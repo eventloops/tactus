@@ -254,15 +254,30 @@ A short name for the branch, for a refusal message and a test.
 What this build does with it, and — for anything but `Performed` — the
 reason belongs in the arm, not in prose somewhere else.
 
-## `pub const fn disposition(self) -> Disposition` › `Self::Integration | Self::Closure => Disposition::RefusedByCheckpoint,`
+## `pub const fn disposition(self) -> Disposition` › `Self::Closure => Disposition::RefusedByCheckpoint,`
 
 `checkpoint_refusals`: "an intermediate build refuses, before any
-append, any operation whose terminals it does not implement
-(PR7: integration and run end beyond refusal)". Both are made
-unrepresentable rather than remembered — `Admitted` carries five
-of `Step`'s eight variants, so no value reaching the acting half
-can name either. (The third that does not cross is `Poisoned`,
-which is not a branch this build declines but the absence of one.)
+append, any operation whose terminals it does not implement". Run end
+beyond refusal is PR10's, and it is made unrepresentable rather than
+remembered — `Admitted` carries six of `Step`'s nine variants, so no
+value reaching the acting half can name a closure. The other two that
+do not cross are `RepairDispatch`, which is PR8's own checkpoint
+refusal and belongs to the ready-dispatch branch rather than to a
+branch of its own, and `Poisoned`, which is not a branch this build
+declines but the absence of one.
+
+## `pub const fn disposition(self) -> Disposition` › `Self::Integration => Disposition::Performed,`
+
+"check the ceiling … then take a provisional integration reservation
+and integrate exactly one", whole: the ceiling is `select`'s, the
+`{pipeline, merge}` reservation is taken in `integrate` before any
+effect, and the sequence itself — the exact-base decision under
+`assert_publishable`, the fast `merge_prepared`, the compare-and-swap
+and `task_merged` — is `super::integrate`'s, appending through the
+same `RunJournal` the candidate sequence uses. A pre-append failure
+cancels the reservation and leaves the candidate queued; a failure
+after the first append leaves the fold-derived holding the append
+created, which recovery resolves.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::DeferBackoff => Disposition::Performed,`
 
@@ -320,11 +335,25 @@ Not a branch of the loop: the append-error protocol has already
 ended the command. `select` returns it so that a poisoned fold
 cannot be read as "no further transition, therefore end the run".
 
+## `pub const fn of(step: &Step) -> Option<Self>` › `Step::Dispatch { .. } | Step::RepairDispatch { .. } => Some(Self::ReadyDispatch),`
+
+A repair dispatch is the ready-dispatch branch reaching a Repair-origin
+task: `eligibility_order` names "new ordinary dispatch" and no branch
+for repairs, so the step maps to that branch and the checkpoint refuses
+it there.
+
 ## `pub const fn of(step: &Step) -> Option<Self>` › `Step::BudgetExceeded(_) => None,`
 
 A breach is recorded *by* the branch that asked, and every
 asking branch is an admitting one; the ceiling is never consulted
 outside one.
+
+## `impl IntegrationJournal for RunJournal<'_, '_>` › `fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {`
+
+The provisional integration reservation converts at the sequence's
+first append, and the ledger it converts in is the one `EmitState`
+borrows for the append-error protocol's cancellation — so the journal
+forwards to it rather than the sequence holding a second borrow.
 
 ## `impl LoopBranch` › `pub fn owes(self, clause: &str) -> UpstrokeError {`
 
@@ -658,6 +687,11 @@ iteration selects.
 ## `pub enum Progress` › `key: TaskKey,`
 
 Whose generation.
+
+## `pub enum Progress` › `Integrated {`
+
+One candidate published: `merge_prepared`, the compare-and-swap and
+`task_merged` are durable, and every task in `satisfies` is `Merged`.
 
 ## `pub enum Progress` › `Blocked {`
 

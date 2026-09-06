@@ -8,6 +8,7 @@ pub mod create;
 pub mod dispatch;
 pub mod emit;
 pub mod identity;
+pub mod integrate;
 pub mod prelock;
 pub mod seams;
 pub mod select;

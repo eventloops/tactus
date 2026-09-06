@@ -10,8 +10,8 @@ use crate::topology::events::TopologyEventBody;
 use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
-    AttemptNumber, CandidateLeaseEffect, CommitSha, FrozenQuestion, GenerationId, SessionId,
-    TopologyEvent,
+    AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion, GenerationId,
+    SequenceId, SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -31,6 +31,7 @@ use super::dispatch::{
 };
 use super::emit::{EmitFailure, EmitState, RunIdentity, emit};
 use super::identity::{InvocationLedger, ReservationKind, Reservations, SlotAssertion};
+use super::integrate::{self, IntegrationJournal, IntegrationRequest};
 use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
 use super::select::{Admitted, Ceiling, Spend, Step, checkpoint, select};
@@ -70,6 +71,23 @@ impl CandidateJournal for RunJournal<'_, '_> {
 
     fn fold(&self) -> &TopologyFold {
         self.emitter.state.fold
+    }
+}
+
+impl IntegrationJournal for RunJournal<'_, '_> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        CandidateJournal::emit(self, body)
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        &mut *self.hooks
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.emitter
+            .state
+            .reservations
+            .convert(key, ReservationKind::Integration)
     }
 }
 
@@ -127,7 +145,8 @@ impl LoopBranch {
     #[must_use]
     pub const fn disposition(self) -> Disposition {
         match self {
-            Self::Integration | Self::Closure => Disposition::RefusedByCheckpoint,
+            Self::Closure => Disposition::RefusedByCheckpoint,
+            Self::Integration => Disposition::Performed,
             Self::DeferBackoff => Disposition::Performed,
             Self::ReadyDispatch => Disposition::Performed,
             Self::ReadyRetry => Disposition::Performed,
@@ -149,7 +168,7 @@ impl LoopBranch {
             Step::BudgetExceeded(_) => None,
             Step::Integrate { .. } => Some(Self::Integration),
             Step::Retry { .. } => Some(Self::ReadyRetry),
-            Step::Dispatch { .. } => Some(Self::ReadyDispatch),
+            Step::Dispatch { .. } | Step::RepairDispatch { .. } => Some(Self::ReadyDispatch),
             Step::Backoff => Some(Self::DeferBackoff),
             Step::HardBlock { .. } => Some(Self::HardBlock),
             Step::Closure(_) => Some(Self::Closure),
@@ -284,6 +303,11 @@ pub enum Progress {
     GenerationClosed {
         key: TaskKey,
     },
+    Integrated {
+        key: TaskKey,
+        sequence: SequenceId,
+        merged_sha: CommitSha,
+    },
     Blocked {
         questions: usize,
     },
@@ -398,6 +422,7 @@ impl TopologyRun {
                 )?;
                 Ok(Progress::Waited { waited_ms, round })
             }
+            Admitted::Integrate { candidate } => self.integrate(*candidate, seams, hooks),
             Admitted::Retry {
                 key, generation, ..
             } => self.retry_ready(key, generation, seams, hooks),
@@ -479,6 +504,39 @@ impl TopologyRun {
             Err(error) => {
                 let _ = self.reservations.cancel(key, ReservationKind::Dispatch);
                 Err(error.discharging(&mut self.invocations))
+            }
+        }
+    }
+
+    fn integrate(
+        &mut self,
+        candidate: CandidateRef,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let request = IntegrationRequest::from_fold(&self.handle.fold, &candidate)?;
+        let key = candidate.key;
+        self.reservations.take(key, ReservationKind::Integration)?;
+
+        let published = self.with_journal(seams, hooks, |journal| {
+            integrate::integrate(journal, seams.manager, &request)
+        });
+
+        match published {
+            Ok(published) => {
+                self.deferral.progressed();
+                Ok(Progress::Integrated {
+                    key,
+                    sequence: published.sequence,
+                    merged_sha: published.merged_sha,
+                })
+            }
+            Err(error) => {
+                if !self.reservations.is_empty() {
+                    self.reservations
+                        .cancel(key, ReservationKind::Integration)?;
+                }
+                Err(error)
             }
         }
     }

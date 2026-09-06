@@ -125,6 +125,10 @@ pub enum Step {
         generation: GenerationId,
         continuing: bool,
     },
+    RepairDispatch {
+        key: TaskKey,
+        generation: GenerationId,
+    },
     Backoff,
     HardBlock {
         questions: Vec<QuestionId>,
@@ -135,6 +139,9 @@ pub enum Step {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Admitted {
     BudgetExceeded(Box<BudgetExceeded4>),
+    Integrate {
+        candidate: Box<CandidateRef>,
+    },
     Retry {
         key: TaskKey,
         generation: GenerationId,
@@ -180,6 +187,9 @@ pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {
         });
     }
     if let Some((key, generation, continuing)) = first_ready(fold) {
+        if is_repair(fold, key) {
+            return Step::RepairDispatch { key, generation };
+        }
         return ceiling_or(ceiling, spend, epoch, key, || Step::Dispatch {
             key,
             continuing,
@@ -218,15 +228,17 @@ pub fn checkpoint(step: Step) -> Result<Admitted, UpstrokeError> {
             generation,
             continuing,
         }),
+        Step::Integrate { candidate } => Ok(Admitted::Integrate { candidate }),
         Step::Backoff => Ok(Admitted::Backoff),
         Step::HardBlock { questions } => Ok(Admitted::HardBlock { questions }),
-        Step::Integrate { candidate } => Err(UpstrokeError::Refused {
+        Step::RepairDispatch { key, generation } => Err(UpstrokeError::Refused {
             message: format!(
-                "this build does not integrate: candidate {} of task {} is eligible, and \
-                 `merge_prepared`, `merge_rejected` and `task_merged` are terminals it does not \
-                 implement, so it refuses before appending the `merge_verification_started` that \
-                 would start one",
-                candidate.candidate_ref, candidate.key
+                "this build does not dispatch a repair: task {key} is a Repair-origin task ready \
+                 to open generation {}, and repair execution — `T-REPAIR-DISPATCH`, the \
+                 materialization of its source candidate and the `LineageHeld` settlements — \
+                 is PR9's, so `checkpoint_refusals` has PR8 refuse the dispatch before any \
+                 append. Nothing was appended and no worktree was created",
+                generation.0
             ),
         }),
         Step::Closure(outcome) => Err(UpstrokeError::Refused {
@@ -281,6 +293,12 @@ fn first_ready(fold: &TopologyFold) -> Option<(TaskKey, GenerationId, bool)> {
         };
         Some((key, GenerationId(generation), false))
     })
+}
+
+fn is_repair(fold: &TopologyFold, key: TaskKey) -> bool {
+    fold.registry()
+        .and_then(|registry| registry.get(key))
+        .is_some_and(|entry| entry.origin == crate::topology::registry::Origin::MergeRepair)
 }
 
 fn open_generation(fold: &TopologyFold, key: TaskKey) -> Option<GenerationId> {

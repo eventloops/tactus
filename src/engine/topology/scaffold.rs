@@ -38,6 +38,7 @@ use crate::workspace_manager::{
 
 use super::attempt::{AttemptPlan, GatePlan, ReviewerPlan};
 use super::dispatch::{DispatchKind, DispatchRequest, Dispatched, EventEmitter, dispatch};
+use super::seams::TopologyHooks;
 
 pub(super) const ALPHA: TaskKey = TaskKey(0);
 pub(super) const BETA: TaskKey = TaskKey(1);
@@ -65,7 +66,7 @@ fn task_of(id: &str) -> Task {
     }
 }
 
-fn plan() -> Plan {
+pub(super) fn plan() -> Plan {
     Plan {
         source: PlanSource {
             adapter: "markdown".to_owned(),
@@ -99,7 +100,7 @@ fn chain(task: &str) -> ChainSummary {
     }
 }
 
-const NORMALIZED_DIGEST: &str =
+pub(super) const NORMALIZED_DIGEST: &str =
     "sha256:1010101010101010101010101010101010101010101010101010101010101010";
 
 fn run_started(fixture: &Fixture) -> RunStarted4 {
@@ -629,6 +630,26 @@ pub(super) struct Run {
     pub(super) emitter: FoldedEmitter,
     pub(super) runner: RecordingRunner,
     pub(super) invocations: crate::engine::topology::identity::InvocationLedger,
+    pub(super) reservations: crate::engine::topology::identity::Reservations,
+}
+
+impl super::integrate::IntegrationJournal for Run {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        self.emitter
+            .emit(body, &mut self.hooks)
+            .map_err(|failure| failure.discharging(&mut self.invocations))
+    }
+
+    fn hooks(&mut self) -> &mut dyn super::seams::TopologyHooks {
+        &mut self.hooks
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.reservations.convert(
+            key,
+            crate::engine::topology::identity::ReservationKind::Integration,
+        )
+    }
 }
 
 impl Run {
@@ -657,6 +678,7 @@ impl Run {
             },
             hooks: Hooks::new(&harness, &timeline),
             invocations: crate::engine::topology::identity::InvocationLedger::new(),
+            reservations: crate::engine::topology::identity::Reservations::new(),
             runner: RecordingRunner::new(),
             timeline,
             harness,
@@ -669,6 +691,7 @@ impl Run {
             fixture,
         };
         let started = run_started(&run.fixture);
+        let integration_ref = started.integration_ref.clone();
         run.emitter
             .emit(
                 TopologyEventBody::RunStarted {
@@ -677,6 +700,16 @@ impl Run {
                 &mut run.hooks,
             )
             .expect("run_started");
+        // P8: the integration ref, zero-old at the base, after run_started.
+        run.fixture
+            .manager
+            .create_ref_zero_old(
+                run.hooks.effects(),
+                crate::topology::effects::RefSite::CreateIntegration,
+                integration_ref.as_str(),
+                &run.fixture.head,
+            )
+            .expect("the integration ref");
         run.runner.watching(run.emitter.log.path());
         run
     }
@@ -787,6 +820,7 @@ impl Run {
             hooks: Hooks::new(&harness, &timeline),
             runner: RecordingRunner::new(),
             invocations: crate::engine::topology::identity::InvocationLedger::new(),
+            reservations: crate::engine::topology::identity::Reservations::new(),
             timeline,
             harness,
             paths: {
@@ -869,6 +903,185 @@ impl Run {
             )
             .expect("task_spawned");
         key
+    }
+}
+
+impl super::candidate::CandidateJournal for Run {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        self.emitter
+            .emit(body, &mut self.hooks)
+            .map_err(|failure| failure.discharging(&mut self.invocations))
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.emitter.fold()
+    }
+}
+
+impl Run {
+    /// Carry `key` from its first dispatch to a queued candidate through the
+    /// real candidate sequence: a worker edit, the capture, the commit, the
+    /// pin, `candidate_prepared`, the candidates ref, `task_candidate_created`,
+    /// and the scrub. The candidate's base is the run's own.
+    pub(super) fn queue_candidate(
+        &mut self,
+        key: TaskKey,
+    ) -> crate::topology::events::CandidateRef {
+        use super::candidate::{
+            JudgedTree, append_candidate_created, append_candidate_prepared, create_candidates_ref,
+            pin_candidate, reclaim_after_creation, write_candidate_commit,
+        };
+
+        let generation =
+            u32::try_from(self.emitter.task(key).generations.len()).expect("a small fixture");
+        let dispatched = self.dispatch(key, generation);
+        let binding = self.binding(key, 0);
+        self.emitter
+            .emit(
+                TopologyEventBody::AttemptStarted {
+                    data: crate::topology::events::AttemptStarted4 {
+                        key,
+                        generation: dispatched.generation,
+                        attempt: AttemptNumber(1),
+                        rung: 0,
+                        binding,
+                        pool: Some("scaffold-pool".to_owned()),
+                        resume_session: None,
+                        materialization_observed: None,
+                    },
+                },
+                &mut self.hooks,
+            )
+            .expect("attempt_started");
+        write_file(
+            &dispatched.worktree.join(format!("{key}-work.txt")),
+            format!(
+                "work of task {key} in generation {}\n",
+                dispatched.generation.0
+            )
+            .as_bytes(),
+        );
+        let manager = self.fixture.manager.clone();
+        manager
+            .candidate_stage(self.hooks.effects(), &dispatched.slot)
+            .expect("stage");
+        let tree = manager
+            .candidate_write_tree(self.hooks.effects(), &dispatched.slot)
+            .expect("write-tree");
+        let actual_paths = manager
+            .changed_paths(&dispatched.slot, dispatched.base.as_str())
+            .expect("changed paths");
+        let judged = JudgedTree {
+            key,
+            generation: dispatched.generation,
+            attempt: Box::new(AttemptRecord {
+                attempt: 1,
+                tier: "mid".to_owned(),
+                model: format!("{}-mid-model", self.display_id(key)),
+                pool: Some("scaffold-pool".to_owned()),
+                resumed: false,
+                duration: Duration::from_millis(5),
+                cost_usd: Some(0.5),
+                reviews: self
+                    .emitter
+                    .fold()
+                    .registry()
+                    .expect("a registry")
+                    .get(key)
+                    .expect("the task is registered")
+                    .reviews
+                    .obliged_lenses()
+                    .into_iter()
+                    .map(|lens| crate::events::ReviewRecord {
+                        pass: lens.name().to_owned(),
+                        agent: REVIEW_AGENT.to_owned(),
+                        model: "scaffold-review-model".to_owned(),
+                        adapter: None,
+                        preflight_cli_version: None,
+                        effort: None,
+                        pool: None,
+                        cost_usd: Some(0.1),
+                        outcome: crate::events::ReviewPassOutcome::Passed,
+                    })
+                    .collect(),
+                session_id: None,
+                usage: None,
+                failure: None,
+            }),
+            base_sha: dispatched.base.clone(),
+            tree_sha: CommitSha(tree),
+            message: format!("upstroke: {} attempt 1", self.display_id(key)),
+            actual_paths: actual_paths.clone(),
+            lease_effect: crate::topology::events::CandidateLeaseEffect::ReplacesPredicted {
+                paths: actual_paths,
+            },
+        };
+        let run_id = self
+            .emitter
+            .fold()
+            .started()
+            .expect("started")
+            .run_id
+            .clone();
+        let unpinned =
+            write_candidate_commit(&manager, &mut self.hooks, &run_id, judged).expect("commit");
+        let pinned = pin_candidate(&manager, &mut self.hooks, unpinned).expect("pin");
+        let promoting = append_candidate_prepared(self, pinned).expect("candidate_prepared");
+        let candidate = promoting.candidate().clone();
+        let referenced =
+            create_candidates_ref(&manager, &mut self.hooks, promoting).expect("candidates ref");
+        let created = append_candidate_created(self, referenced).expect("task_candidate_created");
+        reclaim_after_creation(&manager, &mut self.hooks, &dispatched.slot, created)
+            .expect("scrub");
+        candidate
+    }
+
+    pub(super) fn display_id(&self, key: TaskKey) -> String {
+        self.emitter
+            .fold()
+            .registry()
+            .expect("a registry")
+            .get(key)
+            .expect("the task is registered")
+            .display_id
+            .as_str()
+            .to_owned()
+    }
+
+    /// The run's integration ref, as `run_started` recorded it.
+    pub(super) fn integration_ref(&self) -> GitRef {
+        self.emitter
+            .fold()
+            .started()
+            .expect("started")
+            .integration_ref
+            .clone()
+    }
+
+    /// What the integration ref names right now.
+    pub(super) fn head(&self) -> Option<String> {
+        self.fixture
+            .manager
+            .direct_ref_target(self.integration_ref().as_str())
+            .expect("read the integration ref")
+    }
+
+    /// Replay the durable log twice and check both replays agree with the
+    /// live fold.
+    pub(super) fn replay_twice_equal(&self) {
+        let events = self.emitter.durable_events();
+        let inputs = FrozenInputs {
+            plan: plan(),
+            normalized_plan_digest: NORMALIZED_DIGEST.to_owned(),
+        };
+        let first = TopologyFold::replay(inputs.clone(), &events).expect("the log replays");
+        let second = TopologyFold::replay(inputs, &events).expect("the log replays again");
+        assert_eq!(first.state(), second.state(), "two replays disagree");
+        assert_eq!(
+            self.emitter.fold().state(),
+            first.state(),
+            "the live fold and a replay of its own log disagree"
+        );
     }
 }
 

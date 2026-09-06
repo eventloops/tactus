@@ -471,12 +471,12 @@ fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {
             candidate: Box::new(candidate.clone())
         }
     );
-    let error = checkpoint(step).expect_err("this build does not integrate");
-    let message = format!("{error}");
-    assert!(message.contains("does not integrate"), "{message}");
-    assert!(
-        message.contains(candidate.candidate_ref.0.as_str()),
-        "the refusal does not name what it refused: {message}"
+    assert_eq!(
+        checkpoint(step).expect("this build integrates"),
+        Admitted::Integrate {
+            candidate: Box::new(candidate.clone())
+        },
+        "an eligible integration crosses the checkpoint carrying the candidate the queue chose"
     );
 
     let mut spend = Spend::new();
@@ -513,7 +513,16 @@ fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {
 
 #[test]
 fn the_checkpoint_admits_every_branch_this_build_implements() {
+    let candidate = queue_candidate(&mut started(), GIMEL, 0);
     let admitted = [
+        (
+            Step::Integrate {
+                candidate: Box::new(candidate.clone()),
+            },
+            Admitted::Integrate {
+                candidate: Box::new(candidate),
+            },
+        ),
         (
             Step::Retry {
                 key: BET,
@@ -554,7 +563,7 @@ fn the_checkpoint_admits_every_branch_this_build_implements() {
 }
 
 #[test]
-fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {
+fn every_step_variant_is_admitted_or_refused_and_the_split_is_six_three() {
     let every: Vec<Step> = vec![
         Step::Poisoned,
         budget_exceeded(
@@ -579,6 +588,10 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {
             generation: GenerationId(2),
             continuing: false,
         },
+        Step::RepairDispatch {
+            key: TaskKey(3),
+            generation: GenerationId(0),
+        },
         Step::Backoff,
         Step::HardBlock {
             questions: vec![question_for(ALEPH).id],
@@ -594,6 +607,7 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {
             Step::Integrate { .. } => "Integrate",
             Step::Retry { .. } => "Retry",
             Step::Dispatch { .. } => "Dispatch",
+            Step::RepairDispatch { .. } => "RepairDispatch",
             Step::Backoff => "Backoff",
             Step::HardBlock { .. } => "HardBlock",
             Step::Closure(_) => "Closure",
@@ -616,14 +630,15 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {
 
     assert_eq!(
         crossed.len(),
-        5,
+        6,
         "the admitted count moved: {:?}",
         crossed.iter().map(|(_, n)| *n).collect::<Vec<_>>()
     );
     assert_eq!(
         refused,
-        vec!["Poisoned", "Integrate", "Closure"],
-        "the set that does not cross the checkpoint changed"
+        vec!["Poisoned", "RepairDispatch", "Closure"],
+        "the set that does not cross the checkpoint changed: `checkpoint_refusals` has PR8 \
+         refuse repair dispatch and run-end closure, and `Poisoned` is the absence of a branch"
     );
 }
 
@@ -827,6 +842,7 @@ fn arm_label(step: &Step) -> &'static str {
         Step::Dispatch {
             continuing: false, ..
         } => "Dispatch",
+        Step::RepairDispatch { .. } => "RepairDispatch",
         Step::Backoff => "Backoff",
         Step::HardBlock { .. } => "HardBlock",
         Step::Closure(_) => "Closure",
@@ -838,6 +854,7 @@ const OFFERS_WORK: &[&str] = &[
     "Retry",
     "Dispatch",
     "Dispatch (continuing)",
+    "RepairDispatch",
     "Backoff",
     "HardBlock",
 ];
@@ -932,6 +949,11 @@ fn an_ending_run_offers_no_work_from_any_arm() {
         ("Integrate", || {
             let mut fold = started();
             let _ = queue_candidate(&mut fold, GIMEL, 0);
+            fold
+        }),
+        ("RepairDispatch", || {
+            let mut fold = started();
+            register_runnable_repair(&mut fold);
             fold
         }),
         ("Backoff", || {
@@ -1170,4 +1192,111 @@ fn the_selected_retry_is_the_one_the_settlement_module_runs() {
     assert_eq!(started_event.key, key);
     assert_eq!(started_event.generation, generation);
     assert_eq!(started_event.attempt, attempt);
+}
+
+/// Reject the queued candidate of `GIMEL` on a conflict, registering a
+/// runnable repair as task 3 — the only way a Repair-origin task enters a
+/// registry, and the state `select` offers `RepairDispatch` from.
+///
+/// Every other task is settled so the repair is the first ready key.
+fn register_runnable_repair(fold: &mut TopologyFold) {
+    use crate::topology::events::{
+        FrozenSpawn, MergeRejected, RejectionDisposition, RejectionLeaseEffect, SequenceId,
+        SpawnAdmission,
+    };
+    use crate::topology::registry::{Lineage, Origin, repair_display_id};
+
+    for key in [ALEPH, BET] {
+        in_flight(fold, key, 0);
+        settle_into(fold, &finished(key, 0, 1, Next::Fail));
+    }
+    let candidate = queue_candidate(fold, GIMEL, 0);
+    let registry = fold.registry().expect("the run has a registry");
+    let key = TaskKey(u32::try_from(registry.len()).expect("a small fixture registry"));
+    let root = registry.get(GIMEL).expect("gimel is registered").clone();
+    let mut entry = root.clone();
+    entry.key = key;
+    entry.display_id = crate::ir::TaskId::from(repair_display_id(0, &root.display_id).as_str());
+    entry.origin = Origin::MergeRepair;
+    entry.deps = Vec::new();
+    entry.display_deps = Vec::new();
+    entry.lineage = Some(Lineage {
+        root: GIMEL,
+        parent: GIMEL,
+        index: 0,
+    });
+    apply(
+        fold,
+        &ev(TopologyEventBody::MergeRejected {
+            data: Box::new(MergeRejected {
+                sequence: SequenceId(0),
+                candidate,
+                rejecting_head: sha("moved-head"),
+                disposition: RejectionDisposition::Conflict {
+                    paths: region(GIMEL),
+                },
+                repair: FrozenSpawn {
+                    key,
+                    entry,
+                    admission: SpawnAdmission::Runnable,
+                },
+                lease_effect: RejectionLeaseEffect::CreatesLineage {
+                    root: GIMEL,
+                    paths: region(GIMEL),
+                },
+            }),
+        }),
+    );
+}
+
+#[test]
+fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_append() {
+    let mut fold = started();
+    register_runnable_repair(&mut fold);
+    let repair = TaskKey(3);
+    assert_eq!(
+        fold.task_state(repair),
+        Some(TaskState::Pending),
+        "the rejection registered the repair runnable"
+    );
+    assert!(fold.ready(repair), "the repair is structurally ready");
+
+    let step = select(&fold, &Ceiling::unlimited(), &no_spend());
+    assert_eq!(
+        step,
+        Step::RepairDispatch {
+            key: repair,
+            generation: GenerationId(0),
+        },
+        "the selector names the repair dispatch as its own step rather than an ordinary one"
+    );
+
+    // The ceiling is not consulted for a step the checkpoint refuses: a
+    // `budget_exceeded` is an append, and the refusal is before any.
+    let mut spend = Spend::new();
+    spend.record(GIMEL, &record(1, Some(9.0)));
+    let breached = Ceiling {
+        run_usd: Some(1.0),
+        task_usd: None,
+    };
+    assert_eq!(
+        select(&fold, &breached, &spend),
+        Step::RepairDispatch {
+            key: repair,
+            generation: GenerationId(0),
+        },
+        "a breached ceiling would append `budget_exceeded` for a dispatch that is refused \
+         before any append"
+    );
+
+    let error = checkpoint(step).expect_err("this build does not dispatch a repair");
+    let message = format!("{error}");
+    assert!(
+        message.contains("Repair-origin") && message.contains("PR9"),
+        "the refusal names the operation and the slice that owns it: {message}"
+    );
+    assert!(
+        message.contains("Nothing was appended"),
+        "the refusal says the run is untouched: {message}"
+    );
 }

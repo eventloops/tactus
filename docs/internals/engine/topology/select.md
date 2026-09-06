@@ -290,6 +290,17 @@ Not a new branch: `eligibility_order` names "new ordinary dispatch",
 and a continuation is not a new one. It is the same branch reaching
 the same attempt over ground that already exists.
 
+## `pub enum Step` › `RepairDispatch {`
+
+A `ready` task whose origin is `MergeRepair`.
+
+Named as its own step rather than folded into `Dispatch` because the
+checkpoint refuses it and the loop maps it: `checkpoint_refusals` has PR8
+refuse "dispatch of a Repair-origin task … before any append", and the
+refusal has to be taken on a value nothing has acted on. It is selected
+**without** the ceiling check, because a `budget_exceeded` is an append and
+the refusal comes before any.
+
 ## `pub enum Step` › `Backoff,`
 
 Deferred work and nothing else. Sleep the defer backoff, then append
@@ -311,12 +322,13 @@ Run-end closure is due, with the outcome the fold derives.
 
 The branches an **intermediate build** is entitled to perform.
 
-[`Step`] has **eight** variants and this has five, so **three** do not
-cross: `Integrate`, `Closure` and `Poisoned`. The first two are the whole of
-`checkpoint_refusals` for PR7 — there is no value of this type that can
-carry an integration or a run end, so no caller holding one can append
-`merge_verification_started` or `run_finished`. That is the refusal made
-unrepresentable rather than remembered.
+[`Step`] has **nine** variants and this has six, so **three** do not
+cross: `RepairDispatch`, `Closure` and `Poisoned`. The first two are the
+whole of `checkpoint_refusals` for PR8 — there is no value of this type that
+can carry a repair dispatch or a run end, so no caller holding one can
+append the `task_dispatched` of a repair or `run_finished`. That is the
+refusal made unrepresentable rather than remembered. `Integrate` crossed
+when PR8 implemented every terminal of `merge_verification_started`.
 
 The third is not a refusal of a *branch*. `Poisoned` is the absence of one:
 an append errored, this process's fold is not authoritative, and nothing
@@ -329,14 +341,19 @@ Both counts are computed, per §22:
 
 ```text
 $ awk '/^pub enum Step \{/,/^\}/'     src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-8
+9
 $ awk '/^pub enum Admitted \{/,/^\}/' src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-5
+6
 ```
 
 ## `pub enum Admitted` › `BudgetExceeded(Box<BudgetExceeded4>),`
 
 [`Step::BudgetExceeded`].
+
+## `pub enum Admitted` › `Integrate {`
+
+[`Step::Integrate`]. The candidate crosses with it, so the acting half
+integrates exactly the candidate the queue chose and re-derives nothing.
 
 ## `pub enum Admitted` › `Retry {`
 
@@ -449,13 +466,17 @@ ceiling is done whatever the branch would have been.
 `checkpoint_refusals`: "an intermediate build refuses, **before any
 append**, any operation whose terminals it does not implement".
 
-PR7 appends `attempt_started` and implements its terminals; it does not
-implement `merge_prepared`, `merge_rejected` or `task_merged`, so it never
-appends `merge_verification_started` — INV-07's "every checkpoint build
-implements every terminal reachable from any start it appends" is that
-sentence read from the other end. Run-end closure is refused for the same
-reason: `run_finished` is a terminal whose finalization PR7 does not
-perform.
+PR8 implements every terminal of `merge_verification_started` and of
+`merge_prepared`, so an integration crosses. What it refuses is the two
+operations `checkpoint_refusals` names for it: "dispatch of a Repair-origin
+task and repair-admission answers" — the dispatch here, because it is a
+selected step, and the answer at the hard block, where answers are read.
+Repair execution is `T-REPAIR-DISPATCH`, PR9's, and a build that dispatched
+a repair would append a `task_dispatched` whose terminals it does not
+implement — INV-07's "every checkpoint build implements every terminal
+reachable from any start it appends" read from the other end. Run-end
+closure is refused for the same reason: `run_finished` is a terminal whose
+finalization this build does not perform.
 
 The refusal is taken on the [`Step`], which is a value nothing has acted
 on: `select` performed no effect and appended nothing, so "before any
@@ -464,8 +485,15 @@ enough.
 
 ### Errors
 
-[`UpstrokeError::Refused`] naming the operation and the terminals PR7 does
-not implement.
+[`UpstrokeError::Refused`] naming the operation and the slice that owns
+what this build does not implement.
+
+## `fn is_repair(fold: &TopologyFold, key: TaskKey) -> bool {`
+
+Whether `key` is a Repair-origin task: registered by a `merge_rejected`
+rather than by the plan. Read from the registry entry's origin, which the
+rejection froze, so the selector and the checkpoint agree on what a repair
+is by construction.
 
 ## `fn eligible_integration(fold: &TopologyFold) -> Option<CandidateRef> {`
 

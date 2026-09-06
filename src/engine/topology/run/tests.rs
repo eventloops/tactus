@@ -33,10 +33,11 @@ fn every_branch_states_what_this_build_does_with_it() {
         .collect();
     assert_eq!(
         refused,
-        vec!["integration", "run-end closure"],
-        "`checkpoint_refusals` names exactly these two for PR7: \"integration \
-         and run end beyond refusal\". A third refusal here is a build refusing \
-         something the packet did not let it refuse"
+        vec!["run-end closure"],
+        "`checkpoint_refusals` has PR8 refuse repair execution and repair-admission \
+         answers — neither a branch of its own — and run end stays refused until PR10. \
+         A second branch here is a build refusing something the packet did not let it \
+         refuse"
     );
 
     let owed: Vec<&str> = LoopBranch::ALL
