@@ -5,7 +5,9 @@ use std::collections::BTreeMap;
 use crate::error::UpstrokeError;
 use crate::ir::{Answer, Question, QuestionId};
 use crate::review;
+use crate::topology::events::Answer4;
 use crate::topology::events::TopologyEventBody;
+use crate::topology::fold::QuestionOrigin;
 
 use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
@@ -436,6 +438,11 @@ pub enum Progress {
         sequence: SequenceId,
         parked: bool,
     },
+    Answered {
+        key: TaskKey,
+        question: QuestionId,
+        declined: bool,
+    },
     Blocked {
         questions: usize,
     },
@@ -594,7 +601,7 @@ impl TopologyRun {
                     spent_attempt,
                 })
             }
-            Admitted::HardBlock { questions } => self.hard_block(&questions, seams),
+            Admitted::HardBlock { questions } => self.hard_block(&questions, seams, hooks),
         }
     }
 
@@ -701,29 +708,92 @@ impl TopologyRun {
         &mut self,
         questions: &[QuestionId],
         seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
         for id in questions {
-            let question = self.open_question(id)?;
-            match seams.answers.resolve(&question)? {
-                Answer::Unanswered => {}
-                Answer::Answered { .. } | Answer::Declined => {
-                    return Err(UpstrokeError::Refused {
-                        message: format!(
-                            "question {} was answered, and ingesting an answer is PR9's: \
-                             `question_answered` and `T-ANSWER` are that slice's and this one's \
-                             contract does not name them. Refused before any append",
-                            id.0
-                        ),
-                    });
-                }
+            let (question, origin, key) = self.open_question(id)?;
+            let answer = match seams.answers.resolve(&question)? {
+                Answer::Unanswered => continue,
+                answer => answer,
+            };
+            // A verification park is PR8's to ingest; a repair-admission or an
+            // attempt park is PR9's, and `checkpoint_refusals` has this build
+            // refuse those answers before any append.
+            if origin != QuestionOrigin::VerificationPark {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "question {} is a repair-admission or attempt park, and ingesting its \
+                         answer is PR9's: `pr_sequence[8]` refuses \"repair-admission answers \
+                         before any append\" and `T-ANSWER` is that slice's. Refused before any \
+                         append",
+                        id.0
+                    ),
+                });
             }
+            return self.ingest_verification_answer(id, key, &question, answer, seams, hooks);
         }
         Ok(Progress::Blocked {
             questions: questions.len(),
         })
     }
 
-    fn open_question(&self, id: &QuestionId) -> Result<Question, UpstrokeError> {
+    /// Ingest an answer to a verification-park question: append
+    /// `question_answered`, which the fold routes to `AwaitingMerge` (the
+    /// candidate re-verifies under a new sequence) or, for a decline, to a
+    /// failed lineage with its queue position consumed and its lease released,
+    /// halting per `decline_halts_run`.
+    fn ingest_verification_answer(
+        &mut self,
+        id: &QuestionId,
+        key: TaskKey,
+        question: &Question,
+        answer: Answer,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let answer4 = match answer {
+            Answer::Declined => Answer4::Declined {
+                decline_halts_run: seams.halts_run,
+            },
+            Answer::Answered { text } => Answer4::Answered {
+                option_index: question
+                    .options
+                    .iter()
+                    .position(|option| *option == text)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .unwrap_or(0),
+                binding_override: None,
+            },
+            Answer::Unanswered => {
+                return Err(UpstrokeError::Refused {
+                    message: format!("question {} resolved to no answer to ingest", id.0),
+                });
+            }
+        };
+        let declined = matches!(answer4, Answer4::Declined { .. });
+        self.emit(
+            TopologyEventBody::QuestionAnswered {
+                data: crate::topology::events::QuestionAnswered4 {
+                    key,
+                    question: id.clone(),
+                    answer: answer4,
+                    via: seams.answers.id().to_owned(),
+                },
+            },
+            seams,
+            hooks,
+        )?;
+        Ok(Progress::Answered {
+            key,
+            question: id.clone(),
+            declined,
+        })
+    }
+
+    fn open_question(
+        &self,
+        id: &QuestionId,
+    ) -> Result<(Question, QuestionOrigin, TaskKey), UpstrokeError> {
         let open = self
             .handle
             .fold
@@ -733,13 +803,17 @@ impl TopologyRun {
                 message: format!("question {} is not open in this run's fold", id.0),
             })?;
         let frozen = &open.question;
-        Ok(Question {
-            id: frozen.id.clone(),
-            kind: frozen.kind,
-            affected_tasks: vec![crate::ir::TaskId(self.display_id(frozen.key)?)],
-            context: frozen.context.clone(),
-            options: frozen.options.clone(),
-        })
+        Ok((
+            Question {
+                id: frozen.id.clone(),
+                kind: frozen.kind,
+                affected_tasks: vec![crate::ir::TaskId(self.display_id(frozen.key)?)],
+                context: frozen.context.clone(),
+                options: frozen.options.clone(),
+            },
+            open.origin,
+            frozen.key,
+        ))
     }
 
     fn continue_open(

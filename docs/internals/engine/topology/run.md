@@ -308,8 +308,14 @@ machinery, reached through the same `attempt` and `settle`.
 
 `loop`'s "attached-terminal prompt or `wait_on_block` for open
 questions". The channel decision is `interaction::answers_for`'s;
-this branch asks whatever source it is handed. An answer that
-arrives is refused, because ingesting one is PR9's.
+this branch asks whatever source it is handed. An answer to a
+**verification-park** question is ingested here — PR8's
+`question_answered`, which the fold routes to `AwaitingMerge` for an
+answer and to a failed lineage for a decline — and an answer to a
+repair-admission or attempt park is refused, because ingesting those
+is PR9's. The `QuestionOrigin` the fold recorded is what tells the two
+apart, so the refusal is a statement about the question's kind rather
+than about the answer.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::IngestAnswers => Disposition::NotThisSlice {`
 
@@ -692,6 +698,24 @@ Whose generation.
 
 One candidate published: `merge_prepared`, the compare-and-swap and
 `task_merged` are durable, and every task in `satisfies` is `Merged`.
+
+## `pub enum Progress` › `Rejected {`
+
+One candidate rejected: `merge_rejected` is durable, its repair
+registered, and the rejected task is `AwaitingRepair`. No repair was
+dispatched — that is PR9's.
+
+## `pub enum Progress` › `Unavailable {`
+
+One verification could not be run: `merge_verification_unavailable` is
+durable, deferred (the candidate waits for a wake) or `parked` (a
+question is open and the task is `AwaitingInput`).
+
+## `pub enum Progress` › `Answered {`
+
+One verification-park question ingested: `question_answered` is
+durable, and the candidate is back in the queue (`declined` false) or
+its lineage has failed (`declined` true).
 
 ## `pub enum Progress` › `Blocked {`
 

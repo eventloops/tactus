@@ -6064,6 +6064,82 @@ fn an_outage_that_needs_a_person_parks_with_a_question_that_can_be_answered() {
 }
 
 #[test]
+fn declined_parked_verification_fails_task_consumes_queue_position_releases_lease_and_halts_per_policy()
+ {
+    let head = sha("head");
+    let proposal = sha("proposal");
+    for halts in [false, true] {
+        let mut fold = two_queued();
+        apply(
+            &mut fold,
+            &verification_started(MID, 0, 0, &head, &proposal),
+        );
+        apply(
+            &mut fold,
+            &unavailable_event(
+                0,
+                UnavailableCause::HumanRequired {
+                    verdict: "  a licence finding  ".to_owned(),
+                },
+                UnavailableOutcome::Parked {
+                    question: question("q-park-Ünicode", MID),
+                },
+            ),
+        );
+        assert_eq!(fold.task_state(MID), Some(TaskState::AwaitingInput));
+        assert!(
+            fold.queue().expect("started").holds_task(MID),
+            "the candidate is still queued"
+        );
+        assert!(
+            fold.leases()
+                .expect("started")
+                .holds(LeaseOwner::Candidate {
+                    key: MID,
+                    generation: GenerationId(0)
+                }),
+            "the candidate lease is held while parked"
+        );
+
+        apply(
+            &mut fold,
+            &answered(
+                MID,
+                "q-park-Ünicode",
+                Answer4::Declined {
+                    decline_halts_run: halts,
+                },
+            ),
+        );
+
+        assert_eq!(
+            fold.task_state(MID),
+            Some(TaskState::Failed),
+            "a declined verification park fails the task"
+        );
+        assert!(
+            !fold.queue().expect("started").holds_task(MID),
+            "the queue position is consumed"
+        );
+        assert!(
+            !fold
+                .leases()
+                .expect("started")
+                .holds(LeaseOwner::Candidate {
+                    key: MID,
+                    generation: GenerationId(0)
+                }),
+            "the candidate lease is released"
+        );
+        assert_eq!(
+            fold.halted_at(),
+            halts.then_some(MID),
+            "the run halts exactly per decline_halts_run"
+        );
+    }
+}
+
+#[test]
 fn a_rejection_creates_or_widens_exactly_one_lineage_and_registers_its_repair() {
     let base = sha("base");
     let head = sha("head");

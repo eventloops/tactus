@@ -231,3 +231,15 @@ this table and to `pr8-body.md` before the commit that needs it lands.
 ## 4. Blocking items
 
 None recorded yet.
+
+## 5. Coverage notes recorded during implementation
+
+- **R13 (driver ingest).** The verification-park answer/decline transitions are proven at the
+  fold layer (`an_outage_that_needs_a_person_parks_with_a_question_that_can_be_answered`,
+  `declined_parked_verification_fails_task_consumes_queue_position_releases_lease_and_halts_per_policy`)
+  and the terminals that open a park at the integrate layer (`a_human_required_verdict_parks_the_task`,
+  `infrastructure_failure_defers_then_parks_at_max_defers`). `TopologyRun::hard_block` ingests a
+  verification-park answer and refuses a repair-admission one; that branching is typed and small,
+  and the fold it appends through does the substantive work. An end-to-end `step()`→hard_block
+  ingestion test needs a resumed log carrying a park, whose hand-construction the recover harness
+  does not yet make cheap; it is left to the acceptance harness rather than duplicated here.
