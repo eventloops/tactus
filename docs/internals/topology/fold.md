@@ -289,6 +289,18 @@ A verification is running against a recorded head.
 
 The publication is authorized and the ref move is owed.
 
+## `pub enum TransactionClass` › `expected_head: CommitSha,`
+
+The head the authorization expects the integration ref to be at.
+
+Retained here because CAS recovery (`transaction_fault_matrix[T-FAST]` and
+`[T-PREPARED]`, `resume_action`) is decided against it: a ref still at
+`expected_head` retries the compare-and-swap, a ref already at
+`proposed_sha` appends `task_merged`, and any other value refuses. The
+`merge_prepared` record carries it and the fold checked it; keeping it on
+the transaction means the recovery reads the value the fold authorized
+rather than re-deriving it from the event list a second time.
+
 ## `pub struct Transaction {`
 
 The one unresolved integration transaction, if there is one.

@@ -302,6 +302,7 @@ impl RunState {
             sequence: prepared.sequence,
             candidate: prepared.candidate(),
             class: TransactionClass::Prepared {
+                expected_head: prepared.expected_head.clone(),
                 proposed_sha: prepared.proposed_sha.clone(),
                 satisfies: prepared.satisfies.clone(),
             },

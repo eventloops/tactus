@@ -257,3 +257,30 @@ materialization facts are still checked when the attempt is recorded.
 
 The same eligible candidate that makes integration admissible. The
 engine uses this borrowed result so its choice includes lineage questions.
+
+## `impl TopologyFold` › `pub fn next_sequence(&self) -> Option<SequenceId> {`
+
+The sequence the next integration transaction opens under, or `None`
+before the run starts.
+
+Sequences are dense from 0 across the run and consumed by
+`merge_verification_started`, `merge_prepared(fast)` and
+`merge_rejected(conflict)`; the driver names the staging worktree and the
+prepared pin of a transaction after this number, so it reads it from the
+fold that will check the append rather than counting on its own.
+
+## `impl TopologyFold` › `pub fn satisfies_closure(&self, key: TaskKey) -> Option<Vec<TaskKey>> {`
+
+The canonical ordered closure a publication of `key` settles.
+
+`decisions.repairs.satisfies`: "canonical ordered closure derived by the
+fold and copied exactly by `task_merged`". The driver writes exactly this
+into `merge_prepared.satisfies`, and `check_merge_prepared` refuses any
+other value, so exposing the derivation is what lets a live run and a
+replay agree by construction.
+
+## `impl TopologyFold` › `pub fn lineage_members(&self, root: TaskKey) -> Option<u32> {`
+
+How many repairs lineage `root` already holds, which is also the index
+the next member records and the count `check_merge_rejected` holds against
+the frozen `max_merge_repairs` (INV-11).

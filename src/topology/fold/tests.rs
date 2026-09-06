@@ -6244,6 +6244,130 @@ fn a_conflict_opens_and_closes_its_own_transaction() {
     assert_eq!(held, vec!["build.rs", "src/Zebra", "src/mid"]);
 }
 
+#[test]
+fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {
+    let base = sha("base");
+    let head = sha("head");
+    let proposal = sha("proposal");
+
+    // A run frozen at `limit`, with alpha merged and mid's candidate under
+    // verification, built as a log so the refusals can be checked on replay.
+    let verifying = |limit: u32| -> (TopologyFold, Vec<TopologyEvent>) {
+        let mut fold = TopologyFold::new(inputs());
+        let mut log = Vec::new();
+        let mut step = |fold: &mut TopologyFold, event: TopologyEvent| {
+            apply(fold, &event);
+            log.push(event);
+        };
+        step(
+            &mut fold,
+            ev(TopologyEventBody::RunStarted {
+                data: Box::new(RunStarted4 {
+                    limits: TopologyLimits {
+                        max_merge_repairs: limit,
+                        ..run_started().limits
+                    },
+                    ..run_started()
+                }),
+            }),
+        );
+        step(&mut fold, dispatch(ALPHA, 0, &base));
+        let start = attempt_started(&fold, ALPHA, 0, 1, 0);
+        step(&mut fold, start);
+        step(&mut fold, candidate_prepared(ALPHA, 0, &base));
+        step(&mut fold, candidate_created(ALPHA, 0));
+        step(&mut fold, fast_publication(ALPHA, 0, 0, &base, vec![ALPHA]));
+        step(&mut fold, merged(ALPHA, 0, 0, vec![ALPHA]));
+        step(&mut fold, dispatch(MID, 0, &base));
+        let start = attempt_started(&fold, MID, 0, 1, 0);
+        step(&mut fold, start);
+        step(&mut fold, candidate_prepared(MID, 0, &base));
+        step(&mut fold, candidate_created(MID, 0));
+        step(&mut fold, verification_started(MID, 0, 1, &head, &proposal));
+        (fold, log)
+    };
+
+    let rejection = |admission: SpawnAdmission| {
+        let mut repair = repair_spawn(TaskKey(3), MID, MID);
+        repair.entry.deps = vec![ALPHA];
+        repair.entry.display_deps = vec![TaskId::from("alpha")];
+        if let SpawnAdmission::HumanBinding { options, .. } = &admission {
+            clip_to_human_binding(&mut repair, options.clone());
+        } else {
+            repair.admission = admission;
+        }
+        ev(TopologyEventBody::MergeRejected {
+            data: Box::new(MergeRejected {
+                sequence: SequenceId(1),
+                candidate: candidate_of(MID, 0),
+                rejecting_head: head.clone(),
+                disposition: RejectionDisposition::CodeRejected {
+                    verification: verification_record(Verdict::Rejected),
+                },
+                repair,
+                lease_effect: RejectionLeaseEffect::CreatesLineage {
+                    root: MID,
+                    paths: region(MID),
+                },
+            }),
+        })
+    };
+    let human_required = |limit: u32| SpawnAdmission::HumanRequired {
+        limit,
+        question: question("q-limit-Ünicode", TaskKey(3)),
+    };
+    let human_binding = || SpawnAdmission::HumanBinding {
+        options: vec!["  Codex-CLI  ".to_owned()],
+        question: question("q-binding-Ünicode", TaskKey(3)),
+    };
+
+    // Below the limit: the first repair of a run that allows one automatic
+    // repair is runnable, and asking a person instead is refused.
+    let (under, log) = verifying(1);
+    accepts(&under, &rejection(SpawnAdmission::Runnable));
+    accepts(&under, &rejection(human_binding()));
+    let refused = refused_live_and_on_replay(&under, &log, &rejection(human_required(1)));
+    let FoldError::InconsistentRecord { detail, .. } = &refused else {
+        panic!("a premature human-required repair was refused as {refused}");
+    };
+    assert!(
+        detail.contains("consumed 0 of 1 automatic repair(s)"),
+        "the refusal counts the lineage against the frozen limit: {detail}"
+    );
+
+    // At the limit: a run that allows no automatic repair registers the first
+    // repair with human admission, and a runnable one is refused.
+    let (at_limit, log) = verifying(0);
+    let refused = refused_live_and_on_replay(&at_limit, &log, &rejection(SpawnAdmission::Runnable));
+    let FoldError::InconsistentRecord { detail, .. } = &refused else {
+        panic!("an over-limit runnable repair was refused as {refused}");
+    };
+    assert!(
+        detail.contains("consumed its 0 automatic repair(s)"),
+        "the refusal names the exhausted limit: {detail}"
+    );
+    accepts(&at_limit, &rejection(human_binding()));
+
+    let mut parked = at_limit.clone();
+    apply(&mut parked, &rejection(human_required(0)));
+    assert_eq!(
+        parked.task_state(TaskKey(3)),
+        Some(TaskState::AwaitingInput)
+    );
+    assert_eq!(parked.task_state(MID), Some(TaskState::AwaitingRepair));
+    assert_eq!(
+        parked.open_questions().expect("started").len(),
+        1,
+        "the over-limit repair parks on the question the rejection embedded"
+    );
+    assert_eq!(parked.lineage_members(MID), Some(1));
+    assert_eq!(parked.next_sequence(), Some(SequenceId(2)));
+    assert_eq!(
+        parked.satisfies_closure(TaskKey(3)),
+        Some(vec![MID, TaskKey(3)])
+    );
+}
+
 fn answered(key: TaskKey, id: &str, answer: Answer4) -> TopologyEvent {
     ev(TopologyEventBody::QuestionAnswered {
         data: QuestionAnswered4 {
@@ -7468,6 +7592,7 @@ fn grid_state(
                     sequence: SequenceId(0),
                     candidate: candidate_of(MID, 0),
                     class: TransactionClass::Prepared {
+                        expected_head: sha("base"),
                         proposed_sha: sha("commit-2-0"),
                         satisfies: vec![MID],
                     },
