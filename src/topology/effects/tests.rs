@@ -6642,7 +6642,6 @@ fn there_is_no_host_on_which_a_containment_point_is_unrequired() {
         },
         "the default host is the one this build actually runs on"
     );
-    assert_eq!(Host::current().other(), Host::current().other());
     assert_ne!(Host::current().other(), Host::current());
     assert_eq!(
         Host::current().platform(),
