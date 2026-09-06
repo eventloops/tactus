@@ -688,6 +688,19 @@ impl Slot {
 mod worktree;
 pub use self::worktree::{Quiescence, VerifyFailure, WorktreeRecord};
 
+/// What a failed proposal cherry-pick left behind; see
+/// [`WorkspaceManager::proposal_state`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProposalState {
+    /// The pick stopped on unmerged entries at these paths.
+    Conflict { paths: PathSet },
+    /// The candidate's change is already wholly present on the head.
+    Empty,
+    /// Neither shape: the pick failed for a reason the inspection does not
+    /// classify, described as what was seen.
+    Unclassified { detail: String },
+}
+
 /// The owner of an execution root and everything inside it.
 #[derive(Debug, Clone)]
 pub struct WorkspaceManager {
@@ -2566,6 +2579,89 @@ impl WorkspaceManager {
                 self.git_line(&path, &["rev-parse", "HEAD"])
             },
         )
+    }
+
+    /// What a failed `Object.ProposalCherryPick` left in its staging worktree,
+    /// read after the fact.
+    ///
+    /// A read, like [`Self::changed_paths`]: it takes no hooks and names no
+    /// effect site, because it creates no object, moves no ref and touches no
+    /// index. Git reports an already-present change and a textual conflict
+    /// the same way — a non-zero exit with `CHERRY_PICK_HEAD` left behind —
+    /// and the two are opposite dispositions (`DESIGN.md` §26.3), so the
+    /// worktree is inspected rather than the message parsed:
+    ///
+    /// * unmerged index entries (`git diff --name-status --diff-filter=U`,
+    ///   NUL-delimited and decoded byte-safely) are a conflict, and their
+    ///   paths are what the repair lineage takes a lease on;
+    /// * no unmerged entry, `HEAD` still at `head`, `CHERRY_PICK_HEAD` present
+    ///   and the index equal to `HEAD` is the empty pick — measured on git
+    ///   2.43, "The previous cherry-pick is now empty", exit 1;
+    /// * anything else is reported as [`ProposalState::Unclassified`] with
+    ///   what was seen, so the caller can surface the pick's own error.
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals or a Git error from the inspections.
+    pub fn proposal_state(&self, slot: &Slot, head: &str) -> Result<ProposalState, UpstrokeError> {
+        self.revalidate()?;
+        let path = self.slot_target(slot)?;
+        let unmerged = self.git_ok(
+            &path,
+            &[
+                OsString::from("diff"),
+                OsString::from("--name-status"),
+                OsString::from("--diff-filter=U"),
+                OsString::from("-z"),
+            ],
+        )?;
+        let paths = decode_changed_paths(&unmerged);
+        let conflicted = paths.prefixes().is_none_or(|prefixes| !prefixes.is_empty());
+        if conflicted {
+            return Ok(ProposalState::Conflict { paths });
+        }
+        let at = self.git_line(&path, &["rev-parse", "HEAD"])?;
+        if at != head {
+            return Ok(ProposalState::Unclassified {
+                detail: format!("no unmerged entry, and HEAD is {at} where the head was {head}"),
+            });
+        }
+        let picking = self
+            .git(
+                &path,
+                &[
+                    OsString::from("rev-parse"),
+                    OsString::from("--verify"),
+                    OsString::from("--quiet"),
+                    OsString::from("CHERRY_PICK_HEAD"),
+                ],
+            )?
+            .status
+            .success();
+        if !picking {
+            return Ok(ProposalState::Unclassified {
+                detail: "no unmerged entry and no CHERRY_PICK_HEAD".to_owned(),
+            });
+        }
+        let index_clean = self
+            .git(
+                &path,
+                &[
+                    OsString::from("diff"),
+                    OsString::from("--cached"),
+                    OsString::from("--quiet"),
+                ],
+            )?
+            .status
+            .success();
+        if !index_clean {
+            return Ok(ProposalState::Unclassified {
+                detail: "no unmerged entry, CHERRY_PICK_HEAD present, and the index differs \
+                         from HEAD"
+                    .to_owned(),
+            });
+        }
+        Ok(ProposalState::Empty)
     }
 
     /// `Object.RepairMaterialize` — `git cherry-pick --no-commit` in a repair

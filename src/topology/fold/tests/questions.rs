@@ -647,10 +647,9 @@ fn open_continuation_controls_before_and_after_a_lineage_answer() {
     let (mut trace, continuation) = open_continuation_prefix();
     assert!(matches!(
         select(&trace.fold, &Ceiling::unlimited(), &Spend::new()),
-        Step::Dispatch {
+        Step::RepairDispatch {
             key: TaskKey(3),
             generation: GenerationId(0),
-            continuing: true,
         }
     ));
     trace.record(park_sibling());
@@ -660,10 +659,9 @@ fn open_continuation_controls_before_and_after_a_lineage_answer() {
     accepts(&trace.fold, &continuation);
     assert!(matches!(
         select(&trace.fold, &Ceiling::unlimited(), &Spend::new()),
-        Step::Dispatch {
+        Step::RepairDispatch {
             key: TaskKey(3),
             generation: GenerationId(0),
-            continuing: true,
         }
     ));
     trace.record(continuation);

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::engine::topology::identity::ReservationKind;
-use crate::engine::topology::scaffold::{ALPHA, BETA, Run};
+use crate::engine::topology::scaffold::{ALPHA, BETA, Run, VerifyReview};
 use crate::topology::effects::{EffectSiteId, HookPhase, ObjectSite, WorktreeSite};
 use crate::topology::events::{GenerationId, TopologyEvent};
 use crate::topology::fold::{TaskState, TopologyFold};
@@ -21,7 +21,7 @@ fn count_objects(run: &Run) -> u64 {
 /// Integrate `candidate` as the loop would: the reservation before any effect,
 /// the sequence, and the reservation cancelled when the sequence ended before
 /// its first append.
-fn integrate_through(run: &mut Run, candidate: &CandidateRef) -> Result<Published, UpstrokeError> {
+fn integrate_through(run: &mut Run, candidate: &CandidateRef) -> Result<Terminal, UpstrokeError> {
     let request = IntegrationRequest::from_fold(run.emitter.fold(), candidate)?;
     run.reservations
         .take(candidate.key, ReservationKind::Integration)?;
@@ -32,6 +32,25 @@ fn integrate_through(run: &mut Run, candidate: &CandidateRef) -> Result<Publishe
             .cancel(candidate.key, ReservationKind::Integration)?;
     }
     outcome
+}
+
+#[track_caller]
+fn published(terminal: Terminal) -> Published {
+    match terminal {
+        Terminal::Merged(published) => published,
+        other => panic!("expected a publication, reached {other:?}"),
+    }
+}
+
+fn merge_prepared_of_sequence(run: &Run, sequence: SequenceId) -> MergePrepared {
+    run.emitter
+        .durable_events()
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::MergePrepared { data } if data.sequence == sequence => Some(*data),
+            _ => None,
+        })
+        .expect("a durable merge_prepared for the sequence")
 }
 
 fn merge_prepared_of(run: &Run) -> MergePrepared {
@@ -58,7 +77,8 @@ fn fast_path_publishes_exact_candidate_without_staging_or_proposal_object() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .begin_fast_sequence("s0");
-    let published = integrate_through(&mut run, &candidate).expect("the fast path publishes");
+    let published =
+        published(integrate_through(&mut run, &candidate).expect("the fast path publishes"));
     run.harness
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -491,37 +511,94 @@ fn third_sha_refused_and_a_ref_already_at_the_proposal_only_records() {
 }
 
 #[test]
-fn a_stale_candidate_is_refused_before_any_staging_effect_in_this_build() {
-    let mut run = Run::started("stale-refused");
+fn stale_candidate_takes_staging_path_and_publishes_pinned_proposal() {
+    let mut run = Run::started("stale-clean");
+    run.verify_reviewers.push(passing_reviewer());
     let first = run.queue_candidate(ALPHA);
     let second = run.queue_candidate(BETA);
-    integrate_through(&mut run, &first).expect("the first candidate is exact-base");
+    published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+    let head_after_first = run.head().expect("the head moved");
     assert_ne!(
-        run.head().as_deref(),
-        Some(run.base().as_str()),
-        "the second candidate's base is no longer the head"
+        head_after_first,
+        run.base().0,
+        "the head is no longer beta's base"
     );
 
-    let kinds_before = run.emitter.durable_kinds();
-    let error = integrate_through(&mut run, &second).expect_err("stale refuses in this build");
-    assert!(error.to_string().contains("stale"), "{error}");
-    assert_eq!(
-        run.emitter.durable_kinds(),
-        kinds_before,
-        "nothing was appended"
+    let terminal = integrate_through(&mut run, &second).expect("beta takes the staging path");
+    let published = published(terminal);
+    assert_eq!(published.key, BETA);
+    assert_eq!(published.sequence, SequenceId(1));
+
+    let proposal = run.head().expect("the head moved again");
+    assert_ne!(
+        proposal, second.commit_sha.0,
+        "a stale merge does not publish the candidate itself"
     );
-    for site in [
-        EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
-        EffectSiteId::Worktree(WorktreeSite::AddStaging),
-        EffectSiteId::Object(ObjectSite::ProposalCherryPick),
-        EffectSiteId::Ref(RefSite::PinPrepared),
-    ] {
-        assert!(!run.observed(site, HookPhase::Before), "`{site}` executed");
-    }
-    assert!(run.reservations.is_empty() && run.reservations.balances());
-    assert_eq!(run.task_state(BETA), TaskState::AwaitingMerge);
+    assert_eq!(published.merged_sha.0, proposal);
+    assert_eq!(
+        git(&run.fixture.base, &["rev-parse", &format!("{proposal}^")]),
+        head_after_first,
+        "the proposal's parent is the head it was cherry-picked onto"
+    );
+
+    let prepared = merge_prepared_of_sequence(&run, SequenceId(1));
+    assert_eq!(prepared.disposition, PreparedDisposition::StaleClean);
+    assert_eq!(prepared.expected_head.0, head_after_first);
+    assert_eq!(prepared.proposed_sha.0, proposal);
+    assert!(
+        prepared.prepared_ref.is_some(),
+        "a stale_clean publication pins its proposal"
+    );
+    assert!(
+        prepared
+            .verification
+            .as_ref()
+            .is_some_and(crate::topology::events::VerificationRecord::passed)
+    );
+
+    assert!(
+        run.fixture
+            .manager
+            .intents()
+            .expect("intents")
+            .iter()
+            .all(|slot| !matches!(slot, crate::workspace_manager::Slot::Staging { .. })),
+        "the staging intent survived the terminal"
+    );
+    assert!(
+        run.fixture
+            .manager
+            .direct_ref_target(prepared.prepared_ref.as_ref().expect("a pin").as_str())
+            .expect("read the pin")
+            .is_none(),
+        "the prepared pin survived task_merged"
+    );
+    assert!(
+        run.observed(
+            EffectSiteId::Object(ObjectSite::ProposalCherryPick),
+            HookPhase::After
+        ),
+        "the proposal was never cherry-picked"
+    );
+    assert_eq!(run.task_state(BETA), TaskState::Merged);
+    assert!(run.reservations.balances());
+    run.replay_twice_equal();
 }
 
+fn passing_reviewer() -> crate::engine::topology::attempt::ReviewerPlan {
+    crate::engine::topology::attempt::ReviewerPlan {
+        agent: crate::runner::AgentId::new(crate::engine::topology::scaffold::REVIEW_AGENT),
+        profile: crate::review::profile_for(
+            crate::engine::topology::scaffold::REVIEW_AGENT,
+            "review-model",
+            "review",
+            crate::ir::Effort::High,
+        ),
+        lens: crate::review::Lens::Acceptance,
+        preflight_cli_version: None,
+        timeout: std::time::Duration::from_secs(120),
+    }
+}
 #[test]
 fn a_recovered_authorization_is_the_live_one_and_completes_through_the_same_publish() {
     let mut run = Run::started("recovered-authorization");
@@ -568,4 +645,272 @@ fn a_recovered_authorization_is_the_live_one_and_completes_through_the_same_publ
         "a completed publication authorizes nothing further"
     );
     run.replay_twice_equal();
+}
+
+#[test]
+fn an_already_present_candidate_settles_without_an_empty_commit() {
+    let mut run = Run::started("already-present");
+    run.verify_reviewers.push(passing_reviewer());
+    // Both candidates make the same change to the same path, so beta's
+    // cherry-pick onto the merged head is empty.
+    let first = run.queue_candidate_editing(ALPHA, "shared.txt", "the shared change\n");
+    let second = run.queue_candidate_editing(BETA, "shared.txt", "the shared change\n");
+    published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+    let head = run.head().expect("the head moved");
+
+    let objects_before = count_objects(&run);
+    let published =
+        published(integrate_through(&mut run, &second).expect("beta is already present"));
+    assert_eq!(
+        published.merged_sha.0, head,
+        "already_present publishes the unchanged head"
+    );
+    assert_eq!(
+        run.head().as_deref(),
+        Some(head.as_str()),
+        "the ref did not move"
+    );
+    assert_eq!(
+        count_objects(&run),
+        objects_before,
+        "no proposal commit was manufactured for an already-present candidate"
+    );
+
+    let prepared = merge_prepared_of_sequence(&run, SequenceId(1));
+    assert_eq!(prepared.disposition, PreparedDisposition::AlreadyPresent);
+    assert_eq!(prepared.expected_head.0, head);
+    assert_eq!(prepared.proposed_sha.0, head);
+    assert_eq!(prepared.prepared_ref, None, "already_present pins nothing");
+    assert_eq!(run.task_state(BETA), TaskState::Merged);
+    run.replay_twice_equal();
+}
+
+#[test]
+fn a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect() {
+    let mut run = Run::started("conflict");
+    let first = run.queue_candidate_editing(ALPHA, "shared.txt", "alpha's line\n");
+    let second = run.queue_candidate_editing(BETA, "shared.txt", "beta's line\n");
+    published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+    let head = run.head().expect("head moved");
+
+    let terminal = integrate_through(&mut run, &second).expect("beta conflicts");
+    let Terminal::Rejected { sequence, key } = terminal else {
+        panic!("a conflict must reject, reached {terminal:?}");
+    };
+    assert_eq!((sequence, key), (SequenceId(1), BETA));
+
+    // The rejection registered the repair atomically: beta is AwaitingRepair,
+    // a new Pending repair task exists, and the lineage lease is held.
+    assert_eq!(run.task_state(BETA), TaskState::AwaitingRepair);
+    let repair = TaskKey(
+        u32::try_from(run.emitter.fold().registry().expect("registry").len() - 1)
+            .expect("a small fixture registry"),
+    );
+    assert_eq!(run.task_state(repair), TaskState::Pending);
+    let rejected = run
+        .emitter
+        .durable_events()
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::MergeRejected { data } => Some(*data),
+            _ => None,
+        })
+        .expect("a durable merge_rejected");
+    assert!(matches!(
+        rejected.disposition,
+        crate::topology::events::RejectionDisposition::Conflict { .. }
+    ));
+    assert_eq!(rejected.rejecting_head.0, head);
+    assert_eq!(
+        rejected.repair.entry.origin,
+        crate::topology::registry::Origin::MergeRepair
+    );
+    assert_eq!(
+        rejected.repair.entry.lineage,
+        Some(crate::topology::registry::Lineage {
+            root: BETA,
+            parent: BETA,
+            index: 0
+        })
+    );
+    assert!(
+        matches!(
+            rejected.repair.admission,
+            crate::topology::events::SpawnAdmission::Runnable
+        ),
+        "the first repair of a run with automatic repairs is runnable"
+    );
+
+    // No repair was dispatched: no task_dispatched for the repair, and no
+    // repair worktree exists — merge_rejected is before any repair effect.
+    assert!(
+        !run.emitter
+            .durable_kinds()
+            .iter()
+            .rev()
+            .take(1)
+            .any(|k| *k == "task_dispatched"),
+        "the terminal is merge_rejected, not a dispatch"
+    );
+    // The staging worktree of the rejected transaction is gone.
+    assert!(
+        run.fixture
+            .manager
+            .intents()
+            .expect("intents")
+            .iter()
+            .all(|slot| !matches!(slot, crate::workspace_manager::Slot::Staging { .. })),
+        "the staging worktree survived the rejection"
+    );
+    run.replay_twice_equal();
+}
+
+#[test]
+fn a_code_rejected_candidate_registers_a_repair() {
+    let mut run = Run::started("code-rejected");
+    run.verify_reviewers.push(passing_reviewer());
+    run.verify_review = VerifyReview::NeedsChanges;
+    let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+    let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
+    published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+
+    let terminal = integrate_through(&mut run, &second).expect("beta is stale then rejected");
+    let Terminal::Rejected { .. } = terminal else {
+        panic!("a review rejection must reject, reached {terminal:?}");
+    };
+    let rejected = run
+        .emitter
+        .durable_events()
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::MergeRejected { data } => Some(*data),
+            _ => None,
+        })
+        .expect("a durable merge_rejected");
+    let crate::topology::events::RejectionDisposition::CodeRejected { verification } =
+        &rejected.disposition
+    else {
+        panic!("a review rejection is code-attributed");
+    };
+    assert_eq!(
+        verification.verdict,
+        crate::topology::events::VerificationVerdict::Rejected
+    );
+    assert!(
+        verification.gates_passed,
+        "the gate set passed; the reviewer rejected"
+    );
+    assert_eq!(run.task_state(BETA), TaskState::AwaitingRepair);
+    run.replay_twice_equal();
+}
+
+#[test]
+fn a_human_required_verdict_parks_the_task() {
+    let mut run = Run::started("human-required");
+    run.verify_reviewers.push(passing_reviewer());
+    run.verify_review = VerifyReview::NeedsHuman;
+    let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+    let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
+    published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+
+    let terminal = integrate_through(&mut run, &second).expect("beta parks");
+    let Terminal::Unavailable { parked, .. } = terminal else {
+        panic!("a human-required verdict is unavailable, reached {terminal:?}");
+    };
+    assert!(parked, "a human-required verdict always parks");
+    let unavailable = unavailable_of(&run);
+    assert!(matches!(
+        unavailable.cause,
+        crate::topology::events::UnavailableCause::HumanRequired { .. }
+    ));
+    assert!(matches!(
+        unavailable.outcome,
+        crate::topology::events::UnavailableOutcome::Parked { .. }
+    ));
+    assert_eq!(run.task_state(BETA), TaskState::AwaitingInput);
+    assert_eq!(
+        run.emitter.fold().open_questions().expect("started").len(),
+        1
+    );
+    // The pin and staging are reclaimed at the terminal.
+    assert!(
+        run.fixture
+            .manager
+            .intents()
+            .expect("intents")
+            .iter()
+            .all(|slot| !matches!(slot, crate::workspace_manager::Slot::Staging { .. })),
+        "the staging worktree survived the park"
+    );
+    run.replay_twice_equal();
+}
+
+#[test]
+fn infrastructure_failure_defers_then_parks_at_max_defers() {
+    let mut run = Run::started_with_max_defers("infra-defer", 2);
+    run.verify_reviewers.push(passing_reviewer());
+    run.verify_review = VerifyReview::Unavailable(crate::ir::OutcomeStatus::RateLimited);
+    let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+    let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
+    published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+
+    // First outage: deferred, inside the allowance.
+    let terminal = integrate_through(&mut run, &second).expect("beta defers");
+    assert!(matches!(
+        terminal,
+        Terminal::Unavailable { parked: false, .. }
+    ));
+    let unavailable = unavailable_of(&run);
+    assert!(matches!(
+        unavailable.outcome,
+        crate::topology::events::UnavailableOutcome::Deferred { defers: 1 }
+    ));
+    assert_eq!(
+        run.task_state(BETA),
+        TaskState::AwaitingMerge,
+        "a deferred task stays awaiting merge"
+    );
+    assert!(
+        !run.emitter.fold().integration_admissible(),
+        "a deferred candidate is not eligible until the wake"
+    );
+
+    // Wake it, then the second outage parks at max_defers.
+    run.wake_deferred();
+    assert!(
+        run.emitter.fold().integration_admissible(),
+        "the wake re-enabled the candidate"
+    );
+    let terminal = integrate_through(&mut run, &second).expect("beta parks at the limit");
+    assert!(matches!(
+        terminal,
+        Terminal::Unavailable { parked: true, .. }
+    ));
+    let unavailable = run
+        .emitter
+        .durable_events()
+        .into_iter()
+        .filter_map(|event| match event.body {
+            TopologyEventBody::MergeVerificationUnavailable { data } => Some(data),
+            _ => None,
+        })
+        .next_back()
+        .expect("the second unavailable");
+    assert!(matches!(
+        unavailable.outcome,
+        crate::topology::events::UnavailableOutcome::Parked { .. }
+    ));
+    assert_eq!(run.task_state(BETA), TaskState::AwaitingInput);
+    run.replay_twice_equal();
+}
+
+fn unavailable_of(run: &Run) -> crate::topology::events::MergeVerificationUnavailable {
+    run.emitter
+        .durable_events()
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::MergeVerificationUnavailable { data } => Some(data),
+            _ => None,
+        })
+        .expect("a durable merge_verification_unavailable")
 }

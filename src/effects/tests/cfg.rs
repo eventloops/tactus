@@ -948,6 +948,7 @@ pub(crate) static WHOLE_FILE_TEST_MODULES: LazyLock<Vec<PathBuf>> = LazyLock::ne
         "engine/topology/preflight/tests.rs",
         "engine/topology/prelock/tests.rs",
         "engine/topology/recover/tests.rs",
+        "engine/topology/repair/tests.rs",
         "engine/topology/run/tests.rs",
         "engine/topology/scaffold.rs",
         "engine/topology/select/tests.rs",

@@ -19,7 +19,8 @@ use crate::workspace_manager::WorkspaceManager;
 
 use super::attempt::{
     Assessment, AttemptContext, AttemptPlan, AttemptPlans, AttemptSite, Capture, InputsRequest,
-    Judgement, Judging, PlanRequest, ReviewInputPolicy, ReviewPasses,
+    Judge, JudgeIdentities, JudgeNames, Judgement, Judging, PlanRequest, ReviewInputPolicy,
+    ReviewPasses, SnapshotOf, Subject, VerificationRequest,
 };
 use super::candidate::{
     CandidateJournal, JudgedTree, append_candidate_created, append_candidate_prepared,
@@ -30,8 +31,12 @@ use super::dispatch::{
     resume_open_no_attempt, task_slot,
 };
 use super::emit::{EmitFailure, EmitState, RunIdentity, emit};
-use super::identity::{InvocationLedger, ReservationKind, Reservations, SlotAssertion};
-use super::integrate::{self, IntegrationJournal, IntegrationRequest};
+use super::identity::{
+    InvocationLedger, ReservationKind, Reservations, SequenceIdentities, SlotAssertion,
+};
+use super::integrate::{
+    self, IntegrationJournal, IntegrationRequest, Terminal, Verification, VerifyRequest,
+};
 use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
 use super::select::{Admitted, Ceiling, Spend, Step, checkpoint, select};
@@ -74,9 +79,27 @@ impl CandidateJournal for RunJournal<'_, '_> {
     }
 }
 
-impl IntegrationJournal for RunJournal<'_, '_> {
+/// The run's integration context: the emitter for the appends, the hook
+/// bundle for the funnels, and the seams and ledgers the verification runs
+/// through. One object, so `emit`, `verify` and `converted` are all `&mut
+/// self` methods over disjoint fields rather than three overlapping borrows.
+struct IntegrationCx<'a, 'h> {
+    emitter: RunEmitter<'a>,
+    hooks: &'h mut dyn TopologyHooks,
+    invocations: &'h mut InvocationLedger,
+    slots: &'h mut SlotAssertion,
+    seams: &'h RunSeams<'a>,
+}
+
+impl IntegrationJournal for IntegrationCx<'_, '_> {
     fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
-        CandidateJournal::emit(self, body)
+        self.emitter
+            .emit(body, self.hooks)
+            .map_err(|failure| failure.discharging(self.invocations))
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.emitter.state.fold
     }
 
     fn hooks(&mut self) -> &mut dyn TopologyHooks {
@@ -88,6 +111,102 @@ impl IntegrationJournal for RunJournal<'_, '_> {
             .state
             .reservations
             .convert(key, ReservationKind::Integration)
+    }
+}
+
+impl Verification for IntegrationCx<'_, '_> {
+    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, UpstrokeError> {
+        let (entry, base) = {
+            let fold = &*self.emitter.state.fold;
+            let entry = fold
+                .registry()
+                .and_then(|registry| registry.get(request.candidate.key))
+                .cloned()
+                .ok_or_else(|| UpstrokeError::Refused {
+                    message: format!(
+                        "task {} is not in this run's registry",
+                        request.candidate.key
+                    ),
+                })?;
+            let base = fold
+                .task(request.candidate.key)
+                .and_then(|task| {
+                    task.generations
+                        .iter()
+                        .find(|generation| generation.id == request.candidate.generation)
+                })
+                .and_then(|generation| generation.candidate.as_ref())
+                .map(|prepared| prepared.base_sha.clone());
+            (entry, base)
+        };
+
+        // The review diff: the proposal against the head for a stale
+        // candidate, and the candidate's own patch (base..commit) for an
+        // already-present one, whose proposal is the head itself.
+        let (diff_parent, diff_tree) = if request.already_present {
+            let base = base.ok_or_else(|| UpstrokeError::Refused {
+                message: "an already-present verification needs the candidate's recorded base to                           review its original patch"
+                    .to_owned(),
+            })?;
+            (base.0, request.candidate.commit_sha.0.clone())
+        } else {
+            (request.head.0.clone(), request.proposed.0.clone())
+        };
+        let diff = self
+            .seams
+            .manager
+            .candidate_diff(request.staging, &diff_parent, &diff_tree)?;
+
+        let inputs = self.seams.plans.inputs(&InputsRequest {
+            entry: &entry,
+            diff,
+        })?;
+        let implementer = entry
+            .ladder
+            .rungs
+            .last()
+            .map(|rung| crate::review::PassBinding::new(&rung.agent, &rung.model))
+            .unwrap_or_else(|| crate::review::PassBinding::new("", ""));
+        let plan = self.seams.plans.verification(&VerificationRequest {
+            entry: &entry,
+            implementer,
+        })?;
+
+        let proposed = crate::workspace_manager::ObjectId::new(request.proposed.0.clone())
+            .map_err(|refusal| UpstrokeError::Git {
+                message: format!("the proposed commit is not an object id: {refusal}"),
+            })?;
+        let identities = SequenceIdentities::new(request.sequence);
+        let mut judge = Judge {
+            manager: self.seams.manager,
+            hooks: &mut *self.hooks,
+            runner: self.seams.runner,
+            slots: self.slots,
+            ledger: self.invocations,
+            adapters: self.seams.adapters,
+            paths: self.seams.paths,
+            reviews: self.seams.reviews,
+        };
+        judge.judge(&Subject {
+            snapshot: SnapshotOf::Commit(proposed),
+            names: JudgeNames::Integration {
+                sequence: u64::from(request.sequence.0),
+            },
+            identities: JudgeIdentities::Sequence(identities),
+            stem: format!("integration-s{}", request.sequence.0),
+            gates: &plan.gates,
+            reviewers: &plan.reviewers,
+            inputs: &inputs,
+            prior_failure: None,
+            invocations: &move |pass| review::ReviewInvocations {
+                pass: identities.review_pass(pass, 0),
+                reask: identities.review_reask(pass, 0),
+            },
+        })
+    }
+
+    fn ids(&self) -> &dyn super::seams::IdSource {
+        self.seams.ids
     }
 }
 
@@ -308,6 +427,15 @@ pub enum Progress {
         sequence: SequenceId,
         merged_sha: CommitSha,
     },
+    Rejected {
+        key: TaskKey,
+        sequence: SequenceId,
+    },
+    Unavailable {
+        key: TaskKey,
+        sequence: SequenceId,
+        parked: bool,
+    },
     Blocked {
         questions: usize,
     },
@@ -518,17 +646,45 @@ impl TopologyRun {
         let key = candidate.key;
         self.reservations.take(key, ReservationKind::Integration)?;
 
-        let published = self.with_journal(seams, hooks, |journal| {
-            integrate::integrate(journal, seams.manager, &request)
-        });
+        let terminal = {
+            let mut cx = IntegrationCx {
+                emitter: RunEmitter {
+                    identity: &self.identity,
+                    state: EmitState {
+                        fold: &mut self.handle.fold,
+                        log: &mut self.handle.log,
+                        reservations: &mut self.reservations,
+                        warnings: &mut self.warnings,
+                    },
+                    clock: seams.clock,
+                },
+                hooks,
+                invocations: &mut self.invocations,
+                slots: &mut self.slots,
+                seams,
+            };
+            integrate::integrate(&mut cx, seams.manager, &request)
+        };
 
-        match published {
-            Ok(published) => {
+        match terminal {
+            Ok(terminal) => {
                 self.deferral.progressed();
-                Ok(Progress::Integrated {
-                    key,
-                    sequence: published.sequence,
-                    merged_sha: published.merged_sha,
+                Ok(match terminal {
+                    Terminal::Merged(published) => Progress::Integrated {
+                        key: published.key,
+                        sequence: published.sequence,
+                        merged_sha: published.merged_sha,
+                    },
+                    Terminal::Rejected { sequence, key } => Progress::Rejected { key, sequence },
+                    Terminal::Unavailable {
+                        sequence,
+                        key,
+                        parked,
+                    } => Progress::Unavailable {
+                        key,
+                        sequence,
+                        parked,
+                    },
                 })
             }
             Err(error) => {

@@ -10,6 +10,7 @@ pub mod emit;
 pub mod identity;
 pub mod integrate;
 pub mod prelock;
+pub mod repair;
 pub mod seams;
 pub mod select;
 pub mod settle;

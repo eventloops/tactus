@@ -24,7 +24,9 @@ use crate::workspace_manager::{
 };
 
 use super::dispatch::{self, Dispatched, EventEmitter};
-use super::identity::{AttemptIdentities, InvocationLedger, SlotAssertion, SlotPair, is_slotted};
+use super::identity::{
+    AttemptIdentities, InvocationLedger, SequenceIdentities, SlotAssertion, SlotPair, is_slotted,
+};
 use super::seams::TopologyHooks;
 
 #[derive(Debug, Clone)]
@@ -64,12 +66,34 @@ pub struct InputsRequest<'a> {
     pub diff: String,
 }
 
+/// What an integration verification is planned from: the task whose
+/// candidate is being integrated, and the implementer binding the candidate
+/// ran under, so the review passes are the ones its own review would run.
+pub struct VerificationRequest<'a> {
+    pub entry: &'a crate::topology::registry::TaskEntry,
+    pub implementer: review::PassBinding,
+}
+
+/// Every recorded gate and every review pass an integration reruns on the
+/// proposed tree: `DESIGN.md` §26.3, "rerun every recorded gate and review on
+/// the proposed integrated tree".
+#[derive(Debug, Clone)]
+pub struct VerificationPlan {
+    pub gates: Vec<GatePlan>,
+    pub reviewers: Vec<ReviewerPlan>,
+}
+
 pub trait AttemptPlans {
     fn inputs(&self, request: &InputsRequest<'_>) -> Result<ReviewInputs, UpstrokeError>;
 
     fn pool_for(&self, agent: &str) -> Option<String>;
 
     fn plan(&self, request: &PlanRequest<'_>) -> Result<AttemptPlan, UpstrokeError>;
+
+    fn verification(
+        &self,
+        request: &VerificationRequest<'_>,
+    ) -> Result<VerificationPlan, UpstrokeError>;
 }
 
 pub trait ReviewInputPolicy {
@@ -237,6 +261,21 @@ impl AttemptContext<'_> {
             .map_err(|failure| failure.discharging(self.ledger))
     }
 
+    /// The judge over this context's ledgers: the same slot assertion and
+    /// invocation ledger, reborrowed for one gate set or one review.
+    fn judge_core(&mut self) -> Judge<'_> {
+        Judge {
+            manager: self.manager,
+            hooks: &mut *self.hooks,
+            runner: self.runner,
+            slots: &mut *self.slots,
+            ledger: &mut *self.ledger,
+            adapters: self.adapters,
+            paths: self.paths,
+            reviews: self.reviews,
+        }
+    }
+
     pub fn start(
         &mut self,
         site: AttemptSite<'_>,
@@ -272,7 +311,7 @@ impl AttemptContext<'_> {
             plan.worker_timeout,
             invocation.clone(),
         );
-        let worker = self.execute(&request, plan.pool.clone())?;
+        let worker = self.judge_core().execute(&request, plan.pool.clone())?;
         Ok(AttemptRun { identities, worker })
     }
 
@@ -338,153 +377,24 @@ impl AttemptContext<'_> {
             capture,
             assessed,
         } = judging;
-        let generation = site.generation.0;
-        let attempt = plan.attempt.0;
-
-        let mut failure = assessed.failure.clone();
-        let mut gates = Vec::with_capacity(plan.gates.len());
-        if !plan.gates.is_empty() && failure.is_none() {
-            let snapshot = self.snapshot(SnapshotName::gates(generation, attempt), capture)?;
-            for (index, gate) in plan.gates.iter().enumerate() {
-                let invocation = run
-                    .identities
-                    .gate(u32::try_from(index).unwrap_or(u32::MAX), 0);
-                let request = gate_request(
-                    gate.command.clone(),
-                    snapshot.path().to_path_buf(),
-                    gate.timeout,
-                    invocation,
-                );
-                let verdict = self.verdict(&request, None)?;
-                let refused = !verdict.passed();
-                if refused && failure.is_none() {
-                    failure = Some(crate::engine::classify::gate_failure(&GateFailure {
-                        gate: gate.name.clone(),
-                        summary: format!(
-                            "exit {}{}{}",
-                            verdict
-                                .code
-                                .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
-                            if verdict.timed_out {
-                                " (timed out)"
-                            } else {
-                                ""
-                            },
-                            if verdict.output_limited {
-                                " (output truncated)"
-                            } else {
-                                ""
-                            }
-                        ),
-                        log_tail: crate::util::tail(
-                            &verdict.log,
-                            crate::gates::FEEDBACK_TAIL_BYTES,
-                        ),
-                    }));
-                }
-                gates.push(verdict);
-                if refused {
-                    break;
-                }
-            }
-            self.manager
-                .remove_snapshot(self.hooks.effects(), &snapshot)?;
-        }
-
-        let mut reviews = Vec::with_capacity(plan.reviewers.len());
-        for (index, reviewer) in plan.reviewers.iter().enumerate() {
-            if failure.is_some() {
-                break;
-            }
-            let pass = u32::try_from(index).unwrap_or(u32::MAX);
-            let snapshot =
-                self.snapshot(SnapshotName::review(generation, attempt, pass), capture)?;
-            let adapter = self.adapters.get(reviewer.agent.as_str()).ok_or_else(|| {
-                UpstrokeError::Refused {
-                    message: format!(
-                        "review pass {pass} is bound to agent `{}` and no adapter answers to that \
-                         name; pre-flight probed the agents this run recorded and this is not one \
-                         of them",
-                        reviewer.agent.as_str()
-                    ),
-                }
-            })?;
-            let outcome = self.reviews.run(
-                &review::ReviewCx {
-                    adapter,
-                    profile: reviewer.profile.clone(),
-                    lens: reviewer.lens,
-                    task: review::ReviewSubject {
-                        title: &inputs.title,
-                        body: &inputs.body,
-                        acceptance: &inputs.acceptance,
-                    },
-                    diff: &inputs.diff,
-                    artifacts: &inputs.artifacts,
-                    decisions: &inputs.decisions,
-                    workspace: snapshot.path(),
-                    settings_dir: &self.paths.settings(),
-                    reviews_dir: &self.paths.reviews(),
-                    stem: format!("{}-{}", inputs.stem, attempt),
-                    timeout: reviewer.timeout,
-                },
-                self.runner,
-                &invocations(pass),
-            )?;
-
-            let ids = invocations(pass);
-            for ordinal in 0..outcome.invocations {
-                let id = if ordinal == 0 {
-                    ids.pass.clone()
-                } else {
-                    run.identities.review_reask(pass, ordinal - 1)
-                };
-                self.ledger.register(&id)?;
-                self.ledger.complete(&id)?;
-            }
-
-            let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
-            let cost_usd = outcome.cost_usd;
-            failure = review_failure(outcome.result);
-            reviews.push(
-                super::super::classify::ReviewPassFacts {
-                    pass: reviewer.lens.name(),
-                    agent: &reviewer.profile.agent,
-                    model: &reviewer.profile.model,
-                    adapter: adapter.id(),
-                    preflight_cli_version: reviewer.preflight_cli_version.clone(),
-                    effort: reviewer.profile.effort,
-                    pool: crate::engine::attempt::pool_option(&reviewer.profile.pool),
-                    cost_usd,
-                    unavailable,
-                    failed: failure.is_some(),
-                }
-                .record(),
-            );
-            self.manager
-                .remove_snapshot(self.hooks.effects(), &snapshot)?;
-        }
-
-        Ok(Judgement {
-            gates,
-            reviews,
-            failure,
-        })
-    }
-
-    fn snapshot(
-        &mut self,
-        name: SnapshotName,
-        capture: &Capture,
-    ) -> Result<Snapshot, UpstrokeError> {
-        self.manager.add_snapshot(
-            self.hooks.effects(),
-            &name,
-            &SnapshotInput::Tree {
+        let subject = Subject {
+            snapshot: SnapshotOf::Tree {
                 tree: captured_object_id("`git write-tree`", capture.tree.clone())?,
                 parent: captured_object_id("the recorded base commit", capture.parent.clone())?,
             },
-        )
+            names: JudgeNames::Attempt {
+                generation: site.generation.0,
+                attempt: plan.attempt.0,
+            },
+            identities: JudgeIdentities::Attempt(run.identities),
+            stem: format!("{}-{}", inputs.stem, plan.attempt.0),
+            gates: &plan.gates,
+            reviewers: &plan.reviewers,
+            inputs,
+            prior_failure: assessed.failure.clone(),
+            invocations,
+        };
+        self.judge_core().judge(&subject)
     }
 
     pub fn settle_interrupted(
@@ -530,13 +440,276 @@ impl AttemptContext<'_> {
         }
         dispatch::scrub(self.manager, self.hooks, &dispatched.slot)
     }
+}
+
+/// What a judgement runs against: the exact tree a candidate captured, or the
+/// commit an integration proposes.
+///
+/// `decisions.workspace_candidates.snapshots`: a tree-only input is committed
+/// ephemerally on its recorded parent before the snapshot is added; a commit
+/// input is checked out as it is and creates no object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotOf {
+    Tree { tree: ObjectId, parent: ObjectId },
+    Commit(ObjectId),
+}
+
+impl SnapshotOf {
+    fn input(&self) -> SnapshotInput {
+        match self {
+            Self::Tree { tree, parent } => SnapshotInput::Tree {
+                tree: tree.clone(),
+                parent: parent.clone(),
+            },
+            Self::Commit(commit) => SnapshotInput::Commit(commit.clone()),
+        }
+    }
+}
+
+/// How the snapshots of one judgement are named: one for the gate set, one
+/// fresh per reviewer, never reused across roles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JudgeNames {
+    Attempt { generation: u32, attempt: u32 },
+    Integration { sequence: u64 },
+}
+
+impl JudgeNames {
+    fn gates(self) -> SnapshotName {
+        match self {
+            Self::Attempt {
+                generation,
+                attempt,
+            } => SnapshotName::gates(generation, attempt),
+            Self::Integration { sequence } => SnapshotName::integration(sequence),
+        }
+    }
+
+    fn review(self, pass: u32) -> SnapshotName {
+        match self {
+            Self::Attempt {
+                generation,
+                attempt,
+            } => SnapshotName::review(generation, attempt, pass),
+            Self::Integration { sequence } => SnapshotName::integration_review(sequence, pass),
+        }
+    }
+}
+
+/// Whose invocations a judgement's processes are: an attempt's
+/// `(key, generation, attempt, role, ordinal)` or an integration's
+/// `(sequence, role, ordinal)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JudgeIdentities {
+    Attempt(AttemptIdentities),
+    Sequence(SequenceIdentities),
+}
+
+impl JudgeIdentities {
+    fn gate(self, gate: u32, ordinal: u32) -> InvocationId {
+        match self {
+            Self::Attempt(ids) => ids.gate(gate, ordinal),
+            Self::Sequence(ids) => ids.gate(gate, ordinal),
+        }
+    }
+
+    fn review_reask(self, reask: u32, ordinal: u32) -> InvocationId {
+        match self {
+            Self::Attempt(ids) => ids.review_reask(reask, ordinal),
+            Self::Sequence(ids) => ids.review_reask(reask, ordinal),
+        }
+    }
+}
+
+/// One thing to judge: what to snapshot, what to run in the snapshots, and
+/// what the reviewers are told.
+pub struct Subject<'s> {
+    pub snapshot: SnapshotOf,
+    pub names: JudgeNames,
+    pub identities: JudgeIdentities,
+    /// The stem the review transcripts are filed under.
+    pub stem: String,
+    pub gates: &'s [GatePlan],
+    pub reviewers: &'s [ReviewerPlan],
+    pub inputs: &'s ReviewInputs,
+    /// A failure already decided before anything ran — an assessment's — so
+    /// the gate set and the reviewers are skipped exactly as the attempt path
+    /// skips them.
+    pub prior_failure: Option<AttemptFailure>,
+    /// The pass and re-ask invocation ids of review pass `n`.
+    pub invocations: &'s dyn Fn(u32) -> review::ReviewInvocations,
+}
+
+/// The gate set and the reviewers, run on fresh exact snapshots.
+///
+/// The one implementation of "gates on a fresh exact snapshot, each reviewer
+/// on its own fresh exact snapshot" for both the candidate phase and the
+/// integration: a candidate is judged on the tree it captured, an integration
+/// on the proposal or head commit, and everything else — the snapshot per
+/// role, the invocation ledger, the slot pair, the review records — is the
+/// same protocol run once.
+pub struct Judge<'a> {
+    pub manager: &'a WorkspaceManager,
+    pub hooks: &'a mut dyn TopologyHooks,
+    pub runner: &'a dyn Runner,
+    pub slots: &'a mut SlotAssertion,
+    pub ledger: &'a mut InvocationLedger,
+    pub adapters: &'a dyn AdapterSource,
+    pub paths: &'a RunPaths,
+    pub reviews: &'a dyn ReviewPasses,
+}
+
+impl Judge<'_> {
+    /// Run every gate on one snapshot, then every reviewer on its own, and
+    /// say what they decided.
+    ///
+    /// # Errors
+    ///
+    /// A snapshot funnel refusal, a Runner error spawning a process, an
+    /// adapter no pass answers to, or a review pass that could not be run.
+    pub fn judge(&mut self, subject: &Subject<'_>) -> Result<Judgement, UpstrokeError> {
+        let mut failure = subject.prior_failure.clone();
+        let mut gates = Vec::with_capacity(subject.gates.len());
+        if !subject.gates.is_empty() && failure.is_none() {
+            let snapshot = self.snapshot(subject.names.gates(), &subject.snapshot)?;
+            for (index, gate) in subject.gates.iter().enumerate() {
+                let invocation = subject
+                    .identities
+                    .gate(u32::try_from(index).unwrap_or(u32::MAX), 0);
+                let request = gate_request(
+                    gate.command.clone(),
+                    snapshot.path().to_path_buf(),
+                    gate.timeout,
+                    invocation,
+                );
+                let verdict = self.verdict(&request, None)?;
+                let refused = !verdict.passed();
+                if refused && failure.is_none() {
+                    failure = Some(crate::engine::classify::gate_failure(&GateFailure {
+                        gate: gate.name.clone(),
+                        summary: format!(
+                            "exit {}{}{}",
+                            verdict
+                                .code
+                                .map_or_else(|| "signal".to_owned(), |code| code.to_string()),
+                            if verdict.timed_out {
+                                " (timed out)"
+                            } else {
+                                ""
+                            },
+                            if verdict.output_limited {
+                                " (output truncated)"
+                            } else {
+                                ""
+                            }
+                        ),
+                        log_tail: crate::util::tail(
+                            &verdict.log,
+                            crate::gates::FEEDBACK_TAIL_BYTES,
+                        ),
+                    }));
+                }
+                gates.push(verdict);
+                if refused {
+                    break;
+                }
+            }
+            self.manager
+                .remove_snapshot(self.hooks.effects(), &snapshot)?;
+        }
+
+        let mut reviews = Vec::with_capacity(subject.reviewers.len());
+        for (index, reviewer) in subject.reviewers.iter().enumerate() {
+            if failure.is_some() {
+                break;
+            }
+            let pass = u32::try_from(index).unwrap_or(u32::MAX);
+            let snapshot = self.snapshot(subject.names.review(pass), &subject.snapshot)?;
+            let adapter = self.adapters.get(reviewer.agent.as_str()).ok_or_else(|| {
+                UpstrokeError::Refused {
+                    message: format!(
+                        "review pass {pass} is bound to agent `{}` and no adapter answers to that \
+                         name; pre-flight probed the agents this run recorded and this is not one \
+                         of them",
+                        reviewer.agent.as_str()
+                    ),
+                }
+            })?;
+            let inputs = subject.inputs;
+            let outcome = self.reviews.run(
+                &review::ReviewCx {
+                    adapter,
+                    profile: reviewer.profile.clone(),
+                    lens: reviewer.lens,
+                    task: review::ReviewSubject {
+                        title: &inputs.title,
+                        body: &inputs.body,
+                        acceptance: &inputs.acceptance,
+                    },
+                    diff: &inputs.diff,
+                    artifacts: &inputs.artifacts,
+                    decisions: &inputs.decisions,
+                    workspace: snapshot.path(),
+                    settings_dir: &self.paths.settings(),
+                    reviews_dir: &self.paths.reviews(),
+                    stem: subject.stem.clone(),
+                    timeout: reviewer.timeout,
+                },
+                self.runner,
+                &(subject.invocations)(pass),
+            )?;
+
+            let ids = (subject.invocations)(pass);
+            for ordinal in 0..outcome.invocations {
+                let id = if ordinal == 0 {
+                    ids.pass.clone()
+                } else {
+                    subject.identities.review_reask(pass, ordinal - 1)
+                };
+                self.ledger.register(&id)?;
+                self.ledger.complete(&id)?;
+            }
+
+            let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
+            let cost_usd = outcome.cost_usd;
+            failure = review_failure(outcome.result);
+            reviews.push(
+                super::super::classify::ReviewPassFacts {
+                    pass: reviewer.lens.name(),
+                    agent: &reviewer.profile.agent,
+                    model: &reviewer.profile.model,
+                    adapter: adapter.id(),
+                    preflight_cli_version: reviewer.preflight_cli_version.clone(),
+                    effort: reviewer.profile.effort,
+                    pool: crate::engine::attempt::pool_option(&reviewer.profile.pool),
+                    cost_usd,
+                    unavailable,
+                    failed: failure.is_some(),
+                }
+                .record(),
+            );
+            self.manager
+                .remove_snapshot(self.hooks.effects(), &snapshot)?;
+        }
+
+        Ok(Judgement {
+            gates,
+            reviews,
+            failure,
+        })
+    }
+
+    fn snapshot(&mut self, name: SnapshotName, of: &SnapshotOf) -> Result<Snapshot, UpstrokeError> {
+        self.manager
+            .add_snapshot(self.hooks.effects(), &name, &of.input())
+    }
 
     // This sequential context owns the invocation ledger and slot assertion.
     // Register before acquiring the atomic agent/pool pair; a refused acquisition
     // cancels that registration. Runner::run returns before the pair is released,
     // then each registered invocation is completed or cancelled exactly once.
     // Keep settlement here so a run_registered error cannot leave a Running entry.
-    fn execute(
+    pub fn execute(
         &mut self,
         request: &RunnerRequest,
         pool: Option<String>,

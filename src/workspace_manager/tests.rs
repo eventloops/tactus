@@ -3471,6 +3471,10 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
             "candidate_diff",
             Box::new(|slot| manager.candidate_diff(slot, &head, &head).map(drop)),
         ),
+        (
+            "proposal_state",
+            Box::new(|slot| manager.proposal_state(slot, &head).map(drop)),
+        ),
     ];
 
     let covered: BTreeSet<String> = primitives

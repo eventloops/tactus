@@ -631,6 +631,11 @@ pub(super) struct Run {
     pub(super) runner: RecordingRunner,
     pub(super) invocations: crate::engine::topology::identity::InvocationLedger,
     pub(super) reservations: crate::engine::topology::identity::Reservations,
+    pub(super) slots: crate::engine::topology::identity::SlotAssertion,
+    pub(super) verify_gates: Vec<super::attempt::GatePlan>,
+    pub(super) verify_reviewers: Vec<super::attempt::ReviewerPlan>,
+    pub(super) verify_review: VerifyReview,
+    pub(super) ids_source: super::seams::RealIds,
 }
 
 impl super::integrate::IntegrationJournal for Run {
@@ -638,6 +643,10 @@ impl super::integrate::IntegrationJournal for Run {
         self.emitter
             .emit(body, &mut self.hooks)
             .map_err(|failure| failure.discharging(&mut self.invocations))
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.emitter.fold()
     }
 
     fn hooks(&mut self) -> &mut dyn super::seams::TopologyHooks {
@@ -652,8 +661,139 @@ impl super::integrate::IntegrationJournal for Run {
     }
 }
 
+/// What the scaffold's integration verification decides, so a test drives a
+/// stale_clean pass, a code rejection, a human-required park, or an outage
+/// without a real reviewer.
+#[derive(Debug, Clone)]
+pub(super) enum VerifyReview {
+    Passed,
+    NeedsChanges,
+    NeedsHuman,
+    Unavailable(crate::ir::OutcomeStatus),
+}
+
+struct ScaffoldReviews {
+    outcome: VerifyReview,
+}
+
+impl super::attempt::ReviewPasses for ScaffoldReviews {
+    fn run(
+        &self,
+        _cx: &crate::review::ReviewCx<'_>,
+        _runner: &dyn Runner,
+        _invocations: &crate::review::ReviewInvocations,
+    ) -> Result<crate::review::ReviewOutcome, UpstrokeError> {
+        let result = match &self.outcome {
+            VerifyReview::Passed => crate::review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: true,
+                reasons: Vec::new(),
+                required_changes: Vec::new(),
+                needs_human: false,
+            }),
+            VerifyReview::NeedsChanges => crate::review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: false,
+                reasons: vec!["the proposed tree regresses merged behaviour".to_owned()],
+                required_changes: vec!["restore it".to_owned()],
+                needs_human: false,
+            }),
+            VerifyReview::NeedsHuman => crate::review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: false,
+                reasons: vec!["a person must decide this integration".to_owned()],
+                required_changes: Vec::new(),
+                needs_human: true,
+            }),
+            VerifyReview::Unavailable(status) => crate::review::ReviewResult::Unavailable {
+                status: *status,
+                detail: "the integration reviewer was unavailable".to_owned(),
+            },
+        };
+        Ok(crate::review::ReviewOutcome {
+            result,
+            cost_usd: Some(0.2),
+            invocations: 1,
+            transcript: PathBuf::new(),
+        })
+    }
+}
+
+impl super::integrate::Verification for Run {
+    fn verify(
+        &mut self,
+        request: &super::integrate::VerifyRequest<'_>,
+    ) -> Result<super::attempt::Judgement, UpstrokeError> {
+        use super::attempt::{Judge, JudgeIdentities, JudgeNames, SnapshotOf, Subject};
+        let manager = self.fixture.manager.clone();
+        let parent = if request.already_present {
+            self.base().0
+        } else {
+            request.head.0.clone()
+        };
+        let tree = if request.already_present {
+            request.candidate.commit_sha.0.clone()
+        } else {
+            request.proposed.0.clone()
+        };
+        let diff = manager.candidate_diff(request.staging, &parent, &tree)?;
+        let inputs = super::attempt::ReviewInputs {
+            title: "integration".to_owned(),
+            body: String::new(),
+            acceptance: vec!["it integrates".to_owned()],
+            diff,
+            artifacts: Vec::new(),
+            decisions: Vec::new(),
+            stem: format!("s{}", request.sequence.0),
+        };
+        let gates = self.verify_gates.clone();
+        let reviewers = self.verify_reviewers.clone();
+        let reviews = ScaffoldReviews {
+            outcome: self.verify_review.clone(),
+        };
+        let adapters = ScaffoldAdapters::new();
+        let proposed = crate::workspace_manager::ObjectId::new(request.proposed.0.clone())
+            .expect("the proposed commit is an object id");
+        let identities = super::identity::SequenceIdentities::new(request.sequence);
+        let mut judge = Judge {
+            manager: &manager,
+            hooks: &mut self.hooks,
+            runner: &self.runner,
+            slots: &mut self.slots,
+            ledger: &mut self.invocations,
+            adapters: &adapters,
+            paths: &self.paths,
+            reviews: &reviews,
+        };
+        judge.judge(&Subject {
+            snapshot: SnapshotOf::Commit(proposed),
+            names: JudgeNames::Integration {
+                sequence: u64::from(request.sequence.0),
+            },
+            identities: JudgeIdentities::Sequence(identities),
+            stem: format!("integration-s{}", request.sequence.0),
+            gates: &gates,
+            reviewers: &reviewers,
+            inputs: &inputs,
+            prior_failure: None,
+            invocations: &move |pass| crate::review::ReviewInvocations {
+                pass: identities.review_pass(pass, 0),
+                reask: identities.review_reask(pass, 0),
+            },
+        })
+    }
+
+    fn ids(&self) -> &dyn super::seams::IdSource {
+        &self.ids_source
+    }
+}
+
 impl Run {
     pub(super) fn started(tag: &str) -> Self {
+        let mut run = Self::bare(tag);
+        let started = run_started(&run.fixture);
+        Self::begin(&mut run, started);
+        run
+    }
+
+    fn bare(tag: &str) -> Self {
         let fixture = Fixture::created(tag);
         let harness = Arc::new(Mutex::new(HookHarness::new()));
         let timeline = Timeline::default();
@@ -663,7 +803,7 @@ impl Run {
             &mut Vec::new(),
         )
         .expect("open the schema-4 log");
-        let mut run = Self {
+        Self {
             emitter: FoldedEmitter {
                 log,
                 fold: TopologyFold::new(FrozenInputs {
@@ -680,6 +820,11 @@ impl Run {
             invocations: crate::engine::topology::identity::InvocationLedger::new(),
             reservations: crate::engine::topology::identity::Reservations::new(),
             runner: RecordingRunner::new(),
+            slots: crate::engine::topology::identity::SlotAssertion::new(),
+            verify_gates: Vec::new(),
+            verify_reviewers: Vec::new(),
+            verify_review: VerifyReview::Passed,
+            ids_source: super::seams::RealIds,
             timeline,
             harness,
             paths: {
@@ -689,8 +834,12 @@ impl Run {
                 paths
             },
             fixture,
-        };
-        let started = run_started(&run.fixture);
+        }
+    }
+
+    /// Emit `run_started` and create the integration ref (P8), the two steps
+    /// every constructor shares.
+    fn begin(run: &mut Self, started: RunStarted4) {
         let integration_ref = started.integration_ref.clone();
         run.emitter
             .emit(
@@ -700,7 +849,6 @@ impl Run {
                 &mut run.hooks,
             )
             .expect("run_started");
-        // P8: the integration ref, zero-old at the base, after run_started.
         run.fixture
             .manager
             .create_ref_zero_old(
@@ -711,7 +859,30 @@ impl Run {
             )
             .expect("the integration ref");
         run.runner.watching(run.emitter.log.path());
+    }
+
+    /// [`Self::started`] with a chosen `max_defers`, for the deferral tests.
+    pub(super) fn started_with_max_defers(tag: &str, max_defers: u32) -> Self {
+        let mut run = Self::bare(tag);
+        let mut started = run_started(&run.fixture);
+        started.limits.max_defers = max_defers;
+        Self::begin(&mut run, started);
         run
+    }
+
+    /// Wake every verification-deferred candidate: `defer_wait_elapsed`.
+    pub(super) fn wake_deferred(&mut self) {
+        self.emitter
+            .emit(
+                TopologyEventBody::DeferWaitElapsed {
+                    data: crate::topology::events::DeferWaitElapsed4 {
+                        waited_ms: 1,
+                        round: 1,
+                    },
+                },
+                &mut self.hooks,
+            )
+            .expect("defer_wait_elapsed");
     }
 
     pub(super) fn manager(&self) -> &WorkspaceManager {
@@ -821,6 +992,11 @@ impl Run {
             runner: RecordingRunner::new(),
             invocations: crate::engine::topology::identity::InvocationLedger::new(),
             reservations: crate::engine::topology::identity::Reservations::new(),
+            slots: crate::engine::topology::identity::SlotAssertion::new(),
+            verify_gates: Vec::new(),
+            verify_reviewers: Vec::new(),
+            verify_review: VerifyReview::Passed,
+            ids_source: super::seams::RealIds,
             timeline,
             harness,
             paths: {
@@ -927,6 +1103,20 @@ impl Run {
         &mut self,
         key: TaskKey,
     ) -> crate::topology::events::CandidateRef {
+        let path = format!("{key}-work.txt");
+        let content = format!("work of task {key}\n");
+        self.queue_candidate_editing(key, &path, &content)
+    }
+
+    /// Queue a candidate whose worker edits exactly `path` to `content`, so a
+    /// later candidate editing the same path conflicts with it, and one editing
+    /// it to the same content is already present.
+    pub(super) fn queue_candidate_editing(
+        &mut self,
+        key: TaskKey,
+        path: &str,
+        content: &str,
+    ) -> crate::topology::events::CandidateRef {
         use super::candidate::{
             JudgedTree, append_candidate_created, append_candidate_prepared, create_candidates_ref,
             pin_candidate, reclaim_after_creation, write_candidate_commit,
@@ -953,14 +1143,7 @@ impl Run {
                 &mut self.hooks,
             )
             .expect("attempt_started");
-        write_file(
-            &dispatched.worktree.join(format!("{key}-work.txt")),
-            format!(
-                "work of task {key} in generation {}\n",
-                dispatched.generation.0
-            )
-            .as_bytes(),
-        );
+        write_file(&dispatched.worktree.join(path), content.as_bytes());
         let manager = self.fixture.manager.clone();
         manager
             .candidate_stage(self.hooks.effects(), &dispatched.slot)

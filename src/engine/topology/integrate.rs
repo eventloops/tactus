@@ -20,17 +20,23 @@
 use thiserror::Error;
 
 use crate::error::UpstrokeError;
+use crate::ladder::{AttemptFailure, FailureKind};
 use crate::topology::effects::RefSite;
 use crate::topology::events::{
-    CandidateRef, CommitSha, GitRef, MergeLeaseRelease, MergePrepared, PreparedDisposition,
-    SequenceId, TaskMerged, TopologyEventBody, VerificationSource,
+    CandidateRef, CommitSha, FrozenQuestion, GitRef, InfrastructureKind, MergeLeaseRelease,
+    MergePrepared, MergeVerificationStarted, MergeVerificationUnavailable, PreparedDisposition,
+    RejectionDisposition, SequenceId, TaskMerged, TopologyEventBody, UnavailableCause,
+    UnavailableOutcome, VerificationBasis, VerificationRecord, VerificationSource,
+    VerificationVerdict,
 };
 use crate::topology::fold::{TopologyFold, TransactionClass};
+use crate::topology::paths::PathSet;
 use crate::topology::registry::TaskKey;
-use crate::workspace_manager::{Slot, WorkspaceManager};
+use crate::workspace_manager::{ProposalState, Slot, WorkspaceManager};
 
+use super::attempt::Judgement;
 use super::candidate::RUN_REF_ROOT;
-use super::seams::TopologyHooks;
+use super::seams::{IdSource, TopologyHooks};
 
 /// `refs/upstroke/runs/<run>/prepared/<sequence>`: the pin that keeps a stale
 /// candidate's proposal commit reachable while its verification runs (R12).
@@ -64,6 +70,10 @@ pub trait IntegrationJournal {
     /// The fold's refusal, or the append-error protocol's report.
     fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError>;
 
+    /// The fold every append is checked against, read to derive a repair and a
+    /// candidate's region.
+    fn fold(&self) -> &TopologyFold;
+
     /// The hook bundle the funnels take.
     fn hooks(&mut self) -> &mut dyn TopologyHooks;
 
@@ -75,6 +85,40 @@ pub trait IntegrationJournal {
     ///
     /// The reservation ledger's refusal when no such reservation is held.
     fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError>;
+}
+
+/// What runs an integration verification and mints its park question.
+///
+/// Implemented by the same object as [`IntegrationJournal`], because both are
+/// the run: the gates and reviewers execute through the run's own
+/// [`super::attempt::Judge`] over its ledgers, and a park question is minted
+/// from the run's [`IdSource`].
+pub trait Verification {
+    /// Run every recorded gate on one fresh exact snapshot of the proposed
+    /// commit and every review pass on its own, reviewing it against the head,
+    /// and say what they decided. `staging` is read only for the review diff;
+    /// no gate or reviewer runs in it.
+    ///
+    /// # Errors
+    ///
+    /// A snapshot funnel refusal, a Runner error, or a plan the run cannot
+    /// assemble.
+    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, UpstrokeError>;
+
+    /// The id source a park question's identity comes from.
+    fn ids(&self) -> &dyn IdSource;
+}
+
+/// One integration verification to run.
+pub struct VerifyRequest<'a> {
+    pub candidate: &'a CandidateRef,
+    pub sequence: SequenceId,
+    pub staging: &'a Slot,
+    pub head: &'a CommitSha,
+    pub proposed: &'a CommitSha,
+    /// The proposal equals the head: gates rerun on the head and the review
+    /// judges the head tree against the candidate's original patch.
+    pub already_present: bool,
 }
 
 /// Why the sequence refused, each naming the record and the value it
@@ -116,18 +160,6 @@ pub enum Refusal {
         refname: String,
         found: String,
         expected: String,
-    },
-
-    #[error(
-        "refusing to integrate task {key} generation {generation}: the integration ref is at \
-         {head} and the candidate's base is {base}, so the candidate is stale; this build \
-         publishes exact-base candidates only and refuses a stale one before any staging effect"
-    )]
-    StaleNotImplemented {
-        key: u32,
-        generation: u32,
-        head: String,
-        base: String,
     },
 }
 
@@ -539,25 +571,427 @@ pub fn prune_pin(
 /// Any refusal of the sequence it runs, and — in this build —
 /// [`Refusal::StaleNotImplemented`] for a candidate whose base is no longer
 /// the head, refused before any staging effect.
-pub fn integrate(
-    journal: &mut dyn IntegrationJournal,
+pub fn integrate<J: IntegrationJournal + Verification>(
+    journal: &mut J,
     manager: &WorkspaceManager,
     request: &IntegrationRequest,
-) -> Result<Published, UpstrokeError> {
+) -> Result<Terminal, UpstrokeError> {
     let decided = decide(manager, request)?;
     match decided.exact_base {
         ExactBase::Fast => {
             let authorized = prepare_fast(journal, request, decided.head)?;
-            publish(journal, manager, authorized)
+            Ok(Terminal::Merged(publish(journal, manager, authorized)?))
         }
-        ExactBase::Stale => Err(Refusal::StaleNotImplemented {
-            key: request.candidate.key.0,
-            generation: request.candidate.generation.0,
-            head: decided.head.0,
-            base: request.base_sha.0.clone(),
-        }
-        .into()),
+        ExactBase::Stale => integrate_stale(journal, manager, request, decided.head),
     }
+}
+
+/// The terminal one integration reached.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Terminal {
+    /// A publication: `merge_prepared`, the compare-and-swap, `task_merged`.
+    Merged(Published),
+    /// A conflict or a code-attributed rejection, with the repair registered.
+    Rejected { sequence: SequenceId, key: TaskKey },
+    /// The verification could not be run: deferred, or parked.
+    Unavailable {
+        sequence: SequenceId,
+        key: TaskKey,
+        parked: bool,
+    },
+}
+
+/// What a cherry-pick left in the staging worktree.
+enum Picked {
+    Clean { proposal: CommitSha },
+    Conflict { paths: PathSet },
+    Empty,
+    Unclassified { detail: String },
+}
+
+/// The stale path: cherry-pick the immutable candidate onto the head in a
+/// staging worktree, classify what the pick left, and reach the terminal the
+/// classification and (for a clean or empty pick) the verification decide.
+fn integrate_stale<J: IntegrationJournal + Verification>(
+    journal: &mut J,
+    manager: &WorkspaceManager,
+    request: &IntegrationRequest,
+    head: CommitSha,
+) -> Result<Terminal, UpstrokeError> {
+    let candidate = &request.candidate;
+    let staging = staging_slot(request.sequence);
+
+    manager.write_intent(journal.hooks().effects(), &staging)?;
+    manager.add_worktree(journal.hooks().effects(), &staging, head.as_str())?;
+
+    let picked = manager.proposal_cherry_pick(
+        journal.hooks().effects(),
+        &staging,
+        candidate.commit_sha.as_str(),
+    );
+    let classified = match &picked {
+        Ok(proposal) => Picked::Clean {
+            proposal: CommitSha(proposal.clone()),
+        },
+        Err(_) => match manager.proposal_state(&staging, head.as_str())? {
+            ProposalState::Conflict { paths } => Picked::Conflict { paths },
+            ProposalState::Empty => Picked::Empty,
+            ProposalState::Unclassified { detail } => Picked::Unclassified { detail },
+        },
+    };
+
+    match classified {
+        Picked::Clean { proposal } => {
+            let run_id = run_id_of(journal)?;
+            let pin = prepared_pin_ref(&run_id, request.sequence);
+            manager.create_ref_zero_old(
+                journal.hooks().effects(),
+                RefSite::PinPrepared,
+                pin.as_str(),
+                proposal.as_str(),
+            )?;
+            start_and_verify(
+                journal,
+                manager,
+                request,
+                &staging,
+                &head,
+                &proposal,
+                Some(pin.clone()),
+                VerificationBasis::StaleClean { prepared_ref: pin },
+                PreparedDisposition::StaleClean,
+            )
+        }
+        Picked::Empty => start_and_verify(
+            journal,
+            manager,
+            request,
+            &staging,
+            &head,
+            &head.clone(),
+            None,
+            VerificationBasis::AlreadyPresent,
+            PreparedDisposition::AlreadyPresent,
+        ),
+        Picked::Conflict { paths } => {
+            let rejected = super::repair::merge_rejected(
+                journal.fold(),
+                journal.ids(),
+                candidate,
+                head.clone(),
+                request.sequence,
+                RejectionDisposition::Conflict {
+                    paths: paths.clone(),
+                },
+                paths,
+            )?;
+            let sequence = rejected.sequence;
+            let key = candidate.key;
+            journal.emit(TopologyEventBody::MergeRejected {
+                data: Box::new(rejected),
+            })?;
+            journal.converted(key)?;
+            reclaim_staging(journal, manager, &staging, None)?;
+            Ok(Terminal::Rejected { sequence, key })
+        }
+        Picked::Unclassified { detail } => {
+            reclaim_staging(journal, manager, &staging, None)?;
+            Err(picked.err().unwrap_or_else(|| {
+                refused(&format!(
+                    "the proposal cherry-pick of candidate {} left an unclassifiable staging \
+                     state: {detail}",
+                    candidate.commit_sha
+                ))
+            }))
+        }
+    }
+}
+
+/// Append `merge_verification_started`, run the verification, and reach the
+/// terminal the judgement decides.
+#[allow(clippy::too_many_arguments)]
+fn start_and_verify<J: IntegrationJournal + Verification>(
+    journal: &mut J,
+    manager: &WorkspaceManager,
+    request: &IntegrationRequest,
+    staging: &Slot,
+    head: &CommitSha,
+    proposed: &CommitSha,
+    pin: Option<GitRef>,
+    basis: VerificationBasis,
+    disposition: PreparedDisposition,
+) -> Result<Terminal, UpstrokeError> {
+    let candidate = &request.candidate;
+    journal.emit(TopologyEventBody::MergeVerificationStarted {
+        data: MergeVerificationStarted {
+            sequence: request.sequence,
+            candidate: candidate.clone(),
+            basis,
+            expected_head: head.clone(),
+            proposed_sha: proposed.clone(),
+        },
+    })?;
+    journal.converted(candidate.key)?;
+
+    let already_present = disposition == PreparedDisposition::AlreadyPresent;
+    let judgement = journal.verify(&VerifyRequest {
+        candidate,
+        sequence: request.sequence,
+        staging,
+        head,
+        proposed,
+        already_present,
+    })?;
+
+    match judgement.failure.clone() {
+        None => {
+            let record = passing_record(&judgement);
+            let authorized =
+                prepare_verified(journal, request, head, proposed, pin, disposition, record)?;
+            Ok(Terminal::Merged(publish(journal, manager, authorized)?))
+        }
+        Some(failure) if failure.is_outage() => unavailable(
+            journal,
+            manager,
+            request,
+            staging,
+            pin,
+            infrastructure(&failure),
+        ),
+        Some(failure) if needs_human(&failure) => unavailable(
+            journal,
+            manager,
+            request,
+            staging,
+            pin,
+            UnavailableCause::HumanRequired {
+                verdict: failure.reason.clone(),
+            },
+        ),
+        Some(failure) => {
+            let record = code_record(&judgement, &failure);
+            let rejected = super::repair::merge_rejected(
+                journal.fold(),
+                journal.ids(),
+                candidate,
+                head.clone(),
+                request.sequence,
+                RejectionDisposition::CodeRejected {
+                    verification: record,
+                },
+                candidate_region(journal.fold(), candidate),
+            )?;
+            let sequence = rejected.sequence;
+            let key = candidate.key;
+            journal.emit(TopologyEventBody::MergeRejected {
+                data: Box::new(rejected),
+            })?;
+            reclaim_staging(journal, manager, staging, pin.as_ref())?;
+            Ok(Terminal::Rejected { sequence, key })
+        }
+    }
+}
+
+/// Authorize a verified publication, checked by the fold's `merge_prepared`
+/// relations for stale_clean and already_present.
+#[allow(clippy::too_many_arguments)]
+fn prepare_verified(
+    journal: &mut dyn IntegrationJournal,
+    request: &IntegrationRequest,
+    head: &CommitSha,
+    proposed: &CommitSha,
+    pin: Option<GitRef>,
+    disposition: PreparedDisposition,
+    record: VerificationRecord,
+) -> Result<Authorized, UpstrokeError> {
+    let candidate = &request.candidate;
+    journal.emit(TopologyEventBody::MergePrepared {
+        data: Box::new(MergePrepared {
+            sequence: request.sequence,
+            disposition,
+            expected_head: head.clone(),
+            proposed_sha: proposed.clone(),
+            key: candidate.key,
+            generation: candidate.generation,
+            candidate_sha: candidate.commit_sha.clone(),
+            candidate_ref: candidate.candidate_ref.clone(),
+            prepared_ref: pin.clone(),
+            verification_source: VerificationSource::Verification {
+                sequence: request.sequence,
+            },
+            verification: Some(record),
+            satisfies: request.satisfies.clone(),
+        }),
+    })?;
+    Ok(Authorized {
+        sequence: request.sequence,
+        key: candidate.key,
+        expected_head: head.clone(),
+        proposed_sha: proposed.clone(),
+        satisfies: request.satisfies.clone(),
+        lease_release: request.lease_release.clone(),
+        integration_ref: request.integration_ref.clone(),
+        pin,
+        staging: Some(staging_slot(request.sequence)),
+    })
+}
+
+/// A verification outage: `merge_verification_unavailable`, deferred while the
+/// candidate is inside its frozen allowance and parked at it, then the staging
+/// worktree and the pin reclaimed.
+fn unavailable<J: IntegrationJournal + Verification>(
+    journal: &mut J,
+    manager: &WorkspaceManager,
+    request: &IntegrationRequest,
+    staging: &Slot,
+    pin: Option<GitRef>,
+    cause: UnavailableCause,
+) -> Result<Terminal, UpstrokeError> {
+    let candidate = &request.candidate;
+    let taken = candidate_defers(journal.fold(), candidate);
+    let max = journal
+        .fold()
+        .started()
+        .ok_or_else(|| refused("the run has not started"))?
+        .limits
+        .max_defers;
+    let is_outage = matches!(cause, UnavailableCause::Infrastructure { .. });
+    let outcome = if is_outage && taken.saturating_add(1) < max {
+        UnavailableOutcome::Deferred {
+            defers: taken.saturating_add(1),
+        }
+    } else {
+        UnavailableOutcome::Parked {
+            question: park_question(journal, candidate.key, &cause),
+        }
+    };
+    let parked = matches!(outcome, UnavailableOutcome::Parked { .. });
+    journal.emit(TopologyEventBody::MergeVerificationUnavailable {
+        data: MergeVerificationUnavailable {
+            sequence: request.sequence,
+            cause,
+            outcome,
+        },
+    })?;
+    reclaim_staging(journal, manager, staging, pin.as_ref())?;
+    Ok(Terminal::Unavailable {
+        sequence: request.sequence,
+        key: candidate.key,
+        parked,
+    })
+}
+
+fn park_question<J: Verification>(
+    journal: &J,
+    key: TaskKey,
+    cause: &UnavailableCause,
+) -> FrozenQuestion {
+    let (kind, context) = match cause {
+        UnavailableCause::HumanRequired { verdict } => (
+            crate::ir::QuestionKind::Clarify,
+            format!("integration verification needs a person: {verdict}"),
+        ),
+        UnavailableCause::Infrastructure { kind } => (
+            crate::ir::QuestionKind::Unblock,
+            format!(
+                "integration verification kept failing on infrastructure ({kind:?}) and has \
+                 exhausted its deferrals; retry it or decline the task"
+            ),
+        ),
+    };
+    FrozenQuestion {
+        id: journal.ids().question_id(),
+        key,
+        kind,
+        context,
+        options: crate::engine::coordinator::question_options(kind),
+    }
+}
+
+fn infrastructure(failure: &AttemptFailure) -> UnavailableCause {
+    let kind = match failure.kind {
+        FailureKind::RateLimited => InfrastructureKind::RateLimited,
+        FailureKind::ReviewUnavailable => InfrastructureKind::ReviewUnavailable,
+        FailureKind::Timeout => InfrastructureKind::ReviewerTimeout,
+        _ => InfrastructureKind::Other {
+            detail: failure.reason.clone(),
+        },
+    };
+    UnavailableCause::Infrastructure { kind }
+}
+
+fn needs_human(failure: &AttemptFailure) -> bool {
+    matches!(
+        failure.kind,
+        FailureKind::NeedsHuman | FailureKind::ReviewInputTooLarge | FailureKind::ReviewInputOpaque
+    )
+}
+
+fn passing_record(judgement: &Judgement) -> VerificationRecord {
+    VerificationRecord {
+        verdict: VerificationVerdict::Passed,
+        gates_passed: true,
+        reviews: judgement.reviews.clone(),
+        detail: "the integration verification passed".to_owned(),
+    }
+}
+
+fn code_record(judgement: &Judgement, failure: &AttemptFailure) -> VerificationRecord {
+    let gates_passed = !matches!(failure.kind, FailureKind::GateFailed);
+    super::repair::code_rejection_record(
+        gates_passed,
+        judgement.reviews.clone(),
+        failure.reason.clone(),
+    )
+}
+
+fn candidate_region(fold: &TopologyFold, candidate: &CandidateRef) -> PathSet {
+    fold.task(candidate.key)
+        .and_then(|task| {
+            task.generations
+                .iter()
+                .find(|generation| generation.id == candidate.generation)
+        })
+        .and_then(|generation| generation.candidate.as_ref())
+        .map_or(PathSet::RepoWide, |prepared| prepared.paths.clone())
+}
+
+fn candidate_defers(fold: &TopologyFold, candidate: &CandidateRef) -> u32 {
+    fold.queue()
+        .and_then(|queue| queue.get(candidate.key, candidate.generation))
+        .map_or(0, |entry| entry.defers)
+}
+
+fn run_id_of<J: IntegrationJournal>(journal: &J) -> Result<String, UpstrokeError> {
+    Ok(journal
+        .fold()
+        .started()
+        .ok_or_else(|| refused("the run has not started"))?
+        .run_id
+        .clone())
+}
+
+/// Remove a stale transaction's staging worktree with force, then its intent,
+/// then delete its pin expected-old.
+fn reclaim_staging(
+    journal: &mut dyn IntegrationJournal,
+    manager: &WorkspaceManager,
+    staging: &Slot,
+    pin: Option<&GitRef>,
+) -> Result<(), UpstrokeError> {
+    manager.remove_worktree(journal.hooks().effects(), staging)?;
+    manager.remove_intent(journal.hooks().effects(), staging)?;
+    if let Some(pin) = pin {
+        if let Some(proposed) = manager.direct_ref_target(pin.as_str())? {
+            manager.delete_ref_expected_old(
+                journal.hooks().effects(),
+                RefSite::DeletePreparedPin,
+                pin.as_str(),
+                &proposed,
+            )?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
