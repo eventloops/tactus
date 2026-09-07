@@ -282,6 +282,11 @@ pub mod chain {
             }
 
             #[must_use]
+            pub fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
+                self._run.enter_cleanup_scope()
+            }
+
+            #[must_use]
             pub fn into_guards(self) -> (RunLock, WorktreeLock, RootDerived) {
                 // Transfer live guards without unlocking. The recipient keeps both for
                 // the command and must release the run lock before the worktree lease.
@@ -915,6 +920,7 @@ pub fn run_recovery_order(
         seams.worktree_git_dir,
         hooks.rundir(),
     )?;
+    let _cleanup_scope = locks.cleanup_scope();
     let records = RecordsVerified::verify(locks, seams.repo_key)?;
     let mut steps = vec![RecoveryStep::A];
 
@@ -1452,6 +1458,11 @@ pub struct RunHandle {
 }
 
 impl RunHandle {
+    #[must_use]
+    pub(crate) fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
+        self._run.enter_cleanup_scope()
+    }
+
     #[must_use]
     pub fn created(
         started: RunStarted4,

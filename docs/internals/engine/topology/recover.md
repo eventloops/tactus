@@ -385,6 +385,20 @@ process, or while a surviving reaper's shared cleanup hold (R28)
 is observed. The value is consumed either way, because a
 refusal here ends the command.
 
+## `impl LocksHeld` › `pub fn cleanup_scope(&self) -> crate::rundir::CleanupScope {`
+
+The run lock's cleanup scope, for the thread that drives the recovery
+order. A Unix reaper takes its cleanup-lease paths from the thread-local
+scope at spawn (`proc::spawn_reaper`), and only through a scope does it
+hold the shared `cleanup.lock` that R28 says the next coordinator observes
+and refuses on. The v0.1 coordinator and resume enter the scope right
+after acquiring the lock; the topology path acquired it here and entered
+nothing, so every reaper of the probes at (c) and of the loop's gates and
+reviewers held no lease — the cover review of `8a5f59e8` measured a real
+reaper at `ReaperStarted` with the run's hold absent
+(`PR8-R4-CLEANUP-LEASE`). [`run_recovery_order`] enters it for its own
+duration, and `TopologyRun::step` enters one per step.
+
 ## `impl LocksHeld` › `pub fn root(&self) -> &RootDerived {`
 
 What (a0) derived.
@@ -1197,6 +1211,12 @@ needs. Reordering the body does not compile.
 Step (i), admission, is the loop's and is not here: `checkpoint_refusals`
 gives the loop's refusals to `select.rs`, and this file owns step (b)'s.
 
+The lock's cleanup scope is entered as soon as the locks are held and
+lives to the end of the function ([`LocksHeld::cleanup_scope`]), so the
+reapers of (c)'s host probes hold the run's R28 lease; the loop enters its
+own per step, because the scope is thread-local and the handle may be
+driven elsewhere.
+
 ### Errors
 
 The first refusal of the order: a lock held elsewhere or a surviving reaper
@@ -1723,7 +1743,10 @@ one the loop's own appends must be able to check themselves against.
 ## `pub struct RunHandle {`
 
 The run's own state, handed from a completed start to the loop that drives
-it.
+it. `cleanup_scope` hands the driving thread the lock's cleanup scope for
+the stretch it spawns processes in (`TopologyRun::step`), since the lock
+itself stays inside the handle and cannot be borrowed across `&mut self`.
+
 
 **Every field of this was being dropped at the end of the recovery order**,
 and that is the mechanical reason `TopologyRun` could not exist. Not a

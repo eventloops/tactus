@@ -648,7 +648,9 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
+        let _cleanup_scope = self.handle.cleanup_scope();
         let selected = select(&self.handle.fold, &self.ceiling, &self.spend);
+
         let admitted = checkpoint(selected)?;
         match admitted {
             Admitted::BudgetExceeded(exceeded) => {

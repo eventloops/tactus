@@ -110,6 +110,7 @@ struct Damage {
     alternative_reviewer: bool,
     no_automatic_repairs: bool,
     alpha_kind: Option<TaskKind>,
+    host_gate: Option<&'static str>,
 }
 
 impl Fixture {
@@ -563,12 +564,21 @@ fn run_started(
         },
         gates: vec!["clippy".to_owned()],
         gates_from_config: true,
-        gate_cmds: vec![GateSummary {
-            name: "clippy".to_owned(),
-            cmd: "cargo clippy".to_owned(),
-            timeout: Duration::from_secs(600),
-            shell: ShellKind::Bash,
-        }],
+        gate_cmds: vec![damage.host_gate.map_or_else(
+            || GateSummary {
+                name: "clippy".to_owned(),
+                cmd: "cargo clippy".to_owned(),
+                timeout: Duration::from_secs(600),
+                shell: ShellKind::Bash,
+            },
+            |cmd| GateSummary {
+                name: "clippy".to_owned(),
+                cmd: cmd.to_owned(),
+                timeout: Duration::from_secs(60),
+                shell: ShellKind::Sh,
+            },
+        )],
+
         interaction_mode: "attached".to_owned(),
         chains: {
             let first = if damage.deep_ladder {
@@ -7864,6 +7874,71 @@ fn a_runner_that_loses_track_of_a_running_gate_refuses_resumably_and_reclaims_no
         snapshot_intents(&fixture).len(),
         1,
         "the gate's snapshot is retained: the container has it mounted"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_host_integration_reaper_holds_the_runs_cleanup_lease() {
+    struct LeaseObserver {
+        public: PathBuf,
+        holds: Arc<Mutex<Vec<bool>>>,
+    }
+
+    impl crate::agent::proc::SpawnHooks for LeaseObserver {
+        fn point(&mut self, point: SubEffectPoint) -> Injection {
+            if point == SubEffectPoint::ReaperStarted {
+                self.holds
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(rundir::observe_cleanup_hold(&self.public, &mut NoHooks));
+            }
+            Injection::Proceed
+        }
+    }
+
+    let fixture = Fixture::build(
+        "host-reaper-lease",
+        Damage {
+            two_tasks: true,
+            host_runner: true,
+            host_gate: Some("exit 1"),
+            ..Damage::default()
+        },
+    );
+    plant_stale_verification(&fixture);
+    let holds = Arc::new(Mutex::new(Vec::new()));
+    let runner = crate::runner::host::HostRunner::new().with_hooks(Box::new(LeaseObserver {
+        public: fixture.public(),
+        holds: Arc::clone(&holds),
+    }));
+    let driven = drive_with(
+        &fixture,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    assert!(
+        matches!(driven.progress.first(), Some(Ok(Progress::Rejected { .. }))),
+        "the re-verification ran its gate through the production host runner and the gate's \
+         exit 1 rejected it: {:?}",
+        driven.progress
+    );
+    let observed = holds.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert!(
+        !observed.is_empty(),
+        "no reaper was started for the gate, so nothing was observed"
+    );
+    assert!(
+        observed.iter().all(|held| *held),
+        "at ReaperStarted the gate's reaper held no lease on this run's cleanup.lock (R28), so a \
+         resume after the coordinator's death would take the exclusive side while the reaper \
+         still reclaims the group: {observed:?}"
+    );
+    assert!(
+        !rundir::observe_cleanup_hold(&fixture.public(), &mut NoHooks),
+        "the hold outlived the reaper that took it"
     );
 }
 

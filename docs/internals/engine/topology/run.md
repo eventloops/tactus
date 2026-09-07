@@ -1010,6 +1010,20 @@ value nothing has acted on, so `checkpoint_refusals`' "before any
 append" holds by construction rather than by this function remembering
 to check early enough.
 
+**Every step runs inside the run lock's cleanup scope.** A Unix reaper
+reads its cleanup-lease paths from the thread-local scope when it is
+spawned, and a reaper spawned with none active holds no lease: the next
+coordinator's exclusive probe (R28, `INV-18.recovery`) then finds nothing
+to refuse on while that reaper still reclaims a gate's process group. The
+v0.1 coordinator enters the scope beside its lock; this loop's attempt
+path never had, and the integration path routed its gates and reviewers
+through the same omission — the cover review of `8a5f59e8` measured a
+real reaper at `ReaperStarted` with the run's hold absent
+(`PR8-R4-CLEANUP-LEASE`). The scope is entered at the top of the step and
+dropped with it, on the thread that drives the step, which is what a
+thread-local registration needs.
+
+
 ### Errors
 
 The checkpoint refusals — integration, run end, and a poisoned fold —

@@ -809,6 +809,14 @@ mod steps {
             &self.owner
         }
 
+        /// The run lock's cleanup scope, entered for the stretch of P4 that
+        /// spawns the probes: a Unix reaper takes its cleanup-lease paths from
+        /// the thread-local scope at spawn, and a probe's reaper that outlives
+        /// this coordinator must hold R28 like any other.
+        pub(super) fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
+            self.lock.enter_cleanup_scope()
+        }
+
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
             self.facts.abort(reached, Some(self.lock), error)
         }
@@ -1752,7 +1760,9 @@ fn p4_run_preflight(
     hooks: &mut dyn TopologyHooks,
 ) -> Result<ProbesCertified, Box<Aborted>> {
     let _ = hooks;
+    let _cleanup_scope = p3b.cleanup_scope();
     let expected = p3b.facts().checked().runner_policy_sha256().to_owned();
+
     if request.probes.policy_digest() != expected {
         let recorded = crate::runner::policy::runner_policy_sha256(&p3b.owner().runner);
         return Err(p3b.abort(
