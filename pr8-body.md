@@ -152,7 +152,7 @@ already settled are marked as such):
 ## Validation
 
 All ten gates green locally, from the repository root, on the last code commit of this branch,
-`926d2989424d65f6e3b3b504debe2697f46de93d`; the commits that follow it change the three record
+`4052c0a324fc8980751cb6c7019456014f54b618`; the commits that follow it change the three record
 files and no code, and the ten gates were rerun on the pushed head before the push:
 
 ```
