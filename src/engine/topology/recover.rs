@@ -10,9 +10,9 @@ use crate::runner::container::GitView;
 use crate::runner::container::resolve::RunnerPreflight;
 use crate::runner::container::runtime::{ContainerRuntime, OwnerLiveness};
 use crate::topology::events::{
-    AttemptInterrupted4, AttemptNumber, GenerationCloseReason, GenerationClosed, GenerationId,
-    GitRef, IncarnationId, LeaseDisposition, RunResumed4, RunStarted4, TopologyEvent,
-    TopologyEventBody,
+    AttemptInterrupted4, AttemptNumber, CommitSha, GenerationCloseReason, GenerationClosed,
+    GenerationId, GitRef, IncarnationId, LeaseDisposition, RunResumed4, RunStarted4, SequenceId,
+    TopologyEvent, TopologyEventBody,
 };
 use crate::topology::fold::{FrozenInputs, GenerationClass, TopologyFold};
 use crate::topology::leases::GenerationLease;
@@ -1294,12 +1294,44 @@ pub fn ensure_recorded_integration_ref(
     hooks: &mut dyn TopologyHooks,
 ) -> Result<(), UpstrokeError> {
     let started = started_of(certified);
-    ensure_integration_ref(
-        refs,
-        hooks.effects(),
-        started.integration_ref.as_str(),
-        started.base_sha.as_str(),
-    )
+    let refname = started.integration_ref.as_str();
+    let Some((sequence, published)) = latest_publication(events_of(certified)) else {
+        return ensure_integration_ref(refs, hooks.effects(), refname, started.base_sha.as_str());
+    };
+    refs.assert_publishable(refname)?;
+    match refs.direct_target(refname)? {
+        Some(at) if at == published.0 => Ok(()),
+        Some(at) => Err(UpstrokeError::Refused {
+            message: format!(
+                "the integration ref `{refname}` is at {at} and the log's latest publication, \
+                 sequence {}, put it at {published}; the log and the integration ref no longer \
+                 describe the same run, so nothing is moved and the run does not continue",
+                sequence.0
+            ),
+        }),
+        None => Err(UpstrokeError::Refused {
+            message: format!(
+                "the integration ref `{refname}` names nothing and the log's latest publication, \
+                 sequence {}, put it at {published}; a published run's ref is never recreated \
+                 from its base, so nothing is created and the run does not continue",
+                sequence.0
+            ),
+        }),
+    }
+}
+
+/// The head the log's latest publication put the integration ref at: the
+/// `merged_sha` of the last `task_merged` in the proven prefix.
+///
+/// `transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
+/// completions" among what a resume continues from, and this is where the
+/// startup repair reads them: a run that has published owes its ref to its
+/// last publication, not to `run_started.base_sha`.
+fn latest_publication(events: &[TopologyEvent]) -> Option<(SequenceId, CommitSha)> {
+    events.iter().rev().find_map(|event| match &event.body {
+        TopologyEventBody::TaskMerged { data } => Some((data.sequence, data.merged_sha.clone())),
+        _ => None,
+    })
 }
 
 pub struct EmitContext<'a> {
@@ -1475,6 +1507,10 @@ fn emit(
     super::emit::emit(&identity, &mut state, context.clock, body, context.hooks)
         .map(|_| ())
         .map_err(|error| super::emit::EmitFailure::from(error).discharging(context.invocations))
+}
+
+fn events_of(certified: &PreflightCertified) -> &[TopologyEvent] {
+    certified.rebuilt().censused().barrier().events()
 }
 
 fn fold_of(certified: &PreflightCertified) -> &TopologyFold {

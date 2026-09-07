@@ -5926,6 +5926,160 @@ fn a_resume_completes_a_prepared_fast_transaction_through_the_barrier_and_cas() 
     let _ = planted.tree;
 }
 
+/// Resume through the real `WorkspaceManager` as *both* ref interfaces — the
+/// P7/P8 startup repair reads the same refs the transaction recovery moves.
+///
+/// The `RecordingRefs` double every other resume here supplies answers
+/// "absent" to the startup repair whatever the repository holds, which is
+/// exactly how a resume that refused its own published head stayed green
+/// (`pr8-triage.md` C1). A publication test resumes through this.
+fn resume_with_real_refs(
+    fixture: &Fixture,
+    harness: &Arc<Mutex<HookHarness>>,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(harness)).recording_durability();
+    resume_with_real_refs_hooked(fixture, &mut hooks)
+}
+
+fn resume_with_real_refs_hooked(
+    fixture: &Fixture,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
+    let runtime = runtime_holding_the_record();
+    let liveness = FakeOwnerLiveness::new();
+    let view = DisposableDirView::new(ContainerTrace::default());
+    let incarnation = IncarnationId(RESUMER.to_owned());
+    let manager = fixture.manager();
+    let mut warnings = Vec::new();
+    let root = fixture.derive(None)?;
+    run_recovery_order(
+        root,
+        &ResumeSeams {
+            repo_root: &fixture.repo_root,
+            worktree_git_dir: &fixture.git_dir,
+            repo_key: &fixture.repo_key,
+            incarnation: &incarnation,
+            inputs: fixture.inputs(),
+            today: &container_selection(),
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+            preflight: &AlwaysCertifies,
+            refs: &manager,
+            manager: &manager,
+            clock: &Frozen,
+        },
+        hooks,
+        &mut warnings,
+    )
+}
+
+#[test]
+fn a_resume_after_a_completed_publication_accepts_its_own_head() {
+    // `transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
+    // completions" among what recovery continues from: once sequence 0 has
+    // published, the integration ref legitimately names the proposal, not
+    // `run_started.base_sha`, and the next resume must accept it rather than
+    // refuse its own work as foreign history.
+    let fixture = Fixture::healthy("published-head");
+    let planted = plant_prepared_fast(&fixture);
+
+    let first = resume_with_real_refs(&fixture, &harness())
+        .expect("the first resume completes the authorized publication");
+    assert_eq!(merged_sequences(&fixture), vec![0]);
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str())
+    );
+    // The first resumer exits, releasing its locks; the next incarnation must
+    // accept the durable result of the publication it finds.
+    drop(first);
+
+    let (_, handle) = resume_with_real_refs(&fixture, &harness())
+        .expect("a second resume accepts the head its own publication put there");
+    assert_eq!(
+        merged_sequences(&fixture),
+        vec![0],
+        "the publication was recorded once and nothing was published again"
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str()),
+        "the ref stays where the publication put it"
+    );
+    assert!(handle.fold.transaction().is_none());
+    assert_eq!(handle.fold.task_state(ALPHA), Some(TaskState::Merged));
+}
+
+#[test]
+fn a_resume_after_a_publication_refuses_a_ref_that_disagrees_with_the_log() {
+    // DESIGN §26: "`task_merged` exists but the ref disagrees — refuse; the
+    // log and integration branch no longer describe the same run". Neither a
+    // ref moved elsewhere nor a deleted one is repaired from the base.
+    let fixture = Fixture::healthy("published-disagrees");
+    let planted = plant_prepared_fast(&fixture);
+    drop(
+        resume_with_real_refs(&fixture, &harness())
+            .expect("the first resume completes the authorized publication"),
+    );
+
+    let elsewhere = commit_on(
+        &fixture,
+        planted.commit.as_str(),
+        "elsewhere.txt",
+        "someone else\n",
+        "upstroke: elsewhere",
+    );
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            elsewhere.as_str(),
+        ],
+    );
+    let moved = harness();
+    let text = message(
+        &resume_with_real_refs(&fixture, &moved)
+            .expect_err("a ref that disagrees with the recorded publication refuses"),
+    );
+    assert!(
+        text.contains(elsewhere.as_str()) && text.contains(planted.commit.as_str()),
+        "the refusal names what it found and what the log published: {text}"
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(elsewhere.as_str()),
+        "the foreign ref is left exactly as it was"
+    );
+    assert_eq!(
+        cas_integration_entries(&moved) + create_ref_entries(&moved),
+        0,
+        "nothing swapped or created a ref"
+    );
+
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &["update-ref", "-d", fixture.started.integration_ref.as_str()],
+    );
+    let absent = harness();
+    let text = message(
+        &resume_with_real_refs(&fixture, &absent)
+            .expect_err("an absent ref after a publication refuses rather than being recreated"),
+    );
+    assert!(
+        text.contains(planted.commit.as_str()),
+        "the refusal names the head the log published: {text}"
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()),
+        None,
+        "the P7/P8 repair is for a run killed at run start, not for a published run"
+    );
+    assert_eq!(create_ref_entries(&absent), 0);
+    assert_eq!(merged_sequences(&fixture), vec![0]);
+}
+
 struct FixedIds;
 
 impl crate::engine::topology::seams::IdSource for FixedIds {

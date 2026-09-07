@@ -79,15 +79,26 @@ step this order would otherwise not have:
 > **P7/P8: create the ref zero-old at the recorded base if absent; if
 > present == base continue (no spend repeats)**
 
-[`ensure_recorded_integration_ref`] is that step. Its body is
-[`super::create::ensure_integration_ref`] — **P8's own body, called, not
-copied**: two implementations of "if present == base continue" would be two
-places for a run killed between P6 and P8 to be treated differently from one
-that was not, which is the duplication that function exists to prevent.
-What this module adds is the two arguments, and it takes them from the
-record `RootDerived` resolved and `RecordsVerified` authenticated —
-`run_started(4).integration_ref` and `run_started(4).base_sha` — never from
-today's configuration.
+[`ensure_recorded_integration_ref`] is that step. For a run that has not yet
+published, its body is [`super::create::ensure_integration_ref`] — **P8's
+own body, called, not copied**: two implementations of "if present == base
+continue" would be two places for a run killed between P6 and P8 to be
+treated differently from one that was not, which is the duplication that
+function exists to prevent. What this module adds is the two arguments, and
+it takes them from the record `RootDerived` resolved and `RecordsVerified`
+authenticated — `run_started(4).integration_ref` and `run_started(4).base_sha`
+— never from today's configuration.
+
+For a run that *has* published, the base is no longer where the ref belongs:
+`transaction_fault_matrix[T-RESUME].durable_state` counts "CAS completions"
+among what a resume continues from, so the step reads the latest
+`task_merged.merged_sha` in the proven prefix ([`latest_publication`]) and
+requires the ref there. A ref elsewhere, or none, is DESIGN §26's
+"`task_merged` exists but the ref disagrees — refuse; the log and integration
+branch no longer describe the same run": nothing is moved and nothing is
+created. The three reviews of `3414dc58` found the base compared after a
+publication, which refused every resume of a run that had merged anything
+(`pr8-triage.md` C1).
 
 It is skipped entirely when the proven prefix carries an integration
 transaction — [`finish_integration`] at step (f) owns the ref then — and
@@ -1511,12 +1522,19 @@ A run killed between P6 and P8 is committed — `run_started(4)` is durable and
 else in this build creates one, so without this step such a run resumes into
 a namespace its own record describes and the repository does not have.
 
-**The body is P8's, called rather than copied.**
+**Before any publication, the body is P8's, called rather than copied.**
 [`super::create::ensure_integration_ref`] answers all three dispositions —
 absent, present at the base, present at anything else — and its doc states
 why there may be only one of it. This function contributes the two
-arguments and nothing else; if it ever grows a comparison of its own,
-that is the duplication the shared body exists to prevent.
+arguments and nothing else on that path; a second "present == base" would be
+the duplication the shared body exists to prevent.
+
+**After a publication, the ref belongs to the last `task_merged`.** The
+proven prefix's latest `merged_sha` ([`latest_publication`]) is the one head
+the ref may name: a ref there continues, a ref elsewhere refuses as the run
+whose log and branch no longer agree (DESIGN §26), and an absent ref refuses
+rather than being recreated — P7/P8's create-at-base is for a run killed at
+run start, and a published run was not.
 
 **Both arguments come from the record.** `run_started(4).integration_ref` and
 `run_started(4).base_sha`, reached through the witness chain from the
