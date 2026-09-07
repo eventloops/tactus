@@ -948,12 +948,6 @@ pub fn run_recovery_order(
     let mut certified = PreflightCertified::certify(rebuilt, seams.preflight)?;
     steps.push(RecoveryStep::C);
 
-    // A `Prepared` transaction owns the ref: `finish_integration` compares it
-    // against the authorization and swaps it, so the startup check would only
-    // adopt what that step is about to move. Under any other prefix — no
-    // transaction, or a verification whose interrupted settlement moves no
-    // ref — the check runs: `[T-RESUME].refusal_condition`, "foreign
-    // integration state".
     let publication_pending = matches!(
         fold_of(&certified)
             .transaction()
@@ -972,12 +966,6 @@ pub fn run_recovery_order(
         warnings,
     };
 
-    // T-PROPOSAL residue and the pins the log accounts for: staging worktrees
-    // no live transaction owns are reclaimed with force, a resolved sequence's
-    // pin is pruned at the proposal it recorded, the open transaction's pin is
-    // checked against its record and kept, and exactly the provisional orphan
-    // `prepared/<next_seq>` is reclaimed. Before the namespace check, so that
-    // check refuses whatever the log does not account for — untouched.
     let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;
 
     {
@@ -991,14 +979,9 @@ pub fn run_recovery_order(
             .clone();
         let namespace = crate::engine::topology::candidate::run_namespace(&run_id);
         let mut expected = crate::engine::topology::candidate::expected_refs(&run_id, fold);
-        // The run's own integration ref sits under this namespace and is never
-        // unexpected; `expected_refs` leaves it out because it enumerates
-        // candidate refs, so the recovery names it here.
         expected.push(fold.started().map_or_else(String::new, |started| {
             started.integration_ref.as_str().to_owned()
         }));
-        // The open transaction's pin is expected: it keeps the proposal
-        // reachable while the transaction resolves, verifying or prepared.
         if let Some(pin) = &live_pin {
             expected.push(pin.0.clone());
         }
@@ -1007,10 +990,6 @@ pub fn run_recovery_order(
             .refuse_unexpected_refs(&namespace, &expected)?;
     }
 
-    // The P7/P8 integration-ref repair is for a run killed at run-start, and
-    // the published-run check for every later one. A run with a prepared
-    // publication is past both: the ref is the transaction's to move, so the
-    // step is skipped and `finish_integration` owns the ref.
     if !publication_pending {
         ensure_recorded_integration_ref(&certified, seams.refs, context.hooks)?;
     }
@@ -1062,28 +1041,6 @@ pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError
     }
 }
 
-/// Recovery step (f), integration half: resolve the one integration
-/// transaction the proven prefix leaves open.
-///
-/// `transaction_fault_matrix` rows T-FAST, T-PREPARED and T-VERIFY, and
-/// INV-09's "an authorized publication is always completed (recovery or
-/// run-end closure), never abandoned". A `Prepared` transaction is completed
-/// through `integrate::publish` — the same compare-and-swap recovery the live
-/// path uses, issued only now that the stable-prefix barrier of step (a1) has
-/// proven the `merge_prepared` line durable, so a CAS is never issued on a
-/// merely replay-visible authorization. A `VerificationStarted` transaction is
-/// settled `merge_verification_interrupted`, its pin deleted expected-old at
-/// the proposal the record names and its staging worktree reclaimed, and the
-/// candidate re-verifies under a new sequence.
-///
-/// The pin of either transaction was checked against its record by
-/// [`reclaim_stale_residue`] before any append; a substituted pin refused
-/// there, so nothing here deletes a ref the log did not authorize.
-///
-/// # Errors
-///
-/// A refusal (a third SHA on the CAS, a symbolic or checked-out ref, a pin at
-/// another SHA), the append-error protocol's report, or a Git error.
 pub fn finish_integration(
     certified: &mut PreflightCertified,
     manager: &WorkspaceManager,
@@ -1146,15 +1103,6 @@ pub fn finish_integration(
     reclaim_snapshot_residue(manager, context)
 }
 
-/// Reclaim every verification snapshot, with force, once every terminal a
-/// snapshot could belong to is durable: the attempts settled at (d), and the
-/// integration transaction resolved just above.
-///
-/// `C.cancellation`: "snapshots reclaimed"; `[T-VERIFY].resume_action`. The
-/// live path removes snapshots only after its terminal, so a kill between the
-/// terminal and the removal — or during the judgement itself, whose terminal
-/// this step has now appended — leaves exactly this residue, and nothing
-/// still running can own a snapshot when a fresh process reaches here.
 fn reclaim_snapshot_residue(
     manager: &WorkspaceManager,
     context: &mut EmitContext<'_>,
@@ -1168,17 +1116,12 @@ fn reclaim_snapshot_residue(
     Ok(())
 }
 
-/// A stale-clean verification the log started: its sequence, the pin the
-/// record names, and the proposal that pin was created at.
 struct PinnedSequence {
     sequence: SequenceId,
     pin: GitRef,
     proposed: CommitSha,
 }
 
-/// Every `prepared/<seq>` the log accounts for, from the proven prefix's
-/// `merge_verification_started` records with a stale-clean basis. A fast or
-/// already-present sequence pins nothing and is not here.
 fn pinned_sequences(events: &[TopologyEvent]) -> Vec<PinnedSequence> {
     events
         .iter()
@@ -1198,28 +1141,6 @@ fn pinned_sequences(events: &[TopologyEvent]) -> Vec<PinnedSequence> {
         .collect()
 }
 
-/// Reclaim what the log does not need and check what it does, before the
-/// namespace check: T-PROPOSAL (a', a, b) residue, and every `prepared/<seq>`
-/// the log accounts for.
-///
-/// * Every `merge/<seq>` staging worktree no live transaction owns is removed
-///   with force, the proposal objects then left to Git (R27).
-/// * A resolved sequence's pin is pruned expected-old at the proposal its
-///   `merge_verification_started` recorded; a pin at any other SHA refuses
-///   (INV-17: substituted refs refuse) and is left as it is.
-/// * The open transaction's pin — a verification's or a prepared publication's
-///   — is required to name its recorded proposal and is kept: T-VERIFY's
-///   "pin SHA differs from record" refuses before any settlement, and
-///   `invariants[INV-15]`'s cleanup never touches a resumably open resource.
-/// * With no transaction open, exactly `prepared/<next_seq>` is the
-///   provisional orphan T-PROPOSAL (b) names, reclaimed expected-old at what
-///   it names.
-///
-/// Anything else under `prepared/` is not accounted for by the log and is
-/// refused by the namespace check that follows, untouched
-/// (`expected_failures_refusals`: "orphan pin outside next sequence").
-///
-/// Returns the open transaction's pin for the namespace check's expected set.
 fn reclaim_stale_residue(
     certified: &PreflightCertified,
     manager: &WorkspaceManager,
@@ -1377,8 +1298,6 @@ impl crate::engine::topology::integrate::IntegrationJournal for RecoveryJournal<
     }
 
     fn converted(&mut self, _key: TaskKey) -> Result<(), UpstrokeError> {
-        // A fresh process holds no provisional reservation; a recovery
-        // publication converts nothing.
         Ok(())
     }
 }
@@ -1415,13 +1334,6 @@ pub fn ensure_recorded_integration_ref(
     }
 }
 
-/// The head the log's latest publication put the integration ref at: the
-/// `merged_sha` of the last `task_merged` in the proven prefix.
-///
-/// `transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
-/// completions" among what a resume continues from, and this is where the
-/// startup repair reads them: a run that has published owes its ref to its
-/// last publication, not to `run_started.base_sha`.
 fn latest_publication(events: &[TopologyEvent]) -> Option<(SequenceId, CommitSha)> {
     events.iter().rev().find_map(|event| match &event.body {
         TopologyEventBody::TaskMerged { data } => Some((data.sequence, data.merged_sha.clone())),

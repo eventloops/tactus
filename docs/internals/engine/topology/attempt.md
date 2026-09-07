@@ -1129,16 +1129,143 @@ caller.
 
 ## `pub enum JudgeError {`
 
-Why a judgement could not be completed, with the Runner's failure told
-apart from every other. The two have different terminals at integration:
-a gate process the Runner could not run is an observed infrastructure
-failure (`invariants[INV-23]`, `[T-VERIFY].resume_action`) and terminates
-`merge_verification_unavailable{Infrastructure{RunnerSpawnFailure}}`,
-deferred or parked; everything else ends the command. The attempt path
-converts it back into the plain error it always was ([`From`]), so nothing
-there changes.
+Why a judgement could not be completed.
+
+A Runner that could not run a gate process is told apart from every other
+error, because the two have different terminals at integration:
+`invariants[INV-23]` classifies a mid-run spawn failure as a
+`RunnerSpawnFailure` outage settlement, and
+`transaction_fault_matrix[T-VERIFY].resume_action` requires an observed
+infrastructure failure to terminate `merge_verification_unavailable`
+deferred or parked — never to escape as an error that leaves the
+verification open and the defer count untouched. A reviewer's process
+failure already reaches the judgement as `ReviewResult::Unavailable`
+through `review::run_review`; this covers the gate path through
+[`Judge::execute`]. The attempt path converts it back into the plain
+error it always was ([`From`]), so nothing there changes.
 
 ## `impl AttemptContext<'_>` › `log: format!("{}{}", output.stdout, output.stderr),`
 
 Both streams, in the order `gates::run_all` joins them: a gate's
 diagnostic is as often on stderr as on stdout.
+
+## `pub struct VerificationRequest<'a> {`
+
+What an integration verification is planned from: the task whose
+candidate is being integrated, and the implementer binding the candidate
+ran under, so the review passes are the ones its own review would run.
+
+## `pub struct VerificationPlan {`
+
+Every recorded gate and every review pass an integration reruns on the
+proposed tree: `DESIGN.md` §26.3, "rerun every recorded gate and review on
+the proposed integrated tree".
+
+## `impl AttemptContext<'_> {` › `fn judge_core(&mut self) -> Judge<'_> {`
+
+The judge over this context's ledgers: the same slot assertion and
+invocation ledger, reborrowed for one gate set or one review.
+
+## `pub enum SnapshotOf {`
+
+What a judgement runs against: the exact tree a candidate captured, or the
+commit an integration proposes.
+
+`decisions.workspace_candidates.snapshots`: a tree-only input is committed
+ephemerally on its recorded parent before the snapshot is added; a commit
+input is checked out as it is and creates no object.
+
+## `pub enum JudgeNames {`
+
+How the snapshots of one judgement are named: one for the gate set, one
+fresh per reviewer, never reused across roles.
+
+## `pub enum JudgeIdentities {`
+
+Whose invocations a judgement's processes are: an attempt's
+`(key, generation, attempt, role, ordinal)` or an integration's
+`(sequence, role, ordinal)`.
+
+## `pub enum SnapshotDisposal {`
+
+When a judgement's snapshots are removed.
+
+The attempt path removes each snapshot as its role finishes, before
+`attempt_finished` — the order the effect inventory registers for
+`Snapshot.Remove` (`Before(AttemptFinished)`). The integration path may
+not: `pr_sequence[9].slice_contract.side_effect_vs_event_ordering` puts
+"staging and snapshot removal (forced) after terminal (incl.
+Deferred/Parked)", so its judge leaves every snapshot in place and the
+sequence reclaims them once the terminal is durable — a removal that
+failed can then no longer strand a completed judgement behind an
+unterminated verification.
+
+## `pub enum SnapshotDisposal {` › `AsEachRoleFinishes,`
+
+Remove each snapshot as soon as its gate set or reviewer is done.
+
+## `pub enum SnapshotDisposal {` › `AfterTheTerminal,`
+
+Leave every snapshot, with its intent, for the caller to reclaim
+after the terminal it appends.
+
+## `pub struct Subject<'s> {`
+
+One thing to judge: what to snapshot, what to run in the snapshots, and
+what the reviewers are told.
+
+## `pub struct Subject<'s> {` › `pub disposal: SnapshotDisposal,`
+
+When the snapshots this judgement creates are removed.
+
+## `pub struct Subject<'s> {` › `pub stem: String,`
+
+The stem the review transcripts are filed under.
+
+## `pub struct Subject<'s> {` › `pub prior_failure: Option<AttemptFailure>,`
+
+A failure already decided before anything ran — an assessment's — so
+the gate set and the reviewers are skipped exactly as the attempt path
+skips them.
+
+## `pub struct Subject<'s> {` › `pub invocations: &'s dyn Fn(u32) -> review::ReviewInvocations,`
+
+The pass and re-ask invocation ids of review pass `n`.
+
+## `pub enum JudgeError {` › `Runner {`
+
+The Runner returned an error for `invocation` instead of a process
+output: the process could not be spawned or supervised.
+
+## `pub enum JudgeError {` › `Other(UpstrokeError),`
+
+Anything else: a snapshot funnel refusal, a ledger refusal, an adapter
+no pass answers to, or a review pass that could not be run.
+
+## `pub struct Judge<'a> {`
+
+The gate set and the reviewers, run on fresh exact snapshots.
+
+The one implementation of "gates on a fresh exact snapshot, each reviewer
+on its own fresh exact snapshot" for both the candidate phase and the
+integration: a candidate is judged on the tree it captured, an integration
+on the proposal or head commit, and everything else — the snapshot per
+role, the invocation ledger, the slot pair, the review records — is the
+same protocol run once.
+
+## `impl Judge<'_> {` › `pub fn judge(&mut self, subject: &Subject<'_>) -> Result<Judgement, JudgeError> {`
+
+Run every gate on one snapshot, then every reviewer on its own, and
+say what they decided.
+
+### Errors
+
+[`JudgeError::Runner`] when the Runner could not run a gate process;
+[`JudgeError::Other`] for a snapshot funnel refusal, an adapter no pass
+answers to, or a review pass that could not be run.
+
+## `impl Judge<'_> {` › `fn execute_typed(`
+
+[`Self::execute`], telling a Runner error apart from a ledger or slot
+refusal: the Runner's own `Err` is [`JudgeError::Runner`], settled in
+the ledger as a cancellation exactly as before.

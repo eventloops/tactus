@@ -669,3 +669,59 @@ The directory and site a kill child is given.
 ## `pub(super) const OUTCOME: RunOutcome = RunOutcome::Complete;`
 
 The run outcome a run-end closure records in these tests.
+
+## `pub(super) struct Ran {` › `pub(super) head_at_spawn: Option<String>,`
+
+The commit the workspace's HEAD named when the process was spawned —
+what a gate or reviewer actually looked at — or `None` when the
+workspace is not a checkout.
+
+## `pub(super) enum VerifyReview {`
+
+What the scaffold's integration verification decides, so a test drives a
+stale_clean pass, a code rejection, a human-required park, or an outage
+without a real reviewer.
+
+## `fn verify(` › `match judge.judge(&Subject {`
+
+The same mapping production makes (`run.rs`): a Runner that could
+not run a gate is an outage with a terminal, not an error.
+
+## `impl Run {` › `fn begin(run: &mut Self, started: RunStarted4) {`
+
+Emit `run_started` and create the integration ref (P8), the two steps
+every constructor shares.
+
+## `impl Run {` › `pub(super) fn started_with_max_defers(tag: &str, max_defers: u32) -> Self {`
+
+[`Self::started`] with a chosen `max_defers`, for the deferral tests.
+
+## `impl Run {` › `pub(super) fn wake_deferred(&mut self) {`
+
+Wake every verification-deferred candidate: `defer_wait_elapsed`.
+
+## `impl Run {` › `pub(super) fn queue_candidate(`
+
+Carry `key` from its first dispatch to a queued candidate through the
+real candidate sequence: a worker edit, the capture, the commit, the
+pin, `candidate_prepared`, the candidates ref, `task_candidate_created`,
+and the scrub. The candidate's base is the run's own.
+
+## `impl Run {` › `pub(super) fn queue_candidate_editing(`
+
+Queue a candidate whose worker edits exactly `path` to `content`, so a
+later candidate editing the same path conflicts with it, and one editing
+it to the same content is already present.
+
+## `impl Run {` › `pub(super) fn integration_ref(&self) -> GitRef {`
+
+The run's integration ref, as `run_started` recorded it.
+
+## `impl Run {` › `pub(super) fn head(&self) -> Option<String> {`
+
+What the integration ref names right now.
+
+## `impl Run {` › `pub(super) fn replay_twice_equal(&self) {`
+
+Replay the durable log twice and check both replays agree with the
+live fold.

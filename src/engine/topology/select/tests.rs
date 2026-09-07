@@ -230,9 +230,6 @@ fn selection_takes_the_first_eligible_candidate_and_not_the_head() {
 
 #[test]
 fn reported_spend_replays_integration_verification_records() {
-    // An integration's reviews are charged to the candidate's task at the
-    // verification, and the terminal's record — merge_prepared's or a code
-    // rejection's — carries them, so a replay charges the same total.
     let verification = |cost: f64| crate::topology::events::VerificationRecord {
         verdict: crate::topology::events::VerificationVerdict::Passed,
         gates_passed: true,
@@ -259,8 +256,6 @@ fn reported_spend_replays_integration_verification_records() {
     });
     let mut rejected = verification(1.0);
     rejected.verdict = crate::topology::events::VerificationVerdict::Rejected;
-    // Any registered entry will do: `Spend::replay` reads the record's
-    // reviews and never the spawn it registers.
     let repair_entry = {
         let fold = started();
         let mut entry = fold
@@ -1275,11 +1270,6 @@ fn the_selected_retry_is_the_one_the_settlement_module_runs() {
     assert_eq!(started_event.attempt, attempt);
 }
 
-/// Reject the queued candidate of `GIMEL` on a conflict, registering a
-/// runnable repair as task 3 — the only way a Repair-origin task enters a
-/// registry, and the state `select` offers `RepairDispatch` from.
-///
-/// Every other task is settled so the repair is the first ready key.
 fn register_runnable_repair(fold: &mut TopologyFold) {
     use crate::topology::events::{
         FrozenSpawn, MergeRejected, RejectionDisposition, RejectionLeaseEffect, SequenceId,
@@ -1352,8 +1342,6 @@ fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_
         "the selector names the repair dispatch as its own step rather than an ordinary one"
     );
 
-    // The ceiling is not consulted for a step the checkpoint refuses: a
-    // `budget_exceeded` is an append, and the refusal is before any.
     let mut spend = Spend::new();
     spend.record(GIMEL, &record(1, Some(9.0)));
     let breached = Ceiling {

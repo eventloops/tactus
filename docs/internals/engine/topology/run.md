@@ -372,7 +372,9 @@ producing attempt's. The reviews of `3414dc58` found the ladder's *last*
 rung passed here, which a candidate produced lower down never ran under —
 so a primary reviewer equal to the real implementer was not swapped for
 the alternative, and a model could be handed its own work to review
-(`pr8-triage.md` C6).
+(`pr8-triage.md` C6). `DESIGN.md` §26 verdict item 4 reruns "all recorded
+gates and review passes", and the recorded passes were selected against this
+binding.
 
 ## `impl Verification for IntegrationCx<'_, '_>` › `let prior_failure = match crate::engine::classify::diff_failure(`
 
@@ -1563,3 +1565,46 @@ The driver owns the ledger, so obligation (3) is discharged here
 and the loop keeps one error type. `emitter` borrows the fold, the
 log, the reservations and the warnings; `invocations` is a disjoint
 field, which is the whole reason it is no longer inside `EmitState`.
+
+## `struct IntegrationCx<'a, 'h> {`
+
+The run's integration context: the emitter for the appends, the hook
+bundle for the funnels, and the seams and ledgers the verification runs
+through. One object, so `emit`, `verify` and `converted` are all `&mut
+self` methods over disjoint fields rather than three overlapping borrows.
+
+## `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {` › `let (diff_parent, diff_tree) = if request.already_present {`
+
+The review diff: the proposal against the head for a stale
+candidate, and the candidate's own patch (base..commit) for an
+already-present one, whose proposal is the head itself.
+
+## `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {` › `let prior_failure = match crate::engine::classify::diff_failure(`
+
+What the attempt path decides before it judges (`assess`): a diff
+no reviewer can judge — too large, or opaque — and the review-input
+policy's answer for the proposed tree, read in the staging worktree.
+Either stands in for the gates and reviewers as the prior failure,
+and the sequence parks the candidate for a person (R4): a Fix task
+cannot be asked to edit code without code evidence, and waiting
+cannot make the same diff fit.
+
+## `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {` › `self.spend.record_reviews(key, &judgement.reviews);`
+
+The ceiling's ledger, charged before the terminal is
+appended, as an attempt's reviews are charged in `settle`:
+`Spend::replay` rebuilds it from the terminal's record.
+
+## `fn hard_block(` › `if origin != QuestionOrigin::VerificationPark {`
+
+A verification park is PR8's to ingest; a repair-admission or an
+attempt park is PR9's, and `checkpoint_refusals` has this build
+refuse those answers before any append.
+
+## `impl TopologyRun {` › `fn ingest_verification_answer(`
+
+Ingest an answer to a verification-park question: append
+`question_answered`, which the fold routes to `AwaitingMerge` (the
+candidate re-verifies under a new sequence) or, for a decline, to a
+failed lineage with its queue position consumed and its lease released,
+halting per `decline_halts_run`.

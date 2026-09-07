@@ -388,9 +388,6 @@ pub(super) struct Ran {
     pub(super) agent: Option<AgentId>,
     pub(super) command: CommandSpec,
     pub(super) durable_at_spawn: Vec<String>,
-    /// The commit the workspace's HEAD named when the process was spawned —
-    /// what a gate or reviewer actually looked at — or `None` when the
-    /// workspace is not a checkout.
     pub(super) head_at_spawn: Option<String>,
 }
 
@@ -676,9 +673,6 @@ impl super::integrate::IntegrationJournal for Run {
     }
 }
 
-/// What the scaffold's integration verification decides, so a test drives a
-/// stale_clean pass, a code rejection, a human-required park, or an outage
-/// without a real reviewer.
 #[derive(Debug, Clone)]
 pub(super) enum VerifyReview {
     Passed,
@@ -779,8 +773,6 @@ impl super::integrate::Verification for Run {
             paths: &self.paths,
             reviews: &reviews,
         };
-        // The same mapping production makes (`run.rs`): a Runner that could
-        // not run a gate is an outage with a terminal, not an error.
         match judge.judge(&Subject {
             snapshot: SnapshotOf::Commit(proposed),
             disposal: SnapshotDisposal::AfterTheTerminal,
@@ -865,8 +857,6 @@ impl Run {
         }
     }
 
-    /// Emit `run_started` and create the integration ref (P8), the two steps
-    /// every constructor shares.
     fn begin(run: &mut Self, started: RunStarted4) {
         let integration_ref = started.integration_ref.clone();
         run.emitter
@@ -889,7 +879,6 @@ impl Run {
         run.runner.watching(run.emitter.log.path());
     }
 
-    /// [`Self::started`] with a chosen `max_defers`, for the deferral tests.
     pub(super) fn started_with_max_defers(tag: &str, max_defers: u32) -> Self {
         let mut run = Self::bare(tag);
         let mut started = run_started(&run.fixture);
@@ -898,7 +887,6 @@ impl Run {
         run
     }
 
-    /// Wake every verification-deferred candidate: `defer_wait_elapsed`.
     pub(super) fn wake_deferred(&mut self) {
         self.emitter
             .emit(
@@ -1123,10 +1111,6 @@ impl super::candidate::CandidateJournal for Run {
 }
 
 impl Run {
-    /// Carry `key` from its first dispatch to a queued candidate through the
-    /// real candidate sequence: a worker edit, the capture, the commit, the
-    /// pin, `candidate_prepared`, the candidates ref, `task_candidate_created`,
-    /// and the scrub. The candidate's base is the run's own.
     pub(super) fn queue_candidate(
         &mut self,
         key: TaskKey,
@@ -1136,9 +1120,6 @@ impl Run {
         self.queue_candidate_editing(key, &path, &content)
     }
 
-    /// Queue a candidate whose worker edits exactly `path` to `content`, so a
-    /// later candidate editing the same path conflicts with it, and one editing
-    /// it to the same content is already present.
     pub(super) fn queue_candidate_editing(
         &mut self,
         key: TaskKey,
@@ -1259,7 +1240,6 @@ impl Run {
             .to_owned()
     }
 
-    /// The run's integration ref, as `run_started` recorded it.
     pub(super) fn integration_ref(&self) -> GitRef {
         self.emitter
             .fold()
@@ -1269,7 +1249,6 @@ impl Run {
             .clone()
     }
 
-    /// What the integration ref names right now.
     pub(super) fn head(&self) -> Option<String> {
         self.fixture
             .manager
@@ -1277,8 +1256,6 @@ impl Run {
             .expect("read the integration ref")
     }
 
-    /// Replay the durable log twice and check both replays agree with the
-    /// live fold.
     pub(super) fn replay_twice_equal(&self) {
         let events = self.emitter.durable_events();
         let inputs = FrozenInputs {

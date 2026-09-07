@@ -6326,8 +6326,6 @@ fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {
     let head = sha("head");
     let proposal = sha("proposal");
 
-    // A run frozen at `limit`, with alpha merged and mid's candidate under
-    // verification, built as a log so the refusals can be checked on replay.
     let verifying = |limit: u32| -> (TopologyFold, Vec<TopologyEvent>) {
         let mut fold = TopologyFold::new(inputs());
         let mut log = Vec::new();
@@ -6397,8 +6395,6 @@ fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {
         question: question("q-binding-Ünicode", TaskKey(3)),
     };
 
-    // Below the limit: the first repair of a run that allows one automatic
-    // repair is runnable, and asking a person instead is refused.
     let (under, log) = verifying(1);
     accepts(&under, &rejection(SpawnAdmission::Runnable));
     accepts(&under, &rejection(human_binding()));
@@ -6411,8 +6407,6 @@ fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {
         "the refusal counts the lineage against the frozen limit: {detail}"
     );
 
-    // At the limit: a run that allows no automatic repair registers the first
-    // repair with human admission, and a runnable one is refused.
     let (at_limit, log) = verifying(0);
     let refused = refused_live_and_on_replay(&at_limit, &log, &rejection(SpawnAdmission::Runnable));
     let FoldError::InconsistentRecord { detail, .. } = &refused else {
@@ -6446,12 +6440,6 @@ fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {
 
 #[test]
 fn a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_repair() {
-    // INV-11: "bounded per root by the frozen limit". With one automatic
-    // repair allowed, the first rejection of `mid` registers a runnable
-    // repair (member 0); that repair's own candidate is then rejected, and the
-    // second repair (member 1) may only ask a person — a runnable admission
-    // refuses, live and on replay. Distinct from the limit-of-zero case
-    // because a positive limit is consumed by a lineage that actually ran.
     let base = sha("base");
     let head = sha("head");
     let proposal = sha("proposal");
@@ -6491,7 +6479,6 @@ fn a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_rep
     step(&mut fold, candidate_created(MID, 0));
     step(&mut fold, verification_started(MID, 0, 1, &head, &proposal));
 
-    // Member 0: the one automatic repair the run allows.
     let mut first = repair_spawn(first_repair, MID, MID);
     first.entry.deps = vec![ALPHA];
     first.entry.display_deps = vec![TaskId::from("alpha")];
@@ -6515,8 +6502,6 @@ fn a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_rep
     );
     assert_eq!(fold.lineage_members(MID), Some(1));
 
-    // The repair runs and produces its replacement candidate, which is
-    // verified and rejected in turn.
     let mut dispatched = dispatch(first_repair, 0, &base);
     if let TopologyEventBody::TaskDispatched { data } = &mut dispatched.body {
         data.lease = LeaseGrant::InheritedLineage { root: MID };
@@ -6614,9 +6599,6 @@ fn a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_rep
 
 #[test]
 fn an_empty_intersection_ladder_records_no_tier_no_ceiling_and_the_raised_floor() {
-    // The shape a merge repair freezes when `mid` intersects the root's
-    // ladder empty (`pr8-plan.md` R10): the fold's own ladder check accepts
-    // it, because an absent ceiling is the maximum of no tier.
     let waiting = FrozenLadder {
         tiers: Vec::new(),
         attempts_per: 2,

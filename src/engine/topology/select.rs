@@ -34,9 +34,6 @@ impl Spend {
         *self.per_task.entry(key).or_insert(0.0) += attempt;
     }
 
-    /// The reviews an integration verification ran for `key`'s candidate,
-    /// charged as an attempt's reviews are: each pass's reported cost, to the
-    /// run and to the task.
     pub fn record_reviews(&mut self, key: TaskKey, reviews: &[crate::events::ReviewRecord]) {
         let cost: f64 = reviews.iter().filter_map(|review| review.cost_usd).sum();
         self.run += cost;
@@ -52,10 +49,6 @@ impl Spend {
                 TopologyEventBody::CandidatePrepared { data } => {
                     spend.record(data.key, &data.attempt);
                 }
-                // The integration verifications whose terminal carries the
-                // review record. An unavailable terminal carries none, so a
-                // verification that ended in a park or an outage is charged
-                // live and not here (`pr8-plan.md` R22).
                 TopologyEventBody::MergePrepared { data } => {
                     if let Some(verification) = &data.verification {
                         spend.record_reviews(data.key, &verification.reviews);

@@ -643,3 +643,16 @@ coexist and the packet will have to say which wins.
 ## `first_ready` › `return None;`
 
 This task cannot name another generation in the event format.
+
+## `impl Spend {` › `pub fn record_reviews(&mut self, key: TaskKey, reviews: &[crate::events::ReviewRecord]) {`
+
+The reviews an integration verification ran for `key`'s candidate,
+charged as an attempt's reviews are: each pass's reported cost, to the
+run and to the task.
+
+## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `TopologyEventBody::MergePrepared { data } => {`
+
+The integration verifications whose terminal carries the
+review record. An unavailable terminal carries none, so a
+verification that ended in a park or an outage is charged
+live and not here (`pr8-plan.md` R22).

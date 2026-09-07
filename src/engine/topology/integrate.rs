@@ -1,21 +1,4 @@
-//! The integration transaction of one queued candidate.
-//!
-//! `decisions.coordinator_integration.integration_sequence`: the loop selects
-//! the first eligible candidate, checks the ceiling, takes the provisional
-//! `{pipeline, merge}` reservation, and then — **before any staging effect** —
-//! asserts the integration ref publishable and reads its head. That read is
-//! the exact-base decision: a head equal to the base `candidate_prepared`
-//! recorded publishes the immutable candidate commit itself; any other head
-//! takes the staging path. Everything after the decision is a terminal of the
-//! transaction it opened, and every authorized publication is completed
-//! through one function, [`publish`], on the live path and on recovery alike.
-//!
-//! The module performs no append of its own: every event goes through the
-//! caller's [`IntegrationJournal`], which is the run's emitter and its fold,
-//! so a live run and a replay reach the same state by the same checks. What
-//! it owns is the *order* — reservation, then the head read, then the fast
-//! `merge_prepared`, then the compare-and-swap, then `task_merged` — and the
-//! refusals that order rests on.
+//! Extended notes: `docs/internals/engine/topology/integrate.md`
 
 use thiserror::Error;
 
@@ -38,14 +21,11 @@ use super::attempt::Judgement;
 use super::candidate::RUN_REF_ROOT;
 use super::seams::{IdSource, TopologyHooks};
 
-/// `refs/upstroke/runs/<run>/prepared/<sequence>`: the pin that keeps a stale
-/// candidate's proposal commit reachable while its verification runs (R12).
 #[must_use]
 pub fn prepared_pin_ref(run_id: &str, sequence: SequenceId) -> GitRef {
     GitRef(format!("{RUN_REF_ROOT}/{run_id}/prepared/{}", sequence.0))
 }
 
-/// The staging worktree of a stale transaction, `merge/s<sequence>` (R10).
 #[must_use]
 pub fn staging_slot(sequence: SequenceId) -> Slot {
     Slot::Staging {
@@ -53,90 +33,36 @@ pub fn staging_slot(sequence: SequenceId) -> Slot {
     }
 }
 
-/// What the integration sequence appends through, reads its state from, and
-/// performs its effects with.
-///
-/// One trait rather than three parameters because the three are one object
-/// on the live path: the run's emitter owns the fold it checks against, the
-/// append handle, the hook bundle, and the reservation ledger the first
-/// append converts. The sequence calls them in the order the packet fixes and
-/// never holds two of them across a call.
 pub trait IntegrationJournal {
-    /// Append `body` through the run's emitter: checked against the fold,
-    /// written and synced, then applied.
-    ///
-    /// # Errors
-    ///
-    /// The fold's refusal, or the append-error protocol's report.
     fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError>;
 
-    /// The fold every append is checked against, read to derive a repair and a
-    /// candidate's region.
     fn fold(&self) -> &TopologyFold;
 
-    /// The hook bundle the funnels take.
     fn hooks(&mut self) -> &mut dyn TopologyHooks;
 
-    /// The provisional integration reservation of `key` converted to a
-    /// fold-derived holding: called exactly once, right after the first
-    /// append of the sequence.
-    ///
-    /// # Errors
-    ///
-    /// The reservation ledger's refusal when no such reservation is held.
     fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError>;
 }
 
-/// What runs an integration verification and mints its park question.
-///
-/// Implemented by the same object as [`IntegrationJournal`], because both are
-/// the run: the gates and reviewers execute through the run's own
-/// [`super::attempt::Judge`] over its ledgers, and a park question is minted
-/// from the run's [`IdSource`].
 pub trait Verification {
-    /// Run every recorded gate on one fresh exact snapshot of the proposed
-    /// commit and every review pass on its own, reviewing it against the head,
-    /// and say what they decided. `staging` is read only for the review diff
-    /// and the review-input policy; no gate or reviewer runs in it.
-    ///
-    /// # Errors
-    ///
-    /// A snapshot funnel refusal, or a plan the run cannot assemble. A Runner
-    /// that could not run a gate is not an error but
-    /// [`Verified::RunnerUnavailable`]: an observed infrastructure failure
-    /// with a terminal of its own.
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError>;
 
-    /// The id source a park question's identity comes from.
     fn ids(&self) -> &dyn IdSource;
 }
 
-/// What a verification came back with.
 pub enum Verified {
-    /// The gates and reviewers ran, or a prior failure stood in for them.
     Judged(Judgement),
-    /// The Runner could not run a gate process: `invariants[INV-23]`'s
-    /// mid-run `RunnerSpawnFailure`, an observed infrastructure failure the
-    /// sequence terminates `merge_verification_unavailable{Infrastructure}`,
-    /// deferred inside the frozen allowance and parked at it
-    /// (`transaction_fault_matrix[T-VERIFY].resume_action`).
     RunnerUnavailable { detail: String },
 }
 
-/// One integration verification to run.
 pub struct VerifyRequest<'a> {
     pub candidate: &'a CandidateRef,
     pub sequence: SequenceId,
     pub staging: &'a Slot,
     pub head: &'a CommitSha,
     pub proposed: &'a CommitSha,
-    /// The proposal equals the head: gates rerun on the head and the review
-    /// judges the head tree against the candidate's original patch.
     pub already_present: bool,
 }
 
-/// Why the sequence refused, each naming the record and the value it
-/// disagreed with.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum Refusal {
     #[error(
@@ -203,32 +129,17 @@ fn refused(message: &str) -> UpstrokeError {
     }
 }
 
-/// What the fold recorded about the candidate the loop selected, read once
-/// before any effect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegrationRequest {
     pub candidate: CandidateRef,
-    /// The sequence this transaction opens under: the fold's next dense one.
     pub sequence: SequenceId,
-    /// The base `candidate_prepared` recorded — the head the exact-base
-    /// decision compares against.
     pub base_sha: CommitSha,
-    /// The closure this publication settles, as the fold derives it.
     pub satisfies: Vec<TaskKey>,
-    /// The lease `task_merged` releases: the candidate's own, or its lineage's.
     pub lease_release: MergeLeaseRelease,
-    /// The ref this run publishes onto, as `run_started` recorded it.
     pub integration_ref: GitRef,
 }
 
 impl IntegrationRequest {
-    /// Read the request from the fold that selected `candidate`.
-    ///
-    /// # Errors
-    ///
-    /// [`Refusal::NoCandidateRecord`] when the fold holds no
-    /// `candidate_prepared` for the candidate, or a refusal when the run has
-    /// not started.
     pub fn from_fold(fold: &TopologyFold, candidate: &CandidateRef) -> Result<Self, UpstrokeError> {
         let started = fold
             .started()
@@ -251,7 +162,6 @@ impl IntegrationRequest {
     }
 }
 
-/// The base the candidate's `candidate_prepared` recorded.
 fn prepared_base(
     fold: &TopologyFold,
     candidate: &CandidateRef,
@@ -274,12 +184,6 @@ fn prepared_base(
         })
 }
 
-/// The lease a publication of `candidate` releases.
-///
-/// `decisions.admission_and_leases.leases`: "task_merged releases the
-/// Candidate lease or, when satisfies contains root, the lineage lease". A
-/// lineage member's closure always reaches its root, so the release is the
-/// lineage's exactly when the candidate's task descends from one.
 fn lease_release(fold: &TopologyFold, candidate: &CandidateRef) -> MergeLeaseRelease {
     fold.registry()
         .and_then(|registry| registry.get(candidate.key))
@@ -293,16 +197,12 @@ fn lease_release(fold: &TopologyFold, candidate: &CandidateRef) -> MergeLeaseRel
         )
 }
 
-/// The exact-base decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExactBase {
-    /// The head is the candidate's base: publish the candidate commit itself.
     Fast,
-    /// The head moved: cherry-pick and re-verify.
     Stale,
 }
 
-/// The head the integration ref was read at, and what it decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "a decision is followed by the sequence it selects"]
 pub struct Decided {
@@ -310,17 +210,6 @@ pub struct Decided {
     pub exact_base: ExactBase,
 }
 
-/// The exact-base decision: `assert_publishable`, then the head read.
-///
-/// Read-only, and every staging effect of the sequence comes after it — that
-/// is INV-09's "the exact-base decision is made from the integration ref head
-/// before any staging effect", and the reason this is a separate function
-/// from the paths it selects between.
-///
-/// # Errors
-///
-/// A symbolic or checked-out integration ref (`assert_publishable`),
-/// [`Refusal::IntegrationRefAbsent`], or a Git error reading the ref.
 pub fn decide(
     manager: &WorkspaceManager,
     request: &IntegrationRequest,
@@ -342,12 +231,6 @@ pub fn decide(
     Ok(Decided { head, exact_base })
 }
 
-/// A publication the log has authorized and the ref move still owes.
-///
-/// Built on the live path by the `merge_prepared` that authorized it, and on
-/// recovery from the fold's `Prepared` transaction. Either way [`publish`]
-/// completes it: INV-09's "an authorized publication is always completed
-/// (recovery or run-end closure), never abandoned".
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "an authorized publication is always completed, never abandoned"]
 pub struct Authorized {
@@ -358,24 +241,11 @@ pub struct Authorized {
     pub satisfies: Vec<TaskKey>,
     pub lease_release: MergeLeaseRelease,
     pub integration_ref: GitRef,
-    /// The `prepared/<seq>` pin of a stale publication, pruned after
-    /// `task_merged`; `None` for a fast one, which pins nothing.
     pub pin: Option<GitRef>,
-    /// The staging worktree of a stale publication, removed with force after
-    /// `task_merged`; `None` for a fast one, which stages nothing.
     pub staging: Option<Slot>,
 }
 
 impl Authorized {
-    /// The publication the fold's unresolved transaction authorizes, if the
-    /// transaction has reached `merge_prepared`.
-    ///
-    /// `None` when there is no transaction or it is still verifying; the
-    /// latter is `T-VERIFY`'s row, settled elsewhere.
-    ///
-    /// # Errors
-    ///
-    /// A refusal when the run has not started.
     pub fn from_fold(fold: &TopologyFold) -> Result<Option<Self>, UpstrokeError> {
         let Some(transaction) = fold.transaction() else {
             return Ok(None);
@@ -394,13 +264,6 @@ impl Authorized {
             .started()
             .ok_or_else(|| refused("the proven prefix records a transaction and no run"))?;
         let candidate = &transaction.candidate;
-        // A fast publication staged nothing; a stale-clean or already-present
-        // one ran in `merge/s<seq>` and the fold retains which it was, because
-        // the SHAs alone cannot say: an already-present publication at the
-        // candidate's own commit has `proposed_sha == candidate.commit_sha`
-        // and a staging worktree all the same (`pr8-triage.md`, crash 5).
-        // The pin is the one the record names — `None` for fast and
-        // already-present, which pin nothing.
         let staged = *disposition != PreparedDisposition::Fast;
         Ok(Some(Self {
             sequence: transaction.sequence,
@@ -416,7 +279,6 @@ impl Authorized {
     }
 }
 
-/// A completed publication.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Published {
     pub sequence: SequenceId,
@@ -425,18 +287,6 @@ pub struct Published {
     pub satisfies: Vec<TaskKey>,
 }
 
-/// The fast path: `merge_prepared(fast)` for a candidate whose base is the
-/// head that was just read.
-///
-/// The record names the candidate's own `candidate_prepared` as its
-/// verification source, proposes the candidate commit and pins nothing, and
-/// the fold refuses every other shape (`check_merge_prepared`). The provisional
-/// reservation converts at this append, its first.
-///
-/// # Errors
-///
-/// The fold's refusal or the append-error protocol's report; the reservation
-/// ledger's refusal after the append.
 pub fn prepare_fast(
     journal: &mut dyn IntegrationJournal,
     request: &IntegrationRequest,
@@ -477,31 +327,6 @@ pub fn prepare_fast(
     })
 }
 
-/// Complete an authorized publication: the compare-and-swap, then
-/// `task_merged`, then the pruning the terminal permits.
-///
-/// `decisions.coordinator_integration.publish` and `cas_recovery`, as one
-/// function for both: `assert_publishable`, read the ref, and then
-///
-/// * at `expected_head`: `update-ref --no-deref <ref> <proposed> <expected>`
-///   through `Ref.CompareAndSwapIntegration` — for an already-present
-///   publication the two are equal and Git validates the expected old without
-///   moving anything;
-/// * at `proposed_sha`: the move already happened and only the record is
-///   owed;
-/// * at anything else: refuse. A third SHA is foreign history.
-///
-/// `task_merged` is appended only after the ref is at `proposed_sha`, which
-/// is INV-09's "CAS before `task_merged`". The pin and the staging worktree
-/// of a stale publication go afterwards, because both keep the proposal
-/// reachable until the integration ref does.
-///
-/// # Errors
-///
-/// A symbolic or checked-out ref, [`Refusal::IntegrationRefAbsent`],
-/// [`Refusal::ThirdSha`], a Git error from the swap, the fold's refusal of
-/// `task_merged`, the append-error protocol's report, or
-/// [`Refusal::PinAtAnotherSha`].
 pub fn publish(
     journal: &mut dyn IntegrationJournal,
     manager: &WorkspaceManager,
@@ -559,14 +384,6 @@ pub fn publish(
     })
 }
 
-/// Delete a prepared pin expected-old at the proposal it recorded.
-///
-/// Absent is fine — a kill between two resumes may have pruned it already —
-/// and a pin at another object refuses rather than deleting the evidence.
-///
-/// # Errors
-///
-/// [`Refusal::PinAtAnotherSha`] or a Git error.
 pub fn prune_pin(
     hooks: &mut dyn TopologyHooks,
     manager: &WorkspaceManager,
@@ -592,17 +409,6 @@ pub fn prune_pin(
     )
 }
 
-/// One integration, from the decision to its terminal.
-///
-/// The reservation is the caller's: taken before this is entered and
-/// cancelled by the caller if this returns before the first append converted
-/// it.
-///
-/// # Errors
-///
-/// Any refusal of the sequence it runs, and — in this build —
-/// [`Refusal::StaleNotImplemented`] for a candidate whose base is no longer
-/// the head, refused before any staging effect.
 pub fn integrate<J: IntegrationJournal + Verification>(
     journal: &mut J,
     manager: &WorkspaceManager,
@@ -618,14 +424,13 @@ pub fn integrate<J: IntegrationJournal + Verification>(
     }
 }
 
-/// The terminal one integration reached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminal {
-    /// A publication: `merge_prepared`, the compare-and-swap, `task_merged`.
     Merged(Published),
-    /// A conflict or a code-attributed rejection, with the repair registered.
-    Rejected { sequence: SequenceId, key: TaskKey },
-    /// The verification could not be run: deferred, or parked.
+    Rejected {
+        sequence: SequenceId,
+        key: TaskKey,
+    },
     Unavailable {
         sequence: SequenceId,
         key: TaskKey,
@@ -633,7 +438,6 @@ pub enum Terminal {
     },
 }
 
-/// What a cherry-pick left in the staging worktree.
 enum Picked {
     Clean { proposal: CommitSha },
     Conflict { paths: PathSet },
@@ -641,9 +445,6 @@ enum Picked {
     Unclassified { detail: String },
 }
 
-/// The stale path: cherry-pick the immutable candidate onto the head in a
-/// staging worktree, classify what the pick left, and reach the terminal the
-/// classification and (for a clean or empty pick) the verification decide.
 fn integrate_stale<J: IntegrationJournal + Verification>(
     journal: &mut J,
     manager: &WorkspaceManager,
@@ -739,8 +540,6 @@ fn integrate_stale<J: IntegrationJournal + Verification>(
     }
 }
 
-/// Append `merge_verification_started`, run the verification, and reach the
-/// terminal the judgement decides.
 #[allow(clippy::too_many_arguments)]
 fn start_and_verify<J: IntegrationJournal + Verification>(
     journal: &mut J,
@@ -795,8 +594,6 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             let record = passing_record(&judgement);
             let authorized =
                 prepare_verified(journal, request, head, proposed, pin, disposition, record)?;
-            // `merge_prepared` is the verification's terminal: the snapshots
-            // go now, before the ref moves, and never before the append.
             reclaim_snapshots(journal, manager)?;
             Ok(Terminal::Merged(publish(journal, manager, authorized)?))
         }
@@ -844,8 +641,6 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
     }
 }
 
-/// Authorize a verified publication, checked by the fold's `merge_prepared`
-/// relations for stale_clean and already_present.
 #[allow(clippy::too_many_arguments)]
 fn prepare_verified(
     journal: &mut dyn IntegrationJournal,
@@ -888,11 +683,6 @@ fn prepare_verified(
     })
 }
 
-/// A verification outage: `merge_verification_unavailable`, deferred while the
-/// candidate is inside its frozen allowance and parked at it, then the
-/// snapshots, the staging worktree and the pin reclaimed. `detail` is what
-/// the infrastructure reported, carried into the park question's context so
-/// a person sees why the outage exhausted its deferrals.
 #[allow(clippy::too_many_arguments)]
 fn unavailable<J: IntegrationJournal + Verification>(
     journal: &mut J,
@@ -1031,16 +821,6 @@ fn run_id_of<J: IntegrationJournal>(journal: &J) -> Result<String, UpstrokeError
         .clone())
 }
 
-/// Remove every verification snapshot with force, each with its intent.
-///
-/// `side_effect_vs_event_ordering`: "staging and snapshot removal (forced)
-/// after terminal (incl. Deferred/Parked)". The judge leaves its snapshots
-/// in place ([`super::attempt::SnapshotDisposal::AfterTheTerminal`]) and
-/// this runs once the terminal is durable, so a removal that fails can no
-/// longer strand a completed judgement behind an unterminated verification.
-/// Every snapshot intent is reclaimed rather than an exact list, because a
-/// judgement that returned an error after adding a snapshot has no list to
-/// hand back, and this sequential coordinator runs one judgement at a time.
 fn reclaim_snapshots(
     journal: &mut dyn IntegrationJournal,
     manager: &WorkspaceManager,
@@ -1054,9 +834,6 @@ fn reclaim_snapshots(
     Ok(())
 }
 
-/// After a rejection or an unavailable terminal: the snapshots, then the
-/// stale transaction's staging worktree with force and its intent, then its
-/// pin deleted expected-old.
 fn reclaim_staging(
     journal: &mut dyn IntegrationJournal,
     manager: &WorkspaceManager,

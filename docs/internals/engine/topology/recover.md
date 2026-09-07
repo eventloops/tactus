@@ -1400,8 +1400,8 @@ same place the live append would have been.
 
 ### Errors
 
-A refusal (a third SHA on the CAS, a symbolic or checked-out ref), the
-append-error protocol's report, or a Git error.
+A refusal (a third SHA on the CAS, a symbolic or checked-out ref, a pin at
+another SHA), the append-error protocol's report, or a Git error.
 
 ## `fn pinned_sequences(`
 
@@ -1414,18 +1414,33 @@ it is read.
 
 ## `fn reclaim_stale_residue(`
 
-Four dispositions, each cited in its own doc comment: staging residue no
-live transaction owns is reclaimed with force (T-PROPOSAL a', a); a resolved
-sequence's pin is pruned expected-old at its recorded proposal and refuses
-at any other SHA (INV-17); the open transaction's pin — a verification's or
-a prepared publication's — must name its recorded proposal (T-VERIFY's "pin
-SHA differs from record") and is kept, cleanup never touching a resumably
-open resource (INV-15); with no transaction open, exactly
-`prepared/<next_seq>` is the provisional orphan T-PROPOSAL (b) names.
+Reclaim what the log does not need and check what it does, before the
+namespace check: T-PROPOSAL (a', a, b) residue, and every `prepared/<seq>`
+the log accounts for.
+
+* Every `merge/<seq>` staging worktree no live transaction owns is removed
+  with force, the proposal objects then left to Git (R27).
+* A resolved sequence's pin is pruned expected-old at the proposal its
+  `merge_verification_started` recorded; a pin at any other SHA refuses
+  (INV-17: substituted refs refuse) and is left as it is.
+* The open transaction's pin — a verification's or a prepared publication's
+  — is required to name its recorded proposal and is kept: T-VERIFY's
+  "pin SHA differs from record" refuses before any settlement, and
+  `invariants[INV-15]`'s cleanup never touches a resumably open resource.
+* With no transaction open, exactly `prepared/<next_seq>` is the
+  provisional orphan T-PROPOSAL (b) names, reclaimed expected-old at what
+  it names.
+
+Anything else under `prepared/` is not accounted for by the log and is
+refused by the namespace check that follows, untouched
+(`expected_failures_refusals`: "orphan pin outside next sequence").
+
+Returns the open transaction's pin for the namespace check's expected set.
+
 Expected-old deletion at whatever a ref names proves only that nothing
 moved it since the read; it does not establish that the value read was
 authorized, which is why the old form of this step — delete everything but
-the verifying pin — was wrong.
+the verifying pin — was wrong (`pr8-triage.md` C2).
 
 ## `pub fn finish_promotions(`
 
@@ -1996,3 +2011,77 @@ Every `(key, generation)` settled holding a session.
 ## `fn outcome_name(outcome: &RunOutcome) -> &'static str {`
 
 The outcome as `run_finished` writes it.
+
+## `pub fn run_recovery_order(` › `let publication_pending = matches!(`
+
+A `Prepared` transaction owns the ref: `finish_integration` compares it
+against the authorization and swaps it, so the startup check would only
+adopt what that step is about to move. Under any other prefix — no
+transaction, or a verification whose interrupted settlement moves no
+ref — the check runs: `[T-RESUME].refusal_condition`, "foreign
+integration state".
+
+## `pub fn run_recovery_order(` › `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
+
+T-PROPOSAL residue and the pins the log accounts for: staging worktrees
+no live transaction owns are reclaimed with force, a resolved sequence's
+pin is pruned at the proposal it recorded, the open transaction's pin is
+checked against its record and kept, and exactly the provisional orphan
+`prepared/<next_seq>` is reclaimed. Before the namespace check, so that
+check refuses whatever the log does not account for — untouched.
+
+## `pub fn run_recovery_order(` › `expected.push(fold.started().map_or_else(String::new, |started| {`
+
+The run's own integration ref sits under this namespace and is never
+unexpected; `expected_refs` leaves it out because it enumerates
+candidate refs, so the recovery names it here.
+
+## `pub fn run_recovery_order(` › `if let Some(pin) = &live_pin {`
+
+The open transaction's pin is expected: it keeps the proposal
+reachable while the transaction resolves, verifying or prepared.
+
+## `pub fn run_recovery_order(` › `if !publication_pending {`
+
+The P7/P8 integration-ref repair is for a run killed at run-start, and
+the published-run check for every later one. A run with a prepared
+publication is past both: the ref is the transaction's to move, so the
+step is skipped and `finish_integration` owns the ref.
+
+## `fn reclaim_snapshot_residue(`
+
+Reclaim every verification snapshot, with force, once every terminal a
+snapshot could belong to is durable: the attempts settled at (d), and the
+integration transaction resolved just above.
+
+`C.cancellation`: "snapshots reclaimed"; `[T-VERIFY].resume_action`. The
+live path removes snapshots only after its terminal, so a kill between the
+terminal and the removal — or during the judgement itself, whose terminal
+this step has now appended — leaves exactly this residue, and nothing
+still running can own a snapshot when a fresh process reaches here.
+
+## `struct PinnedSequence {`
+
+A stale-clean verification the log started: its sequence, the pin the
+record names, and the proposal that pin was created at.
+
+## `fn pinned_sequences(events: &[TopologyEvent]) -> Vec<PinnedSequence> {`
+
+Every `prepared/<seq>` the log accounts for, from the proven prefix's
+`merge_verification_started` records with a stale-clean basis. A fast or
+already-present sequence pins nothing and is not here.
+
+## `fn converted(&mut self, _key: TaskKey) -> Result<(), UpstrokeError> {` › `Ok(())`
+
+A fresh process holds no provisional reservation; a recovery
+publication converts nothing.
+
+## `fn latest_publication(events: &[TopologyEvent]) -> Option<(SequenceId, CommitSha)> {`
+
+The head the log's latest publication put the integration ref at: the
+`merged_sha` of the last `task_merged` in the proven prefix.
+
+`transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
+completions" among what a resume continues from, and this is where the
+startup repair reads them: a run that has published owes its ref to its
+last publication, not to `run_started.base_sha`.

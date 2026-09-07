@@ -81,10 +81,6 @@ impl CandidateJournal for RunJournal<'_, '_> {
     }
 }
 
-/// The run's integration context: the emitter for the appends, the hook
-/// bundle for the funnels, and the seams and ledgers the verification runs
-/// through. One object, so `emit`, `verify` and `converted` are all `&mut
-/// self` methods over disjoint fields rather than three overlapping borrows.
 struct IntegrationCx<'a, 'h> {
     emitter: RunEmitter<'a>,
     hooks: &'h mut dyn TopologyHooks,
@@ -117,15 +113,6 @@ impl IntegrationJournal for IntegrationCx<'_, '_> {
     }
 }
 
-/// The binding the candidate of `key` ran under, for `passes_for`'s
-/// self-review rule: the task's validated override when one exists (E2 binds
-/// every later attempt to it), else the frozen rung at the fold-derived rung
-/// position. The fold moves a task's rung only at an escalation settlement
-/// and a task at `AwaitingMerge` settles no further attempt, so that position
-/// is the producing attempt's. `DESIGN.md` §26 verdict item 4 reruns "all
-/// recorded gates and review passes", and the recorded passes were selected
-/// against this binding — never against the ladder's last rung, which a
-/// candidate produced lower down never ran under.
 fn implementer_binding(
     fold: &TopologyFold,
     key: TaskKey,
@@ -180,9 +167,6 @@ impl Verification for IntegrationCx<'_, '_> {
             (entry, base, implementer_binding(fold, key)?)
         };
 
-        // The review diff: the proposal against the head for a stale
-        // candidate, and the candidate's own patch (base..commit) for an
-        // already-present one, whose proposal is the head itself.
         let (diff_parent, diff_tree) = if request.already_present {
             let base = base.ok_or_else(|| UpstrokeError::Refused {
                 message: "an already-present verification needs the candidate's recorded base to                           review its original patch"
@@ -202,13 +186,6 @@ impl Verification for IntegrationCx<'_, '_> {
             implementer,
         })?;
 
-        // What the attempt path decides before it judges (`assess`): a diff
-        // no reviewer can judge — too large, or opaque — and the review-input
-        // policy's answer for the proposed tree, read in the staging worktree.
-        // Either stands in for the gates and reviewers as the prior failure,
-        // and the sequence parks the candidate for a person (R4): a Fix task
-        // cannot be asked to edit code without code evidence, and waiting
-        // cannot make the same diff fit.
         let prior_failure = match crate::engine::classify::diff_failure(
             &diff,
             entry.spec.kind,
@@ -274,9 +251,6 @@ impl Verification for IntegrationCx<'_, '_> {
         });
         match judged {
             Ok(judgement) => {
-                // The ceiling's ledger, charged before the terminal is
-                // appended, as an attempt's reviews are charged in `settle`:
-                // `Spend::replay` rebuilds it from the terminal's record.
                 self.spend.record_reviews(key, &judgement.reviews);
                 Ok(Verified::Judged(judgement))
             }
@@ -797,9 +771,6 @@ impl TopologyRun {
                 Answer::Unanswered => continue,
                 answer => answer,
             };
-            // A verification park is PR8's to ingest; a repair-admission or an
-            // attempt park is PR9's, and `checkpoint_refusals` has this build
-            // refuse those answers before any append.
             if origin != QuestionOrigin::VerificationPark {
                 return Err(UpstrokeError::Refused {
                     message: format!(
@@ -818,11 +789,6 @@ impl TopologyRun {
         })
     }
 
-    /// Ingest an answer to a verification-park question: append
-    /// `question_answered`, which the fold routes to `AwaitingMerge` (the
-    /// candidate re-verifies under a new sequence) or, for a decline, to a
-    /// failed lineage with its queue position consumed and its lease released,
-    /// halting per `decline_halts_run`.
     fn ingest_verification_answer(
         &mut self,
         id: &QuestionId,

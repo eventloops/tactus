@@ -1,4 +1,4 @@
-//! Tests for the repair-spawn builder.
+//! Extended notes: `docs/internals/engine/topology/repair/tests.md`
 
 use crate::engine::topology::scaffold::{ALPHA, Run};
 use crate::ir::Tier;
@@ -89,9 +89,6 @@ fn root_ladder(tiers: &[Tier], floor: Option<Tier>) -> FrozenLadder {
 
 #[test]
 fn the_repair_ladder_is_the_roots_rungs_at_or_above_the_raised_floor() {
-    // `decisions.repairs.routing`: minimum tier mid intersected with the
-    // root's frozen pin and ceiling. A root that starts at small loses that
-    // rung; its floor becomes mid and its ceiling the highest survivor.
     let ladder = repair_ladder(
         &root_ladder(&[Tier::Small, Tier::Mid, Tier::Frontier], Some(Tier::Small)),
         &["claude-code".to_owned()],
@@ -107,7 +104,6 @@ fn the_repair_ladder_is_the_roots_rungs_at_or_above_the_raised_floor() {
     assert_eq!(ladder.attempts_per, 2);
     assert!(matches!(ladder.admission, Admission::Runnable));
 
-    // A root floored above mid keeps its own floor.
     let frontier_only = repair_ladder(
         &root_ladder(&[Tier::Mid, Tier::Frontier], Some(Tier::Frontier)),
         &["claude-code".to_owned()],
@@ -118,10 +114,6 @@ fn the_repair_ladder_is_the_roots_rungs_at_or_above_the_raised_floor() {
 
 #[test]
 fn an_empty_tier_intersection_registers_a_human_binding_ladder_with_the_allowed_agents() {
-    // R10: a root whose every rung is below mid has no tier the repair may
-    // run at. The frozen payload records exactly that — no tier, no rung, no
-    // ceiling, the raised floor — and offers the run's allowed agents to the
-    // person who must name a binding, never the sub-floor rungs it excluded.
     let allowed = vec!["claude-code".to_owned(), "copilot".to_owned()];
     let ladder = repair_ladder(&root_ladder(&[Tier::Small], Some(Tier::Small)), &allowed);
     assert!(
@@ -170,7 +162,6 @@ fn the_admission_follows_the_ladder_first_and_the_consumed_allowance_second() {
     let entry = rejected.repair.entry;
     let key = entry.key;
 
-    // Below the limit: runnable. At it: a person approves another attempt.
     assert!(matches!(
         admission_for(&entry, 2, 3, &ids, key),
         SpawnAdmission::Runnable
@@ -183,9 +174,6 @@ fn the_admission_follows_the_ladder_first_and_the_consumed_allowance_second() {
     assert_eq!(question.key, key);
     assert!(question.is_complete());
 
-    // The empty intersection wins over the limit on either side of it: the
-    // fold refuses HumanRequired on a HumanBinding ladder, so this is the one
-    // admissible shape for an over-limit rejection with no tier left.
     let mut waiting = entry;
     waiting.ladder = repair_ladder(
         &root_ladder(&[Tier::Small], Some(Tier::Small)),
