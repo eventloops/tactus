@@ -109,6 +109,7 @@ struct Damage {
     deep_ladder: bool,
     alternative_reviewer: bool,
     no_automatic_repairs: bool,
+    alpha_kind: Option<TaskKind>,
 }
 
 impl Fixture {
@@ -153,7 +154,12 @@ impl Fixture {
             mkdir(&private_dir);
         }
 
-        let plan = plan_with(damage.two_tasks);
+        let mut plan = plan_with(damage.two_tasks);
+        if let Some(kind) = damage.alpha_kind {
+            if let Some(alpha) = plan.tasks.first_mut() {
+                alpha.kind = kind;
+            }
+        }
         let recorded_locator = damage
             .locator
             .clone()
@@ -7896,6 +7902,247 @@ fn a_gate_whose_runner_lost_it_after_start_and_reclaimed_it_defers_as_an_outage(
 }
 
 #[test]
+fn a_git_error_observed_by_the_verification_settles_an_infrastructure_outage() {
+    let fixture = Fixture::two_tasks("git-state");
+    plant_stale_verification(&fixture);
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            input_git_error: true,
+            ..DriveSeams::default()
+        },
+        1,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Unavailable { parked: false, .. }))
+        ),
+        "foreign Git state under the review-input reader is an outage of the sequence, \
+         not an interruption: {:?}",
+        driven.progress
+    );
+    let terminals = unavailable_terminals(&driven.log);
+    let crate::topology::events::UnavailableCause::Infrastructure {
+        kind: crate::topology::events::InfrastructureKind::Other { detail },
+    } = &terminals[0].cause
+    else {
+        panic!(
+            "an infrastructure outage of its own kind: {:?}",
+            terminals[0].cause
+        );
+    };
+    assert!(
+        detail.contains("foreign Git state") && detail.contains("index"),
+        "the terminal carries what Git reported: {detail}"
+    );
+    assert!(
+        matches!(
+            terminals[0].outcome,
+            crate::topology::events::UnavailableOutcome::Deferred { defers: 1 }
+        ),
+        "deferred inside the allowance: {:?}",
+        terminals[0].outcome
+    );
+    assert!(
+        driven.reviewer_models.is_empty(),
+        "no reviewer ran on a tree the verification could not read"
+    );
+    assert!(
+        fixture.manager().intents().expect("intents").is_empty(),
+        "the staging worktree with the corrupt index was reclaimed with force at the terminal"
+    );
+}
+
+#[test]
+fn a_gate_that_times_out_during_integration_verification_defers_instead_of_registering_a_repair() {
+    let fixture = Fixture::two_tasks("gate-timeout");
+    plant_stale_verification(&fixture);
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            gate_times_out: true,
+            ..DriveSeams::default()
+        },
+        1,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Unavailable { parked: false, .. }))
+        ),
+        "a timeout is not a repair (decisions.repairs.not_repairs): {:?}",
+        driven.progress
+    );
+    assert!(
+        driven
+            .log
+            .iter()
+            .all(|event| !matches!(event.body, TopologyEventBody::MergeRejected { .. })),
+        "no repair was registered for a gate that produced no verdict"
+    );
+    let terminals = unavailable_terminals(&driven.log);
+    let crate::topology::events::UnavailableCause::Infrastructure {
+        kind: crate::topology::events::InfrastructureKind::Other { detail },
+    } = &terminals[0].cause
+    else {
+        panic!("an outage of its own kind: {:?}", terminals[0].cause);
+    };
+    assert!(
+        detail.contains("timed out") && detail.contains("gate"),
+        "the terminal names the timed-out gate: {detail}"
+    );
+    assert!(
+        driven.reviewer_models.is_empty(),
+        "no reviewer ran after a gate that produced no verdict"
+    );
+}
+
+fn plant_stale_verification_of_a_test_candidate(
+    fixture: &Fixture,
+) -> (crate::topology::events::CandidateRef, CommitSha, CommitSha) {
+    use crate::workspace_manager::fixture::{git, write_file};
+    const SHARED_TEST: &str = "#[test]\nfn shared() {\n    assert!(true);\n}\n";
+    let head = plant_published_beta_editing(fixture, "tests/shared.rs", SHARED_TEST);
+
+    let repo = &fixture.repo_root;
+    write_file(&repo.join("tests/shared.rs"), SHARED_TEST.as_bytes());
+    write_file(&repo.join("support.rs"), b"pub fn helper() {}\n");
+    git(repo, &["add", "--", "tests/shared.rs", "support.rs"]);
+    let tree = CommitSha(git(repo, &["write-tree"]));
+    let commit = CommitSha(git(
+        repo,
+        &[
+            "commit-tree",
+            tree.as_str(),
+            "-p",
+            fixture.base_sha.as_str(),
+            "-m",
+            "upstroke: alpha attempt 1",
+        ],
+    ));
+    git(
+        repo,
+        &["rm", "-q", "-f", "--", "tests/shared.rs", "support.rs"],
+    );
+    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, ALPHA, GEN);
+    for refname in [&names.prepared_ref, &names.candidate_ref] {
+        git(repo, &["update-ref", refname.as_str(), commit.as_str()]);
+    }
+    let candidate = crate::topology::events::CandidateRef {
+        key: ALPHA,
+        generation: GEN,
+        commit_sha: commit.clone(),
+        candidate_ref: names.candidate_ref.clone(),
+    };
+    append_events(
+        fixture,
+        &[
+            dispatched_at(&fixture.base_sha),
+            attempt_started(1),
+            candidate_prepared_for(fixture, ALPHA, &commit, &tree, &names, "support.rs"),
+            TopologyEventBody::TaskCandidateCreated {
+                data: crate::topology::events::TaskCandidateCreated {
+                    candidate: candidate.clone(),
+                },
+            },
+        ],
+    );
+
+    let proposal = commit_on(
+        fixture,
+        head.as_str(),
+        "support.rs",
+        "pub fn helper() {}\n",
+        "upstroke: proposal s1",
+    );
+    let pin = crate::engine::topology::integrate::prepared_pin_ref(
+        RUN_ID,
+        crate::topology::events::SequenceId(1),
+    );
+    git(repo, &["update-ref", pin.as_str(), proposal.as_str()]);
+    plant_staging_worktree(fixture, 1, proposal.as_str());
+    append_events(
+        fixture,
+        &[TopologyEventBody::MergeVerificationStarted {
+            data: crate::topology::events::MergeVerificationStarted {
+                sequence: crate::topology::events::SequenceId(1),
+                candidate: candidate.clone(),
+                basis: crate::topology::events::VerificationBasis::StaleClean { prepared_ref: pin },
+                expected_head: head.clone(),
+                proposed_sha: proposal.clone(),
+            },
+        }],
+    );
+    (candidate, head, proposal)
+}
+
+#[test]
+fn a_test_candidate_whose_test_was_already_published_is_verified_not_rejected_for_provenance() {
+    let fixture = Fixture::build(
+        "test-provenance",
+        Damage {
+            two_tasks: true,
+            alpha_kind: Some(TaskKind::Test),
+            ..Damage::default()
+        },
+    );
+    let (candidate, head, proposal) = plant_stale_verification_of_a_test_candidate(&fixture);
+
+    let manager = fixture.manager();
+    let own_diff = manager
+        .candidate_diff(
+            &crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(
+                1,
+            )),
+            fixture.base_sha.as_str(),
+            candidate.commit_sha.as_str(),
+        )
+        .expect("the candidate's own diff");
+    let integration_diff = manager
+        .candidate_diff(
+            &crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(
+                1,
+            )),
+            head.as_str(),
+            proposal.as_str(),
+        )
+        .expect("the integration diff");
+    assert!(
+        crate::engine::classify::diff_failure(&own_diff, TaskKind::Test, true).is_none(),
+        "the candidate's own diff passes the Test-provenance rule"
+    );
+    assert!(
+        crate::engine::classify::diff_failure(&integration_diff, TaskKind::Test, true)
+            .is_some_and(|failure| failure.kind == crate::ladder::FailureKind::TestProvenance),
+        "the integration diff, the candidate cherry-picked onto a head that already holds its \
+         test, would fail that rule: the witness discriminates"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated { key: ALPHA, .. }))
+        ),
+        "the integration judges size and opacity only, and the candidate publishes: {:?}",
+        driven.progress
+    );
+    assert!(
+        driven
+            .log
+            .iter()
+            .all(|event| !matches!(event.body, TopologyEventBody::MergeRejected { .. })),
+        "no repair was registered for a test the tree already contains"
+    );
+    assert_eq!(
+        driven.reviewer_models.len(),
+        1,
+        "the reviewer judged the proposal"
+    );
+}
+
+#[test]
 fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {
     let fixture = Fixture::two_tasks("input-rejected");
     plant_stale_verification(&fixture);
@@ -8109,12 +8356,16 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
 const BETA: TaskKey = TaskKey(1);
 
 fn plant_published_beta(fixture: &Fixture) -> CommitSha {
+    plant_published_beta_editing(fixture, "other.txt", "another task\n")
+}
+
+fn plant_published_beta_editing(fixture: &Fixture, file: &str, content: &str) -> CommitSha {
     use crate::workspace_manager::fixture::git;
     let commit = commit_on(
         fixture,
         fixture.base_sha.as_str(),
-        "other.txt",
-        "another task\n",
+        file,
+        content,
         "upstroke: task 1 attempt 1",
     );
     let tree = CommitSha(git(
@@ -8139,7 +8390,7 @@ fn plant_published_beta(fixture: &Fixture) -> CommitSha {
         &[
             for_task(BETA, "beta", dispatched_at(&fixture.base_sha)),
             for_task(BETA, "beta", attempt_started(1)),
-            candidate_prepared_for(fixture, BETA, &commit, &tree, &names, "other.txt"),
+            candidate_prepared_for(fixture, BETA, &commit, &tree, &names, file),
             TopologyEventBody::TaskCandidateCreated {
                 data: crate::topology::events::TaskCandidateCreated {
                     candidate: candidate.clone(),
