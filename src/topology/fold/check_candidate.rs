@@ -1,28 +1,21 @@
-//! The candidate checks: the settlement that prepares one, and its creation.
+//! Extended notes: `docs/internals/topology/fold/check_candidate.md`
 
 use super::*;
 
-impl RunState {
-    // --- candidate_prepared ------------------------------------------------
+const CANDIDATE_PREPARED: &str = "candidate_prepared";
 
+impl RunState {
     pub(super) fn check_candidate_prepared(
         &self,
         prepared: &CandidatePrepared,
     ) -> Result<(), FoldError> {
-        const KIND: &str = "candidate_prepared";
-        let entry = self.entry(KIND, prepared.key)?;
-        let task = self.task(KIND, prepared.key)?;
-        let generation = self.open_generation(KIND, task, prepared.key, prepared.generation)?;
-        // **The generation is still in flight, because this event is what
-        // settles it.** It used to require `Promoting`, which only an
-        // `attempt_finished{Succeeded}` could produce — so the fold *required*
-        // the dual pattern the 2026-08-12 record forbids. With the settlement
-        // moved here, a `Promoting` generation means that record was appended
-        // anyway, and the arm above already refuses it; this refuses the other
-        // half of the same shape, so neither order can produce two settlements.
+        let entry = self.entry(CANDIDATE_PREPARED, prepared.key)?;
+        let task = self.task(CANDIDATE_PREPARED, prepared.key)?;
+        let generation =
+            self.open_generation(CANDIDATE_PREPARED, task, prepared.key, prepared.generation)?;
         if !matches!(generation.class, GenerationClass::InFlight { .. }) {
             return Err(FoldError::NotTheOpenGeneration {
-                kind: KIND,
+                kind: CANDIDATE_PREPARED,
                 key: prepared.key.0,
                 generation: prepared.generation.0,
                 detail: format!(
@@ -32,42 +25,10 @@ impl RunState {
                 ),
             });
         }
-        // INV-06: "at most one candidate per generation", enforced_by "fold
-        // refuses a second candidate for a generation". Refused here, before
-        // any lease or candidate-state mutation could be planned: a second
-        // record would replace the first and hand a later
-        // `task_candidate_created` a candidate the queue never saw prepared.
-        if generation.candidate.is_some() {
-            return Err(FoldError::NotTheOpenGeneration {
-                kind: KIND,
-                key: prepared.key.0,
-                generation: prepared.generation.0,
-                detail: "the generation has already prepared a candidate, and one generation \
-                         prepares at most one"
-                    .to_owned(),
-            });
-        }
-        // **And the attempt it names must have succeeded.** This event is the
-        // sole successful settlement for a candidate-producing attempt, so a
-        // record carrying a failure is a settlement contradicting itself: the
-        // candidate's own authoritative evidence would say a gate failed while
-        // the fold promoted the generation and carried it to
-        // `task_candidate_created`, queueing it as a success.
-        //
-        // Missing until 2026-08-27. The Class B change made this the successful
-        // settlement and did not make the fold require success — the semantic
-        // condition that motivated the change was the one condition not
-        // enforced, and the round-4 review of `09f9a99` walked the five steps.
-        // It also gives `TopologyRun`'s `Brief::replay` the property it already
-        // assumed: a `candidate_prepared` record never carries feedback,
-        // because it never carries a failure.
-        //
-        // `InconsistentRecord` rather than a new variant: the refusal inventory
-        // is packet-enumerated, and "the event disagrees with the record it
-        // cites" is exactly this kind.
+        refuse_repeated_candidate(generation, prepared.key, prepared.generation)?;
         if !prepared.attempt.is_successful() {
             return Err(FoldError::InconsistentRecord {
-                kind: KIND,
+                kind: CANDIDATE_PREPARED,
                 detail: format!(
                     "attempt {} of generation {} does not record a successful attempt — \
                      failure {:?}, review outcomes {:?} — and `candidate_prepared` is the \
@@ -84,35 +45,6 @@ impl RunState {
                 ),
             });
         }
-        // **And it must have run the passes the run froze for this task.**
-        // `is_successful` above asks `all` over *the passes the record happens
-        // to carry*, which is a predicate the record's own author chooses the
-        // domain of: a `candidate_prepared` carrying a lone passed
-        // `second-opinion` — or an empty list — satisfies it, and the fold
-        // charges the rung, enters `Promoting`, and permits
-        // `task_candidate_created` for a tree the configured primary reviewer
-        // never read. Round 6 of the `cfa1be8` review found it as its first P1;
-        // that round fixed the *outcome* half — a pass recorded `Failed` or
-        // `Unavailable` is refused — and this is the *presence* half.
-        //
-        // **Fold-side, and taking `(record, frozen)`.** The predicate needs the
-        // plan and `AttemptRecord` does not carry it, so it cannot be a method
-        // on the record; the entry is already in hand here for the lease and
-        // lineage relations below.
-        //
-        // The comparison is the ordered list of pass names, so it refuses in
-        // one place every way a record can disagree with its obligation: a
-        // configured pass omitted, a pass duplicated, a pass nobody configured,
-        // and the configured passes in another order. §11.3's own reason for
-        // the order is that "a later pass only exists because every earlier one
-        // approved" — a record whose second opinion precedes its acceptance
-        // pass describes a review that did not happen.
-        //
-        // `FrozenReviews::obliged_lenses` is `review::passes_for`'s answer
-        // rather than a second reading of §11.2/§11.3, and it is the same
-        // reader the plan assembler dispatches from. That is the whole of why
-        // this is safe to enforce: the obligation the fold requires and the
-        // passes the driver runs are one derivation.
         let obliged: Vec<&str> = entry
             .reviews
             .obliged_lenses()
@@ -127,7 +59,7 @@ impl RunState {
             .collect();
         if recorded != obliged {
             return Err(FoldError::InconsistentRecord {
-                kind: KIND,
+                kind: CANDIDATE_PREPARED,
                 detail: format!(
                     "attempt {} of generation {} records the review pass(es) {:?} and this task \
                      is frozen to require {:?}, in that order — every configured pass runs and \
@@ -136,26 +68,18 @@ impl RunState {
                 ),
             });
         }
-        // ST-06: a candidate is prepared *by the attempt that succeeded*, so
-        // the embedded record names the generation's current attempt. Without
-        // this the record is inert data and a candidate can be published
-        // attributed to an attempt that did not produce it.
         if prepared.attempt.attempt != generation.attempts {
             return Err(FoldError::WrongAttempt {
-                kind: KIND,
+                kind: CANDIDATE_PREPARED,
                 key: prepared.key.0,
                 generation: prepared.generation.0,
                 attempt: prepared.attempt.attempt,
                 expected: generation.attempts.to_string(),
             });
         }
-        // INV-09 depends on this: the exact-base decision compares the
-        // integration head against `base_sha` and then publishes `commit_sha`,
-        // so a commit parented anywhere else would fast-forward the integration
-        // ref onto history nobody judged.
         if !prepared.parent_is_base() {
             return Err(FoldError::InconsistentRecord {
-                kind: KIND,
+                kind: CANDIDATE_PREPARED,
                 detail: format!(
                     "the candidate is parented on {} and the work started from {}",
                     prepared.parent_sha, prepared.base_sha
@@ -164,53 +88,19 @@ impl RunState {
         }
         if prepared.base_sha != generation.base_sha {
             return Err(FoldError::InconsistentRecord {
-                kind: KIND,
+                kind: CANDIDATE_PREPARED,
                 detail: format!(
                     "it records base {} and generation {} was dispatched at {}",
                     prepared.base_sha, prepared.generation.0, generation.base_sha
                 ),
             });
         }
-        match (&prepared.lease_effect, entry.lineage) {
-            (CandidateLeaseEffect::ReplacesPredicted { paths }, None) => {
-                if *paths != prepared.actual_paths {
-                    return Err(FoldError::InconsistentRecord {
-                        kind: KIND,
-                        detail: "the region it takes is not the region its diff touched".to_owned(),
-                    });
-                }
-            }
-            (CandidateLeaseEffect::WidensLineage { root, paths }, Some(lineage)) => {
-                if *root != lineage.root {
-                    return Err(FoldError::InconsistentRecord {
-                        kind: KIND,
-                        detail: format!(
-                            "it widens lineage {root} and its task descends from {}",
-                            lineage.root
-                        ),
-                    });
-                }
-                if *paths != prepared.actual_paths {
-                    return Err(FoldError::InconsistentRecord {
-                        kind: KIND,
-                        detail: "the region it widens by is not the region its diff touched"
-                            .to_owned(),
-                    });
-                }
-            }
-            _ => {
-                return Err(FoldError::InconsistentRecord {
-                    kind: KIND,
-                    detail: "a lineage member widens its lineage and an ordinary candidate \
-                             replaces its predicted region; this does the other one"
-                        .to_owned(),
-                });
-            }
-        }
-        Ok(())
+        check_lease_effect(
+            &prepared.lease_effect,
+            entry.lineage.map(|lineage| lineage.root),
+            &prepared.actual_paths,
+        )
     }
-
-    // --- task_candidate_created --------------------------------------------
 
     pub(super) fn check_candidate_created(
         &self,
@@ -220,20 +110,16 @@ impl RunState {
         let candidate = &created.candidate;
         let task = self.task(KIND, candidate.key)?;
         let generation = self.open_generation(KIND, task, candidate.key, candidate.generation)?;
-        // ST-06: a mismatched task_candidate_created.
-        let prepared = match &generation.candidate {
-            Some(prepared) if generation.class == GenerationClass::Promoting => prepared,
-            _ => {
-                return Err(FoldError::NotTheOpenGeneration {
-                    kind: KIND,
-                    key: candidate.key.0,
-                    generation: candidate.generation.0,
-                    detail: format!(
-                        "the generation is {} and has prepared no candidate",
-                        generation.class.name()
-                    ),
-                });
-            }
+        let Some(prepared) = promoting_candidate(generation) else {
+            return Err(FoldError::NotTheOpenGeneration {
+                kind: KIND,
+                key: candidate.key.0,
+                generation: candidate.generation.0,
+                detail: format!(
+                    "the generation is {} and has prepared no candidate",
+                    generation.class.name()
+                ),
+            });
         };
         if prepared.candidate != *candidate {
             return Err(FoldError::InconsistentRecord {
@@ -248,5 +134,275 @@ impl RunState {
             });
         }
         Ok(())
+    }
+}
+
+fn check_lease_effect(
+    lease_effect: &CandidateLeaseEffect,
+    lineage_root: Option<TaskKey>,
+    actual_paths: &PathSet,
+) -> Result<(), FoldError> {
+    match (lease_effect, lineage_root) {
+        (CandidateLeaseEffect::ReplacesPredicted { paths }, None) => {
+            if paths != actual_paths {
+                return Err(FoldError::InconsistentRecord {
+                    kind: CANDIDATE_PREPARED,
+                    detail: "the region it takes is not the region its diff touched".to_owned(),
+                });
+            }
+        }
+        (CandidateLeaseEffect::WidensLineage { root, paths }, Some(lineage_root)) => {
+            if *root != lineage_root {
+                return Err(FoldError::InconsistentRecord {
+                    kind: CANDIDATE_PREPARED,
+                    detail: format!(
+                        "it widens lineage {root} and its task descends from {lineage_root}"
+                    ),
+                });
+            }
+            if paths != actual_paths {
+                return Err(FoldError::InconsistentRecord {
+                    kind: CANDIDATE_PREPARED,
+                    detail: "the region it widens by is not the region its diff touched".to_owned(),
+                });
+            }
+        }
+        (CandidateLeaseEffect::ReplacesPredicted { .. }, Some(_))
+        | (CandidateLeaseEffect::WidensLineage { .. }, None) => {
+            return Err(FoldError::InconsistentRecord {
+                kind: CANDIDATE_PREPARED,
+                detail: "a lineage member widens its lineage and an ordinary candidate \
+                         replaces its predicted region; this does the other one"
+                    .to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn refuse_repeated_candidate(
+    generation: &GenerationFold,
+    key: TaskKey,
+    generation_id: GenerationId,
+) -> Result<(), FoldError> {
+    if generation.candidate.is_some() {
+        return Err(FoldError::NotTheOpenGeneration {
+            kind: CANDIDATE_PREPARED,
+            key: key.0,
+            generation: generation_id.0,
+            detail: "the generation has already prepared a candidate, and one generation \
+                     prepares at most one"
+                .to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn promoting_candidate(generation: &GenerationFold) -> Option<&PreparedCandidate> {
+    match &generation.candidate {
+        Some(prepared) if generation.class == GenerationClass::Promoting => Some(prepared),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ROOT: TaskKey = TaskKey(1);
+    const ANOTHER_ROOT: TaskKey = TaskKey(7);
+    const MISMATCHED_PAIRING: &str = "a lineage member widens its lineage and an ordinary \
+                                      candidate replaces its predicted region; this does the \
+                                      other one";
+
+    fn region(name: &str) -> PathSet {
+        PathSet::Prefixes {
+            paths: vec![GitPath(format!("src/{name}/"))],
+        }
+    }
+
+    fn refusal(result: &Result<(), FoldError>) -> Option<(&str, &str)> {
+        match result {
+            Err(FoldError::InconsistentRecord { kind, detail }) => Some((kind, detail.as_str())),
+            _ => None,
+        }
+    }
+
+    fn prepared() -> PreparedCandidate {
+        PreparedCandidate {
+            candidate: CandidateRef {
+                key: TaskKey(0),
+                generation: GenerationId(0),
+                commit_sha: CommitSha("c".repeat(40)),
+                candidate_ref: GitRef("refs/upstroke/runs/run/candidates/0/0".to_owned()),
+            },
+            base_sha: CommitSha("b".repeat(40)),
+            tree_sha: CommitSha("t".repeat(40)),
+            paths: region("alpha"),
+        }
+    }
+
+    fn generation(class: GenerationClass, candidate: Option<PreparedCandidate>) -> GenerationFold {
+        GenerationFold {
+            id: GenerationId(0),
+            class,
+            base_sha: CommitSha("b".repeat(40)),
+            lease: GenerationLease::Own,
+            attempts: 1,
+            candidate,
+        }
+    }
+
+    #[test]
+    fn an_ordinary_candidate_takes_exactly_the_region_its_diff_touched() {
+        let taken = CandidateLeaseEffect::ReplacesPredicted {
+            paths: region("alpha"),
+        };
+        assert_eq!(check_lease_effect(&taken, None, &region("alpha")), Ok(()));
+
+        let elsewhere = CandidateLeaseEffect::ReplacesPredicted {
+            paths: region("beta"),
+        };
+        let refused = check_lease_effect(&elsewhere, None, &region("alpha"));
+        assert_eq!(
+            refusal(&refused),
+            Some((
+                CANDIDATE_PREPARED,
+                "the region it takes is not the region its diff touched"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_widening_that_names_a_lineage_its_task_does_not_descend_from_is_refused() {
+        let widens = CandidateLeaseEffect::WidensLineage {
+            root: ANOTHER_ROOT,
+            paths: region("alpha"),
+        };
+        let refused = check_lease_effect(&widens, Some(ROOT), &region("alpha"));
+        let expected =
+            format!("it widens lineage {ANOTHER_ROOT} and its task descends from {ROOT}");
+        assert_eq!(
+            refusal(&refused),
+            Some((CANDIDATE_PREPARED, expected.as_str()))
+        );
+    }
+
+    #[test]
+    fn a_widening_widens_by_exactly_the_region_its_diff_touched() {
+        let widens = CandidateLeaseEffect::WidensLineage {
+            root: ROOT,
+            paths: region("alpha"),
+        };
+        assert_eq!(
+            check_lease_effect(&widens, Some(ROOT), &region("alpha")),
+            Ok(())
+        );
+
+        let elsewhere = CandidateLeaseEffect::WidensLineage {
+            root: ROOT,
+            paths: region("beta"),
+        };
+        let refused = check_lease_effect(&elsewhere, Some(ROOT), &region("alpha"));
+        assert_eq!(
+            refusal(&refused),
+            Some((
+                CANDIDATE_PREPARED,
+                "the region it widens by is not the region its diff touched"
+            ))
+        );
+    }
+
+    #[test]
+    fn a_lineage_member_widens_and_an_ordinary_candidate_replaces_and_neither_does_the_other() {
+        let replaces = CandidateLeaseEffect::ReplacesPredicted {
+            paths: region("alpha"),
+        };
+        let by_a_lineage_member = check_lease_effect(&replaces, Some(ROOT), &region("alpha"));
+        assert_eq!(
+            refusal(&by_a_lineage_member),
+            Some((CANDIDATE_PREPARED, MISMATCHED_PAIRING))
+        );
+
+        let widens = CandidateLeaseEffect::WidensLineage {
+            root: ROOT,
+            paths: region("alpha"),
+        };
+        let by_an_ordinary_task = check_lease_effect(&widens, None, &region("alpha"));
+        assert_eq!(
+            refusal(&by_an_ordinary_task),
+            Some((CANDIDATE_PREPARED, MISMATCHED_PAIRING))
+        );
+    }
+
+    #[test]
+    fn a_generation_that_already_prepared_a_candidate_is_refused() {
+        let held = generation(
+            GenerationClass::InFlight {
+                attempt: AttemptNumber(1),
+            },
+            Some(prepared()),
+        );
+        let refused = refuse_repeated_candidate(&held, ROOT, GenerationId(3));
+        assert_eq!(
+            refused,
+            Err(FoldError::NotTheOpenGeneration {
+                kind: CANDIDATE_PREPARED,
+                key: ROOT.0,
+                generation: 3,
+                detail: "the generation has already prepared a candidate, and one generation \
+                         prepares at most one"
+                    .to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_generation_with_no_candidate_yet_is_not_refused() {
+        let held = generation(
+            GenerationClass::InFlight {
+                attempt: AttemptNumber(1),
+            },
+            None,
+        );
+        assert_eq!(
+            refuse_repeated_candidate(&held, ROOT, GenerationId(3)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_promoting_generation_offers_the_candidate_it_prepared() {
+        let held = generation(GenerationClass::Promoting, Some(prepared()));
+        assert_eq!(promoting_candidate(&held), Some(&prepared()));
+    }
+
+    #[test]
+    fn a_generation_that_is_not_promoting_offers_no_candidate_even_when_one_is_attached() {
+        let classes = [
+            GenerationClass::OpenNoAttempt,
+            GenerationClass::InFlight {
+                attempt: AttemptNumber(1),
+            },
+            GenerationClass::RetainedIdle {
+                session: SessionId("session".to_owned()),
+                incarnation: Epoch(0),
+            },
+            GenerationClass::Closed,
+        ];
+        for class in classes {
+            let named = class.name();
+            let held = generation(class, Some(prepared()));
+            assert!(
+                promoting_candidate(&held).is_none(),
+                "a generation that is {named} offered a candidate to promote"
+            );
+        }
+    }
+
+    #[test]
+    fn a_promoting_generation_that_prepared_nothing_offers_no_candidate() {
+        let held = generation(GenerationClass::Promoting, None);
+        assert!(promoting_candidate(&held).is_none());
     }
 }

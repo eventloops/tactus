@@ -1,13 +1,8 @@
-//! The derived outcome (INV-15) and the structural predicates it and the
-//! selection accessors are both answered from.
+//! Extended notes: `docs/internals/topology/fold/outcome.md`
 
 use super::*;
 
 impl RunState {
-    // -----------------------------------------------------------------------
-    // derived_outcome
-    // -----------------------------------------------------------------------
-
     pub(super) fn derived_outcome(&self) -> DerivedOutcome {
         if !self.common() {
             return DerivedOutcome::NotEnding;
@@ -30,7 +25,6 @@ impl RunState {
         DerivedOutcome::FoldError
     }
 
-    /// No generation is open and no integration transaction is unresolved.
     pub(super) fn common(&self) -> bool {
         self.tasks.iter().all(|task| {
             task.open()
@@ -38,11 +32,10 @@ impl RunState {
         }) && self.transaction.is_none()
     }
 
-    /// Some task could be dispatched, retried, or integrated from this state
-    /// alone. Budget, capacity and runner availability are not consulted.
     pub(super) fn structurally_admissible(&self) -> bool {
-        (0..self.tasks.len())
-            .map(|index| TaskKey(u32::try_from(index).unwrap_or(u32::MAX)))
+        let keys = u32::try_from(self.tasks.len()).unwrap_or(u32::MAX);
+        (0..keys)
+            .map(TaskKey)
             .any(|key| self.ready(key) || self.ready_retry(key))
             || self.integration_admissible()
     }
@@ -59,41 +52,35 @@ impl RunState {
                     .get(dep.index())
                     .is_some_and(|dep| dep.state == TaskState::Merged)
             })
-            && self.open_question_for(key).is_none()
+            && !self.lineage_has_question(key)
             && !self.queue.holds_task(key)
             && self
                 .transaction
                 .as_ref()
                 .is_none_or(|open| open.candidate.key != key)
-            && self.dispatch_lease_check(key, entry)
+            && self.dispatch_lease_check(key, entry, task)
             && self.pipeline_reservable()
             && !self.run_is_ending()
     }
 
-    /// A repair dispatch is never lease-blocked; an ordinary one is blocked by
-    /// any overlapping active lease of another owner.
-    ///
-    /// The predicted region is not in the log until the dispatch that takes it,
-    /// so the check the *fold* can make is over the run's own leases: a task
-    /// with a repo-wide prediction is admissible exactly when nothing is held.
-    pub(super) fn dispatch_lease_check(&self, key: TaskKey, entry: &TaskEntry) -> bool {
+    pub(super) fn dispatch_lease_check(
+        &self,
+        key: TaskKey,
+        entry: &TaskEntry,
+        task: &TaskFold,
+    ) -> bool {
         if entry.lineage.is_some() {
             return true;
         }
-        let predicted = predicted_region(entry);
+        let Ok(generation) = u32::try_from(task.generations.len()) else {
+            return false;
+        };
         !self.leases.overlaps_another(
             LeaseOwner::Generation {
                 key,
-                generation: GenerationId(
-                    u32::try_from(
-                        self.tasks
-                            .get(key.index())
-                            .map_or(0, |task| task.generations.len()),
-                    )
-                    .unwrap_or(u32::MAX),
-                ),
+                generation: GenerationId(generation),
             },
-            &predicted,
+            &predicted_region(entry),
             &self.started.path_policy,
         )
     }
@@ -110,7 +97,7 @@ impl RunState {
         });
         task.state == TaskState::Pending
             && retained
-            && self.open_question_for(key).is_none()
+            && !self.lineage_has_question(key)
             && self
                 .transaction
                 .as_ref()
@@ -119,38 +106,41 @@ impl RunState {
             && !self.run_is_ending()
     }
 
+    pub(super) fn eligible_continuation(&self, key: TaskKey) -> Option<GenerationId> {
+        if self.run_is_ending() || self.lineage_has_question(key) {
+            return None;
+        }
+        self.tasks
+            .get(key.index())
+            .and_then(TaskFold::open)
+            .filter(|generation| generation.class == GenerationClass::OpenNoAttempt)
+            .map(|generation| generation.id)
+    }
+
     pub(super) fn pipeline_reservable(&self) -> bool {
         self.pipeline_held()
             < usize::try_from(self.started.limits.max_parallel).unwrap_or(usize::MAX)
     }
 
-    /// `permits.provisional_reservations` gives integration selection the
-    /// `{pipeline, merge}` pair, and `deadlock_freedom` takes a reservation
-    /// "only when the derived count permits" — so the entitlement is a clause
-    /// of admissibility here for the same reason it is one in [`Self::ready`]
-    /// and [`Self::ready_retry`], and not a check the caller is trusted to
-    /// remember. `permits.pipeline` counts an unresolved integration
-    /// transaction among the held, which is the other half of the same
-    /// statement: a selector that admitted an integration while the count was
-    /// at `max_parallel` would open the entitlement that is already held.
     pub(super) fn integration_admissible(&self) -> bool {
-        self.transaction.is_none()
-            && self.pipeline_reservable()
-            && !self.run_is_ending()
-            && self
-                .queue
-                .first_eligible(
-                    |key| self.task_is_awaiting_input(key),
-                    &self.leases,
-                    &self.started.path_policy,
-                )
-                .is_some()
+        self.eligible_integration_candidate().is_some()
+    }
+
+    pub(super) fn eligible_integration_candidate(&self) -> Option<&CandidateRef> {
+        if self.transaction.is_some() || !self.pipeline_reservable() || self.run_is_ending() {
+            return None;
+        }
+        self.queue
+            .first_eligible(
+                |key| self.task_is_awaiting_input(key),
+                &self.leases,
+                &self.started.path_policy,
+            )
+            .map(|entry| &entry.candidate)
     }
 
     pub(super) fn backoff_pending(&self) -> bool {
-        self.tasks
-            .iter()
-            .any(|task| task.state == TaskState::Deferred)
+        !self.deferred_tasks.is_empty()
             || self
                 .queue
                 .entries()
@@ -166,47 +156,35 @@ impl RunState {
         let blocked = self.blocked_tasks();
         self.tasks.iter().enumerate().all(|(index, task)| {
             task.state.is_terminal()
-                || (task.state == TaskState::Pending && blocked.contains(&index))
+                || (task.state == TaskState::Pending
+                    && u32::try_from(index).is_ok_and(|key| blocked.contains(&TaskKey(key))))
         }) && self.queue.is_empty()
             && !self.leases.any_candidate_or_lineage()
     }
 
-    /// Every task that can never run because a failure sits in its transitive
-    /// dependency closure.
-    pub(super) fn blocked_tasks(&self) -> BTreeSet<usize> {
+    pub(super) fn blocked_tasks(&self) -> BTreeSet<TaskKey> {
         let mut blocked = BTreeSet::new();
-        // To a fixed point, not in one pass. A *repair*'s dependencies refer
-        // only backwards, but an original's keys are assigned in plan order
-        // (`keys_by_display_id`) and plan order is not topological order, so
-        // an ordinary plan can have a task depend on a later key. One forward
-        // pass would then decide that task before it had decided what the task
-        // waits on, and a failure two hops away would go unseen — which is the
-        // difference between "directly failed dependency" and the transitive
-        // closure the packet asks for.
-        //
-        // Each round adds at least one member or stops, and membership only
-        // grows, so this runs at most `tasks.len()` rounds.
         loop {
             let mut grew = false;
             for (index, task) in self.tasks.iter().enumerate() {
-                if task.state != TaskState::Pending || blocked.contains(&index) {
+                let Ok(key) = u32::try_from(index).map(TaskKey) else {
+                    continue;
+                };
+                if task.state != TaskState::Pending || blocked.contains(&key) {
                     continue;
                 }
-                let Some(entry) = self
-                    .registry
-                    .get(TaskKey(u32::try_from(index).unwrap_or(u32::MAX)))
-                else {
+                let Some(entry) = self.registry.get(key) else {
                     continue;
                 };
                 let poisoned = entry.deps.iter().any(|dep| {
-                    blocked.contains(&dep.index())
+                    blocked.contains(dep)
                         || self
                             .tasks
                             .get(dep.index())
                             .is_some_and(|dep| dep.state == TaskState::Failed)
                 });
                 if poisoned {
-                    blocked.insert(index);
+                    blocked.insert(key);
                     grew = true;
                 }
             }

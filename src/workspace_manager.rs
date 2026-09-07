@@ -743,11 +743,13 @@ pub struct WorkspaceManager {
 ///
 /// **This is not `runner::container::racing_removal`, and the two must not be merged.**
 /// That one resolves a *handoff*: two threads racing on one path, where the loser needs
-/// only the winner's in-flight call to return, which is why it spends
-/// `RACING_ACCESS_ATTEMPTS` cheap `yield_now`s and no wall-clock at all. This one waits
-/// on a *kernel* condition with a millisecond timescale, which no number of yields
-/// reaches. Give either race the other's budget and both stop working: the handoff
-/// would sleep for a microsecond problem, and this would spin through a dead process's
+/// only the winner's in-flight call to return. It spends `RACING_YIELD_ATTEMPTS` cheap
+/// `yield_now`s first, and sleeps `RACING_SLEEP` for the rest of `RACING_ACCESS_ATTEMPTS`
+/// only because the winner's last step — closing the handle that marked the name — can be
+/// descheduled for a quantum, which no yield on another processor reaches. This one waits
+/// on a *kernel* condition with a longer timescale: a dying process closing every handle it
+/// holds. Give either race the other's budget and both stop working: the handoff would
+/// sleep a second for a microsecond problem, and this would give up on a dead process's
 /// handles long before they closed.
 /// How many times [`remove_tree_once_handles_close`] tries before it calls a
 /// handle a lock rather than a closing process.
@@ -1587,7 +1589,7 @@ impl WorkspaceManager {
     /// #136's rows record. **It is not a guarantee that the sampled child runs
     /// the funnel's argv**, and this comment previously said it was. It does
     /// **not** make the kill go through the process funnel either — that is
-    /// `PR5D-PROCESS-FUNNEL-TAKES-NO-SITE` in `reviews/FINDINGS.md`, owned by
+    /// `PR5D-PROCESS-FUNNEL-TAKES-NO-SITE` in `reviews/findings/`, owned by
     /// PR6/PR7 with `src/runner/**` frozen — and this comment does not claim it
     /// does.
     pub(crate) const CANDIDATE_STAGE_ARGV: [&str; 4] = ["add", "-A", "--", "."];
@@ -2895,8 +2897,10 @@ impl WorkspaceManager {
     /// filesystem is the judged tree while a process inspecting it through Git
     /// may not see that tree, and this doc claims only the first. Closing the
     /// second is product-wide behaviour needing a `design/` sentence about
-    /// what an exact snapshot is defined against, and is a deferred row in
-    /// `reviews/FINDINGS.md` §50 awaiting the owner's design ruling.
+    /// what an exact snapshot is defined against, and is a deferred finding in
+    /// `reviews/findings/`
+    /// (`id: PR130-REVIEW3-REPLACEMENT-ISOLATION-STOPS-AT-THE-MANAGER`)
+    /// awaiting the owner's design ruling.
     fn command(&self, cwd: &Path, args: &[OsString]) -> Command {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(self.hooks_dir());

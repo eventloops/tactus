@@ -1,14 +1,24 @@
 name: CI
 
 on:
-  # The integration branch for the parallel-execution design receives slice
-  # pull requests and is tested on every merge into it; each slice head gets
-  # a single-reviewer frontier review. decisions/2026-08-21-stacked-slice-prs.md
+  # `master` is the only base. The parallel-execution design's integration
+  # branch, `codex/parallelism-design`, was deleted once its slices had landed;
+  # standing another one up means adding its name to every branch list here and
+  # in pr-policy.yml, and to the gate that pins them, in one change
+  # (MAINTAINING.md, Repository rules).
   push:
-    branches: [master, codex/parallelism-design]
+    branches: [master]
   pull_request:
-    branches: [master, codex/parallelism-design]
+    branches: [master]
     types: [opened, edited, synchronize, reopened]
+  # The merge queue builds each entry on the head of its base plus the entries
+  # queued ahead of it, and lands exactly the commit these contexts passed on;
+  # a branch is never brought up to date by hand to merge (MAINTAINING.md,
+  # Repository rules). The concurrency key below is `github.ref` for this
+  # event, one queue branch per entry, so entries never cancel each other.
+  merge_group:
+    types: [checks_requested]
+    branches: [master]
 
 permissions:
   contents: read
@@ -82,7 +92,7 @@ jobs:
   # target directory is pre-warmed, so there is no cache step.
   test-windows:
     name: test (winguest)
-    runs-on: [self-hosted, windows, winguest]
+    runs-on: [self-hosted, windows, "${{ github.event_name == 'merge_group' && 'winguest-queue' || 'winguest' }}"]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -205,6 +215,8 @@ jobs:
       - run: bash .github/scripts/test-pr-policy.sh
       - run: bash .github/scripts/test-pr-ledger-evidence.sh
       - run: bash .github/scripts/test-docs-consistency.sh
+      - run: bash .github/scripts/test-internals-notes.sh
+      - run: bash .github/scripts/test-pr-ready-audit.sh
 
   # Branch protection requires this one deliberately stable context. Keeping
   # the external rule pointed at an aggregate means adding a platform or

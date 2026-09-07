@@ -1,42 +1,5 @@
-//! Turning captured bytes into raw and typed shapes.
-//!
-//! Every function here that reads a file's contents takes a [`FileSnapshot`]
-//! and never a path. That is the whole of what makes a pre-lock validation
-//! worth its ordering: the bytes that were validated and the bytes that are
-//! parsed are the same object, so there is no second read for the file to
-//! change between. A reader here that reached for the path instead would
-//! reintroduce exactly the window the capture exists to close.
-//!
-//! `parse_pool` is the exception to the shape and not to the rule: it takes a
-//! `&Path` and never reads through it. The path is what it names in the error
-//! it returns and in one diagnostic string, nothing more. A later change that
-//! wants a file's contents here reaches for the snapshot, never for that path.
-//!
-//! `[pools]` keeps the temperament the rest of the configuration surface has:
-//! anything that would silently change what the estimator does is an error,
-//! anything that only degrades what it can say is a warning that names the key.
-//! Pool order is file order, and file order is preference — the span each entry
-//! carries is what preserves it through a map.
+//! Extended notes: `docs/internals/config/read.md`
 
-// **This child states its own lint level and inherits nothing.** A Rust lint
-// level is scoped by the module tree rather than by the file, so an out-of-line
-// child of `src/config.rs` inherits that file's inner
-// `#![allow(clippy::disallowed_methods)]` unless it says otherwise --
-// `PR6-LANEF-004`, and the mistake two W1 pull requests then made
-// independently (#100 and #102). Nothing here reaches a governed primitive, so
-// all three governed lints are DENIED and this module takes no
-// `effects/allowlist.toml` row: a row records an allowance, and this module
-// takes none.
-//
-// The three are not equally load-bearing, and which is which is worth stating.
-// `src/config.rs` allows `clippy::disallowed_methods` and that lint alone, so
-// the first line below is the one that restores a level the parent removed
-// outright: without it, a denied method here raises no diagnostic at all. The
-// other two raise this module from clippy's default `warn` to `deny`, so a
-// denied type or macro fails here on its own rather than only under CI's
-// `-D warnings`. All three are written out because what decides the first one
-// is a property of the parent's attribute rather than of this file, and a
-// parent's attribute can widen without this file changing.
 #![deny(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -61,35 +24,15 @@ pub(super) fn read_repo_config(
         }
         return Ok((RawRepoConfig::default(), path));
     };
-    let raw = toml::from_str(&text).map_err(|e| UpstrokeError::Config {
-        path: path.clone(),
-        message: e.to_string(),
-    })?;
-    Ok((raw, path))
+    match toml::from_str(&text) {
+        Ok(raw) => Ok((raw, path)),
+        Err(e) => Err(UpstrokeError::Config {
+            path,
+            message: e.to_string(),
+        }),
+    }
 }
 
-/// Read `~/.upstroke/pools.toml` into typed pools (§17).
-///
-/// Temperament matches the rest of this file: anything that would silently
-/// change what the estimator does is an error, and anything that only degrades
-/// what it can say is a warning.
-///
-/// - unknown `kind` → **error**; it decides which estimator rule runs.
-/// - unknown `sources` entry → **error**; dropping `signals` by typo would
-///   discard §13's ground truth while the file still claims to have it.
-/// - `safety_margin` / `reserve` outside `0.0..=1.0` → **error**; both are
-///   fractions, and a "150% margin" has no reading that is merely degraded.
-/// - `agent` with no adapter in this build → **warn**, pool kept and marked
-///   unusable. §17's own example ships `[pools.local] agent = "aider"`, so
-///   erroring would brick anyone who copied the documented file.
-/// - unknown keys → **warn**, by name.
-///
-/// An **explicit** `--pools` path that does not exist is an error, the way an
-/// explicit `--config` is in [`read_repo_config`]: a path someone typed and
-/// that is not there is a typo, and answering it with "no pools connected —
-/// run `upstroke connect`" sends them to regenerate a file that was never the
-/// problem. A *discovered* one that is absent is the normal fresh case and
-/// stays silent.
 pub(super) fn read_pools(
     pools: Option<&FileSnapshot>,
     has_adapter: &dyn Fn(&str) -> bool,
@@ -108,11 +51,15 @@ pub(super) fn read_pools(
         }
         return Ok(Vec::new());
     };
-    let raw: RawPools = toml::from_str(&text).map_err(|e| UpstrokeError::Config {
-        path: path.clone(),
-        message: e.to_string(),
-    })?;
-    // Back into the order they were written in — see [`RawPools`].
+    let raw: RawPools = match toml::from_str(&text) {
+        Ok(raw) => raw,
+        Err(e) => {
+            return Err(UpstrokeError::Config {
+                path,
+                message: e.to_string(),
+            });
+        }
+    };
     let mut entries: Vec<(String, toml::Spanned<toml::Value>)> =
         raw.pools.unwrap_or_default().into_iter().collect();
     entries.sort_by_key(|(_, spanned)| spanned.span().start);
@@ -140,12 +87,6 @@ fn parse_pool(
         path: path.to_path_buf(),
         message,
     };
-    // A pool's name is its identity everywhere downstream — it is what an
-    // attempt is attributed to and what the ledger prints. A blank one is
-    // indistinguishable from "no pool" by the time it reaches the engine
-    // (`pool_option` maps `""` to `None`), so the attribution would vanish
-    // while the pool still matched for routing. Same reasoning as the
-    // non-empty `[[gates]]` `name`.
     if name.trim().is_empty() {
         return Err(config_error(
             "a pool needs a non-empty name — `[pools.<name>]` is what attempts are attributed to"
@@ -223,7 +164,17 @@ fn parse_pool(
         Some(toml::Value::String(text)) if text.trim().eq_ignore_ascii_case("auto") => {
             Allowance::Auto
         }
-        Some(toml::Value::Integer(units)) => Allowance::Units(units as f64),
+        Some(toml::Value::Integer(units)) => {
+            if !converts_exactly(units) {
+                return Err(config_error(format!(
+                    "[pools.{name}] `monthly_allowance = {units}` cannot be held as written — an \
+                     allowance is a 64-bit float, which carries {} significant bits, and this \
+                     integer needs more; write a value that converts without change",
+                    f64::MANTISSA_DIGITS
+                )));
+            }
+            Allowance::Units(units as f64)
+        }
         Some(toml::Value::Float(units)) => Allowance::Units(units),
         Some(other) => {
             return Err(config_error(format!(
@@ -271,4 +222,314 @@ fn parse_pool(
         profile: raw.profile,
         usable,
     })
+}
+
+fn converts_exactly(units: i64) -> bool {
+    let magnitude = units.unsigned_abs();
+    magnitude == 0
+        || u64::BITS - magnitude.leading_zeros() - magnitude.trailing_zeros()
+            <= f64::MANTISSA_DIGITS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool_value(body: &str) -> toml::Value {
+        toml::from_str(body).expect("valid pool body")
+    }
+
+    fn any_adapter(_: &str) -> bool {
+        true
+    }
+
+    fn absent(tag: &str, required: bool) -> FileSnapshot {
+        FileSnapshot {
+            path: PathBuf::from(format!("absent-{tag}.toml")),
+            required,
+            content: Ok(None),
+        }
+    }
+
+    #[test]
+    fn read_repo_config_of_a_required_absent_file_is_an_error() {
+        let snapshot = absent("required", true);
+        let err = read_repo_config(&snapshot).expect_err("a required file that is absent errors");
+        assert!(matches!(err, UpstrokeError::Config { .. }));
+        assert!(err.to_string().contains("file not found"));
+    }
+
+    #[test]
+    fn read_repo_config_of_an_optional_absent_file_is_the_default() {
+        let snapshot = absent("optional", false);
+        let (raw, returned_path) = read_repo_config(&snapshot).expect("absent optional defaults");
+        assert_eq!(returned_path.as_path(), snapshot.path());
+        assert!(raw.routing.is_none());
+        assert!(raw.pins.is_none());
+    }
+
+    #[test]
+    fn a_blank_pool_name_is_refused() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let err = parse_pool(
+            "   ",
+            pool_value("kind = \"credits\"\nagent = \"claude-code\"\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect_err("a blank name is refused");
+        assert!(err.to_string().contains("non-empty name"));
+    }
+
+    #[test]
+    fn an_unrecognized_kind_is_refused_naming_the_accepted_set() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let err = parse_pool(
+            "p",
+            pool_value("kind = \"subscription\"\nagent = \"claude-code\"\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect_err("an unrecognized kind is refused");
+        assert!(err.to_string().contains("subscription"));
+    }
+
+    #[test]
+    fn a_missing_agent_is_refused() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let err = parse_pool(
+            "p",
+            pool_value("kind = \"credits\"\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect_err("a pool with no agent is refused");
+        assert!(err.to_string().contains("no `agent`"));
+    }
+
+    #[test]
+    fn an_unparseable_window_is_refused() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let err = parse_pool(
+            "p",
+            pool_value(
+                "kind = \"subscription-window\"\nagent = \"claude-code\"\nwindow = \"soon\"\n",
+            ),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect_err("an unparseable window is refused");
+        assert!(err.to_string().contains("soon"));
+    }
+
+    #[test]
+    fn safety_margin_outside_zero_to_one_is_refused() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let err = parse_pool(
+            "p",
+            pool_value("kind = \"credits\"\nagent = \"claude-code\"\nsafety_margin = 1.5\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect_err("an out-of-range safety_margin is refused");
+        assert!(err.to_string().contains("safety_margin"));
+    }
+
+    #[test]
+    fn reserve_outside_zero_to_one_is_refused() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let err = parse_pool(
+            "p",
+            pool_value("kind = \"credits\"\nagent = \"claude-code\"\nreserve = -0.1\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect_err("a negative reserve is refused");
+        assert!(err.to_string().contains("reserve"));
+    }
+
+    #[test]
+    fn monthly_allowance_accepts_auto_case_and_whitespace_insensitively() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let pool = parse_pool(
+            "p",
+            pool_value(
+                "kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = \" AUTO \"\n",
+            ),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect("auto, any case and padding, is accepted");
+        assert_eq!(pool.monthly_allowance, Allowance::Auto);
+    }
+
+    #[test]
+    fn monthly_allowance_accepts_an_integer_as_units() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let pool = parse_pool(
+            "p",
+            pool_value("kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = 300\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect("an integer allowance is accepted");
+        assert_eq!(pool.monthly_allowance, Allowance::Units(300.0));
+    }
+
+    #[test]
+    fn monthly_allowance_accepts_a_float_as_units() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let pool = parse_pool(
+            "p",
+            pool_value("kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = 12.5\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect("a float allowance is accepted");
+        assert_eq!(pool.monthly_allowance, Allowance::Units(12.5));
+    }
+
+    #[test]
+    fn an_integer_allowance_that_converts_exactly_is_accepted_unchanged() {
+        let path = Path::new("pools.toml");
+        for (written, expected) in [
+            ("9007199254740992", 9_007_199_254_740_992.0),
+            ("9007199254740994", 9_007_199_254_740_994.0),
+            ("10000000000000000", 10_000_000_000_000_000.0),
+        ] {
+            let mut warnings = Vec::new();
+            let pool = parse_pool(
+                "p",
+                pool_value(&format!(
+                    "kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = {written}\n"
+                )),
+                path,
+                &any_adapter,
+                &mut warnings,
+            )
+            .expect("an integer that converts exactly is an allowance");
+            assert_eq!(
+                pool.monthly_allowance,
+                Allowance::Units(expected),
+                "{written} survives the cast as the number that was written"
+            );
+        }
+    }
+
+    #[test]
+    fn an_integer_allowance_the_cast_would_change_is_refused() {
+        let path = Path::new("pools.toml");
+        for units in [9_007_199_254_740_993_i64, i64::MAX] {
+            let mut warnings = Vec::new();
+            let err = parse_pool(
+                "p",
+                pool_value(&format!(
+                    "kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = {units}\n"
+                )),
+                path,
+                &any_adapter,
+                &mut warnings,
+            )
+            .expect_err("an allowance past the exactly-representable range is refused");
+            assert!(err.to_string().contains("monthly_allowance"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn monthly_allowance_rejects_zero_and_negative_and_non_finite() {
+        let path = Path::new("pools.toml");
+        for body in [
+            "kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = 0\n",
+            "kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = -5\n",
+            "kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = nan\n",
+            "kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = inf\n",
+        ] {
+            let mut warnings = Vec::new();
+            let err = parse_pool("p", pool_value(body), path, &any_adapter, &mut warnings)
+                .expect_err(&format!("{body} is not a usable allowance"));
+            assert!(err.to_string().contains("monthly_allowance"), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn monthly_allowance_of_the_wrong_shape_names_the_type_it_saw() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let err = parse_pool(
+            "p",
+            pool_value("kind = \"credits\"\nagent = \"claude-code\"\nmonthly_allowance = true\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect_err("a boolean allowance is refused");
+        assert!(err.to_string().contains("monthly_allowance"));
+    }
+
+    #[test]
+    fn duplicate_sources_entries_are_deduplicated_in_file_order() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let pool = parse_pool(
+            "p",
+            pool_value(
+                "kind = \"credits\"\nagent = \"claude-code\"\nsources = [\"signals\", \"signals\"]\n",
+            ),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect("duplicate sources parse");
+        assert_eq!(pool.sources.len(), 1);
+    }
+
+    #[test]
+    fn an_agent_with_no_adapter_warns_and_the_pool_stays_but_unusable() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let pool = parse_pool(
+            "p",
+            pool_value("kind = \"credits\"\nagent = \"nonexistent\"\n"),
+            path,
+            &|_: &str| false,
+            &mut warnings,
+        )
+        .expect("a pool for an unknown adapter is still a pool");
+        assert!(!pool.usable);
+        assert!(warnings.iter().any(|w| w.contains("nonexistent")));
+    }
+
+    #[test]
+    fn an_unknown_key_warns_by_name_and_does_not_fail_the_pool() {
+        let path = Path::new("pools.toml");
+        let mut warnings = Vec::new();
+        let pool = parse_pool(
+            "p",
+            pool_value("kind = \"credits\"\nagent = \"claude-code\"\nfrobnicate = true\n"),
+            path,
+            &any_adapter,
+            &mut warnings,
+        )
+        .expect("an unknown key degrades to a warning, not a refusal");
+        assert!(pool.usable);
+        assert!(warnings.iter().any(|w| w.contains("frobnicate")));
+    }
 }

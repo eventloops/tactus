@@ -1,16 +1,8 @@
-//! `run_started`, and the dispatch of everything after it.
-//!
-//! The two checks that bracket a run: the one that builds the registry a fold
-//! is derived against, and the match that routes every later event to the
-//! check that owns it.
+//! Extended notes: `docs/internals/topology/fold/start.md`
 
 use super::*;
 
 impl TopologyFold {
-    // -----------------------------------------------------------------------
-    // run_started
-    // -----------------------------------------------------------------------
-
     pub(super) fn check_run_started(
         &self,
         started: &RunStarted4,
@@ -23,9 +15,6 @@ impl TopologyFold {
                 schema: started.schema,
             });
         }
-        // refusals[5], first half: the record must name everything needed to
-        // re-establish the runner. The digest is not required — it is the
-        // manifest digest when the runtime reported one (INV-23).
         started
             .runner
             .completeness()
@@ -33,7 +22,29 @@ impl TopologyFold {
                 defect: defect.to_string(),
             })?;
 
-        // refusals[4]: both digests, against the bytes this reader was handed.
+        let recorded_policy = match started.path_policy.version {
+            PathPolicyVersion::V2 => None,
+            PathPolicyVersion::V1 => Some("v1"),
+        };
+        if let Some(recorded) = recorded_policy {
+            return Err(FoldError::InconsistentRecord {
+                kind: "run_started",
+                detail: format!(
+                    "it freezes path policy `{recorded}`, and this binary derives dispatch \
+                     regions under path policy `v2`; the derivation that wrote this run's \
+                     dispatch records is not the one this binary applies, so a run recorded \
+                     under `{recorded}` cannot be replayed here"
+                ),
+            });
+        }
+
+        if started.limits.max_parallel == 0 {
+            return Err(FoldError::UnusableLimit {
+                limit: "max_parallel",
+                value: started.limits.max_parallel,
+            });
+        }
+
         if started.normalized_plan_digest != self.inputs.normalized_plan_digest {
             return Err(FoldError::DigestMismatch {
                 what: "normalized plan",
@@ -58,129 +69,102 @@ impl TopologyFold {
             });
         }
 
-        // Ladder validation at the fold boundary: a malformed ladder is refused
-        // before it is stored, not when something tries to climb it.
         for entry in registry.entries() {
             check_ladder(entry.key, &entry.ladder)?;
         }
         Ok(registry)
     }
 
-    // -----------------------------------------------------------------------
-    // Everything after run_started
-    // -----------------------------------------------------------------------
-
-    #[allow(clippy::too_many_lines)]
     pub(super) fn check_started_run(
         &self,
         run: &RunState,
         event: &TopologyEvent,
         kind: &'static str,
     ) -> Result<TopologyDelta, FoldError> {
-        // refusals[21]: a Complete or Halted run is finalized and then refused,
-        // never continued. A Parked or BudgetExceeded run continues, and the
-        // only event that continues it is the resume that opens the next epoch.
-        if let Some(outcome) = run.finished.clone() {
-            match outcome {
-                RunOutcome::Complete | RunOutcome::Halted => {
-                    return Err(FoldError::RunIsOver {
-                        kind,
-                        outcome: outcome_name(&outcome),
-                    });
-                }
+        if let Some(outcome) = run.finished.as_ref() {
+            let continues = match outcome {
+                RunOutcome::Complete | RunOutcome::Halted => false,
                 RunOutcome::Parked | RunOutcome::BudgetExceeded => {
-                    if !matches!(event.body, TopologyEventBody::RunResumed { .. }) {
-                        return Err(FoldError::RunIsOver {
-                            kind,
-                            outcome: outcome_name(&outcome),
-                        });
-                    }
+                    matches!(event.body, TopologyEventBody::RunResumed { .. })
                 }
+            };
+            if !continues {
+                return Err(FoldError::RunIsOver {
+                    kind,
+                    outcome: outcome_name(outcome),
+                });
             }
         }
 
-        match &event.body {
+        let derived = match &event.body {
             TopologyEventBody::RunStarted { .. } => Err(FoldError::AlreadyStarted),
-            TopologyEventBody::RunResumed { data } => run
-                .check_run_resumed(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::TaskSpawned { data } => run
-                .check_spawn(&data.spawn, kind)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::TaskDispatched { data } => run
-                .check_dispatched(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::AttemptStarted { data } => run
-                .check_attempt_started(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::AttemptFinished { data } => run
-                .check_attempt_finished(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::AttemptInterrupted { data } => run
-                .check_attempt_interrupted(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::GenerationClosed { data } => run
-                .check_generation_closed(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::DeferWaitElapsed { .. } => run
-                .check_defer_wait_elapsed()
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::CandidatePrepared { data } => run
-                .check_candidate_prepared(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::TaskCandidateCreated { data } => run
-                .check_candidate_created(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::MergeVerificationStarted { data } => run
-                .check_verification_started(data)
-                .map(|()| self.delta(event, Derived::None)),
+            TopologyEventBody::RunResumed { data } => {
+                run.check_run_resumed(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::TaskSpawned { data } => {
+                run.check_task_spawned(&data.spawn).map(|()| Derived::None)
+            }
+            TopologyEventBody::TaskDispatched { data } => {
+                run.check_dispatched(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::AttemptStarted { data } => {
+                run.check_attempt_started(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::AttemptFinished { data } => {
+                run.check_attempt_finished(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::AttemptInterrupted { data } => {
+                run.check_attempt_interrupted(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::GenerationClosed { data } => {
+                run.check_generation_closed(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::DeferWaitElapsed { .. } => {
+                run.check_defer_wait_elapsed().map(|()| Derived::None)
+            }
+            TopologyEventBody::CandidatePrepared { data } => {
+                run.check_candidate_prepared(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::TaskCandidateCreated { data } => {
+                run.check_candidate_created(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::MergeVerificationStarted { data } => {
+                run.check_verification_started(data).map(|()| Derived::None)
+            }
             TopologyEventBody::MergeVerificationUnavailable { data } => run
                 .check_verification_unavailable(data)
-                .map(|()| self.delta(event, Derived::None)),
+                .map(|()| Derived::None),
             TopologyEventBody::MergeVerificationInterrupted { data } => run
                 .check_verification_interrupted(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::MergePrepared { data } => run
-                .check_merge_prepared(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::MergeRejected { data } => run
-                .check_merge_rejected(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::TaskMerged { data } => run
-                .check_task_merged(data)
-                .map(|()| self.delta(event, Derived::None)),
+                .map(|()| Derived::None),
+            TopologyEventBody::MergePrepared { data } => {
+                run.check_merge_prepared(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::MergeRejected { data } => {
+                run.check_merge_rejected(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::TaskMerged { data } => {
+                run.check_task_merged(data).map(|()| Derived::None)
+            }
             TopologyEventBody::QuestionRaised { data } => run
                 .check_question_raised(&data.question)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::QuestionAnswered { data } => run
-                .check_question_answered(data)
-                .map(|origin| self.delta(event, Derived::Answer(origin))),
-            TopologyEventBody::BudgetExceeded { data } => run
-                .check_budget_exceeded(data)
-                .map(|()| self.delta(event, Derived::None)),
-            TopologyEventBody::RunFinished { data } => run
-                .check_run_finished(data)
-                .map(|()| self.delta(event, Derived::None)),
+                .map(|()| Derived::None),
+            TopologyEventBody::QuestionAnswered { data } => {
+                run.check_question_answered(data).map(Derived::Answer)
+            }
+            TopologyEventBody::BudgetExceeded { data } => {
+                run.check_budget_exceeded(data).map(|()| Derived::None)
+            }
+            TopologyEventBody::RunFinished { data } => {
+                run.check_run_finished(data).map(|()| Derived::None)
+            }
             TopologyEventBody::CapacitySnapshot { .. }
             | TopologyEventBody::PoolExhausted { .. }
-            | TopologyEventBody::DesignDefect { .. } => Ok(self.delta(event, Derived::None)),
-        }
+            | TopologyEventBody::DesignDefect { .. } => Ok(Derived::None),
+        };
+        derived.map(|derived| self.delta(event, derived))
     }
 
-    // -----------------------------------------------------------------------
-    // The derived outcome
-    // -----------------------------------------------------------------------
-
-    /// The total outcome function (`decisions.run_end_policy.derived_outcome`).
-    ///
-    /// Computed from durable state alone: no spend, no capacity, no runner
-    /// availability, no clock. The legacy precedence is preserved —
-    /// halt > budget > parked > complete — and pending backoff makes `Parked`
-    /// and `Complete` [`DerivedOutcome::NotEnding`] without ever blocking
-    /// `Halted` or `BudgetExceeded`.
-    ///
-    /// A run that has not started is [`DerivedOutcome::NotEnding`]: nothing has
-    /// been recorded, so nothing has ended.
     pub fn derived_outcome(&self) -> DerivedOutcome {
         self.run
             .as_ref()
@@ -197,14 +181,6 @@ pub(super) fn outcome_name(outcome: &RunOutcome) -> &'static str {
     }
 }
 
-/// Whether a frozen ladder is one an attempt could actually climb.
-///
-/// Fold-boundary work rather than registry work: the registry derives a ladder
-/// from whatever the run recorded, and this decides whether that ladder may
-/// enter a fold's state. Both malformations it names are invisible to the
-/// registry — a floor above its ceiling clips to nothing on the first
-/// escalation, and a tier list that does not ascend makes "the next rung" mean
-/// two different things depending on whether it is read by position or by tier.
 pub(super) fn check_ladder(key: TaskKey, ladder: &FrozenLadder) -> Result<(), FoldError> {
     let malformed = |defect: String| FoldError::MalformedLadder { key: key.0, defect };
 
@@ -215,28 +191,32 @@ pub(super) fn check_ladder(key: TaskKey, ladder: &FrozenLadder) -> Result<(), Fo
             )));
         }
     }
+    if let (Some(floor), Some(start)) = (ladder.floor, ladder.tiers.first().copied()) {
+        if floor > start {
+            return Err(malformed(format!(
+                "its floor is `{floor}` and its chain starts at `{start}`, so its first attempt \
+                 runs below the floor the run recorded"
+            )));
+        }
+    }
     if ladder.attempts_per == 0 {
         return Err(malformed(
             "it allows 0 attempts per rung, so no attempt is ever permitted".to_owned(),
         ));
     }
-    let mut previous: Option<Tier> = None;
-    for tier in &ladder.tiers {
-        if let Some(previous) = previous {
-            if *tier <= previous {
-                return Err(malformed(format!(
-                    "its tiers are recorded as `{}`, which does not escalate: `{tier}` does not \
-                     outrank `{previous}`",
-                    ladder
-                        .tiers
-                        .iter()
-                        .map(Tier::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )));
-            }
+    for (previous, tier) in ladder.tiers.iter().zip(ladder.tiers.iter().skip(1)) {
+        if tier <= previous {
+            return Err(malformed(format!(
+                "its tiers are recorded as `{}`, which does not escalate: `{tier}` does not \
+                 outrank `{previous}`",
+                ladder
+                    .tiers
+                    .iter()
+                    .map(Tier::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
         }
-        previous = Some(*tier);
     }
     if ladder.ceiling != ladder.tiers.iter().copied().max() {
         return Err(malformed(format!(
@@ -290,4 +270,122 @@ pub(super) fn check_ladder(key: TaskKey, ladder: &FrozenLadder) -> Result<(), Fo
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::ir::{Effort, ResolvedEffortPolicy};
+    use crate::topology::registry::FrozenRung;
+
+    const KEY: TaskKey = TaskKey(7);
+
+    fn rung(tier: Tier) -> FrozenRung {
+        FrozenRung {
+            tier,
+            agent: format!("agent-{tier}"),
+            model: format!("model-{tier}"),
+            pinned: false,
+        }
+    }
+
+    fn ladder(tiers: &[Tier], rungs: &[Tier], admission: Admission) -> FrozenLadder {
+        FrozenLadder {
+            tiers: tiers.to_vec(),
+            attempts_per: 2,
+            rungs: rungs.iter().copied().map(rung).collect(),
+            floor: tiers.first().copied(),
+            ceiling: tiers.iter().copied().max(),
+            effort: ResolvedEffortPolicy {
+                small: Effort::Low,
+                mid: Effort::XHigh,
+                frontier: Effort::Max,
+                review: Effort::Medium,
+            },
+            admission,
+        }
+    }
+
+    fn defect(ladder: &FrozenLadder) -> Option<String> {
+        match check_ladder(KEY, ladder) {
+            Err(FoldError::MalformedLadder { key, defect }) if key == KEY.0 => Some(defect),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_runnable_ladder_binds_one_rung_for_every_tier() {
+        let every = [Tier::Small, Tier::Mid, Tier::Frontier];
+        assert_eq!(
+            check_ladder(KEY, &ladder(&every, &every, Admission::Runnable)),
+            Ok(())
+        );
+
+        let short = ladder(&every, &[Tier::Small], Admission::Runnable);
+        assert_eq!(
+            defect(&short).as_deref(),
+            Some("it has 1 rung binding(s) for 3 tier(s)")
+        );
+
+        let long = ladder(
+            &[Tier::Small],
+            &[Tier::Small, Tier::Mid],
+            Admission::Runnable,
+        );
+        assert_eq!(
+            defect(&long).as_deref(),
+            Some("it has 2 rung binding(s) for 1 tier(s)")
+        );
+    }
+
+    #[test]
+    fn a_ladder_may_not_start_below_its_recorded_floor() {
+        // The floor clips the chain start: `design/07` writes `min_tier` as
+        // "clips the chain start (binding)", `design/10` §2 has an override
+        // truncating the chain start, and `design/26` has a repair's `mid`
+        // floor intersected with the frozen pin and maximum. `src/route.rs`'s
+        // `raise_start` implements the clip, so no router-produced chain holds
+        // a tier below its floor -- but `TaskRegistry::frozen_ladder` copies
+        // `task.min_tier` into `floor` and the recorded tiers into `tiers`
+        // and compares neither with the other, so a recorded ladder that does
+        // is exactly what this boundary exists to catch.
+        let every = [Tier::Small, Tier::Mid, Tier::Frontier];
+
+        let at_the_floor = FrozenLadder {
+            floor: Some(Tier::Small),
+            ..ladder(&every, &every, Admission::Runnable)
+        };
+        assert_eq!(check_ladder(KEY, &at_the_floor), Ok(()));
+
+        let above_the_floor = FrozenLadder {
+            floor: Some(Tier::Mid),
+            ..ladder(&[Tier::Frontier], &[Tier::Frontier], Admission::Runnable)
+        };
+        assert_eq!(check_ladder(KEY, &above_the_floor), Ok(()));
+
+        let below_the_floor = FrozenLadder {
+            floor: Some(Tier::Mid),
+            ..ladder(&every, &every, Admission::Runnable)
+        };
+        assert_eq!(
+            defect(&below_the_floor).as_deref(),
+            Some(
+                "its floor is `mid` and its chain starts at `small`, so its first attempt runs \
+                 below the floor the run recorded"
+            )
+        );
+    }
+
+    #[test]
+    fn a_human_binding_ladder_keeps_its_tiers_and_binds_none_of_them() {
+        let waiting = ladder(
+            &[Tier::Mid, Tier::Frontier],
+            &[],
+            Admission::HumanBinding {
+                options: vec!["codex-cli".to_owned()],
+            },
+        );
+        assert_eq!(check_ladder(KEY, &waiting), Ok(()));
+    }
 }

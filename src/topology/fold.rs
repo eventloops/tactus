@@ -1,47 +1,4 @@
-//! The checked fold: one transition function for a live run and for a replay.
-//!
-//! **INV-02 — an invalid transition is never appended, and never applied.**
-//! [`TopologyFold::plan_transition`] decides whether an event may be applied
-//! and returns a [`TopologyDelta`] when it may; [`TopologyFold::apply_delta`]
-//! is the only thing that changes the state, and a `TopologyDelta` is the only
-//! thing it accepts. The delta has no public constructor, so there is no way to
-//! reach the state except through the check — which is what makes "the live run
-//! and the replay use one transition" a property of the types rather than a
-//! convention two call sites are expected to keep.
-//!
-//! A live emission is `plan_transition` → append the exact bytes → `apply_delta`
-//! only after the append returned `Ok`. A replay is
-//! [`TopologyFold::replay`], which is those same two calls per event with the
-//! append taken out. Nothing else exists.
-//!
-//! # What the fold refuses
-//!
-//! Everything in `decisions.schema_compatibility.refusals`, less the four the
-//! header probe answers before a fold exists ([`crate::topology::schema`]).
-//! The refusals are not a validation pass bolted onto a fold: they *are* the
-//! fold, because a transition this module cannot state the effect of is a
-//! transition it must not pretend to have applied.
-//!
-//! Three of them are worth naming here because they are relations rather than
-//! shapes, and a reader looking for them in one event will not find them:
-//!
-//! * **The publication relations** (INV-09). A `merge_prepared` is checked
-//!   against the candidate's own record, the pinned proposal, and the head the
-//!   verification read — three records elsewhere in the log.
-//! * **The derived outcome** (INV-15). `run_finished` carries an outcome, and
-//!   the fold accepts it only when it equals [`TopologyFold::derived_outcome`],
-//!   which is computed from durable state alone and never consults spend,
-//!   capacity, or runner availability.
-//! * **Queue order** (`decisions.coordinator_integration.queue`). An
-//!   integration may only start for the first *eligible* candidate, which is
-//!   not the same as the first queued one.
-//!
-//! # What it does not do
-//!
-//! No production path writes or reads a schema-4 log yet, and nothing here
-//! performs an effect: no ref moves, no worktree is created, no report is
-//! written. The fold decides what a log *means*; the effects that log
-//! authorizes, and the typed sites they run through, arrive in later slices.
+//! Extended notes: `docs/internals/topology/fold.md`
 
 mod apply;
 mod check_attempt;
@@ -73,19 +30,10 @@ use crate::topology::events::{
     UnavailableOutcome, VerificationBasis, VerificationSource, VerificationVerdict,
 };
 use crate::topology::leases::{GenerationLease, LeaseOwner, LeaseTable};
-use crate::topology::paths::{GitPath, PathSet};
+use crate::topology::paths::{GitPath, PathPolicyVersion, PathSet};
 use crate::topology::queue::{CandidateQueue, Ineligible, QueueEntry};
 use crate::topology::registry::{Admission, FrozenLadder, TaskEntry, TaskKey, TaskRegistry};
 
-// ---------------------------------------------------------------------------
-// Refusals
-// ---------------------------------------------------------------------------
-
-/// Why a transition was refused.
-///
-/// Every message names the record it refused and the value it disagreed with,
-/// because a fold error reaches an operator as "your log is invalid" unless it
-/// says which line and which field.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum FoldError {
     #[error(
@@ -108,6 +56,14 @@ pub enum FoldError {
 
     #[error("the run's runner record is unusable: {defect}")]
     IncompleteRunner { defect: String },
+
+    #[error(
+        "this `run_started` records `{limit} = {value}`; a run whose entitlement admits no work \
+         can neither dispatch nor end, and the limits this event freezes are what every later \
+         event is folded against, so the limit is refused here rather than at the first task \
+         that cannot be started"
+    )]
+    UnusableLimit { limit: &'static str, value: u32 },
 
     #[error(
         "this incarnation established a different runner from the one the run started with: the \
@@ -187,6 +143,19 @@ pub enum FoldError {
         generation: u32,
         attempt: u32,
         expected: String,
+    },
+
+    #[error(
+        "`{kind}` puts attempt {attempt} of task {key} on rung {rung}, and {detail}; a task's \
+         ladder position is derived by replay, an attempt runs at that position, and only an \
+         escalation moves it, one rung up the frozen ladder"
+    )]
+    WrongRung {
+        kind: &'static str,
+        key: u32,
+        attempt: u32,
+        rung: u32,
+        detail: String,
     },
 
     #[error(
@@ -334,31 +303,14 @@ pub enum FoldError {
     RewrittenLog { line: usize, detail: String },
 }
 
-// ---------------------------------------------------------------------------
-// Fold state
-// ---------------------------------------------------------------------------
-
-/// What a task is doing, as the log says.
-///
-/// The topology's own states, not [`crate::events::TaskState`]: a task with an
-/// open generation is `Pending` here and is kept out of admission by the
-/// generation rather than by a state of its own, because the thing that has to
-/// be closed before the run may end is the generation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskState {
-    /// Runnable once its dependencies are merged and nothing else holds it.
     Pending,
-    /// A candidate exists and is queued for integration.
     AwaitingMerge,
-    /// Its candidate was rejected and a repair carries it.
     AwaitingRepair,
-    /// Parked on a question.
     AwaitingInput,
-    /// Backing off after an outage, until `defer_wait_elapsed` or a resume.
     Deferred,
-    /// Its work is in the integration ref.
     Merged,
-    /// Terminal.
     Failed,
 }
 
@@ -380,23 +332,17 @@ impl TaskState {
     }
 }
 
-/// Where one generation of one task is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GenerationClass {
-    /// Dispatched; no attempt has started.
     OpenNoAttempt,
-    /// An attempt is running.
-    InFlight { attempt: AttemptNumber },
-    /// Settled holding a session, for a same-session retry by the incarnation
-    /// that retained it.
+    InFlight {
+        attempt: AttemptNumber,
+    },
     RetainedIdle {
         session: SessionId,
         incarnation: Epoch,
     },
-    /// An attempt succeeded; the candidate is being promoted to its
-    /// authoritative ref.
     Promoting,
-    /// Over.
     Closed,
 }
 
@@ -411,7 +357,6 @@ impl GenerationClass {
         }
     }
 
-    /// Whether this generation holds a pipeline entitlement.
     fn holds_pipeline(&self) -> bool {
         matches!(
             self,
@@ -419,101 +364,34 @@ impl GenerationClass {
         )
     }
 
-    /// Whether the run may end while this generation is in this class.
     fn blocks_run_end(&self) -> bool {
         !matches!(self, Self::Closed)
     }
 }
 
-/// One generation of one task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GenerationFold {
     pub id: GenerationId,
     pub class: GenerationClass,
-    /// The commit the worktree was created at.
     pub base_sha: CommitSha,
     pub lease: GenerationLease,
-    /// The highest attempt number started in this generation.
     pub attempts: u32,
-    /// The candidate this generation prepared, once it has.
     pub candidate: Option<PreparedCandidate>,
 }
 
-/// What `candidate_prepared` recorded, kept for the relations a publication is
-/// checked against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedCandidate {
     pub candidate: CandidateRef,
-    /// The base the work started from, and the parent of the commit.
     pub base_sha: CommitSha,
-    /// The tree the gates ran against and the reviewers judged.
-    ///
-    /// **Retained because adoption is about identity, not existence.**
-    /// `DESIGN.md` §15 requires `candidate_prepared` to record "exactly one
-    /// complete attempt/base/commit/tree identity ... so resume adopts only
-    /// that exact shape". The tree was on the event and stopped here: recovery
-    /// could check that the object exists and that its parent is the recorded
-    /// base, and a commit with that parent and a **different tree** passed —
-    /// so a resume could publish an object no gate ran against and no reviewer
-    /// read. `candidate.rs`'s own comment recorded the gap rather than closing
-    /// it, because closing it is this field.
-    ///
-    /// Per-instance **Class B** approval, granted 2026-08-26 against the
-    /// frontier re-review of `c2c0294`, finding B; the ledger row is
-    /// `reviews/FINDINGS.md` §3 and `PR7-CANDIDATE-TREE-UNVERIFIED` in §2.
-    /// Nothing serde-visible moves — `CandidatePrepared::tree_sha` already
-    /// exists on the wire and this is the fold keeping what it reads. It
-    /// conforms to §15 rather than amending it.
     pub tree_sha: CommitSha,
     pub paths: PathSet,
 }
 
-/// One task's fold state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskFold {
     pub state: TaskState,
-    /// How many times an attempt on this task has settled `Deferred`.
-    ///
-    /// **The fold owns this count because only the fold survives a resume.**
-    /// `ladder::next_step` reads it on exactly one branch — an outage defers
-    /// while `defers < max_defers` and parks at it — and a driver keeping its
-    /// own tally would restart at zero in the next process while the log still
-    /// held the deferrals, so a run that had already exhausted its allowance
-    /// would defer forever. The legacy engine keeps it in
-    /// `state.progress[index].defers`, which is in-memory schema-3 state; a
-    /// schema-4 run derives everything by replay, so this is derived by replay.
-    ///
-    /// Read through the existing [`TopologyFold::task`] reader. It is a field
-    /// rather than a twelfth reader for that reason.
-    ///
-    /// `max_defers` is **not** here: the ceiling is policy and stays in
-    /// `ladder::LadderPolicy`, read from `run_started(4).limits`. This is the
-    /// count, and only the count.
     pub defers: u32,
-    /// The rung this task's **next** attempt runs at.
-    ///
-    /// **The fold owns it because a task's ladder position survives a resume.**
-    /// A settlement that escalates closes the generation and leaves the task
-    /// `Pending`, so the ready-dispatch branch selects it again — at a rung the
-    /// driver has no other way to know. A driver-side tally reads zero in the
-    /// next process while the log holds the escalation, so the task is
-    /// dispatched on rung 0 forever and never reaches the tier its chain
-    /// escalated it to.
-    ///
-    /// `SettlementTransition::Escalated { rung }` is the durable answer — the
-    /// packet defines it as the rung an escalation climbs *onto* — so this is
-    /// assigned from it, never computed.
     pub rung: u32,
-    /// Attempts already spent at [`Self::rung`].
-    ///
-    /// Not `GenerationFold::attempts`: that counts one generation, and attempts
-    /// at one rung span generations — a same-rung retry that does not resume
-    /// closes its generation and opens a fresh one at the same rung. Feeding
-    /// `LadderState::attempts_on_rung` the per-generation count makes
-    /// `next_step` see the first attempt of the allowance every time, so a task
-    /// retries forever and never escalates.
-    ///
-    /// Reset by an escalation, because the allowance is per rung.
     pub attempts_on_rung: u32,
     pub generations: Vec<GenerationFold>,
 }
@@ -529,8 +407,6 @@ impl TaskFold {
         }
     }
 
-    /// The generation that is not closed, if any. At most one exists: a new one
-    /// is only opened when the previous closed.
     fn open(&self) -> Option<&GenerationFold> {
         self.generations
             .iter()
@@ -544,53 +420,32 @@ impl TaskFold {
     }
 }
 
-/// Why a question is open, which is what decides where its answer returns the
-/// task to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionOrigin {
-    /// A verification could not be run. An answer returns the task to awaiting
-    /// merge, to be re-verified under a new sequence.
     VerificationPark,
-    /// An attempt parked, or a repair's admission is gated. An answer returns
-    /// the task to pending.
     Admission,
 }
 
-/// An open question and what raised it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenQuestion {
     pub question: FrozenQuestion,
     pub origin: QuestionOrigin,
-    /// The frozen binding options this question's admission authorized, for a
-    /// `HumanBinding` admission and for nothing else.
-    ///
-    /// `decisions.task_registry.binding_override` validates an override
-    /// "against the frozen options of that task's open `HumanBinding`
-    /// question", so the authority has to survive from the `task_spawned` that
-    /// froze it to the `question_answered` that draws on it. Kept here rather
-    /// than re-read from the registry entry because it is the *question's*
-    /// authority: two questions of one task are answered separately and only
-    /// one of them ever authorized a binding.
     pub binding: Option<Vec<String>>,
 }
 
-/// Where an integration transaction is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransactionClass {
-    /// A verification is running against a recorded head.
     VerificationStarted {
         basis: VerificationBasis,
         expected_head: CommitSha,
         proposed_sha: CommitSha,
     },
-    /// The publication is authorized and the ref move is owed.
     Prepared {
         proposed_sha: CommitSha,
         satisfies: Vec<TaskKey>,
     },
 }
 
-/// The one unresolved integration transaction, if there is one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Transaction {
     pub sequence: SequenceId,
@@ -598,11 +453,6 @@ pub struct Transaction {
     pub class: TransactionClass,
 }
 
-/// Everything one topology run has recorded.
-///
-/// `PartialEq` and not `Eq`: the run record it holds carries the reported
-/// spend of a budget stop, and a float has no total equality. Comparing two of
-/// these is how a live fold and a replayed one are proved identical (INV-02).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunState {
     started: Box<RunStarted4>,
@@ -611,43 +461,25 @@ pub struct RunState {
     epoch: Epoch,
     incarnation: IncarnationId,
     questions: BTreeMap<QuestionId, OpenQuestion>,
-    /// Every question id this log has used, open or not: an id is never reused.
     seen_questions: BTreeSet<QuestionId>,
+    deferred_tasks: BTreeSet<TaskKey>,
     overrides: BTreeMap<TaskKey, BindingOverride>,
     queue: CandidateQueue,
     leases: LeaseTable,
     transaction: Option<Transaction>,
     next_sequence: u32,
     halted_at: Option<TaskKey>,
-    /// The epoch the halting settlement was recorded in. `halted_at` is never
-    /// cleared, and the answer-ingestion refusal is epoch-scoped.
     halted_epoch: Option<Epoch>,
     budget_stop: Option<BudgetStop>,
     finished: Option<RunOutcome>,
 }
 
-/// The frozen inputs a fold is derived against.
-///
-/// Both are read before the first event: the plan the run normalized, and the
-/// digest of the exact bytes it was normalized to. The fold rebuilds the
-/// registry from the plan and refuses a `run_started` whose recorded digests do
-/// not match, which is the whole of `refusals[4]` — a plan that moved
-/// underneath a log is refused rather than folded on a guess.
 #[derive(Debug, Clone)]
 pub struct FrozenInputs {
     pub plan: Plan,
-    /// Digest of the exact `plan.normalized.json` bytes, in the
-    /// `sha256:<hex>` shape the registry digest uses.
     pub normalized_plan_digest: String,
 }
 
-/// One checked transition, ready to apply.
-///
-/// Deliberately opaque and deliberately unconstructible outside this module:
-/// [`TopologyFold::apply_delta`] takes one of these and nothing else, so the
-/// only path into the state runs through [`TopologyFold::plan_transition`].
-/// That is INV-02 expressed as a type rather than as a rule two call sites are
-/// asked to remember.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopologyDelta {
     event: TopologyEvent,
@@ -655,26 +487,18 @@ pub struct TopologyDelta {
 }
 
 impl TopologyDelta {
-    /// The event this delta applies. Readable so a caller can append the exact
-    /// bytes it checked.
     pub fn event(&self) -> &TopologyEvent {
         &self.event
     }
 }
 
-/// What the check derived and the application would otherwise have to look up
-/// again.
 #[derive(Debug, Clone, PartialEq)]
 enum Derived {
     None,
-    /// The registry rebuilt from the frozen plan and this record, already
-    /// authenticated against the recorded digest.
     Registry(Box<TaskRegistry>),
-    /// Where an answered question returns its task to.
     Answer(QuestionOrigin),
 }
 
-/// The state of one topology run, and the only way to change it.
 #[derive(Debug, Clone)]
 pub struct TopologyFold {
     inputs: FrozenInputs,
@@ -683,7 +507,6 @@ pub struct TopologyFold {
 }
 
 impl TopologyFold {
-    /// A fold over a run that has recorded nothing yet.
     pub fn new(inputs: FrozenInputs) -> Self {
         Self {
             inputs,
@@ -692,15 +515,6 @@ impl TopologyFold {
         }
     }
 
-    /// Fold `events` from nothing, refusing the first transition that does not
-    /// apply.
-    ///
-    /// This *is* the live path with the append removed: one `plan_transition`
-    /// and one `apply_delta` per event, in order. There is no second reader.
-    ///
-    /// # Errors
-    ///
-    /// The [`FoldError`] of the first event that does not apply.
     pub fn replay(inputs: FrozenInputs, events: &[TopologyEvent]) -> Result<Self, FoldError> {
         let mut fold = Self::new(inputs);
         for event in events {
@@ -710,21 +524,7 @@ impl TopologyFold {
         Ok(fold)
     }
 
-    // -----------------------------------------------------------------------
-    // The transition
-    // -----------------------------------------------------------------------
-
-    /// Whether `event` may be applied to this state, and what applying it does.
-    ///
-    /// # Errors
-    ///
-    /// The [`FoldError`] naming what the event disagrees with. A refusal is a
-    /// statement about the pair — this event against this state — and never a
-    /// statement that the event is malformed in isolation, which is
-    /// serialization's business.
     pub fn plan_transition(&self, event: &TopologyEvent) -> Result<TopologyDelta, FoldError> {
-        // refusals[24]: a process whose fold is poisoned by a returned append
-        // error attempts no further transition. The command has already ended.
         if self.poisoned {
             return Err(FoldError::Poisoned);
         }
@@ -741,20 +541,18 @@ impl TopologyFold {
         }
     }
 
-    /// Apply a checked transition. Total: every value it needs was decided by
-    /// the check that produced the delta.
     pub fn apply_delta(&mut self, delta: TopologyDelta) {
         let TopologyDelta { event, derived } = delta;
-        if let (TopologyEventBody::RunStarted { data }, Derived::Registry(registry)) =
-            (&event.body, &derived)
-        {
-            self.run = Some(RunState::start(data.clone(), (**registry).clone()));
-            return;
+        match (event.body, derived) {
+            (TopologyEventBody::RunStarted { data }, Derived::Registry(registry)) => {
+                self.run = Some(RunState::start(data, *registry));
+            }
+            (body, derived) => {
+                if let Some(run) = self.run.as_mut() {
+                    run.apply(&body, &derived);
+                }
+            }
         }
-        let Some(run) = self.run.as_mut() else {
-            return;
-        };
-        run.apply(&event.body, &derived);
     }
 
     fn delta(&self, event: &TopologyEvent, derived: Derived) -> TopologyDelta {
@@ -764,10 +562,6 @@ impl TopologyFold {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// RunState: the checks
-// ---------------------------------------------------------------------------
 
 impl RunState {
     fn start(started: Box<RunStarted4>, registry: TaskRegistry) -> Self {
@@ -781,6 +575,7 @@ impl RunState {
             incarnation,
             questions: BTreeMap::new(),
             seen_questions: BTreeSet::new(),
+            deferred_tasks: BTreeSet::new(),
             overrides: BTreeMap::new(),
             queue: CandidateQueue::new(),
             leases: LeaseTable::new(),
@@ -805,7 +600,6 @@ impl RunState {
             .ok_or(FoldError::UnknownKey { kind, key: key.0 })
     }
 
-    /// The pipeline entitlement this state holds.
     fn pipeline_held(&self) -> usize {
         self.tasks
             .iter()
@@ -831,32 +625,664 @@ impl RunState {
             .values()
             .find(|open| open.question.key == key)
     }
+
+    fn lineage_root(&self, key: TaskKey) -> TaskKey {
+        self.registry
+            .get(key)
+            .and_then(|entry| entry.lineage)
+            .map_or(key, |lineage| lineage.root)
+    }
+
+    fn lineage_has_question(&self, key: TaskKey) -> bool {
+        let root = self.lineage_root(key);
+        self.questions
+            .values()
+            .any(|open| self.lineage_root(open.question.key) == root)
+    }
 }
 
-/// The region an ordinary dispatch of this entry would predict.
-///
-/// The plan's path hints, taken literally: a hint with no glob metacharacter is
-/// its own literal prefix. Anything else — an absent hint list, or a hint whose
-/// literal prefix is empty — classifies repo-wide, which overlaps everything.
 fn predicted_region(entry: &TaskEntry) -> PathSet {
     if entry.spec.path_hints.is_empty() {
         return PathSet::RepoWide;
     }
     let mut paths = Vec::with_capacity(entry.spec.path_hints.len());
     for hint in &entry.spec.path_hints {
-        let literal: String = hint
-            .replace('\\', "/")
-            .chars()
-            .take_while(|character| !matches!(character, '*' | '?' | '[' | '{'))
-            .collect();
-        let trimmed = literal.trim_end_matches('/');
-        if trimmed.is_empty() {
+        let Some(prefix) = hint_prefix(hint) else {
             return PathSet::RepoWide;
-        }
-        paths.push(GitPath(trimmed.to_owned()));
+        };
+        paths.push(prefix);
     }
     PathSet::Prefixes { paths }
 }
 
+fn hint_prefix(hint: &str) -> Option<GitPath> {
+    const METACHARACTERS: [char; 4] = ['*', '?', '[', '{'];
+    if hint.contains('\\') {
+        return None;
+    }
+    let mut prefix = String::with_capacity(hint.len());
+    for (position, component) in hint
+        .split('/')
+        .take_while(|component| !component.contains(METACHARACTERS))
+        .enumerate()
+    {
+        if matches!(component, "." | "..") {
+            return None;
+        }
+        if position > 0 {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+    }
+    let trimmed = prefix.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(GitPath(trimmed.to_owned()))
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod parent_tests {
+    use super::*;
+    use crate::topology::leases::paths_overlap;
+    use crate::topology::paths::{PathGrammar, PathPolicy, PathPolicyVersion};
+
+    fn policy() -> PathPolicy {
+        PathPolicy {
+            version: PathPolicyVersion::V2,
+            case_fold: false,
+            grammar: PathGrammar::Globset,
+        }
+    }
+
+    fn generation(id: u32, class: GenerationClass) -> GenerationFold {
+        GenerationFold {
+            id: GenerationId(id),
+            class,
+            base_sha: CommitSha(format!("base-{id}")),
+            lease: GenerationLease::Own,
+            attempts: 0,
+            candidate: None,
+        }
+    }
+
+    fn variant_name(error: &FoldError) -> &'static str {
+        match error {
+            FoldError::NotStarted { .. } => "NotStarted",
+            FoldError::AlreadyStarted => "AlreadyStarted",
+            FoldError::NotTopologySchema { .. } => "NotTopologySchema",
+            FoldError::IncompleteRunner { .. } => "IncompleteRunner",
+            FoldError::UnusableLimit { .. } => "UnusableLimit",
+            FoldError::RunnerMoved { .. } => "RunnerMoved",
+            FoldError::DigestMismatch { .. } => "DigestMismatch",
+            FoldError::RegistryUnbuildable { .. } => "RegistryUnbuildable",
+            FoldError::MalformedLadder { .. } => "MalformedLadder",
+            FoldError::UnknownKey { .. } => "UnknownKey",
+            FoldError::NonDenseKey { .. } => "NonDenseKey",
+            FoldError::MalformedEntry { .. } => "MalformedEntry",
+            FoldError::WrongTaskState { .. } => "WrongTaskState",
+            FoldError::NotTheOpenGeneration { .. } => "NotTheOpenGeneration",
+            FoldError::WrongAttempt { .. } => "WrongAttempt",
+            FoldError::WrongRung { .. } => "WrongRung",
+            FoldError::StaleIncarnation { .. } => "StaleIncarnation",
+            FoldError::BindingMismatch { .. } => "BindingMismatch",
+            FoldError::InvalidLeaseDisposition { .. } => "InvalidLeaseDisposition",
+            FoldError::NonDenseSequence { .. } => "NonDenseSequence",
+            FoldError::WrongSequence { .. } => "WrongSequence",
+            FoldError::TransactionAlreadyOpen { .. } => "TransactionAlreadyOpen",
+            FoldError::NotFirstEligible { .. } => "NotFirstEligible",
+            FoldError::InconsistentRecord { .. } => "InconsistentRecord",
+            FoldError::InvalidSatisfies { .. } => "InvalidSatisfies",
+            FoldError::InvalidDefers { .. } => "InvalidDefers",
+            FoldError::UnanswerableQuestion { .. } => "UnanswerableQuestion",
+            FoldError::WrongQuestion { .. } => "WrongQuestion",
+            FoldError::RunEnding { .. } => "RunEnding",
+            FoldError::RunIsOver { .. } => "RunIsOver",
+            FoldError::OutcomeMismatch { .. } => "OutcomeMismatch",
+            FoldError::Poisoned => "Poisoned",
+            FoldError::RewrittenLog { .. } => "RewrittenLog",
+        }
+    }
+
+    fn refusals() -> Vec<(FoldError, Vec<String>)> {
+        vec![
+            (
+                FoldError::NotStarted { kind: "kind-01" },
+                vec!["kind-01".to_owned()],
+            ),
+            (FoldError::AlreadyStarted, Vec::new()),
+            (
+                FoldError::NotTopologySchema { schema: 902 },
+                vec!["902".to_owned()],
+            ),
+            (
+                FoldError::IncompleteRunner {
+                    defect: "defect-03".to_owned(),
+                },
+                vec!["defect-03".to_owned()],
+            ),
+            (
+                FoldError::UnusableLimit {
+                    limit: "limit-32",
+                    value: 932,
+                },
+                vec!["limit-32".to_owned(), "932".to_owned()],
+            ),
+            (
+                FoldError::RunnerMoved {
+                    field: "field-04".to_owned(),
+                },
+                vec!["field-04".to_owned()],
+            ),
+            (
+                FoldError::DigestMismatch {
+                    what: "what-05",
+                    recorded: "recorded-05".to_owned(),
+                    actual: "actual-05".to_owned(),
+                },
+                vec![
+                    "what-05".to_owned(),
+                    "recorded-05".to_owned(),
+                    "actual-05".to_owned(),
+                ],
+            ),
+            (
+                FoldError::RegistryUnbuildable {
+                    detail: "detail-06".to_owned(),
+                },
+                vec!["detail-06".to_owned()],
+            ),
+            (
+                FoldError::MalformedLadder {
+                    key: 907,
+                    defect: "defect-07".to_owned(),
+                },
+                vec!["907".to_owned(), "defect-07".to_owned()],
+            ),
+            (
+                FoldError::UnknownKey {
+                    kind: "kind-08",
+                    key: 908,
+                },
+                vec!["kind-08".to_owned(), "908".to_owned()],
+            ),
+            (
+                FoldError::NonDenseKey {
+                    kind: "kind-09",
+                    key: 909,
+                    len: 709,
+                },
+                vec!["kind-09".to_owned(), "909".to_owned(), "709".to_owned()],
+            ),
+            (
+                FoldError::MalformedEntry {
+                    kind: "kind-10",
+                    key: 910,
+                    detail: "detail-10".to_owned(),
+                },
+                vec![
+                    "kind-10".to_owned(),
+                    "910".to_owned(),
+                    "detail-10".to_owned(),
+                ],
+            ),
+            (
+                FoldError::WrongTaskState {
+                    kind: "kind-11",
+                    key: 911,
+                    state: "state-11",
+                    expected: "expected-11",
+                },
+                vec![
+                    "kind-11".to_owned(),
+                    "911".to_owned(),
+                    "state-11".to_owned(),
+                    "expected-11".to_owned(),
+                ],
+            ),
+            (
+                FoldError::NotTheOpenGeneration {
+                    kind: "kind-12",
+                    key: 912,
+                    generation: 712,
+                    detail: "detail-12".to_owned(),
+                },
+                vec![
+                    "kind-12".to_owned(),
+                    "912".to_owned(),
+                    "712".to_owned(),
+                    "detail-12".to_owned(),
+                ],
+            ),
+            (
+                FoldError::WrongAttempt {
+                    kind: "kind-13",
+                    key: 913,
+                    generation: 713,
+                    attempt: 513,
+                    expected: "expected-13".to_owned(),
+                },
+                vec![
+                    "kind-13".to_owned(),
+                    "913".to_owned(),
+                    "713".to_owned(),
+                    "513".to_owned(),
+                    "expected-13".to_owned(),
+                ],
+            ),
+            (
+                FoldError::WrongRung {
+                    kind: "kind-14",
+                    key: 914,
+                    attempt: 714,
+                    rung: 514,
+                    detail: "detail-14".to_owned(),
+                },
+                vec![
+                    "kind-14".to_owned(),
+                    "914".to_owned(),
+                    "714".to_owned(),
+                    "514".to_owned(),
+                    "detail-14".to_owned(),
+                ],
+            ),
+            (
+                FoldError::StaleIncarnation {
+                    key: 915,
+                    attempt: 715,
+                    detail: "detail-15".to_owned(),
+                },
+                vec!["915".to_owned(), "715".to_owned(), "detail-15".to_owned()],
+            ),
+            (
+                FoldError::BindingMismatch {
+                    key: 916,
+                    attempt: 716,
+                    detail: "detail-16".to_owned(),
+                },
+                vec!["916".to_owned(), "716".to_owned(), "detail-16".to_owned()],
+            ),
+            (
+                FoldError::InvalidLeaseDisposition {
+                    kind: "kind-17",
+                    key: 917,
+                    recorded: "recorded-17".to_owned(),
+                    owner: "owner-17",
+                    fate: "fate-17",
+                    expected: "expected-17".to_owned(),
+                },
+                vec![
+                    "kind-17".to_owned(),
+                    "917".to_owned(),
+                    "recorded-17".to_owned(),
+                    "owner-17".to_owned(),
+                    "fate-17".to_owned(),
+                    "expected-17".to_owned(),
+                ],
+            ),
+            (
+                FoldError::NonDenseSequence {
+                    kind: "kind-18",
+                    sequence: 918,
+                    next: 718,
+                },
+                vec!["kind-18".to_owned(), "918".to_owned(), "718".to_owned()],
+            ),
+            (
+                FoldError::WrongSequence {
+                    kind: "kind-19",
+                    sequence: 919,
+                    open: "open-19".to_owned(),
+                },
+                vec!["kind-19".to_owned(), "919".to_owned(), "open-19".to_owned()],
+            ),
+            (
+                FoldError::TransactionAlreadyOpen {
+                    kind: "kind-20",
+                    sequence: 920,
+                    open: 720,
+                },
+                vec!["kind-20".to_owned(), "920".to_owned(), "720".to_owned()],
+            ),
+            (
+                FoldError::NotFirstEligible {
+                    kind: "kind-21",
+                    key: 921,
+                    generation: 721,
+                    detail: "detail-21".to_owned(),
+                },
+                vec![
+                    "kind-21".to_owned(),
+                    "921".to_owned(),
+                    "721".to_owned(),
+                    "detail-21".to_owned(),
+                ],
+            ),
+            (
+                FoldError::InconsistentRecord {
+                    kind: "kind-22",
+                    detail: "detail-22".to_owned(),
+                },
+                vec!["kind-22".to_owned(), "detail-22".to_owned()],
+            ),
+            (
+                FoldError::InvalidSatisfies {
+                    kind: "kind-23",
+                    recorded: vec![923],
+                    derived: vec![723],
+                },
+                vec!["kind-23".to_owned(), "923".to_owned(), "723".to_owned()],
+            ),
+            (
+                FoldError::InvalidDefers {
+                    defers: 924,
+                    detail: "detail-24".to_owned(),
+                },
+                vec!["924".to_owned(), "detail-24".to_owned()],
+            ),
+            (
+                FoldError::UnanswerableQuestion {
+                    kind: "kind-25",
+                    detail: "detail-25".to_owned(),
+                },
+                vec!["kind-25".to_owned(), "detail-25".to_owned()],
+            ),
+            (
+                FoldError::WrongQuestion {
+                    kind: "kind-26",
+                    question: "question-26".to_owned(),
+                    detail: "detail-26".to_owned(),
+                },
+                vec![
+                    "kind-26".to_owned(),
+                    "question-26".to_owned(),
+                    "detail-26".to_owned(),
+                ],
+            ),
+            (
+                FoldError::RunEnding {
+                    kind: "kind-27",
+                    what: "what-27",
+                },
+                vec!["kind-27".to_owned(), "what-27".to_owned()],
+            ),
+            (
+                FoldError::RunIsOver {
+                    kind: "kind-28",
+                    outcome: "outcome-28",
+                },
+                vec!["kind-28".to_owned(), "outcome-28".to_owned()],
+            ),
+            (
+                FoldError::OutcomeMismatch {
+                    recorded: "recorded-29",
+                    derived: "derived-29".to_owned(),
+                },
+                vec!["recorded-29".to_owned(), "derived-29".to_owned()],
+            ),
+            (FoldError::Poisoned, Vec::new()),
+            (
+                FoldError::RewrittenLog {
+                    line: 931,
+                    detail: "detail-31".to_owned(),
+                },
+                vec!["931".to_owned(), "detail-31".to_owned()],
+            ),
+        ]
+    }
+
+    #[test]
+    fn every_refusal_names_the_record_it_refused_and_the_value_it_disagreed_with() {
+        let refusals = refusals();
+        assert_eq!(
+            refusals.len(),
+            33,
+            "the sample list is one refusal per `FoldError` variant; `variant_name` is exhaustive, \
+             so a new variant cannot compile without an arm there and a sample here"
+        );
+        let named: BTreeSet<&'static str> = refusals
+            .iter()
+            .map(|(error, _)| variant_name(error))
+            .collect();
+        assert_eq!(
+            named.len(),
+            refusals.len(),
+            "two samples name one variant, so some variant is unmeasured"
+        );
+
+        let mut rendered: BTreeSet<String> = BTreeSet::new();
+        for (error, fields) in &refusals {
+            let message = error.to_string();
+            assert!(
+                !message.is_empty(),
+                "{} renders nothing",
+                variant_name(error)
+            );
+            for field in fields {
+                assert!(
+                    message.contains(field.as_str()),
+                    "{} drops `{field}` from its message: {message}",
+                    variant_name(error)
+                );
+            }
+            assert!(
+                rendered.insert(message.clone()),
+                "{} reports what another refusal reports: {message}",
+                variant_name(error)
+            );
+        }
+    }
+
+    #[test]
+    fn a_hint_with_no_metacharacter_is_its_own_prefix_and_a_glob_cuts_whole_components() {
+        let cases: [(&str, Option<&str>); 26] = [
+            ("src/literal", Some("src/literal")),
+            ("build.rs", Some("build.rs")),
+            ("src/trailing/", Some("src/trailing")),
+            ("src/star/*.rs", Some("src/star")),
+            ("src/question/?.rs", Some("src/question")),
+            ("src/bracket/[ab].rs", Some("src/bracket")),
+            ("src/brace/{a,b}.rs", Some("src/brace")),
+            (r"src\backslash\deep", None),
+            ("src/doubled//inner/", Some("src/doubled//inner")),
+            ("src/\u{dc}ber/", Some("src/\u{dc}ber")),
+            ("src/star*.rs", Some("src")),
+            ("src/eng*", Some("src")),
+            ("src/a*/b", Some("src")),
+            ("src/deep/mod.rs*", Some("src/deep")),
+            (r"src\deep\mod.rs*", None),
+            (r"src/foo\?bar.rs", None),
+            (r"src/foo\*", None),
+            ("**/anywhere.rs", None),
+            ("*.rs", None),
+            ("star*.rs", None),
+            ("{a,b}/c", None),
+            ("", None),
+            ("/", None),
+            ("src/./alpha", None),
+            ("src/../src/alpha", None),
+            ("./src/alpha", None),
+        ];
+        for (hint, expected) in cases {
+            assert_eq!(
+                hint_prefix(hint).as_ref().map(GitPath::as_str),
+                expected,
+                "`{hint}`"
+            );
+        }
+    }
+
+    #[test]
+    fn a_derived_prefix_overlaps_every_path_its_hint_can_match() {
+        let policy = policy();
+        let covered: [(&str, &str); 5] = [
+            ("src/eng*", "src/engine/mod.rs"),
+            ("src/star*.rs", "src/starship.rs"),
+            ("src/a*/b", "src/alpha/b"),
+            ("src/deep/mod.rs*", "src/deep/mod.rs.bak"),
+            ("src/star/*.rs", "src/star/one.rs"),
+        ];
+        for (hint, matched) in covered {
+            let prefix = hint_prefix(hint).expect("the hint bounds a region");
+            assert!(
+                paths_overlap(&prefix, &GitPath::from(matched), &policy),
+                "`{hint}` derives `{prefix}`, which does not overlap `{matched}` it matches"
+            );
+        }
+        assert!(
+            !paths_overlap(
+                &GitPath::from("src/eng"),
+                &GitPath::from("src/engine/mod.rs"),
+                &policy
+            ),
+            "the comparator is component-wise; a prefix cut inside a component is not an ancestor"
+        );
+    }
+
+    #[test]
+    fn a_hint_carrying_a_backslash_bounds_nothing_because_the_character_has_two_readings() {
+        let policy = policy();
+        for hint in [
+            r"src/foo\?bar.rs",
+            r"src\backslash\deep",
+            r"src\deep\mod.rs*",
+        ] {
+            assert!(hint_prefix(hint).is_none(), "`{hint}` was kept as a prefix");
+        }
+        assert!(
+            !paths_overlap(
+                &GitPath::from("src/foo"),
+                &GitPath::from("src/foo?bar.rs"),
+                &policy
+            ),
+            "the escape reading's prefix does not overlap the one file that reading matches"
+        );
+        assert!(
+            !paths_overlap(
+                &GitPath::from("src/foo/?bar.rs"),
+                &GitPath::from("src/foo?bar.rs"),
+                &policy
+            ),
+            "and the separator reading names a different region again"
+        );
+        assert_eq!(
+            hint_prefix("src/foo").as_ref().map(GitPath::as_str),
+            Some("src/foo"),
+            "the guard refuses backslashes, not every hint"
+        );
+    }
+
+    #[test]
+    fn a_hint_whose_prefix_has_a_dot_component_bounds_nothing_it_can_be_compared_against() {
+        let policy = policy();
+        for spelling in ["src/./alpha", "src/../src/alpha", "./src/alpha", "../alpha"] {
+            assert!(
+                hint_prefix(spelling).is_none(),
+                "`{spelling}` was kept as a prefix"
+            );
+            assert!(
+                !paths_overlap(
+                    &GitPath::from(spelling),
+                    &GitPath::from("src/alpha"),
+                    &policy
+                ),
+                "`{spelling}` would have been a second spelling the comparator does not match"
+            );
+        }
+    }
+
+    #[test]
+    fn a_task_state_and_a_generation_class_each_name_themselves_distinctly() {
+        let states = [
+            (TaskState::Pending, "pending", false),
+            (TaskState::AwaitingMerge, "awaiting merge", false),
+            (TaskState::AwaitingRepair, "awaiting repair", false),
+            (TaskState::AwaitingInput, "awaiting input", false),
+            (TaskState::Deferred, "deferred", false),
+            (TaskState::Merged, "merged", true),
+            (TaskState::Failed, "failed", true),
+        ];
+        let mut names: BTreeSet<&'static str> = BTreeSet::new();
+        for (state, name, terminal) in states {
+            assert_eq!(state.name(), name, "{state:?}");
+            assert_eq!(state.is_terminal(), terminal, "{state:?}");
+            assert!(names.insert(name), "`{name}` names two states");
+        }
+        assert_eq!(names.len(), 7);
+
+        let classes = [
+            (GenerationClass::OpenNoAttempt, "open with no attempt", true),
+            (
+                GenerationClass::InFlight {
+                    attempt: AttemptNumber(1),
+                },
+                "in flight",
+                true,
+            ),
+            (
+                GenerationClass::RetainedIdle {
+                    session: SessionId("s".to_owned()),
+                    incarnation: Epoch(0),
+                },
+                "retained idle",
+                false,
+            ),
+            (GenerationClass::Promoting, "promoting", true),
+            (GenerationClass::Closed, "closed", false),
+        ];
+        let mut class_names: BTreeSet<&'static str> = BTreeSet::new();
+        for (class, name, holds) in classes {
+            assert_eq!(class.name(), name, "{class:?}");
+            assert_eq!(class.holds_pipeline(), holds, "{class:?}");
+            assert_eq!(
+                class.blocks_run_end(),
+                class != GenerationClass::Closed,
+                "{class:?}"
+            );
+            assert!(class_names.insert(name), "`{name}` names two classes");
+        }
+        assert_eq!(class_names.len(), 5);
+    }
+
+    #[test]
+    fn a_tasks_open_generation_is_the_one_that_is_not_closed() {
+        let mut task = TaskFold::new();
+        assert_eq!(task.state, TaskState::Pending);
+        assert_eq!(task.defers, 0);
+        assert_eq!(task.rung, 0);
+        assert_eq!(task.attempts_on_rung, 0);
+        assert!(task.open().is_none(), "a task with no generation has none");
+
+        task.generations
+            .push(generation(0, GenerationClass::Closed));
+        assert!(
+            task.open().is_none(),
+            "a closed generation is not the open one"
+        );
+
+        task.generations
+            .push(generation(1, GenerationClass::Promoting));
+        assert_eq!(
+            task.open().map(|generation| generation.id),
+            Some(GenerationId(1))
+        );
+        task.generations
+            .push(generation(2, GenerationClass::Closed));
+        assert_eq!(
+            task.open().map(|generation| generation.id),
+            Some(GenerationId(1)),
+            "the open one is found past a closed one and before a later closed one"
+        );
+
+        let opened = task.open_mut().expect("the open generation");
+        assert_eq!(opened.id, GenerationId(1));
+        opened.class = GenerationClass::Closed;
+        assert!(
+            task.open().is_none(),
+            "closing the last open generation leaves none"
+        );
+    }
+}
