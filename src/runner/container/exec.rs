@@ -24,8 +24,8 @@ use super::intent::{ContainerIntent, ContainerName};
 use super::runtime::{ContainerRuntime, ContainerTrace, CreateSpec, Mount, RuntimeError};
 use super::view::{self, RoleGitView};
 use super::{
-    CancelResidue, ContainerHooks, GitView, GitViewRequest, LaunchPlan, Launched, NoHooks,
-    create_container, mount_git_view, start_container, write_intent,
+    CancelResidue, ContainerHooks, ContainerToRelease, GitView, GitViewRequest, LaunchPlan,
+    Launched, NoHooks, create_container, mount_git_view, start_container, write_intent,
 };
 use crate::topology::effects::ContainerSite;
 
@@ -219,16 +219,23 @@ impl InvocationPlan {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContainerReached {
+    NotCreated,
+    Created,
+    Started,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Reached {
     view: Option<PathBuf>,
-    container: bool,
+    container: ContainerReached,
 }
 
 impl Reached {
     const INTENT_ONLY: Self = Self {
         view: None,
-        container: false,
+        container: ContainerReached::NotCreated,
     };
 }
 
@@ -558,7 +565,7 @@ impl ContainerRunner {
                     error,
                     Reached {
                         view: Some(plan.view.path.clone()),
-                        container: false,
+                        container: ContainerReached::NotCreated,
                     },
                 ));
             }
@@ -578,7 +585,7 @@ impl ContainerRunner {
                     error,
                     Reached {
                         view: Some(view_path),
-                        container: true,
+                        container: ContainerReached::Created,
                     },
                 ));
             }
@@ -595,7 +602,7 @@ impl ContainerRunner {
                 refusal,
                 Reached {
                     view: Some(view_path),
-                    container: true,
+                    container: ContainerReached::Created,
                 },
             ));
         }
@@ -608,7 +615,7 @@ impl ContainerRunner {
                 error,
                 Reached {
                     view: Some(view_path),
-                    container: true,
+                    container: ContainerReached::Started,
                 },
             ));
         }
@@ -628,10 +635,10 @@ impl ContainerRunner {
         reached: Reached,
     ) -> RunnerError {
         let residue = self.cancel(hooks, &plan.private_root, &plan.name, &reached);
-        let fate = if reached.container && !residue.container_released {
-            ProcessFate::Unresolved
-        } else {
-            ProcessFate::NeverStarted
+        let fate = match reached.container {
+            ContainerReached::NotCreated | ContainerReached::Created => ProcessFate::NeverStarted,
+            ContainerReached::Started if residue.container_gone => ProcessFate::Gone,
+            ContainerReached::Started => ProcessFate::Unresolved,
         };
         if residue.is_empty() {
             return RunnerError::new(&plan.invocation, fate, cause);
@@ -663,7 +670,12 @@ impl ContainerRunner {
             self.view.as_ref(),
             private_root,
             name,
-            reached.container,
+            match reached.container {
+                ContainerReached::NotCreated => ContainerToRelease::Absent,
+                ContainerReached::Created | ContainerReached::Started => {
+                    ContainerToRelease::MayBeRunning
+                }
+            },
             reached.view.as_deref(),
         )
     }
@@ -673,6 +685,7 @@ impl ContainerRunner {
         hooks: &mut dyn ContainerHooks,
         private_root: &Path,
         launched: &Launched,
+        container: ContainerToRelease,
     ) -> Result<(), super::ReleaseFailure> {
         super::release_classified(
             hooks,
@@ -680,6 +693,7 @@ impl ContainerRunner {
             self.view.as_ref(),
             private_root,
             launched,
+            container,
         )
     }
 
@@ -766,26 +780,33 @@ impl Runner for ContainerRunner {
 
         let launched: Launched = self.launch(&mut **hooks, &plan.launch)?;
 
-        let outcome = self.finish(&launched, started, deadline);
-        let released = self.release(&mut **hooks, &self.identity.private_root, &launched);
+        let supervised = self.supervise(&launched.name, deadline);
+        let exit_observed = matches!(supervised, Ok(false));
+        let outcome = supervised.and_then(|timed_out| self.collect(&launched, started, timed_out));
+        let released = self.release(
+            &mut **hooks,
+            &self.identity.private_root,
+            &launched,
+            if exit_observed {
+                ContainerToRelease::ObservedExited
+            } else {
+                ContainerToRelease::MayBeRunning
+            },
+        );
+        let fate = match &released {
+            Ok(()) => ProcessFate::Gone,
+            Err(failure) if failure.container_gone => ProcessFate::Gone,
+            Err(_) => ProcessFate::Unresolved,
+        };
         match (outcome, released) {
             (Ok(output), Ok(())) => Ok(output),
-            (Ok(output), Err(failure)) => {
-                let fate = if output.timed_out || !failure.container_released {
-                    ProcessFate::Unresolved
-                } else {
-                    ProcessFate::Gone
-                };
+            (Ok(_), Err(failure)) => {
                 Err(RunnerError::new(&request.invocation, fate, failure.error))
             }
-            (Err(error), Ok(())) => Err(RunnerError::gone(&request.invocation, error)),
+            (Err(error), Ok(())) => Err(RunnerError::new(&request.invocation, fate, error)),
             (Err(error), Err(failure)) => Err(RunnerError::new(
                 &request.invocation,
-                if failure.container_released {
-                    ProcessFate::Gone
-                } else {
-                    ProcessFate::Unresolved
-                },
+                fate,
                 error.with_cleanup(Err(failure.error)),
             )),
         }
@@ -793,13 +814,12 @@ impl Runner for ContainerRunner {
 }
 
 impl ContainerRunner {
-    fn finish(
+    fn collect(
         &self,
         launched: &Launched,
         started: Instant,
-        deadline: Instant,
+        timed_out: bool,
     ) -> Result<ProcessOutput, UpstrokeError> {
-        let timed_out = self.supervise(&launched.name, deadline)?;
         let execution = self
             .runtime
             .collect(launched.name.as_str())

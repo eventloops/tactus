@@ -480,13 +480,29 @@ fn cancel_created(
     name: &ContainerName,
     view_path: Option<&Path>,
 ) -> Vec<String> {
-    cancel_reached(hooks, runtime, view, private_root, name, true, view_path).messages
+    cancel_reached(
+        hooks,
+        runtime,
+        view,
+        private_root,
+        name,
+        ContainerToRelease::MayBeRunning,
+        view_path,
+    )
+    .messages
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerToRelease {
+    Absent,
+    MayBeRunning,
+    ObservedExited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CancelResidue {
     pub messages: Vec<String>,
-    pub container_released: bool,
+    pub container_gone: bool,
 }
 
 impl CancelResidue {
@@ -502,26 +518,38 @@ pub fn cancel_reached(
     view: &dyn GitView,
     private_root: &Path,
     name: &ContainerName,
-    container_exists: bool,
+    container: ContainerToRelease,
     view_path: Option<&Path>,
 ) -> CancelResidue {
     let mut residue = Vec::new();
-    let mut container_released = true;
-    if container_exists {
-        if let Err(error) = stop_container(
+    let mut container_gone = container != ContainerToRelease::MayBeRunning;
+    if container != ContainerToRelease::Absent {
+        match stop_container(
             hooks,
             ContainerSite::Stop,
             runtime,
             name,
             StopMode::Graceful,
         ) {
-            container_released = false;
-            residue.push(format!("the container could not be stopped: {error}"));
+            Ok(()) => container_gone = true,
+            Err(error) => residue.push(format!("the container could not be stopped: {error}")),
         }
-        if let Err(error) = remove_container(hooks, ContainerSite::Remove, runtime, name) {
-            container_released = false;
-            residue.push(format!("the container could not be removed: {error}"));
+        match remove_container(hooks, ContainerSite::Remove, runtime, name) {
+            Ok(()) => container_gone = true,
+            Err(error) => residue.push(format!("the container could not be removed: {error}")),
         }
+    }
+    if !container_gone {
+        residue.push(format!(
+            "the R19 Git view and the R26 intent record of `{name}` are deliberately retained: \
+             the runtime confirmed neither the stop nor the removal, so the container may still \
+             be running with the view mounted, and the intent is what the next census reclaims \
+             both through (decisions.resource_accounting.rows[R19].at_run_end.NoRunFinished)"
+        ));
+        return CancelResidue {
+            messages: residue,
+            container_gone,
+        };
     }
     let mut view_survives = false;
     if let Some(path) = view_path {
@@ -538,7 +566,7 @@ pub fn cancel_reached(
         ));
         return CancelResidue {
             messages: residue,
-            container_released,
+            container_gone,
         };
     }
     if let Err(error) = remove_intent(hooks, ContainerSite::RemoveIntent, private_root, name) {
@@ -548,7 +576,7 @@ pub fn cancel_reached(
     }
     CancelResidue {
         messages: residue,
-        container_released,
+        container_gone,
     }
 }
 
@@ -571,13 +599,20 @@ pub fn release(
     private_root: &Path,
     launched: &Launched,
 ) -> Result<(), UpstrokeError> {
-    release_classified(hooks, runtime, view, private_root, launched)
-        .map_err(|failure| failure.error)
+    release_classified(
+        hooks,
+        runtime,
+        view,
+        private_root,
+        launched,
+        ContainerToRelease::MayBeRunning,
+    )
+    .map_err(|failure| failure.error)
 }
 
 #[derive(Debug)]
 pub struct ReleaseFailure {
-    pub container_released: bool,
+    pub container_gone: bool,
     pub error: UpstrokeError,
 }
 
@@ -587,6 +622,7 @@ pub fn release_classified(
     view: &dyn GitView,
     private_root: &Path,
     launched: &Launched,
+    container: ContainerToRelease,
 ) -> Result<(), ReleaseFailure> {
     let residue = cancel_reached(
         hooks,
@@ -594,14 +630,14 @@ pub fn release_classified(
         view,
         private_root,
         &launched.name,
-        true,
+        container,
         Some(&launched.view_path),
     );
     if residue.is_empty() {
         return Ok(());
     }
     Err(ReleaseFailure {
-        container_released: residue.container_released,
+        container_gone: residue.container_gone,
         error: UpstrokeError::Refused {
             message: format!(
                 "the release of `{}` could not complete every step, so this run's R19/R26 \

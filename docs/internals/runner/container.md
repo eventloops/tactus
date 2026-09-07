@@ -689,22 +689,60 @@ The answer is a list of descriptions rather than a `Result`, because the
 caller must return the refusal it already has: this function's failure is
 never the thing to report *instead of* an integrity violation.
 
+## `pub enum ContainerToRelease {`
+
+What the caller already knows about the container a cancel or a release is
+handed. `Absent`: no `docker create` was attempted, so the stop and the
+removal are skipped. `MayBeRunning`: a container may exist and may be
+running its process, so the stop and the removal are what establish its
+fate. `ObservedExited`: the caller's supervisor observed the container
+terminated, so nothing runs in it whatever the stop and the removal then
+say — an observed exit is process-fate evidence in its own right, and the
+review of `79ddbffb` found it thrown away the moment a later step failed
+(`PR8-R3-CONTAINER-EVIDENCE`).
+
 ## `pub struct CancelResidue {`
 
 What a cancel or a release could not do, and one fact beside the messages:
-whether the container itself was stopped and removed. The messages are
-for the operator; the fact is for `ContainerRunner::run` and `cancelled`,
-which classify the process by it — a container the runtime never confirmed
-released may still be running its process, and that is the one thing an
-outage terminal must not be settled over.
+whether the runtime established that no process of the container survives.
+The messages are for the operator; the fact is for `ContainerRunner::run`
+and `cancelled`, which classify the process by it — a container the runtime
+never confirmed stopped or removed may still be running its process, and
+that is the one thing an outage terminal must not be settled over.
+
+`container_gone` is **process-fate evidence, kept distinct from whether
+every cleanup step completed** (the review of `79ddbffb`, whose three
+container findings were that one conflation). It is true when no container
+was reached, when the caller observed the container exited, when a stop
+succeeded, or when a forced removal succeeded (`docker rm --force` kills
+before it removes); a failed stop followed by a successful removal is gone,
+and so is a failed removal after a stop that established the exit. It is
+false only when a container may exist and the runtime confirmed neither.
+The view and the intent surviving is no part of it: they are residue for
+the census.
 
 ## `pub fn cancel_reached(`
 
 The one exhaustive cleanup in this tree: stop, remove, unmount, remove the
 intent — **attempting every step even after one fails**, and never removing
 the R26 record while it is the only thing that can find the R19 residue.
-Answers a [`CancelResidue`]; `container_released` is false the moment the
-stop or the removal fails.
+Answers a [`CancelResidue`].
+
+#### Why the view and the intent outlive an unconfirmed container (`PR8-R3-CONTAINER-RETAIN`)
+
+When the stop and the removal both fail and the caller did not observe
+the exit, the container may still be running with the R19 view
+bind-mounted: pruning the view then deletes the Git metadata out from
+under a live gate, and removing the intent deletes the only record that
+names either. The review of `79ddbffb` measured exactly that — survivor
+`Running`, error `Unresolved`, `view=false, intent=false` — after the
+previous round had learned to retain the outer worktree snapshot, which
+protects nothing the container has mounted. So the view and the intent
+are retained **together** whenever `container_gone` is false, the residue
+says so and names the row it protects, and the next census reclaims the
+container, the view and the intent through the intent ([`reclaim`]: kill,
+observe terminated, remove, unmount, remove intent). Removing them would
+be the fail-open direction.
 
 `ContainerRunner::cancel` and `ContainerRunner::release` delegate here, and
 so does [`cancel_created`]. One definition, deliberately: the view-path
@@ -767,14 +805,16 @@ can find it through.
 
 ## `pub struct ReleaseFailure {`
 
-[`release`]'s error with `container_released` beside it: the runner's
-`run` reads it to say whether the failed release left a process that may
-still be running or only a view or an intent for the census.
+[`release`]'s error with `container_gone` beside it: the runner's `run`
+reads it to say whether the failed release left a process that may still
+be running or only a view or an intent for the census.
 
 ## `pub fn release_classified(`
 
-[`release`] keeping that fact; `release` is the same call for a caller that
-has nothing to classify.
+[`release`] keeping that fact, and told what the caller observed
+([`ContainerToRelease`]) so a container seen to exit is not held to be
+running because its stop then failed; `release` is the same call, assuming
+`MayBeRunning`, for a caller that has nothing to classify.
 
 ## `pub const TERMINATION_OBSERVATIONS: usize = 8;`
 
