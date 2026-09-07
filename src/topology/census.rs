@@ -43,7 +43,7 @@ impl Default for CensusBounds {
             attempts_per_generation: 2,
             sequences: 4,
             defers: 2,
-            questions: 2,
+            questions: 4,
             resumes: 2,
             max_trace: 12,
             max_states: 20_000,
@@ -1062,6 +1062,21 @@ mod tests {
                     task_merged(fold, sequence, key, generation),
                 ));
             }
+
+            out.push(Candidate::new(
+                format!("question_raised/{name}"),
+                ev(TopologyEventBody::QuestionRaised {
+                    data: crate::topology::events::QuestionRaised4 {
+                        question: crate::topology::events::FrozenQuestion {
+                            id: QuestionId::from(format!("q-raised-{name}").as_str()),
+                            key,
+                            kind: QuestionKind::Unblock,
+                            context: "  a question raised directly on the task  ".to_owned(),
+                            options: vec!["yes".to_owned(), "no".to_owned()],
+                        },
+                    },
+                }),
+            ));
         }
 
         out.push(Candidate::new(
@@ -1129,9 +1144,12 @@ mod tests {
     }
 
     fn backoff_pending(fold: &TopologyFold) -> bool {
+        // §26: a task's backoff survives its move to `AwaitingInput` under a question, so the
+        // mirror reads the fold's own deferred-task record rather than the current task state,
+        // which a question raised on a `Deferred` task would otherwise clear from view.
         let deferred_task = [ALEPH, BET]
             .iter()
-            .any(|key| fold.task_state(*key) == Some(TaskState::Deferred));
+            .any(|key| fold.task_backoff_pending(*key));
         let deferred_candidate = fold.queue().is_some_and(|queue| {
             queue
                 .entries()
@@ -1211,6 +1229,7 @@ mod tests {
         let (not_ending, ending) = (audit.not_ending, audit.ending);
         assert!(not_ending > 0 && ending > 0, "{not_ending}/{ending}");
 
+        let mut backoff_states = 0;
         for state in census.states() {
             let fold = &state.fold;
             let common = common(fold);
@@ -1218,6 +1237,16 @@ mod tests {
             let budget = fold
                 .budget_stop()
                 .is_some_and(|stop| Some(stop.epoch) == fold.epoch());
+            assert_eq!(
+                backoff_pending(fold),
+                fold.backoff_pending(),
+                "state {}: the census mirror of backoff_pending disagrees with the code, \
+                 including once a question is raised on a deferred task",
+                state.id
+            );
+            if backoff_pending(fold) {
+                backoff_states += 1;
+            }
             if !common {
                 assert_eq!(
                     state.outcome,
@@ -1273,6 +1302,22 @@ mod tests {
                 DerivedOutcome::NotEnding | DerivedOutcome::FoldError => {}
             }
         }
+        assert!(
+            backoff_states > 0,
+            "no explored state had a pending backoff"
+        );
+
+        let deferred_then_awaiting_input = census.states().iter().any(|state| {
+            [ALEPH, BET]
+                .iter()
+                .any(|key| state.fold.task_state(*key) == Some(TaskState::AwaitingInput))
+                && backoff_pending(&state.fold)
+        });
+        assert!(
+            deferred_then_awaiting_input,
+            "no explored state reaches a task that is `AwaitingInput` while its backoff is \
+             still pending; the census mirror and the code can only disagree there"
+        );
     }
 
     #[test]
