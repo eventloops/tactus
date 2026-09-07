@@ -354,12 +354,55 @@ A breach is recorded *by* the branch that asked, and every
 asking branch is an admitting one; the ceiling is never consulted
 outside one.
 
-## `impl IntegrationJournal for RunJournal<'_, '_>` › `fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {`
+## `impl IntegrationJournal for IntegrationCx<'_, '_>` › `fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {`
 
 The provisional integration reservation converts at the sequence's
 first append, and the ledger it converts in is the one `EmitState`
 borrows for the append-error protocol's cancellation — so the journal
 forwards to it rather than the sequence holding a second borrow.
+
+## `fn implementer_binding(`
+
+The binding the candidate ran under, for `passes_for`'s self-review rule:
+the task's validated override when one exists (E2 binds every later attempt
+to it), else the frozen rung at the fold-derived rung position. The fold
+moves a task's rung only at an escalation settlement and a task at
+`AwaitingMerge` settles no further attempt, so that position is the
+producing attempt's. The reviews of `3414dc58` found the ladder's *last*
+rung passed here, which a candidate produced lower down never ran under —
+so a primary reviewer equal to the real implementer was not swapped for
+the alternative, and a model could be handed its own work to review
+(`pr8-triage.md` C6).
+
+## `impl Verification for IntegrationCx<'_, '_>` › `let prior_failure = match crate::engine::classify::diff_failure(`
+
+What the attempt path decides in `assess` before it judges, decided here
+too: a review diff no reviewer can judge (too large, opaque) and the
+review-input policy's answer for the proposed tree, read in the staging
+worktree. Either stands in for the gates and reviewers as the judge's
+prior failure, and the sequence parks the candidate `HumanRequired` (R4).
+Without it the real refusal escaped from `review::materialize_prompt` as an
+error, and a policy that refused the tree still published (`pr8-triage.md`,
+tests 2).
+
+## `impl Verification for IntegrationCx<'_, '_>` › `self.spend.record_reviews(key, &judgement.reviews);`
+
+The ceiling's ledger, charged before the terminal is appended, exactly as
+an attempt's reviews are charged in `settle`; `Spend::replay` rebuilds it
+from the terminal's record. An unavailable terminal carries no review
+record, so a review that ended in a park or an outage is charged live and
+not on replay (`pr8-plan.md` R22).
+
+## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Runner { invocation, error }) => Ok(Verified::RunnerUnavailable {`
+
+A Runner that could not run a gate is not an error of the sequence but an
+observed infrastructure failure with a terminal of its own:
+`transaction_fault_matrix[T-VERIFY].resume_action` and `invariants[INV-23]`
+("a RunnerSpawnFailure outage settlement mid-run"). Left to `?`, it escaped
+after `merge_verification_started`, the transaction stayed open, and every
+repeat bypassed the defer and park limit (`pr8-triage.md` C3). A reviewer's
+process failure already reaches the judgement as `ReviewResult::Unavailable`
+through `run_review`; this covers the gate path.
 
 ## `impl LoopBranch` › `pub fn owes(self, clause: &str) -> UpstrokeError {`
 

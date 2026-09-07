@@ -167,17 +167,7 @@ impl Fixture {
         } else {
             container_runner()
         };
-        let started = run_started(
-            &plan,
-            &recorded_locator,
-            runner,
-            &base_sha,
-            damage.two_tier,
-            damage.deep_ladder,
-            damage.two_tasks,
-            damage.alternative_reviewer,
-            damage.no_automatic_repairs,
-        );
+        let started = run_started(&plan, &recorded_locator, runner, &base_sha, &damage);
 
         let marker = CreatingMarker {
             run_id: RUN_ID.to_owned(),
@@ -542,11 +532,7 @@ fn run_started(
     private_dir: &str,
     runner: RunnerPolicy,
     base: &CommitSha,
-    two_tier: bool,
-    deep_ladder: bool,
-    two_tasks: bool,
-    alternative_reviewer: bool,
-    no_automatic_repairs: bool,
+    damage: &Damage,
 ) -> RunStarted4 {
     let unauthenticated = RunStarted4 {
         schema: TOPOLOGY_SCHEMA,
@@ -573,7 +559,7 @@ fn run_started(
         limits: TopologyLimits {
             max_parallel: 1,
             max_defers: 3,
-            max_merge_repairs: u32::from(!no_automatic_repairs),
+            max_merge_repairs: u32::from(!damage.no_automatic_repairs),
         },
         gates: vec!["clippy".to_owned()],
         gates_from_config: true,
@@ -585,15 +571,15 @@ fn run_started(
         }],
         interaction_mode: "attached".to_owned(),
         chains: {
-            let first = if deep_ladder {
+            let first = if damage.deep_ladder {
                 deep_chain()
-            } else if two_tier {
+            } else if damage.two_tier {
                 escalating_chain()
             } else {
                 chain()
             };
             let mut chains = vec![first.clone()];
-            if two_tasks {
+            if damage.two_tasks {
                 chains.push(ChainSummary {
                     task: "beta".to_owned(),
                     ..first
@@ -609,10 +595,10 @@ fn run_started(
         },
         reviews: {
             let mut reviews = review_plan();
-            if two_tasks {
+            if damage.two_tasks {
                 reviews.second_opinion.push(None);
             }
-            if alternative_reviewer {
+            if damage.alternative_reviewer {
                 reviews.alternative = Some(PassBinding::new(AGENT, "claude-fable-5"));
                 reviews.alternative_available = Some(true);
             }
@@ -6339,7 +6325,7 @@ fn proven_durable_len(hooks: &HarnessTopologyHooks, fixture: &Fixture) -> u64 {
             )
         })
         .map(|record| record.len)
-        .last()
+        .next_back()
         .expect("a sync was recorded")
 }
 
@@ -6429,13 +6415,10 @@ struct ReportingEvents {
 }
 
 fn report(path: &Path, line: &str) {
-    use std::io::Write as _;
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .create(true)
-        .open(path)
-        .expect("the report file opens");
-    writeln!(file, "{line}").expect("the report line is written");
+    let mut content = std::fs::read_to_string(path).unwrap_or_default();
+    content.push_str(line);
+    content.push('\n');
+    crate::workspace_manager::fixture::write_file(path, content.as_bytes());
 }
 
 impl ReportingHooks {
@@ -6703,8 +6686,7 @@ fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {
         .expect("`Event.OpenLog` exposes `SyncPrefix` with an error contract");
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness)).recording_durability();
     let error = resume_with_real_refs_hooked(&fixture, &mut hooks)
-        .err()
-        .expect("a barrier whose sync fails ends the command");
+        .expect_err("a barrier whose sync fails ends the command");
     let text = message(&error);
     assert!(
         text.contains("SyncPrefix"),
@@ -8340,23 +8322,10 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
         "the classifier refused {} of {SAMPLING_N} samples: {refusals:?}",
         refusals.len()
     );
-    assert_eq!(observed.len(), SAMPLING_N as usize);
-    let counted = |wanted: crate::topology::effects::ObjectResidue| {
-        observed
-            .iter()
-            .filter(|(class, _)| *class == wanted)
-            .count()
-    };
-    println!(
-        "integration residue sampling {site}: n={SAMPLING_N} budget={}us none={} internal={} after={} killed={}",
-        budget.as_micros(),
-        counted(crate::topology::effects::ObjectResidue::None),
-        counted(crate::topology::effects::ObjectResidue::Internal),
-        counted(crate::topology::effects::ObjectResidue::After),
-        observed
-            .iter()
-            .filter(|(_, status)| crate::workspace_manager::fixture::died_by_kill(status))
-            .count()
+    assert_eq!(
+        observed.len(),
+        SAMPLING_N as usize,
+        "every sample was classified into one of the site's classes and recovered"
     );
 }
 
@@ -8407,7 +8376,7 @@ fn a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed(
         "recovery deleted a lock file no residue class authorizes it to"
     );
 
-    std::fs::remove_file(&lock).expect("the operator removes the lock");
+    crate::workspace_manager::fixture::remove_file(&lock);
     resume_with_real_refs(&fixture, &harness())
         .expect("with the lock gone the authorized publication completes");
     assert_eq!(merged_sequences(&fixture), vec![0]);

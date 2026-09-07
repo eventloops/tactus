@@ -194,8 +194,13 @@ which number to raise.
 The run ceiling alone.
 
 Split out because one branch checks this and not [`Self::breach`]: an
-integration spawns no worker and is charged to no task. See
-[`select`]'s integration branch for why that is not an omission.
+integration is admitted against the run ceiling alone. See [`select`]'s
+integration branch for why the task ceiling is not consulted there. What an
+integration *spends* is another matter: its verification's reviews are
+charged to the candidate's task and to the run at the verification
+([`Spend::record_reviews`]), so the next check — of either ceiling — sees
+them. The reviews of `3414dc58` found them charged nowhere (`pr8-triage.md`,
+tests 3).
 
 ## `fn run_breach(&self, spend: &Spend) -> Option<Breach>` › `(spent >= limit).then_some(Breach {`
 
@@ -459,7 +464,12 @@ An integration also spawns no worker, and the identities its
 verification passes carry are `(sequence, role, ordinal)` rather
 than a task's. The run ceiling still binds, because `loop` puts the
 check inside every admitting branch and a run at its overall
-ceiling is done whatever the branch would have been.
+ceiling is done whatever the branch would have been — and what the
+verification then spends on its reviews is charged, to the
+candidate's task and to the run, before its terminal is appended
+([`Spend::record_reviews`]; `Spend::replay` reads it back off
+`merge_prepared` and `merge_rejected`), so the run ceiling that admits
+the *next* integration counts every review the last one ran.
 
 ## `pub fn checkpoint(step: Step) -> Result<Admitted, UpstrokeError> {`
 

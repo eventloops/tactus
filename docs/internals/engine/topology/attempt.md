@@ -875,9 +875,22 @@ reviewer on its own.
 the gate set and one fresh snapshot per reviewer, **never reused across
 roles or attempts**, cleaned on completion". The name carries the
 generation, the attempt and the role, so "never reused" is a property of
-[`SnapshotName`] rather than of this loop's discipline — and each
-snapshot is removed before the next is created, so a reviewer cannot
-inherit the previous one's checkout even by mistake.
+[`SnapshotName`] rather than of this loop's discipline — and, on the
+attempt path, each snapshot is removed before the next is created, so a
+reviewer cannot inherit the previous one's checkout even by mistake.
+
+### When the snapshots are removed is the caller's, not the judge's
+
+[`SnapshotDisposal`]. The attempt path removes each snapshot as its role
+finishes, before `attempt_finished` — the order the effect inventory
+registers for `Snapshot.Remove`. The integration path may not:
+`pr_sequence[9].slice_contract.side_effect_vs_event_ordering` puts "staging
+and snapshot removal (forced) after terminal (incl. Deferred/Parked)", so
+its judge leaves every snapshot in place and `integrate` reclaims them once
+`merge_prepared`, `merge_rejected` or `merge_verification_unavailable` is
+durable. A removal that fails can then no longer strand a completed
+judgement behind an unterminated verification, which is what the reviews
+of `3414dc58` found (`pr8-triage.md`, F4).
 
 ### What the name does not carry, and where that is owed
 
@@ -1110,7 +1123,20 @@ caller.
 
 ## `impl AttemptContext<'_>` › `fn verdict(`
 
-[`Self::execute`], reduced to what a judgement records.
+[`Self::execute`], reduced to what a judgement records — through
+[`Judge::execute_typed`], so the Runner's own error stays
+[`JudgeError::Runner`] all the way up.
+
+## `pub enum JudgeError {`
+
+Why a judgement could not be completed, with the Runner's failure told
+apart from every other. The two have different terminals at integration:
+a gate process the Runner could not run is an observed infrastructure
+failure (`invariants[INV-23]`, `[T-VERIFY].resume_action`) and terminates
+`merge_verification_unavailable{Infrastructure{RunnerSpawnFailure}}`,
+deferred or parked; everything else ends the command. The attempt path
+converts it back into the plain error it always was ([`From`]), so nothing
+there changes.
 
 ## `impl AttemptContext<'_>` › `log: format!("{}{}", output.stdout, output.stderr),`
 
