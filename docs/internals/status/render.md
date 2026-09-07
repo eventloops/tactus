@@ -102,8 +102,8 @@ same.
 
 ## `EventBody::LadderRetry { task, data, .. } => format!("{task}: {}", describe_retry(data)),`
 
-The legacy standalone forms of the decisions above, spelt by the
-same helpers so the two wire shapes cannot drift apart.
+The legacy standalone forms of the decisions a settlement carries, spelt by
+the same helpers so the two wire shapes cannot drift apart.
 
 ## `EventBody::DeferWaitElapsed { data } => {`
 
