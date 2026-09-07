@@ -1,7 +1,7 @@
 # `src/engine/topology/settle/tests.rs`
 
 Repository source for these notes: [`src/engine/topology/settle/tests.rs`](../../../../../src/engine/topology/settle/tests.rs).
-[Source on GitHub](https://github.com/eventloops/upstroke/blob/master/src/engine/topology/settle/tests.rs).
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/engine/topology/settle/tests.rs).
 The relative link works in a checkout or on GitHub; the GitHub link also works from the published site.
 
 The code is the authority for what it does. The explanatory prose is preserved below.
@@ -543,6 +543,56 @@ answer the operator already wrote answer *this* question.
 
 The fresh process: recovery step (e) closes it, and only then does
 the run resume. After that, nothing can retry it.
+
+## `fn a_root_a_second_run_adopts_replays_as_already_started() {`
+
+The `AlreadyStarted` fingerprint, built on purpose: one root, two
+children. `PR160-WINDOWS-SETTLE-ALREADYSTARTED` and, before it,
+`PR107-WINDOWS-SETTLE-REPLAY-ALREADYSTARTED-FINGERPRINT` recorded
+`kill_after_failed_settlement_rematerializes_question` and
+`retained_generation_not_continued_after_kill` failing *together* on the
+Windows leg with `the log replays: AlreadyStarted`, intermittently, on
+heads that also passed — and neither row established what produces a log
+with two beginnings. This does. The second child's `create_hooked`
+accepts the directory the first child left, `EventLog::open_hooked` opens
+the log that is already in it, and the beginning it appends is that log's
+second `run_started`.
+
+Both halves are pinned, because either alone would be weaker than it
+reads: that the second child *continued* the first child's log — two
+`run_started` lines, not one and not three — and that replay refuses
+exactly `FoldError::AlreadyStarted`. The refusal is what the reported
+failure was, and pinning the variant separates this fingerprint from
+`PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT`, whose two tests are the
+same two and whose refusal is a `MalformedEntry`.
+
+Why a kill test cannot reach that state now, and could before. The
+fixture PR160 reviewed named its root `upstroke-pr7h-<label>-<pid>-<n>`
+and created it with `create_dir_all`, which accepts an existing
+directory; the Windows leg runs on an ephemeral overlay of a frozen
+image, so every job starts from that image's `%TEMP%` and the roots
+earlier runs left are still in it. A job whose test binary drew a
+process id one of those roots was named for continued that root's log
+instead of starting one — and because the two labels are allocated by
+one process, `question` and `retained` collide as a pair, which is why
+the two tests always failed together. [`scratch`] draws through
+[`scratch_tree::acquire`] since `54ef9d5a`: one exclusive `create_dir` on
+a name carrying a fresh ULID, so the name is not one an earlier run can
+have taken, and an occupied name is refused rather than adopted.
+
+## `fn a_root_a_second_run_adopts_replays_as_already_started()` › `scratch_tree::proves_absent(&dir.join("public").join("events.jsonl")),`
+
+The property that keeps the fingerprint out of the two kill tests,
+asserted where it matters rather than left to the allocator's own tests:
+the root a draw hands over holds no event log. Absence is
+[`scratch_tree::proves_absent`]'s `NotFound`, not `Path::exists`'s
+`false`, which a stat the filesystem refused would also give.
+
+## `fn run_starteds(events: &[TopologyEvent]) -> usize {`
+
+How many beginnings a log records. A count, not a "more than one":
+one is what a sound log has and two is what the fingerprint is, and a
+predicate that answered "at least one" would pass on both.
 
 ## `fn a_resume_that_moved_the_runner_is_refused() {`
 

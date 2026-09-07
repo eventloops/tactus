@@ -30,7 +30,7 @@ use crate::topology::events::{
     RunResumed4, RunStarted4, RunnerContract, RunnerKind, RunnerPolicy, TaskDispatched,
     TopologyEvent, TopologyEventBody, TopologyLimits,
 };
-use crate::topology::fold::{FrozenInputs, GenerationClass, TaskState};
+use crate::topology::fold::{FoldError, FrozenInputs, GenerationClass, TaskState};
 use crate::topology::paths::{GitPath, PathGrammar, PathPolicy, PathPolicyVersion, PathSet};
 use crate::topology::registry::TaskRegistry;
 use crate::topology::schema::TOPOLOGY_SCHEMA;
@@ -123,7 +123,7 @@ fn chain(task: &str) -> ChainSummary {
 
 fn path_policy() -> PathPolicy {
     PathPolicy {
-        version: PathPolicyVersion::V1,
+        version: PathPolicyVersion::V2,
         case_fold: true,
         grammar: PathGrammar::Globset,
     }
@@ -1708,6 +1708,56 @@ fn retained_generation_not_continued_after_kill() {
     )
     .expect_err("a fresh process continued a session it did not retain");
     assert!(worktrees.asked().is_empty());
+}
+
+#[test]
+fn a_root_a_second_run_adopts_replays_as_already_started() {
+    let tree = scratch("adopted");
+    let dir = tree
+        .checked_path()
+        .expect("the acquired tree is current before the first child");
+    assert!(
+        scratch_tree::proves_absent(&dir.join("public").join("events.jsonl")),
+        "the draw handed over a root that already holds an event log: {}",
+        dir.display()
+    );
+
+    spawn_kill_child(dir, "question");
+    let dir = tree
+        .checked_path()
+        .expect("the acquired tree is current between the two children");
+    assert_eq!(
+        run_starteds(&committed(dir)),
+        1,
+        "the first child did not leave one beginning behind"
+    );
+
+    spawn_kill_child(dir, "question");
+    let dir = tree
+        .checked_path()
+        .expect("the acquired tree is current before reading the adopted residue");
+    let events = committed(dir);
+    assert_eq!(
+        run_starteds(&events),
+        2,
+        "the second child did not continue the first child's log"
+    );
+
+    let error = TopologyFold::replay(inputs(), &events)
+        .expect_err("a log with two beginnings does not replay");
+    assert_eq!(
+        error,
+        FoldError::AlreadyStarted,
+        "the adopted root produced a different refusal, so this is not the fingerprint \
+         PR160-WINDOWS-SETTLE-ALREADYSTARTED and its recurrence recorded"
+    );
+}
+
+fn run_starteds(events: &[TopologyEvent]) -> usize {
+    events
+        .iter()
+        .filter(|event| matches!(event.body, TopologyEventBody::RunStarted { .. }))
+        .count()
 }
 
 #[test]

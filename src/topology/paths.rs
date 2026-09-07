@@ -16,6 +16,7 @@ pub struct PathPolicy {
 #[serde(rename_all = "snake_case")]
 pub enum PathPolicyVersion {
     V1,
+    V2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,7 +85,7 @@ mod tests {
 
     fn hostile_policy() -> PathPolicy {
         PathPolicy {
-            version: PathPolicyVersion::V1,
+            version: PathPolicyVersion::V2,
             case_fold: true,
             grammar: PathGrammar::Globset,
         }
@@ -98,14 +99,14 @@ mod tests {
             serde_json::from_str::<PathPolicy>(&json).expect("deserialize"),
             policy
         );
-        assert!(json.contains(r#""version":"v1""#), "{json}");
+        assert!(json.contains(r#""version":"v2""#), "{json}");
         assert!(json.contains(r#""case_fold":true"#), "{json}");
         assert!(json.contains(r#""grammar":"globset""#), "{json}");
     }
 
     #[test]
     fn a_path_policy_refuses_an_unknown_field() {
-        let json = r#"{"version":"v1","case_fold":true,"grammar":"globset","ordering":"lexical"}"#;
+        let json = r#"{"version":"v2","case_fold":true,"grammar":"globset","ordering":"lexical"}"#;
         assert!(serde_json::from_str::<PathPolicy>(json).is_err());
     }
 
@@ -113,13 +114,13 @@ mod tests {
     fn an_unknown_key_stays_unknown_when_it_replaces_a_required_field_as_well_as_when_it_joins_one()
     {
         let intruders: [(&str, &str, &str); 3] = [
-            ("version", "policy_version", r#""v1""#),
+            ("version", "policy_version", r#""v2""#),
             ("case_fold", "fold_case", "true"),
             ("grammar", "ordering", r#""globset""#),
         ];
         for (required, intruder, value) in intruders {
             let mut replaced: serde_json::Value =
-                serde_json::from_str(r#"{"version":"v1","case_fold":true,"grammar":"globset"}"#)
+                serde_json::from_str(r#"{"version":"v2","case_fold":true,"grammar":"globset"}"#)
                     .expect("fixture parses");
             let object = replaced.as_object_mut().expect("object");
             object.remove(required).expect("field present");
@@ -133,7 +134,7 @@ mod tests {
             );
 
             let mut added: serde_json::Value =
-                serde_json::from_str(r#"{"version":"v1","case_fold":true,"grammar":"globset"}"#)
+                serde_json::from_str(r#"{"version":"v2","case_fold":true,"grammar":"globset"}"#)
                     .expect("fixture parses");
             added.as_object_mut().expect("object").insert(
                 intruder.to_owned(),
@@ -151,16 +152,16 @@ mod tests {
         let expectations = [
             (
                 false,
-                r#"{"version":"v1","case_fold":false,"grammar":"globset"}"#,
+                r#"{"version":"v2","case_fold":false,"grammar":"globset"}"#,
             ),
             (
                 true,
-                r#"{"version":"v1","case_fold":true,"grammar":"globset"}"#,
+                r#"{"version":"v2","case_fold":true,"grammar":"globset"}"#,
             ),
         ];
         for (case_fold, expected) in expectations {
             let policy = PathPolicy {
-                version: PathPolicyVersion::V1,
+                version: PathPolicyVersion::V2,
                 case_fold,
                 grammar: PathGrammar::Globset,
             };
@@ -180,8 +181,8 @@ mod tests {
     }
 
     #[test]
-    fn an_unsupported_policy_version_or_grammar_spelling_is_refused_rather_than_folded_into_v1() {
-        for version in ["v2", "V1", "v1 ", "", "v10", "v0"] {
+    fn an_unsupported_policy_version_or_grammar_spelling_is_refused_rather_than_folded_into_one() {
+        for version in ["v3", "V1", "v1 ", "", "v10", "v0"] {
             let json = format!(r#"{{"version":"{version}","case_fold":true,"grammar":"globset"}}"#);
             assert!(
                 serde_json::from_str::<PathPolicy>(&json).is_err(),
@@ -189,7 +190,7 @@ mod tests {
             );
         }
         for grammar in ["globset2", "Globset", "glob", "", "globset "] {
-            let json = format!(r#"{{"version":"v1","case_fold":true,"grammar":"{grammar}"}}"#);
+            let json = format!(r#"{{"version":"v2","case_fold":true,"grammar":"{grammar}"}}"#);
             assert!(
                 serde_json::from_str::<PathPolicy>(&json).is_err(),
                 "grammar `{grammar}` was accepted",
@@ -197,14 +198,23 @@ mod tests {
         }
         assert_eq!(
             serde_json::from_str::<PathPolicy>(
-                r#"{"version":"v1","case_fold":true,"grammar":"globset"}"#
+                r#"{"version":"v2","case_fold":true,"grammar":"globset"}"#
             )
             .expect("the canonical policy decodes"),
             hostile_policy()
         );
         assert_eq!(
+            serde_json::to_string(&PathPolicyVersion::V2).expect("serialize"),
+            r#""v2""#
+        );
+        assert_eq!(
             serde_json::to_string(&PathPolicyVersion::V1).expect("serialize"),
             r#""v1""#
+        );
+        assert_eq!(
+            serde_json::from_str::<PathPolicyVersion>(r#""v1""#).expect("v1 decodes"),
+            PathPolicyVersion::V1,
+            "a run recorded under v1 has to decode before the fold can refuse it by name"
         );
         assert_eq!(
             serde_json::to_string(&PathGrammar::Globset).expect("serialize"),
@@ -216,7 +226,7 @@ mod tests {
     fn a_path_policy_refuses_a_missing_field_rather_than_defaulting_it() {
         for absent in ["version", "case_fold", "grammar"] {
             let mut value: serde_json::Value =
-                serde_json::from_str(r#"{"version":"v1","case_fold":true,"grammar":"globset"}"#)
+                serde_json::from_str(r#"{"version":"v2","case_fold":true,"grammar":"globset"}"#)
                     .expect("fixture parses");
             value
                 .as_object_mut()
@@ -370,6 +380,86 @@ mod tests {
                 set,
                 "the frozen payload did not decode to {set:?}"
             );
+        }
+    }
+
+    #[test]
+    fn the_notes_give_the_empty_region_the_repo_wide_exception_the_comparison_gives_it() {
+        use crate::topology::leases::regions_overlap;
+
+        const NOTES: &str = include_str!("../../docs/internals/topology/paths.md");
+        const CONTRACT: &str = "`impl PathSet` › `pub fn prefixes(&self) -> Option<&[GitPath]> {`";
+        const WIRE: &str = "`fn the_three_regions_are_distinguishable_on_the_wire()` › `let repo_wide = PathSet::RepoWide;`";
+
+        let policy = hostile_policy();
+        let empty = PathSet::Prefixes { paths: Vec::new() };
+        let bounded = PathSet::Prefixes {
+            paths: vec![GitPath::from("src/foo")],
+        };
+
+        assert!(
+            regions_overlap(&empty, &PathSet::RepoWide, &policy)
+                && regions_overlap(&PathSet::RepoWide, &empty, &policy),
+            "these pins describe an empty region that `RepoWide` overlaps; the \
+             comparison no longer says so, so they are the wrong words for \
+             whatever it says now"
+        );
+        assert!(
+            !regions_overlap(&empty, &bounded, &policy)
+                && !regions_overlap(&bounded, &empty, &policy),
+            "these pins describe an empty region that overlaps no bounded one; \
+             the comparison no longer says so, so they are the wrong words for \
+             whatever it says now"
+        );
+
+        let section = |heading: &str| -> String {
+            NOTES
+                .split("\n## ")
+                .find(|section| section.starts_with(heading))
+                .map(|section| section.split_whitespace().collect::<Vec<_>>().join(" "))
+                .unwrap_or_else(|| panic!("the notes carry no {heading:?} heading"))
+        };
+
+        for (heading, states, retired) in [
+            (
+                CONTRACT,
+                &[
+                    (
+                        "an empty region overlaps no bounded region",
+                        "overlaps no bounded region",
+                    ),
+                    (
+                        "`RepoWide` overlaps the empty region even so",
+                        "`RepoWide` overlaps it",
+                    ),
+                ][..],
+                &[("an empty region overlaps nobody at all", "overlaps nobody")][..],
+            ),
+            (
+                WIRE,
+                &[(
+                    "an unbounded region written as an empty one overlaps no bounded region",
+                    "overlaps no bounded region",
+                )][..],
+                &[("such a region overlaps nobody at all", "overlaps nobody")][..],
+            ),
+        ] {
+            let notes = section(heading);
+            for (proposition, pin) in states {
+                assert!(
+                    notes.contains(pin),
+                    "the {heading:?} section must state that {proposition}; \
+                     looked for {pin:?} in:\n{notes}"
+                );
+            }
+            for (claim, pin) in retired {
+                assert!(
+                    !notes.contains(pin),
+                    "the retired claim that {claim} must not come back — \
+                     `regions_overlap` answers `true` for the empty region \
+                     against `RepoWide`; found {pin:?} in:\n{notes}"
+                );
+            }
         }
     }
 

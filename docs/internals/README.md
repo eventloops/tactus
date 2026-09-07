@@ -86,9 +86,11 @@ Censuses that read prose were pointed at the notes or re-expressed rather than k
 `docs/internals/runner/container.md`; `events::log::tests` lifts its `compile_fail` build-refusal
 fixtures from `docs/internals/events/log.md`; and the two comment-strip floors in `agent::tests`
 and `runner::host::tests` plant a control line and assert it is removed instead of counting live
-comments. One sentence stays in the source because two censuses require it on a line of its own:
-the per-site allowance statement in `src/agent/proc/test_support/readiness.rs`, kept to the four
-lines the censuses read. A comment can also be holding a lint at bay — `clippy::collapsible_if`
+comments. No prose stays in the source for a census's sake either: the readiness module's
+per-site allowance statement, which `effects::tests` and `runner::container::tests` require on a
+line of its own, moved with the rest, and those two censuses now read it from
+`docs/internals/agent/proc/test_support/readiness.md` and from that module's row in
+`effects/allowlist.toml`. A comment can also be holding a lint at bay — `clippy::collapsible_if`
 fired once when a comment between two `if`s was removed — and the code, not a comment, is the fix.
 
 
@@ -109,7 +111,7 @@ Where one of these has to stay, it stays, and the notes file says so.
 ## Keeping them honest
 
 `.github/scripts/test-internals-notes.sh` runs in CI's `lint` job (the Ubuntu one, with the other
-four Bash gates) and holds the two trees to each other in both directions:
+five Bash gates) and holds the two trees to each other in both directions:
 
 - every marker is spelled exactly `//! Extended notes: \`docs/internals/<module>.md\`` — no
   anchor, no prose, no other comment form — names the notes file that its own module's path

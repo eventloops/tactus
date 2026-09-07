@@ -1,7 +1,7 @@
 # `src/engine/topology/run.rs`
 
 Repository source for these notes: [`src/engine/topology/run.rs`](../../../../src/engine/topology/run.rs).
-[Source on GitHub](https://github.com/eventloops/upstroke/blob/master/src/engine/topology/run.rs).
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/engine/topology/run.rs).
 The relative link works in a checkout or on GitHub; the GitHub link also works from the published site.
 
 The code is the authority for what it does. The explanatory prose is preserved below.
@@ -211,11 +211,19 @@ The contract passage that says so.
 Partly written, with both halves named **in the branch's own words**.
 
 `loop` states each branch as a sequence of clauses, and a branch can be
-honestly half-built: the ready-dispatch branch's first three clauses are
-a reservation and a dispatch, its last is an entire attempt through the
-Runner. Collapsing that into `Performed` would claim work nobody did,
-and into `NotYetImplemented` would hide a production append that
-genuinely happens. Neither is true, so the type says both.
+honestly half-built. The ready-dispatch branch was, until its attempt and
+settlement landed: its first three clauses were a reservation and a
+dispatch, its last an entire attempt through the Runner, and only the
+first three were written. Collapsing that into `Performed` would have
+claimed work nobody did, and into `NotYetImplemented` would have hidden a
+production append that genuinely happens. Neither was true, so the type
+said both.
+
+**No branch is `PartlyImplemented` today** — every arm of
+[`LoopBranch::disposition`] is `Performed`, `RefusedByCheckpoint` or
+`NotThisSlice`, and
+`a_refusal_names_the_branch_and_says_whether_anything_happened` asserts
+it. The variant stays for the next branch built in halves.
 
 ## `pub enum Disposition` › `#[allow(dead_code)]` (trailing)
 
@@ -267,25 +275,14 @@ the log a kill during the sleep would make false.
 
 The branch reads "ceiling check, provisional dispatch
 reservation, dispatch, run one attempt through the Runner and
-settle". The first three are here. The fourth is an attempt: a
-ladder rung, an adapter-built worker command, a spawn, a capture,
-gates, reviews and a settlement — and the state this build leaves
-instead is `OpenNoAttempt`, which is a **tabled** state, not a
-stuck one: recovery step (g) recreates its worktree at its base,
-and `close_at_run_end` closes it. Stopping here leaves the run in
-a shape the system already knows how to recover.
-All four clauses, and every case of the last one: a success
-through the candidate sequence, a retry, an escalation, an
-outage deferral, a park, and a terminal failure. The last two
+settle". All four clauses, and every case of the last one: a
+success through the candidate sequence, a retry, an escalation,
+an outage deferral, a park, and a terminal failure. The last two
 were refusals until `TaskFold::defers` and the question builder
 existed, and both refusals went with their causes.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::ReadyRetry => Disposition::Performed,`
 
-"{pipeline} reservation, next attempt in the retained
-generation" is here; running that attempt and settling it is the
-half still owed, and it is the same machinery the ready-dispatch
-branch already runs.
 "{pipeline} reservation, next attempt in the retained
 generation", whole: the reservation, `Worktree.Verify`, the
 retry's `attempt_started`, the attempt itself and its
@@ -618,7 +615,21 @@ loop that consumes `Progress` in production is PR8's.
 One attempt ran, was judged, and its settlement is **durable**.
 
 The whole of the ready-dispatch branch: ceiling check, reservation,
-dispatch, the attempt through the Runner, and `attempt_finished`.
+dispatch, the attempt through the Runner, and the settlement append —
+**which append that is depends on `accepted`**.
+
+A rejected attempt ends at `attempt_finished`: `settle` builds the record,
+asks the ladder for the next step, and emits the event `settle_failed`
+shaped. An accepted attempt **never appends `attempt_finished`** — `settle`
+takes the `promote_candidate` path before it reaches any of that, and the
+branch ends at `candidate_prepared` followed by `task_candidate_created`.
+`candidate_prepared` is the sole successful settlement
+(`design/15_design_event_log_resume_run_layout.md`,
+`design/26_design_merge_queue_protocol.md` §26), it carries the attempt
+record itself, and `check_attempt_finished` refuses `Succeeded` outright, so
+a reader reconstructing a successful attempt's durable record who goes
+looking for an `attempt_finished` will not find one. `accepted` is the flag
+that says which of the two sequences was written.
 
 ## `pub enum Progress` › `key: TaskKey,`
 
@@ -1421,8 +1432,8 @@ never invented: the base is `run_started(4).base_sha`, and the predicted
 region is the task's `path_hints`. **An empty hint list is `RepoWide`,
 not an empty prefix set** — `PathSet::RepoWide` is documented as the
 classification for an absent answer, and a task with no hints has given
-one. An empty `Prefixes` would be a region that overlaps nothing, which
-would let every task run against every other.
+one. An empty `Prefixes` would be a region that overlaps no bounded
+region, which would let every task run against every other.
 
 ## `impl TopologyRun` › `let paths = self.handle.fold.predicted_region(key).ok_or_else(|| {`
 
