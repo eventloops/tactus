@@ -8243,6 +8243,38 @@ fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_
     );
 }
 
+/// Git's own ref-lock residue in the repository's common git dir:
+/// `packed-refs.lock` and any `*.lock` under `refs/`. Not the run's
+/// `upstroke-worktree.lock`, which is the coordinator's lock file (R25), and
+/// not a linked worktree's git dir, which recovery reclaims itself.
+fn remove_git_ref_lock_residue(git_dir: &Path) -> Vec<PathBuf> {
+    let mut removed = Vec::new();
+    let packed = git_dir.join("packed-refs.lock");
+    if packed.exists() {
+        crate::workspace_manager::fixture::remove_file(&packed);
+        removed.push(packed);
+    }
+    let mut stack = vec![git_dir.join("refs")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "lock")
+            {
+                crate::workspace_manager::fixture::remove_file(&path);
+                removed.push(path);
+            }
+        }
+    }
+    removed
+}
+
 #[test]
 fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
     // Object.ProposalCherryPick's frozen sampling N (effects/residue-classes.json).
@@ -8287,6 +8319,12 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
         std::thread::sleep(budget.mul_f64(f64::from(run + 1) / f64::from(SAMPLING_N + 1)));
         child.kill();
         let status = child.wait();
+        // A killed git child can also leave a lock file in the repository's
+        // common git dir — `packed-refs.lock`, observed on the macOS runner's
+        // git — which no residue class of the site names and no recovery step
+        // may remove (PR8-CRASH-002). It is removed here as the operator would,
+        // so the sampler measures the staging residue the site registers.
+        let _ = remove_git_ref_lock_residue(&fixture.git_dir);
 
         let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
             .at(&staging)
