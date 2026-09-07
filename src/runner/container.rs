@@ -1021,10 +1021,6 @@ impl DockerCli {
         }
     }
 
-    /// What the daemon holds for one container, from a command that had to reach
-    /// it to answer at all: the CLI fails when it cannot reach the daemon, so a
-    /// listing that succeeded is the daemon speaking, and the container's
-    /// presence is a value in that listing rather than a phrase in a diagnostic.
     fn listing(&self, op: RuntimeOp, name: &str) -> Result<String, RuntimeError> {
         let filter = format!("name={name}");
         self.exec(
@@ -1114,10 +1110,6 @@ const PS_FIELD_SEPARATOR: char = '\u{1f}';
 
 const CONTAINER_STATE_FORMAT: &str = "{{.Names}}\u{1f}{{.State}}";
 
-/// The state a `docker ps` listing holds for exactly `name`, or `None` when the
-/// listing does not hold it. `--filter name=` is a regular expression and
-/// matches every longer name that contains this one, so the filter narrows the
-/// listing and this comparison decides.
 fn listed_state<'a>(listing: &'a str, name: &str) -> Option<&'a str> {
     listing
         .lines()
@@ -1126,11 +1118,6 @@ fn listed_state<'a>(listing: &'a str, name: &str) -> Option<&'a str> {
         .map(|(_, state)| state.trim())
 }
 
-/// What a listing says about a container's liveness; `None` is the daemon not
-/// holding the container at all. The vocabulary and the fallthrough are PR6's,
-/// unchanged: a container being removed counts as running until its record is
-/// gone, and a status this does not enumerate lands on the terminated side
-/// (§7.3 records why that arm is weak and why it is not a defect today).
 fn liveness_of(listed: Option<&str>) -> Liveness {
     match listed {
         None => Liveness::Gone,
@@ -1196,12 +1183,6 @@ const UNREACHABLE_DIAGNOSTICS: &[&str] = &[
 
 #[must_use]
 pub fn is_unreachable_diagnostic(detail: &str) -> bool {
-    // A message the daemon spoke is proof the daemon was reached, whatever the
-    // rest of it quotes. Without this the table below is a phrase search over
-    // text the environment shapes, in the direction that matters: an answered
-    // failure read as unreachable lets `census::proceeds_without` admit a write
-    // command that could not list the containers of a dead owner. Sweeping
-    // finding 1's class, round six.
     if speaks_for_the_daemon(detail) {
         return false;
     }
@@ -1219,30 +1200,8 @@ pub fn classify_docker_failure(operation: RuntimeOp, detail: String) -> RuntimeE
     RuntimeError::Failed { operation, detail }
 }
 
-/// The Docker CLI opens a line with this, and with nothing to its left, when it
-/// is relaying what the daemon said. A command that failed before it reached the
-/// daemon — an endpoint it cannot resolve, TLS material that is not there, a
-/// flag it does not know — never produces such a line.
 const DAEMON_ANSWER: &str = "error response from daemon:";
 
-/// The daemon's own words about `target` inside a diagnostic, lowercased, or
-/// `None` when the CLI failed locally or answered about something else.
-///
-/// Absence and termination used to be read out of the whole of stderr, and
-/// stderr is text the environment shapes. With TLS material missing under a
-/// directory named `no such container`, the CLI fails *before contacting the
-/// daemon* and quotes that path back; every phrase table below matched the
-/// quoted path, so a local failure settled `Gone` and `ProcessGone` beside a
-/// container that was still running (round six, finding 1). Two things have to
-/// hold before a phrase means anything at all. The message has to be one the
-/// daemon spoke, which the CLI marks by opening the line with [`DAEMON_ANSWER`]
-/// and putting the daemon's message after it — a quoted path lands mid-line,
-/// never at a line's start. And it has to be about the container we asked
-/// about, which is what naming the target establishes. Neither is proof on its
-/// own, and the pair is not proof either, because text is evidence about a
-/// message and never about a process: what a surviving answer earns is the
-/// right to *propose* a settlement, which [`settle`] then establishes against
-/// the runtime before returning it.
 fn daemon_answer_about(target: &str, detail: &str) -> Option<String> {
     let target = target.trim().to_ascii_lowercase();
     if target.is_empty() {
@@ -1251,7 +1210,6 @@ fn daemon_answer_about(target: &str, detail: &str) -> Option<String> {
     daemon_lines(detail).find(|line| line.contains(&target))
 }
 
-/// Whether the CLI relayed anything the daemon said, whoever it was about.
 fn speaks_for_the_daemon(detail: &str) -> bool {
     daemon_lines(detail).next().is_some()
 }
@@ -1283,23 +1241,10 @@ fn removal_answer(target: &str, detail: &str) -> Option<Settled> {
         .then_some(Settled::RemovalInProgress)
 }
 
-/// Whether an observation establishes a settlement a diagnostic proposed.
-/// `ProcessGone` is a claim about the process, so the runtime has to agree the
-/// container is not running; `RemovalInProgress` claims nothing about the
-/// process — the reclaimer continues and the residue names it — so there is
-/// nothing for an observation to establish.
 fn establishes(proposed: Settled, observed: Liveness) -> bool {
     !proposed.process_gone() || observed.is_terminated()
 }
 
-/// The settlement a stop's or a removal's outcome establishes.
-///
-/// A success is the daemon's own answer: `docker stop`, `docker kill` and
-/// `docker rm --force` return after the daemon has seen the exit. A failure is
-/// read by `propose` for what its text claims, and a claim about the process is
-/// then put to `observe`, which answers from the runtime rather than from the
-/// failed command's stderr; a proposal the observation contradicts is returned
-/// as the failure it was, leaving the intent retained for a later reclaimer.
 fn settle(
     target: &str,
     outcome: Result<String, RuntimeError>,
@@ -1384,10 +1329,6 @@ impl ContainerRuntime for DockerCli {
         parse_ps_output(&text)
     }
 
-    // Absence is read out of a listing that had to succeed, never out of a
-    // failed `container inspect`'s stderr: the phrase a diagnostic carries is
-    // text the environment shapes, and this is the observation every other
-    // settlement in the runtime is established against (round six, finding 1).
     fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
         let listing = self.listing(RuntimeOp::Observe, name)?;
         Ok(liveness_of(listed_state(&listing, name)))

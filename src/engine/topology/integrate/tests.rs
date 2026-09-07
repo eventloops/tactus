@@ -1308,9 +1308,6 @@ fn verification_snapshots_are_removed_only_after_the_terminal() {
     }
 }
 
-/// A rejection's frozen repair spec and the record it was built from. What PR9
-/// dispatches from is the spec's body; the record is what the spec was built
-/// out of, and a repair that reaches one and not the other is not a repair.
 #[track_caller]
 fn code_rejection(run: &Run) -> (crate::topology::events::VerificationRecord, String) {
     let rejected = rejected_of(run);
@@ -1373,9 +1370,6 @@ fn a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec() {
 
     let (verification, body) = code_rejection(&run);
     assert_eq!(verification.verdict, VerificationVerdict::Rejected);
-    // `attempt::review_failure` renders each `required_changes` entry as its own
-    // `- ` line and leaves the verdict's reasons in the summary, so this is the
-    // reviewer's demand and not a restatement of why the pass failed.
     assert!(
         verification.detail.contains("- restore it"),
         "the durable rejection kept the generic rejection reason and dropped the reviewer's \

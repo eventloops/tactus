@@ -1346,6 +1346,16 @@ named function with its own tests rather than a `matches!` at the call site:
 every fake in this slice injects [`RuntimeError::Unreachable`] *directly*,
 so nothing but a test of this function tests the thing that decides it.
 
+A message the daemon spoke is proof the daemon was reached, whatever the rest
+of it quotes, so [`speaks_for_the_daemon`] refuses before the table is
+consulted. Without that the table is a phrase search over text the environment
+shapes, in the direction that matters: an answered failure read as unreachable
+makes `census::proceeds_without` true, and a write command then proceeds with
+no container evidence over a runtime that answered and would not list a dead
+owner's containers. The daemon's phrases are its own; the label values and
+mount paths it quotes back are engine-supplied. Round six, the sweep of
+finding 1's class.
+
 ## `pub fn classify_docker_failure(operation: RuntimeOp, detail: String) -> RuntimeError {`
 
 One failed `docker` invocation, as the seam's error.
@@ -1356,9 +1366,16 @@ classification is reachable — and testable — **without a daemon**, and the
 census tests can hand a fake runtime the error a verbatim diagnostic really
 produces instead of asserting on an `Unreachable` they minted themselves.
 
-## `fn is_absent(detail: &str) -> bool {`
+## `fn is_absent(target: &str, detail: &str) -> bool {`
 
-Whether a `docker` failure means "the object is not there".
+Whether a `docker` failure means "the object `target` is not there".
+
+The phrases are unchanged and they are no longer read from the whole of
+stderr: [`daemon_answer_about`] is what decides which text they may be looked
+for in. `DockerCli::inspect` is the only caller that still turns this into an
+answer on its own, and on every path it reaches — an image, a volume, and the
+container reads inside `collect` and `create`'s read-back — an absent object
+is a refusal or an error and never a settled process (round six, §7.3).
 
 ## `pub const REMOVAL_IN_PROGRESS: &str = "is already in progress";`
 
@@ -1388,13 +1405,13 @@ winner holds it; it normalizes to [`Settled::RemovalInProgress`], which
 lets a reclaimer continue and lets nothing conclude a fate
 (`PR8-R4-REMOVAL-IN-PROGRESS`).
 
-## `fn removal_answer(detail: &str) -> Option<Settled> {`
+## `fn removal_answer(target: &str, detail: &str) -> Option<Settled> {`
 
 What a `docker rm` failure established: an absent container is a gone
 process, another reclaimer's removal in progress is nothing, and any other
 failure is a failure.
 
-## `fn settle_remove(outcome: Result<String, RuntimeError>) -> Result<Settled, RuntimeError> {`
+## `fn settle_remove(`
 
 `docker rm`'s raw answer, as the seam's: success is a gone process, because
 `docker rm --force` kills and waits before it answers.
@@ -1439,7 +1456,7 @@ The id the runtime says it used, read back from the created
 container. Never `spec.image_id`: the whole point of the check the
 caller then performs is that these two can differ.
 
-## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>` › `settle_remove(self.exec(`
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>` › `settle_remove(`
 
 `--volumes` (`PR6A-ANONYMOUS-VOLUMES-LEAK`). An image declaring
 `VOLUME` gets an **anonymous** volume per container, and `docker rm`
@@ -1454,7 +1471,7 @@ balances. `--volumes` removes only anonymous volumes attached to this
 container and **never a named one**, which is what makes reclaiming it
 here a discharge of R26 rather than a violation of R20.
 
-## `fn stop_answer(detail: &str) -> Option<Settled> {`
+## `fn stop_answer(target: &str, detail: &str) -> Option<Settled> {`
 
 What a `docker stop` / `docker kill` failure established: a container the
 daemon says is not running or does not exist is a gone process; another
@@ -1485,14 +1502,14 @@ historical head because the fixtures serialized the reclaimers. That is not
 a claim about the current suite, which directly checks the stop-settlement
 predicate, including the daemon's removal-in-progress response.
 
-## `fn stop_answer(detail: &str) -> Option<Settled>` › `removal_answer(detail)`
+## `fn stop_answer(target: &str, detail: &str) -> Option<Settled>` › `removal_answer(target, detail)`
 
 `removal_answer` and not `is_absent`: a `docker kill` issued against a
 container another reclaimer is already removing answers with
 `REMOVAL_IN_PROGRESS` too. The reclaimer continues past it, and it says
 nothing about the process: the winner set the flag before it killed.
 
-## `fn settle_stop(outcome: Result<String, RuntimeError>) -> Result<Settled, RuntimeError> {`
+## `fn settle_stop(`
 
 `docker stop` / `docker kill`'s raw answer, as the seam's: success is a
 gone process, because both return after the daemon has seen the exit.
@@ -1500,7 +1517,134 @@ gone process, because both return after the daemon has seen the exit.
 A free function taking the raw outcome rather than a `match` inside
 [`DockerCli::stop`], so the tolerance is reachable **without a daemon**: the
 branch that matters is one a real runtime only produces in a race, and a
-gated test is the wrong and only place it could otherwise be observed.
+gated test is the wrong and only place it could otherwise be observed. Since
+round six it is a thin naming of [`settle`] over [`stop_answer`]: what it
+means to settle, and what a settlement has to be established against, is one
+function shared with `settle_remove`.
+
+## `const DAEMON_ANSWER: &str = "error response from daemon:";`
+
+The Docker CLI opens a line with this, and with nothing to its left, when it
+is relaying what the daemon said. A command that failed before it reached the
+daemon — an endpoint it cannot resolve, TLS material that is not there, a flag
+it does not know — never produces such a line.
+
+Measured on `docker` 29.7.2 (`r6-evidence/docker-transcription.md` in the
+artifacts): every typed subcommand this file issues relays the daemon's answer
+with this marker, and the typed `image inspect` uses it too — only the generic
+`docker inspect`, which this file never runs, wraps a 404 as
+`Error: No such object:` instead. A local failure prints
+`Failed to initialize: unable to resolve docker endpoint: …` and no such line.
+
+## `fn daemon_answer_about(target: &str, detail: &str) -> Option<String> {`
+
+The daemon's own words about `target` inside a diagnostic, lowercased, or
+`None` when the CLI failed locally or answered about something else.
+
+Absence and termination used to be read out of the whole of stderr, and stderr
+is text the environment shapes. With TLS material missing under a directory
+named `no such container`, the CLI fails **before contacting the daemon** and
+quotes that path back; every phrase table in this file matched the quoted path,
+so a local failure settled `Gone` and `ProcessGone` beside a container that was
+still running — the sequence and its reproduction are `pr8-triage.md` §9,
+finding 1.
+
+Two things have to hold before a phrase means anything at all. The message has
+to be one the daemon spoke, which the CLI marks by opening the line with
+[`DAEMON_ANSWER`] and putting the daemon's message after it: a quoted path
+lands mid-line, never at a line's start. And it has to be about the container
+we asked about, which is what naming the target establishes. Each half refuses
+a shape the other admits, and `tests::a_diagnostic_that_is_not_the_daemon_answering_about_this_container_settles_nothing`
+carries one case for each — a local failure quoting the phrase, a local failure
+quoting the phrase *and* the container's name, and the daemon answering about
+another container.
+
+Neither is proof on its own, and the pair is not proof either, because text is
+evidence about a message and never about a process. What a surviving answer
+earns is the right to **propose** a settlement, which [`settle`] then
+establishes against the runtime before returning it.
+
+An empty target answers `None` rather than matching every line: `contains("")`
+is true of anything, and a normalizer whose gate is vacuous for one argument is
+a normalizer with an ungated path.
+
+## `fn speaks_for_the_daemon(detail: &str) -> bool {`
+
+Whether the CLI relayed anything the daemon said, whoever it was about. Used
+by [`is_unreachable_diagnostic`] in the direction the census depends on.
+
+## `fn establishes(proposed: Settled, observed: Liveness) -> bool {`
+
+Whether an observation establishes a settlement a diagnostic proposed.
+
+`ProcessGone` is a claim about the process, so the runtime has to agree the
+container is not running. `RemovalInProgress` claims nothing about the process
+— the reclaimer continues and the residue names it — so there is nothing for an
+observation to establish, and [`settle`] returns it without making one.
+
+## `fn settle(`
+
+The settlement a stop's or a removal's outcome establishes.
+
+A success is the daemon's own answer: `docker stop`, `docker kill` and
+`docker rm --force` return after the daemon has seen the exit, so nothing is
+observed for one. A failure is read by `propose` for what its text claims, and
+a claim about the process is then put to `observe`, which answers from the
+runtime rather than from the failed command's stderr; a proposal the
+observation contradicts is returned as the failure it was, leaving the intent
+retained for a later reclaimer.
+
+The observation is a parameter and not a call, so `FakeRuntime` settles through
+this same function against its own state, and the tests that are about a
+diagnostic rather than about an observation say which observation they mean.
+`tests::never_observed` is the observer for the outcomes that must settle, or
+refuse to, without asking the runtime anything.
+
+## `fn listed_state<'a>(listing: &'a str, name: &str) -> Option<&'a str> {`
+
+The state a `docker ps` listing holds for exactly `name`, or `None` when the
+listing does not hold it.
+
+`--filter name=` is a regular expression and matches every longer name that
+contains this one — measured live, with `upstroke-probe-r6-longer` returned for
+the filter `name=upstroke-probe-r6` — so the filter narrows the listing and
+this comparison decides. `real_docker_lists_the_state_the_settlement_observation_reads`
+creates the colliding name deliberately and fails if the filter stops matching
+it, so the comparison is never left untested by a filter that got stricter.
+
+## `fn liveness_of(listed: Option<&str>) -> Liveness {`
+
+What a listing says about a container's liveness; `None` is the daemon not
+holding the container at all.
+
+The vocabulary and the fallthrough are PR6's, unchanged: a container being
+removed counts as running until its record is gone, and a status this does not
+enumerate lands on the terminated side. `pr8-triage.md` §7.3 records why that
+arm is the class's remaining weak one and why refusing an unenumerated state,
+though the conforming shape, is a behaviour change to PR6 code with no
+reproduction behind it.
+
+## `const CONTAINER_STATE_FORMAT: &str = "{{.Names}}\u{1f}{{.State}}";`
+
+The two fields the settlement observation reads. `{{.State}}` prints the same
+lowercase vocabulary as `container inspect`'s `{{.State.Status}}` — measured
+`created`, `running` and `exited` on the same container — which is what lets
+[`liveness_of`] keep PR6's mapping while the query changes.
+
+## `impl DockerCli` › `fn listing(&self, op: RuntimeOp, name: &str) -> Result<String, RuntimeError> {`
+
+What the daemon holds for one container, from a command that had to reach it to
+answer at all: the CLI fails when it cannot reach the daemon, so a listing that
+succeeded is the daemon speaking, and the container's presence is a value in
+that listing rather than a phrase in a diagnostic. An absent container is an
+exit of **0** with no output, which no local failure can produce.
+
+## `fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {`
+
+Absence is read out of a listing that had to succeed, never out of a failed
+`container inspect`'s stderr: the phrase a diagnostic carries is text the
+environment shapes, and this is the observation every other settlement in the
+runtime is established against (round six, finding 1).
 
 ## `fn mount_argument(mount: &runtime::Mount) -> String {`
 

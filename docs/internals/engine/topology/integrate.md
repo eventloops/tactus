@@ -493,3 +493,21 @@ worker processes, whose runner errors reach it as a `JudgeError::Runner`; a
 reviewer's do not, because `run_review` contains them so the pass can defer
 instead of ending the command. Deferral and containment are right; only the
 attribution was not.
+
+## `fn rejection_detail(failure: &AttemptFailure) -> String {`
+
+What the frozen repair is told about the rejection.
+
+The reason is a summary — ``gate `clippy` failed: exit 1``, `review failed: …` —
+and the evidence a repair works from is in the feedback beside it: the gate's
+own output, which `classify::gate_failure` puts there from `log_tail`, already
+bounded to `crate::gates::FEEDBACK_TAIL_BYTES`; and the reviewer's
+`required_changes`, which `attempt::review_failure` renders one per `- ` line.
+
+Only the reason used to reach the record, so the frozen spec carried the summary
+and nothing that says what to change. PR9 dispatches from that spec and never
+sees this `AttemptFailure`, so evidence dropped here is evidence the repair
+never gets (`pr8-triage.md` §9, finding 2).
+
+The reason stays whole and leads, and the bound is applied to the feedback
+alone, because a bound applied to the pair would cut the summary off first.

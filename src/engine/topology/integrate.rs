@@ -902,18 +902,6 @@ pub(super) fn code_record(judgement: &Judgement, failure: &AttemptFailure) -> Ve
     )
 }
 
-/// What the frozen repair is told about the rejection.
-///
-/// The reason is a summary — `gate `clippy` failed: exit 1`, `review failed: …`
-/// — and the evidence a repair works from is in the feedback beside it: the
-/// gate's own output (`classify::gate_failure` puts `log_tail` there, already
-/// bounded to [`crate::gates::FEEDBACK_TAIL_BYTES`]) and the reviewer's
-/// `required_changes` (`attempt::review_failure`). Only the reason used to
-/// reach the record, so the frozen spec carried the summary and nothing that
-/// says what to change; PR9 dispatches from that spec and never sees this
-/// `AttemptFailure`, so evidence dropped here is evidence the repair never
-/// gets (round six, finding 2). The reason stays whole and leads, because a
-/// bound applied to the pair would cut the summary off first.
 fn rejection_detail(failure: &AttemptFailure) -> String {
     let Some(feedback) = failure
         .feedback

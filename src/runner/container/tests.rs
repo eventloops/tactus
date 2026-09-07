@@ -1908,9 +1908,6 @@ fn step_phrase(site: ContainerSite) -> &'static str {
     }
 }
 
-// The daemon's three transcribed answers, each naming the container it is
-// about, which is how a reclaimer tells an answer about its own container from
-// an answer — or a path — that merely spells the phrase.
 fn daemon_already_stopped(name: &str) -> String {
     format!(
         "Error response from daemon: cannot kill container: {name}: container \
@@ -1926,17 +1923,12 @@ fn daemon_absent_on_stop(name: &str) -> String {
     format!("Error response from daemon: No such container: {name}")
 }
 
-/// The container every transcribed diagnostic in this file is about.
 const SETTLED_TARGET: &str = "upstroke-c";
 
-/// The observation a proposed settlement is established against, for the tests
-/// whose subject is the diagnostic rather than the observation.
 fn observed(liveness: Liveness) -> impl FnOnce(&str) -> Result<Liveness, RuntimeError> {
     move |_| Ok(liveness)
 }
 
-/// An observer that must not be reached: the outcome settles, or refuses to,
-/// without asking the runtime anything.
 fn never_observed(target: &str) -> Result<Liveness, RuntimeError> {
     panic!("`{target}` was observed for an outcome that needed no observation")
 }
@@ -2020,10 +2012,6 @@ fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not(
     );
 }
 
-/// The three shapes a diagnostic can have that must never settle anything, each
-/// one refused by a different half of the mechanism. Dropping the line-start
-/// requirement admits the first two; dropping the target requirement admits the
-/// first and the third.
 const SETTLES_NOTHING: &[(&str, &str)] = &[
     (
         "the reviewer's witness: TLS material missing under a directory named for the phrase, \
@@ -3745,10 +3733,6 @@ fn the_two_docker_diagnostic_tables_never_claim_one_message() {
     assert_eq!(super::stop_answer("c", racing), Some(Settled::ProcessGone));
     assert!(!is_unreachable_diagnostic(racing));
 
-    // The direction that matters: an answered failure read as unreachable lets
-    // `proceeds_without` admit a write command that could not list a dead
-    // owner's containers. The daemon's phrases are its own, but the paths and
-    // label values it quotes back are the environment's.
     for (what, detail) in [
         (
             "a daemon quoting a label value that spells an unreachable diagnostic",
@@ -3950,11 +3934,6 @@ fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {
         return skipped(&reason);
     }
 
-    // The reviewer's witness, reproduced against the live CLI: TLS material that
-    // is not there, under a directory named for the phrase each normalizer used
-    // to search the whole of stderr for. The CLI fails before it contacts the
-    // daemon and quotes the path back, so the phrase is in stderr and nothing
-    // about the container was ever asked.
     let root = scratch("local-failure-phrases");
     let target = "upstroke-c";
     let phrases = [
@@ -4085,9 +4064,6 @@ fn real_docker_lists_the_state_the_settlement_observation_reads() {
         .expect("the colliding name created");
     docker.start(&longer).expect("the colliding name started");
 
-    // The `name=` filter is a regular expression, so the longer name is in this
-    // container's listing; the observation is the exact line's state and not the
-    // filter's.
     let listing = docker
         .raw(
             RuntimeOp::Observe,

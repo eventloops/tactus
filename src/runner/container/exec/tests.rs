@@ -591,8 +591,6 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
         let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
             .expect("a container name");
         if cell.removal_in_progress {
-            // The daemon's answer names the container it is about, and nothing
-            // reads an answer about another one as this container's settlement.
             fixture.runtime.fake().set_docker_stderr(
                 RuntimeOp::Remove,
                 &removal_in_progress_diagnostic(name.as_str()),

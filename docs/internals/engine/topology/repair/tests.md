@@ -36,3 +36,18 @@ Below the limit: runnable. At it: a person approves another attempt.
 The empty intersection wins over the limit on either side of it: the
 fold refuses HumanRequired on a HumanBinding ladder, so this is the one
 admissible shape for an over-limit rejection with no tier left.
+
+## `fn the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas() {` › `let gate_output = "REPAIR-SPEC-GATE-EVIDENCE`
+
+The evidence is not written into the record here. It is produced by the
+production classification of a failing gate and of a rejecting reviewer, and
+carried through `integrate::code_record` — the conversion that used to keep
+`reason` and drop `feedback`. The version before round six handed
+`code_rejection_record` its own `detail`, which sits **downstream** of that
+conversion, so it proved the spec carries what it was given and nothing about
+what gives it anything; it passed on a head where the evidence was being lost,
+which is how the defect reached a green branch (`pr8-triage.md` §9, finding 2).
+
+The needle is one line of the evidence, because the spec is asserted against its
+JSON encoding and a newline is `\n` there; the fixture keeps a second line so
+the conversion is exercised on a real multi-line log tail.

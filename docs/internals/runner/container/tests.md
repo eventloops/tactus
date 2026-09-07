@@ -2431,3 +2431,73 @@ which release step was armed.
 ## `fn a_release_whose_cleanup_fails_still_attempts_every_remaining_step() {` › `assert!(!fixture.runtime.container_names().is_empty());`
 
 The control: everything the release has to remove is really there.
+
+## `fn daemon_already_stopped(name: &str) -> String {`
+
+The daemon's three transcribed answers, each **naming the container it is
+about**, which is how a reclaimer tells an answer about its own container from
+an answer — or a path — that merely spells the phrase. They were literals until
+round six; a literal `upstroke-c` beside a fixture whose container has a
+generated name is a fixture the repaired normalizers correctly refuse, and
+making them functions of the name is what keeps the doubles honest rather than
+what works around the check.
+
+## `const SETTLED_TARGET: &str = "upstroke-c";`
+
+The container every transcribed diagnostic in this file is about.
+
+## `fn observed(liveness: Liveness) -> impl FnOnce(&str) -> Result<Liveness, RuntimeError> {`
+
+The observation a proposed settlement is established against, for the tests
+whose subject is the diagnostic rather than the observation.
+
+## `fn never_observed(target: &str) -> Result<Liveness, RuntimeError> {`
+
+An observer that must not be reached: the outcome settles, or refuses to,
+without asking the runtime anything. It is what proves a success settles on the
+daemon's own answer, and what proves a refused proposal costs no second command.
+
+## `const SETTLES_NOTHING: &[(&str, &str)] = &[`
+
+The three shapes a diagnostic can have that must never settle anything, each
+one refused by a different half of the mechanism. Dropping the line-start
+requirement admits the first two; dropping the target requirement admits the
+first and the third. Both mutations are replayed in `pr8-triage.md` §9.3 and
+each kills this test.
+
+## `fn the_two_docker_diagnostic_tables_never_claim_one_message() {` › `for (what, detail) in [`
+
+The direction that matters: an answered failure read as unreachable lets
+`census::proceeds_without` admit a write command that could not list a dead
+owner's containers. The daemon's phrases are its own, but the paths and label
+values it quotes back are the environment's.
+
+Each case asserts twice: that the quoted text **still matches the phrase table**
+when the daemon line is taken away, and that it does not match with the line
+there. Without the first assertion the second would pass for a table that no
+longer contains the phrase at all, and the guard would be measuring nothing.
+
+## `fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {`
+
+The reviewer's witness, reproduced against the live CLI: TLS material that is
+not there, under a directory named for the phrase each normalizer used to search
+the whole of stderr for. The CLI fails before it contacts the daemon and quotes
+the path back, so the phrase is in stderr and nothing about the container was
+ever asked.
+
+`host::test_support::build_command` with `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`
+and `DOCKER_HOST` set on the child, so the reproduction needs no process-wide
+environment mutation and cannot race another test. Six phrase directories over
+four commands, and the assertion that the CLI still quotes the path it could not
+read — the day it stops, this test stops reproducing the finding and says so
+rather than passing quietly.
+
+## `fn real_docker_lists_the_state_the_settlement_observation_reads() {`
+
+The listing the settlement observation reads, measured on the daemon: an absent
+container, a created one, a running one and an exited one, the second kill
+established against the listing rather than against its own diagnostic, and the
+`name=` filter's regular expression returning a longer name that the exact
+comparison then discards. The colliding container is created deliberately, and
+the test fails if the filter stops matching it, so the comparison the repair
+rests on is never left untested.

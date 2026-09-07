@@ -247,12 +247,6 @@ fn the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas() {
         outcome: crate::events::ReviewPassOutcome::Failed,
     };
 
-    // The evidence is not written into the record here. It is produced by the
-    // production classification of a failing gate and of a rejecting reviewer,
-    // and carried through `integrate::code_record` — the conversion that used to
-    // keep `reason` and drop `feedback`. A test that hands `code_rejection_record`
-    // its own `detail` sits downstream of that conversion and proves only that
-    // the spec carries what it was given (round six, finding 2).
     let gate_output = "REPAIR-SPEC-GATE-EVIDENCE\nerror[E0308]: mismatched types";
     assert!(
         gate_output.contains('\n'),
@@ -275,8 +269,6 @@ fn the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas() {
     )
     .expect("a rejecting verdict is an attempt failure");
 
-    // The needle is one line of the evidence, because the spec is asserted
-    // against its JSON encoding and a newline is `\n` there.
     for (what, failure, evidence, verdict) in [
         (
             "the failing gate's own output",

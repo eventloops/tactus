@@ -182,3 +182,24 @@ append, and the sequence leaves no snapshot behind.
 
 The first append after the mark is merge_verification_started; the
 second is the verification's terminal, whichever shape it took.
+
+## `fn code_rejection(run: &Run) -> (crate::topology::events::VerificationRecord, String) {`
+
+A rejection's frozen repair spec and the record it was built from. What PR9
+dispatches from is the spec's body; the record is what the spec was built out
+of, and a repair that reaches one and not the other is not a repair.
+
+## `fn a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec() {` › `verification.detail.contains("- restore it")`
+
+`attempt::review_failure` renders each `required_changes` entry as its own `- `
+line and leaves the verdict's reasons in the summary, so the `- ` prefix is what
+makes this the reviewer's demand and not a restatement of why the pass failed.
+
+## `fn a_failing_gates_own_output_reaches_the_frozen_repair_spec() {`
+
+The two witnesses of `pr8-triage.md` §9, finding 2, written here rather than
+against the conversion: they drive a failing gate and a rejecting reviewer
+through the production loop to a durable `merge_rejected`, and read both the
+`VerificationRecord` and the frozen repair spec's body. Each asserts the summary
+is still there beside the evidence, so a repair that replaced one with the other
+fails too, and each ends `replay_twice_equal`.
