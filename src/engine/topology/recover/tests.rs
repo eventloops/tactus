@@ -6482,7 +6482,7 @@ fn two_crash_kill_child() {
         RESUMER,
     )
     .expect("the child's repository and private root are real directories");
-    let _ = run_recovery_order(
+    let outcome = run_recovery_order(
         root,
         &ResumeSeams {
             repo_root: &repo_root,
@@ -6505,7 +6505,12 @@ fn two_crash_kill_child() {
         &mut hooks,
         &mut warnings,
     );
-    unreachable!("the kill must have taken this process");
+    let returned = match &outcome {
+        Ok(_) => "recovery returned Ok past the armed kill".to_owned(),
+        Err(error) => format!("recovery returned before the armed append: {error}"),
+    };
+    report(&report_path, &returned);
+    panic!("the kill armed at the task_merged write must have taken this process; {returned}");
 }
 
 #[test]
@@ -6528,7 +6533,9 @@ fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_lo
     );
     assert!(
         crate::workspace_manager::fixture::died_by_abort(&status),
-        "the child must have died at the task_merged write, and it ended {status:?}"
+        "the child must have died at the task_merged write, and it ended {status:?}; it \
+         reported: {}",
+        std::fs::read_to_string(&report_path).unwrap_or_default()
     );
 
     let reported = std::fs::read_to_string(&report_path).expect("the child reported");
@@ -7240,6 +7247,7 @@ fn a_resume_completes_an_already_present_publication_at_the_candidate_commit_and
 struct DriveSeams {
     gate_fails: Option<crate::error::ProcessFate>,
     gate_times_out: bool,
+    gate_exit_code: Option<i32>,
     input_rejected: bool,
     input_git_error: bool,
     review_needs_human: bool,
@@ -7333,6 +7341,7 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
 struct DrivenRunner {
     fails: Option<crate::error::ProcessFate>,
     times_out: bool,
+    exit_code: i32,
     heads: Mutex<Vec<(crate::runner::InvocationId, Option<String>)>>,
 }
 
@@ -7372,7 +7381,11 @@ impl Runner for DrivenRunner {
             ));
         }
         Ok(ProcessOutput {
-            code: if self.times_out { None } else { Some(0) },
+            code: if self.times_out {
+                None
+            } else {
+                Some(self.exit_code)
+            },
             stdout: String::new(),
             stderr: String::new(),
             duration: Duration::from_millis(1),
@@ -7418,15 +7431,77 @@ impl crate::interaction::AnswerSource for DrivenAnswers {
 }
 
 fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    drive_hooked(fixture, seams, steps, &mut hooks)
+}
+
+fn drive_hooked(
+    fixture: &Fixture,
+    seams: &DriveSeams,
+    steps: usize,
+    hooks: &mut dyn TopologyHooks,
+) -> Driven {
     let runner = DrivenRunner {
         fails: seams.gate_fails,
         times_out: seams.gate_times_out,
+        exit_code: seams.gate_exit_code.unwrap_or(0),
         heads: Mutex::new(Vec::new()),
     };
-    let mut hooks = HarnessTopologyHooks::new(harness());
-    let mut driven = drive_with(fixture, seams, steps, &runner, &mut hooks);
+    let mut driven = drive_with(fixture, seams, steps, &runner, hooks);
     driven.gate_heads = runner.heads();
     driven
+}
+
+struct SnapshotRemovalObserver {
+    log: PathBuf,
+    last_event_at_removal: Vec<String>,
+}
+
+impl crate::workspace_manager::EffectHooks for SnapshotRemovalObserver {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == EffectSiteId::Snapshot(crate::topology::effects::SnapshotSite::Remove)
+            && phase == HookPhase::Before
+        {
+            let last = std::fs::read(&self.log)
+                .ok()
+                .and_then(|bytes| TopologyFold::parse_log(&bytes).ok())
+                .and_then(|events| events.last().map(|event| event.body.kind().to_owned()))
+                .unwrap_or_default();
+            self.last_event_at_removal.push(last);
+        }
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+struct SnapshotOrderHooks {
+    rest: HarnessTopologyHooks,
+    effects: SnapshotRemovalObserver,
+}
+
+impl TopologyHooks for SnapshotOrderHooks {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        &mut self.effects
+    }
+
+    fn rundir(&mut self) -> &mut dyn rundir::RunDirHooks {
+        self.rest.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.rest.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.rest.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.rest.spawn()
+    }
 }
 
 fn drive_with(
@@ -8143,6 +8218,160 @@ fn a_test_candidate_whose_test_was_already_published_is_verified_not_rejected_fo
 }
 
 #[test]
+fn the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal()
+ {
+    for (label, seams, terminal) in [
+        ("prepared", DriveSeams::default(), "merge_prepared"),
+        (
+            "rejected",
+            DriveSeams {
+                gate_exit_code: Some(1),
+                ..DriveSeams::default()
+            },
+            "merge_rejected",
+        ),
+        (
+            "parked",
+            DriveSeams {
+                review_needs_human: true,
+                ..DriveSeams::default()
+            },
+            "merge_verification_unavailable",
+        ),
+    ] {
+        let fixture = Fixture::two_tasks(&format!("verifier-oracle-{label}"));
+        let (candidate, _, _) = plant_stale_verification(&fixture);
+        let mut hooks = SnapshotOrderHooks {
+            rest: HarnessTopologyHooks::new(harness()),
+            effects: SnapshotRemovalObserver {
+                log: fixture.log(),
+                last_event_at_removal: Vec::new(),
+            },
+        };
+        let driven = drive_hooked(&fixture, &seams, 1, &mut hooks);
+        assert!(
+            driven.progress.first().is_some_and(Result::is_ok),
+            "{label}: the sequence reached its terminal: {:?}",
+            driven.progress
+        );
+
+        let proposed = driven
+            .log
+            .iter()
+            .filter_map(|event| match &event.body {
+                TopologyEventBody::MergeVerificationStarted { data }
+                    if data.sequence == crate::topology::events::SequenceId(2) =>
+                {
+                    Some(data.proposed_sha.clone())
+                }
+                _ => None,
+            })
+            .next()
+            .expect("the re-verification under sequence 2 recorded its proposal");
+        assert_ne!(
+            proposed, candidate.commit_sha,
+            "{label}: a stale proposal is a new commit"
+        );
+        let gates: Vec<&(crate::runner::InvocationId, Option<String>)> = driven
+            .gate_heads
+            .iter()
+            .filter(|(invocation, _)| {
+                matches!(invocation, crate::runner::InvocationId::Sequence { .. })
+            })
+            .collect();
+        assert_eq!(
+            gates.len(),
+            1,
+            "{label}: one gate ran: {:?}",
+            driven.gate_heads
+        );
+        assert!(
+            gates
+                .iter()
+                .all(|(_, head)| head.as_deref() == Some(proposed.as_str())),
+            "{label}: the gate judged a checkout whose HEAD is the recorded proposal {proposed}, \
+             never the candidate commit {}: {gates:?}",
+            candidate.commit_sha
+        );
+
+        let removals = &hooks.effects.last_event_at_removal;
+        assert_eq!(
+            removals.len(),
+            if label == "rejected" { 1 } else { 2 },
+            "{label}: every snapshot of the sequence was removed once: {removals:?}"
+        );
+        assert!(
+            removals.iter().all(|last| last == terminal),
+            "{label}: a snapshot removal began while the log ended in {removals:?} rather than \
+             the terminal `{terminal}`"
+        );
+    }
+}
+
+#[test]
+fn a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap() {
+    let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);
+    let fixture = Fixture::two_tasks("paid-park");
+    plant_stale_verification(&fixture);
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            review_needs_human: true,
+            review_cost_usd: Some(2.5),
+            run_ceiling_usd: Some(2.2),
+            answer: Some(crate::ir::Answer::Answered {
+                text: options[0].clone(),
+            }),
+            ..DriveSeams::default()
+        },
+        3,
+    );
+    let shapes: Vec<String> = driven
+        .progress
+        .iter()
+        .map(|step| match step {
+            Ok(Progress::Unavailable { parked, .. }) => format!("unavailable(parked={parked})"),
+            Ok(Progress::Answered { declined, .. }) => format!("answered(declined={declined})"),
+            Ok(Progress::BudgetExceeded) => "budget_exceeded".to_owned(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "unavailable(parked=true)",
+            "answered(declined=false)",
+            "budget_exceeded"
+        ],
+        "the paid review parks, the answer returns the candidate, and the live total refuses \
+         the next integration under the ceiling"
+    );
+    assert!(
+        (driven.spend_after - (driven.spend_before + 2.5)).abs() < 1e-9,
+        "the parked review was charged live: {} -> {}",
+        driven.spend_before,
+        driven.spend_after
+    );
+    assert!(
+        driven.spend_before < 2.2 && driven.spend_after > 2.2,
+        "the ceiling sits between the replayed and the live total: {} < 2.2 < {}",
+        driven.spend_before,
+        driven.spend_after
+    );
+
+    let replayed = crate::engine::topology::select::Spend::replay(&driven.log).run_total();
+    assert!(
+        (replayed - driven.spend_before).abs() < 1e-9,
+        "PR8-R2-SPEND-REPLAY (deferred): the frozen `merge_verification_unavailable` carries no \
+         review record, so a replay restores {replayed} where the incarnation that parked the \
+         candidate had reached {}; `decisions.coordinator_integration.dispositions` requires the \
+         spend recorded and the vocabulary cannot carry it (Class C). When the terminal gains its \
+         record this assertion fails and the ledger row closes",
+        driven.spend_after
+    );
+}
+
+#[test]
 fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {
     let fixture = Fixture::two_tasks("input-rejected");
     plant_stale_verification(&fixture);
@@ -8649,6 +8878,7 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
 
     let mut observed = Vec::new();
     let mut refusals = Vec::new();
+    let mut killed_while_running = 0_u32;
     for run in 0..SAMPLING_N {
         let fixture = Fixture::build(&format!("sample-{run}"), two_tasks());
         let (planted, head) = plant_stale_queued_candidate(&fixture);
@@ -8659,8 +8889,24 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
             &["cherry-pick".to_owned(), planted.commit.0.clone()],
         );
         std::thread::sleep(budget.mul_f64(f64::from(run + 1) / f64::from(SAMPLING_N + 1)));
+        let running_at_kill = child.exited().is_none();
         child.kill();
         let status = child.wait();
+        let died_by_kill = crate::workspace_manager::fixture::died_by_kill(&status);
+        assert!(
+            died_by_kill || status.success(),
+            "run {run}: the child ended {status:?}, which is neither the kill's signature nor \
+             a completed pick; the sample says nothing about a kill"
+        );
+        if died_by_kill {
+            killed_while_running += 1;
+        } else {
+            assert!(
+                !running_at_kill || child_outran_the_kill(&status),
+                "run {run}: the child was running when the kill fired and yet exited \
+                 {status:?}"
+            );
+        }
         let _ = remove_git_ref_lock_residue(&fixture.git_dir);
 
         let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
@@ -8700,6 +8946,17 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
         SAMPLING_N as usize,
         "every sample was classified into one of the site's classes and recovered"
     );
+    assert!(
+        killed_while_running >= 1,
+        "no sample died by the kill: the ladder's first rung fires at one ninth of a measured \
+         pick, so a kill that reaches a running child cannot leave it exit 0, and a run in which \
+         every child exited cleanly is a run in which nothing was killed — the evidence of \
+         {SAMPLING_N} samples was of completed picks, not of kills: {observed:?}"
+    );
+}
+
+fn child_outran_the_kill(status: &std::process::ExitStatus) -> bool {
+    status.success()
 }
 
 #[test]
