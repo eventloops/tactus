@@ -6,8 +6,9 @@ Branch `feat/pr8-integration-transactions`, cut from `master` at `44a33caa`. Con
 sentences, so the JSON text of the slice contract is the text implemented). Brief:
 `START-PR8.md` as amended on 2026-09-06 (no pull request, no review, no findings lane; the body
 goes to `pr8-body.md`), then `START-PR8-FIX.md` of 2026-09-07 for the repair round after the
-three reviews of `3414dc58` (`pr8-triage.md`). Implementation model: Claude Fable 5.1 at max
-effort, both rounds.
+three reviews of `3414dc58`, then `START-PR8-FIX2.md` of the same day for the second repair round
+after the three reviews of the repair range `3414dc58..916852c9` (`pr8-triage.md` §5).
+Implementation model: Claude Fable 5.1 at max effort, all three rounds.
 
 This file is the standing plan and the record of every reading taken where the packet was
 ambiguous. Each reading is a decision, not a question. It is updated as commits land. Where the
@@ -134,16 +135,23 @@ offer, the entry now says so and cites the passage that settles it.
   the mapping of each result. Reviewer `Unavailable` with RateLimited →
   `Infrastructure{RateLimited}`; reviewer `Timeout` → `ReviewerTimeout`; any other reviewer
   unavailability (a review process that could not run reaches the judgement this way through
-  `run_review`) → `ReviewUnavailable`; a Runner error running a gate → `RunnerSpawnFailure`
-  (typed by the judge as `JudgeError::Runner`, never propagated as an error of the sequence); any
-  other verification error — a containment refusal, a Git error inspecting the repository — is a
-  defect of the run, not an outage, and ends the command resumably (R24). A gate that exits
-  non-zero or times out is code-attributed (`GatesFailed`); a reviewer verdict that rejects is
-  `Rejected`; a reviewer that asks for a human is `HumanRequired{verdict: reasons}`; a review
-  input that cannot be judged — the diff too large or opaque, or the review-input policy refusing
-  the proposed tree — is classified before any process runs, as the attempt path classifies it,
-  and is `HumanRequired` too: a Fix task cannot be asked to edit code without code evidence and
-  waiting cannot make the same diff fit.
+  `run_review`) → `ReviewUnavailable`; a Runner error running a gate whose process fate is
+  `NeverStarted` → `RunnerSpawnFailure` (R25; typed by the judge as `JudgeError::Runner`, never
+  propagated as an error of the sequence), one whose fate is `Gone` → `Other` (a started process
+  the Runner has established gone), and one whose fate is `Unresolved` → no terminal at all: the
+  command ends resumably with the transaction open (R25); a Git error the verification observes →
+  `Other` (foreign Git state, R26); a gate that times out → `Other` (R27); any other verification
+  error — a containment refusal, a malformed record — is a defect of the run, not an outage, and
+  ends the command resumably (R24). A gate that exits non-zero is code-attributed (`GatesFailed`);
+  a gate that times out is **not** — the first version of this reading said it was, and
+  `decisions.repairs.not_repairs` lists timeout among the outcomes that "at integration terminate
+  in merge_verification_unavailable" (corrected in the second repair round, `pr8-triage.md` §5
+  record F4); a reviewer verdict that rejects is `Rejected`; a reviewer that asks for a human is
+  `HumanRequired{verdict: reasons}`; a review input that cannot be judged — the diff too large or
+  opaque, or the review-input policy refusing the proposed tree — is classified before any process
+  runs, as the attempt path classifies it, and is `HumanRequired` too: a Fix task cannot be asked
+  to edit code without code evidence and waiting cannot make the same diff fit. The attempt path's
+  Test-provenance rule is not applied to the integration diff (R28).
 - **R5. Defer arithmetic.** *Settled by the contract*: `C.expected_failures_refusals[5]` forbids
   Deferred at the limit and non-consecutive counts, and `check_defer_allowance` is the fold's
   statement of it. `Deferred{defers}` with `defers = queued.defers + 1` while that is
@@ -252,13 +260,21 @@ offer, the entry now says so and cites the passage that settles it.
 - **R21 (withdrawn).** The claim that the `effects` census framework covered PR8's per-site kill
   and residue obligations was wrong: it is a self-test of the framework. The recovery tests of R20
   carry those obligations.
-- **R22. Spend on replay.** An integration's judged reviews are charged to the candidate's task
-  and to the run at the verification, before the terminal, and `Spend::replay` reads them back off
-  `merge_prepared` and `merge_rejected{CodeRejected}`. The unavailable terminals carry no review
-  record in their frozen vocabulary, so a review that ended in a `HumanRequired` park or an
-  infrastructure outage is charged live and not on replay; the live total is never below the
-  replayed one, so the ceiling is checked against the larger of the two. Closing the gap is a
-  Class C vocabulary change and is not made here.
+- **R22 (withdrawn).** The first version of this entry read the unavailable terminals' missing
+  review record as a permitted limitation: "charged live and not on replay; the ceiling is checked
+  against the larger of the two". It claimed a discretion the contract does not offer.
+  `decisions.coordinator_integration.dispositions` requires "spend recorded" for an Infrastructure
+  `Deferred`, and DESIGN §26 says the four terminal shapes "carry the complete gate/review
+  records, usage/cost". What holds: an integration's judged reviews are charged to the candidate's
+  task and to the run at the verification, before the terminal, and `Spend::replay` reads them
+  back off `merge_prepared` and `merge_rejected{CodeRejected}`; a review that ended in a
+  `HumanRequired` park or an outage is charged live only, because
+  `MergeVerificationUnavailable{sequence, cause, outcome}` has nowhere to carry it, and a restart
+  therefore admits an integration the previous incarnation's total would have refused (the
+  reviews of `916852c9`, adequacy 1 and record F2, reproduced). Recording it durably is a Class C
+  change to the frozen vocabulary this slice may not make; the gap is an owner decision owed,
+  `PR8-R2-SPEND-REPLAY` in `pr8-body.md`, pinned by
+  `recover::tests::a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap`.
 - **R23. The authorized head with no publication pending.** The latest `task_merged.merged_sha` in
   the proven prefix; before any publication, the recorded base (the P7/P8 create-at-base path is
   unchanged). A ref elsewhere, or absent after a publication, is foreign integration state
@@ -268,9 +284,59 @@ offer, the entry now says so and cites the passage that settles it.
   verifying transaction, whose interrupted settlement moves no ref. (The first implementation
   compared against the base whenever no transaction was open, so a run that had published anything
   refused every later resume; `pr8-triage.md` C1.)
-- **R24. Which verification errors are outages.** See R4: only a Runner's own error running a
-  gate is an outage of the sequence; every other error ends the command resumably, because
-  deferral is applied to nothing the contract does not classify as infrastructure.
+- **R24. Which verification errors are outages.** Rewritten in the second repair round; the first
+  version said "only a Runner's own error running a gate is an outage; every other error ends the
+  command resumably", which both over- and under-reached (`pr8-triage.md` §5, regression 1 and
+  record F3). What decides is the error's own claim: a Runner error is settled by the process fate
+  it carries (R25), a `UpstrokeError::Git` observed anywhere in the verification is foreign Git
+  state and an outage (R26), a timed-out gate is an outage (R27), and every other error — a
+  containment refusal, a plan the run cannot assemble, a malformed record — is a defect of the run
+  and ends the command resumably with the transaction open, because deferral is applied to nothing
+  the contract does not classify as infrastructure.
+- **R25. A Runner error settles a terminal only when it establishes no process survives.**
+  `decisions.repairs.not_repairs` and `[T-VERIFY].resume_action` require an *observed*
+  infrastructure failure to terminate `merge_verification_unavailable`; `invariants[INV-15]`
+  forbids cleanup of resumably open resources, and a terminal authorizes cleanup (the snapshot,
+  the staging worktree, the pin) and readmission (both entitlements released, the next sequence
+  admitted after the defer wake). An error observed while the gate's process may still be running
+  is not an observed failure of the sequence but the coordinator's loss of its own process, and
+  the resources the terminal would reclaim are that process's. So `Runner::run` returns
+  `RunnerError { invocation, fate: ProcessFate, source }`, with the fate made where the evidence
+  is: the host funnel at its spawn, kill and reap points (`NeverStarted` until the spawn returns,
+  `Unresolved` until a kill is reaped or an exit observed and reaped, then `Gone`), the container
+  runner from its cancel and release results (`NeverStarted` when the launch was refused or
+  cancelled with the container confirmed released; `Gone` when the release confirmed it stopped
+  and removed; `Unresolved` when the runtime did not confirm, or the output was a timeout whose
+  stop failed). The integration settles `Infrastructure{RunnerSpawnFailure}` on `NeverStarted`
+  (INV-23's mid-run image mismatch is this), `Infrastructure{Other}` on `Gone`, and on
+  `Unresolved` ends the command resumably with the transaction open, the snapshot retained and
+  nothing appended; the next resume's startup census reclaims the earlier incarnation's container
+  — refusing while the runtime is unreachable, as `[T-RESUME].refusal_condition` says — before
+  recovery step (f) settles the verification interrupted and reclaims the snapshot. `run_review`
+  propagates an `Unresolved` Runner error rather than reporting the review unavailable, so the
+  reviewer path cannot settle a terminal over a running reviewer either. Test doubles must say
+  what they claim: a double that returns an untyped error does not compile.
+- **R26. Foreign Git state at integration.** `decisions.repairs.not_repairs` lists "foreign Git
+  state" among the failures that at integration terminate `merge_verification_unavailable{Deferred
+  | Parked}`. A `UpstrokeError::Git` observed anywhere in the verification — the review diff, the
+  proposed tree's read, the review-input policy's reader (the reviewer's reproduction: a corrupt
+  disposable staging index), the judge's snapshot checkout — settles `Infrastructure{Other{detail:
+  foreign Git state …}}`; every Git command the verification issues runs before or between its
+  processes, never beside one, so no liveness question arises. The kind is `Other` because the
+  frozen `InfrastructureKind` names no Git kind and `Other{detail}` is its extension point.
+- **R27. A timed-out gate at integration.** `not_repairs` lists timeout. A gate verdict with
+  `timed_out: true` (the Runner enforced the timeout: the process is stopped and reaped, the
+  verdict is `None`) is asked about before the judgement's failure is read, and settles
+  `Infrastructure{Other{detail: gate … timed out}}`, deferred inside the allowance and parked at
+  it, registering no repair. The attempt path's treatment of a timed-out gate (PR7's: the attempt
+  fails with the log tail as feedback) is untouched.
+- **R28. The integration diff is judged for size and opacity only.** `classify::diff_failure`
+  also enforces that a Test task's diff adds test code, an attempt-settlement rule (E4's allowance
+  function feeds on it). At integration the diff is the candidate cherry-picked onto a moved head,
+  and a test another candidate published first is absent from it without being absent from the
+  tree; the reviewers reproduced the rule rejecting exactly that candidate and registering a
+  repair. The candidate's provenance was judged when it was produced; the integration consults
+  `classify::unjudgeable_diff` (the size/opacity half) and the review-input policy, nothing more.
 
 ## 2. Staged implementation plan (one commit per shape)
 
@@ -316,6 +382,22 @@ mutation witness replayed against the repaired tree) and passes at the repair:
 | `test(engine): the residue sampler removes git's common-dir lock residue after a kill` | the macOS CI failure of the sampler; a second sighting of `PR8-CRASH-002` |
 | `docs(internals): the integration slice's prose moves to its notes files` | CODING_STANDARDS §13: every comment the pull request added to a module with notes moves to `docs/internals/`, and the four new modules gain notes files; no code changes |
 
+### The second repair round (2026-09-07)
+
+The three reviews of the repair range `3414dc58..916852c9` and their triage are `pr8-triage.md`
+§5. One commit per finding or closely related group, each with a test that fails without its
+repair (the mutation named in §5 below), the records kept current between them:
+
+| Commit | Findings |
+|---|---|
+| `docs(pr8): triage of the three reviews at 916852c9` | the dispositions |
+| `fix(runner): a Runner error carries what it established about the process, and the integration settles a terminal only when no process survives` | regression 1 (`PR8-R2-RUNNER-LIVENESS`); with it the production halves of record F3 (`PR8-R2-GIT-STATE`), record F4 (`PR8-R2-GATE-TIMEOUT`) and adequacy 2 (`PR8-R2-TEST-PROVENANCE`), which share the rewritten `IntegrationCx::verify` |
+| `fix(engine): the frozen repair spec embeds the rejection evidence, the rejecting head and the rejected candidate` | record F1 (`PR8-R2-FROZEN-SPEC`) |
+| `test(engine): foreign Git state and a timed-out gate settle an outage, and a Test candidate is judged for size and opacity only` | the tests of record F3, record F4 and adequacy 2 |
+| `test(engine): the production verifier is observed through the loop, the sampler proves its kills, the crash child reports, and the spend gap is pinned` | adequacy 3 (`PR8-R2-SNAPSHOT-ORACLE`), adequacy 4 (`PR8-R2-SAMPLER-ORACLE`), regression 2 (`PR8-R2-UNREACHABLE`), adequacy 1 / record F2 (`PR8-R2-SPEND-REPLAY`, deferred) |
+| `docs(internals): the three statements the prose relocation preserved false` | record item 7 (`PR8-R2-RECORD-PROSE`) |
+| `docs(pr8): the record after the second repair round` | this file, `pr8-body.md`, `pr8-triage.md`; the provenance section (`PR8-R2-RECORD-PROVENANCE`) |
+
 ## 3. `src/topology/**` changes: Class A / B / C
 
 Rule applied: a read-only accessor that exposes a derivation the fold already makes is
@@ -338,10 +420,14 @@ adaptation to the retained fields, not another behaviour change.
 
 ## 4. Blocking items
 
-None. One owner decision is owed and recorded rather than blocking: `PR8-CRASH-002` in
-`pr8-body.md` (a lock file left by a coordinator killed inside `git update-ref`; no `Ref.*` site
-registers a residue class in the frozen inventory, so reclaiming it is a Class C vocabulary
-change for a slice of its own).
+None. Two owner decisions are owed and recorded rather than blocking, both Class C vocabulary
+changes this slice may not make: `PR8-CRASH-002` in `pr8-body.md` (a lock file left by a
+coordinator killed inside `git update-ref`; no `Ref.*` site registers a residue class in the
+frozen inventory, so reclaiming it is a residue class for a slice of its own), and
+`PR8-R2-SPEND-REPLAY` (the unavailable terminal carries no review record, so a paid review that
+parked or met an outage is charged live and lost on replay; the contract requires the spend
+recorded — a field on `merge_verification_unavailable`, or an erratum on
+`decisions.coordinator_integration.dispositions`).
 
 ## 5. Coverage notes recorded during implementation
 
@@ -421,3 +507,23 @@ change for a slice of its own).
   substituted-pin check, snapshot removal as each role finishes, the skipped snapshot reclaim,
   the last-rung implementer, the propagated Runner error, the skipped input classification, the
   uncharged review, and the removed staging reclaim.
+
+- **The second repair round's witnesses** (`pr8-triage.md` §5), each replayed against the
+  repaired tree and each failing exactly the test named: the blanket conversion restored (an
+  `Unresolved` fate settled as `RunnerSpawnFailure`) fails
+  `a_runner_that_loses_track_of_a_running_gate_refuses_resumably_and_reclaims_nothing` and
+  `a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled`; the
+  Git arm removed fails `a_git_error_observed_by_the_verification_settles_an_infrastructure_outage`;
+  the timed-out-gate check disabled fails
+  `a_gate_that_times_out_during_integration_verification_defers_instead_of_registering_a_repair`;
+  `diff_failure` restored at integration fails
+  `a_test_candidate_whose_test_was_already_published_is_verified_not_rejected_for_provenance`; the
+  spec body not embedded fails `the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas`;
+  the reviewers' two surviving mutations — `request.candidate.commit_sha` snapshotted in
+  `IntegrationCx`, and `SnapshotDisposal::AsEachRoleFinishes` there — each fail
+  `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal`;
+  and `child.kill()` deleted fails `sampled_cherry_pick_child_kills_every_residue_classified_and_recovered`.
+  The runner's own classification is pinned by
+  `runner::container::exec::tests::the_runner_reports_what_it_established_about_the_process_when_it_fails`
+  (three fates from the production `ContainerRunner` over the fake runtime) and
+  `review::tests::an_unresolved_runner_error_propagates_instead_of_reporting_the_review_unavailable`.

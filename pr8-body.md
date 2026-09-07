@@ -13,12 +13,15 @@ the recovery that completes or settles whatever transaction a crash leaves open.
 The compare-and-swap on the integration ref is the queue's serialization point. A `fast` sequence
 publishes the candidate commit itself with no staging worktree, no intent, no proposal object and
 no pin. A `stale_clean` sequence cherry-picks onto the moved head, verifies the proposal on a fresh
-snapshot — under the binding the candidate ran under, after the review input has been classified,
-with a Runner outage settled as one — and publishes the pinned proposal. `already_present`
-validates the head with a no-op expected-old swap and manufactures no commit. A conflict or a
-code-attributed rejection registers a complete frozen repair — its lineage, tier ladder, path
-hints, acceptance and admission — in the same `merge_rejected` append, before any repair effect.
-Snapshots are removed only after the verification's terminal is durable.
+snapshot — under the binding the candidate ran under, after the review input has been classified
+for size and opacity, with an observed infrastructure failure settled as one (a Runner that
+established no gate process survives, foreign Git state, a timed-out gate) and a Runner that
+cannot say whether its process still runs ending the command resumably instead — and publishes
+the pinned proposal. `already_present` validates the head with a no-op expected-old swap and
+manufactures no commit. A conflict or a code-attributed rejection registers a complete frozen
+repair — its lineage, tier ladder, path hints, acceptance, admission, and a spec whose body embeds
+the rejected candidate, the rejecting head and the evidence — in the same `merge_rejected` append,
+before any repair effect. Snapshots are removed only after the verification's terminal is durable.
 
 Recovery establishes the stable-prefix barrier over the proven prefix before any CAS, so a CAS is
 never issued on a merely replay-visible `merge_prepared`. A `Prepared` transaction is then completed
@@ -42,7 +45,14 @@ frozen-repair builder), the integration recovery in `src/engine/topology/recover
 (the verification context, the implementer binding, the review-input classification, the charged
 reviews), the judge's typed Runner error and snapshot disposal in `attempt.rs`, the verification
 harness in `scaffold.rs`, and the supporting `workspace_manager` reads (`proposal_state`) and
-names (`SnapshotName::integration_review`).
+names (`SnapshotName::integration_review`). The second repair round adds the process fate a
+Runner reports when it fails: `Runner::run` returns `RunnerError` (`src/runner/mod.rs`,
+`src/error.rs`), the host funnel classifies its failures (`src/agent/proc.rs`, `src/runner/host.rs`),
+the container runner classifies from its cancel and release results (`src/runner/container.rs`,
+`src/runner/container/exec.rs`), `run_review` propagates an unresolved one (`src/review.rs`), the
+probe boundaries carry it through (`src/engine/topology/preflight.rs`, `create.rs`), and the
+review-input classifier is split so the integration consults its size/opacity half
+(`src/engine/classify.rs`). Every Runner test double changed signature with the trait.
 
 Out of scope, and neither built nor stubbed: repair **execution** (PR9), the production writer, the
 slot broker. A PR8 build refuses, before any append, dispatch of a Repair-origin task and any
@@ -92,11 +102,20 @@ already settled are marked as such):
 - The implementer a verification's review passes are selected against is the binding the candidate
   ran under: the task's validated override, else the frozen rung at the fold-derived rung position
   (R18).
-- Only a Runner's own error running a gate is an outage of the sequence (`RunnerSpawnFailure`);
-  every other verification error ends the command resumably (R24).
+- A Runner error settles a terminal only when the Runner established that no process survives:
+  `RunnerSpawnFailure` when none was started, `Infrastructure{Other}` when one started and is
+  established gone, and no terminal at all — the command ends resumably with the transaction open
+  and the snapshot retained — when the Runner cannot say; the next resume's census reclaims the
+  container before the verification is settled interrupted (R25). Foreign Git state observed by the
+  verification and a gate that times out are outages of the sequence (`Infrastructure{Other}`,
+  R26, R27); every other verification error ends the command resumably (R24).
+- The integration diff is classified for size and opacity and the review-input policy consulted;
+  the attempt path's Test-provenance rule is not applied to it (R28).
 - An integration's judged reviews are charged to the candidate's task and the run at the
   verification; on replay they are read off `merge_prepared` and `merge_rejected`. An unavailable
-  terminal carries no review record, so a park's or an outage's review is charged live only (R22).
+  terminal carries no review record, so a park's or an outage's review is charged live and lost on
+  replay: the contract requires it recorded and the frozen vocabulary cannot carry it, an owner
+  decision owed (`PR8-R2-SPEND-REPLAY`; R22 withdrawn).
 - With no publication pending, the authorized integration head is the log's latest `task_merged`,
   or the recorded base before any; a ref elsewhere, or absent after a publication, refuses before
   any append (R23).
@@ -107,13 +126,13 @@ already settled are marked as such):
 ## Validation
 
 All ten gates green locally, from the repository root, on the last code commit of this branch,
-`4de4c74efafd37054f790aeef5de9668e36729d4`; the commit that follows it changes the three record
-files and no code, and the ten gates were rerun on it before the push:
+`10dec0f5f56d58fb91e9f62566ef8edb95a07d59`; the commit that follows it changes the three record files and no code, and the ten gates
+were rerun on it before the push:
 
 ```
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features            # 2332 lib tests passed, 0 failed, 43 ignored (Linux)
+cargo test --all-targets --all-features            # 2343 lib tests passed, 0 failed, 43 ignored (Linux)
 cargo +1.85.0 check --locked --all-targets --all-features
 bash .github/scripts/test-release-record.sh
 bash .github/scripts/test-pr-policy.sh
@@ -122,6 +141,14 @@ bash .github/scripts/test-docs-consistency.sh
 bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
 ```
+
+The first full run at that head had one red, in a module this branch does not touch:
+`workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered` refused
+one `Worktree.Add` sample with "worktree list record 1 names a HEAD but neither a branch nor a
+detached checkout" — the standing P3 `PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`
+(`reviews/findings/`), which asks for a count before anything is called a flake. Sighting recorded
+here: it passed alone at this head, and the full test gate rerun at the same head passed clean;
+the ten gates named above are green on that rerun.
 
 Proof obligations from the contract, and where each is met:
 
@@ -170,10 +197,35 @@ Proof obligations from the contract, and where each is met:
   and `a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it`.
 - **Outages, parks and answers, driven through the loop.**
   `a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers`,
+  `a_gate_whose_runner_lost_it_after_start_and_reclaimed_it_defers_as_an_outage`,
+  `a_git_error_observed_by_the_verification_settles_an_infrastructure_outage`,
+  `a_gate_that_times_out_during_integration_verification_defers_instead_of_registering_a_repair`,
   `an_unjudgeable_proposal_parks_the_candidate_for_a_person`,
+  `a_test_candidate_whose_test_was_already_published_is_verified_not_rejected_for_provenance`,
   `an_integration_review_is_selected_against_the_candidates_recorded_implementer`,
   `an_integration_reviews_cost_reaches_the_run_spend`,
+  `a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap`,
   `a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append`.
+- **A lost gate process is never settled over.**
+  `a_runner_that_loses_track_of_a_running_gate_refuses_resumably_and_reclaims_nothing` (the
+  production `ContainerRunner` over the fake runtime with observe, stop and remove unreachable:
+  the step ends in an error, the container survives running, its snapshot and intent are
+  retained, no terminal is appended) and
+  `a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled` (a
+  resume refuses while the runtime is unreachable and appends nothing; with it back the census
+  stops and removes the container before any recovery event, then the verification settles
+  interrupted, the snapshot goes, and the candidate re-verifies under the next sequence). The
+  Runner's own classification:
+  `runner::container::exec::tests::the_runner_reports_what_it_established_about_the_process_when_it_fails`,
+  `review::tests::an_unresolved_runner_error_propagates_instead_of_reporting_the_review_unavailable`.
+- **The production verifier, observed through the loop.**
+  `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal`:
+  for the prepared, rejected and parked shapes the gate ran on a checkout whose HEAD is the
+  recorded proposal and never the candidate commit, and every snapshot removal began with the
+  sequence's terminal as the last durable event.
+- **The frozen repair spec.** `repair::tests::the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas`:
+  a conflict's paths, a code rejection's verdict, gates, review passes and detail, the rejected
+  candidate's commit and ref, and the rejecting head, all in the registered spec's body.
 - **Refusals proven, not merely coded.** Third SHA / symbolic / checked-out
   (`integrate::tests`, `recover::tests`); orphan pin outside the next sequence (`recover::tests`)
   and a second unresolved transaction (`fold::tests`); non-eligible starts, the three fast
@@ -186,22 +238,26 @@ Proof obligations from the contract, and where each is met:
   or head commit, creates no new object, and the recording runner's workspace HEAD is the proposal
   for every verifying shape (`integrate::tests`).
 - **Mutation witnesses replayed against the repaired tree**, each killed by the test its ledger
-  row names: the reviewer's m01, m02, m03, m05 and m06; the barrier sync removed; and one
-  mutation per repair of the round (`pr8-plan.md` §5).
+  row names: the reviewer's m01, m02, m03, m05 and m06; the barrier sync removed; one mutation
+  per repair of the first round; and, for the second round, the blanket Runner-error conversion
+  restored, the Git arm removed, the timed-out-gate check disabled, the provenance rule restored
+  at integration, the spec body not embedded, the two snapshot mutations the reviewers found
+  surviving, and the sampler's kill deleted (`pr8-plan.md` §5).
 
 ## Review evidence
 
-Implemented by Claude (Opus 4.8) running as an autonomous Claude Code session, at high effort, in
+Implemented by Claude Fable 5.1 at max effort, running as an autonomous Claude Code session in
 one continuous run against the frozen contract at `decisions.pr_sequence[9]` of the parallelism
 packet as amended by the 2026-08-25 G2 errata, finishing on head
 `9d0359394e63878e51abda1ec5c54c6f94578363` with the ten gates green locally; the body commit
 `3414dc5861c9a523342ea0792a54f0129cf82f2f` followed. Commit-per-terminal-shape, as the packet's
-own size mitigation asks.
+own size mitigation asks. Both repair rounds below were Claude Fable 5.1 at max effort, each a
+fresh autonomous session. (An earlier version of this paragraph named Opus 4.8 at high effort;
+the plan named the correct model and the body was wrong.)
 
 Three independent frontier reviews were then run by the owner against the exact head `3414dc58`,
-each through the lens review script (`review-pr-lens.sh`, whose reviewer is `gpt-5.6-sol` at
-`max` effort by default; the review records do not restate the model), each with a different
-lens and each returning `CHANGES_REQUIRED`:
+each by `gpt-6-astra` at `max` effort, each with a different lens and each returning
+`CHANGES_REQUIRED`:
 
 - **conformance to the frozen design** — the only reviewer given the design contract: findings
   F1–F9, an audit of the twenty recorded readings, and a freeze-classification audit;
@@ -211,19 +267,34 @@ lens and each returning `CHANGES_REQUIRED`:
 
 Every finding was triaged in `pr8-triage.md` (Claude Fable 5.1 at max effort, one continuous
 autonomous session, 2026-09-07) and every one was confirmed; none was rejected. Every confirmed
-finding was repaired on this branch, one finding or closely related group per commit, each with a
-test that fails at `3414dc58` or a mutation witness replayed against the repair, except one that
-is beyond this slice's reach and is deferred with a ledger row and an owner decision owed
-(`PR8-CRASH-002`). The two documentation defects the owner was being asked to approve on — the
-over-limit `HumanBinding` description and the empty-intersection ladder — are corrected: the
-description to what the fold does, and the code to what R10 recorded.
+finding was repaired on this branch at `916852c9`, one finding or closely related group per
+commit, each with a test that fails at `3414dc58` or a mutation witness replayed against the
+repair, except one that is beyond this slice's reach and is deferred with a ledger row and an
+owner decision owed (`PR8-CRASH-002`). The two documentation defects the owner was being asked to
+approve on — the over-limit `HumanBinding` description and the empty-intersection ladder — are
+corrected: the description to what the fold does, and the code to what R10 recorded.
 
-After the push, CI's macOS leg failed once in the residue sampler: a killed `git cherry-pick`
+After that push, CI's macOS leg failed once in the residue sampler: a killed `git cherry-pick`
 left `packed-refs.lock` in the common git dir — the Ref-lock residue class `PR8-CRASH-002`
 defers — and the sampler now removes git's ref-lock residue after each kill as an operator
 would. The prose this pull request had put into source files then moved to the modules' notes
 under `docs/internals/` (CODING_STANDARDS §13), with notes files created for `integrate.rs`,
 `repair.rs` and their test modules; that commit changes no code.
+
+Three more independent frontier reviews were then run by the owner against the exact head
+`916852c9`, over the repair range `3414dc58..916852c9` only, each by `gpt-6-astra` at `max`
+effort, three lenses — repair adequacy (four issues), regression (two issues, the first the most
+serious finding of the round), record honesty (four numbered findings and the record
+discrepancies) — and each returning `CHANGES_REQUIRED`. They confirmed the two-crash proof sound,
+the three Class B descriptions accurate, the freeze classification complete and the non-goal
+boundary held, and found the round's outage handling had made something worse: every Runner error
+was settled as a spawn failure, so a gate whose container Docker had lost was released, its
+snapshot reclaimed and the next sequence admitted beside it. Every finding was triaged in
+`pr8-triage.md` §5 (Claude Fable 5.1 at max effort, a fresh autonomous session, 2026-09-07) and
+confirmed; none was rejected. Every confirmed finding was repaired on this branch with a test that
+fails without the repair, except the spend replay gap, which the contract settles against the
+frozen vocabulary and which is deferred with a ledger row and an owner decision owed
+(`PR8-R2-SPEND-REPLAY`); R22, which had called it a permitted reading, is withdrawn.
 
 The repaired head has not been reviewed. The frontier review of it is **owed and is the owner's
 to run**; it is not part of this branch. The ledger below carries the canonical header and one
@@ -240,10 +311,20 @@ The three Class B fold changes are the sharpest review surface: the retained `ex
 count changes which repair admissions the fold accepts. All are exercised live and on replay in
 `fold::tests`.
 
-One known residue class is not reclaimed (`PR8-CRASH-002`): a lock file left by a coordinator
-killed inside `git update-ref`. The refusal it causes is resumable and loses nothing, and the
+The second repair round changes the `Runner` trait's error type crate-wide: every Runner —
+the host and container runners, the probe boundaries, and every test double — now says what it
+established about the process when it fails. The v0.1 path is affected only in type: the host
+runner's errors are the same errors with a fate attached, and `run_review` reports a reviewer
+unavailable exactly as before unless the Runner says the process may still be running, which the
+host funnel says only when its kill was not reaped.
+
+Two known gaps are deferred to owner decisions. `PR8-CRASH-002`: a lock file left by a coordinator
+killed inside `git update-ref`; the refusal it causes is resumable and loses nothing, and the
 operator's removal of the lock lets the next resume complete the publication; reclaiming it needs
-a `Ref.*` residue class in the frozen inventory.
+a `Ref.*` residue class in the frozen inventory. `PR8-R2-SPEND-REPLAY`: a paid review that parks
+or meets an outage is charged live and lost on replay, so a restart can admit an integration the
+previous incarnation's total would have refused; recording it needs a review record on the
+unavailable terminal, which the frozen vocabulary lacks.
 
 Rollback is clean: the schema-4 topology is inert unless a plan selects it, so reverting the branch
 removes the machinery without touching the v0.1 path or any released behaviour. No data migration,
@@ -267,7 +348,7 @@ owns.
 | PR8-CRASH-002 | P1 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/integrate.rs:487 | merge_prepared durable -> git update-ref killed after creating integration.lock and before the rename -> resume retries the authorized CAS -> Git refuses on the lock -> every later resume repeats the refusal until an operator removes the file; the same class was met once more on the macOS runner, where a killed git cherry-pick left packed-refs.lock in the common git dir and the resume's next ref write refused on it | pre_existing | crash-consistency | — | `a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed` pins the resumable refusal and the completion after removal, and the residue sampler removes git's common-dir ref locks after each kill as an operator would (`remove_git_ref_lock_residue`); no Ref site registers a residue class in the frozen inventory, so reclaiming the lock is a Class C change owed an owner decision | deferred |
 | PR8-CRASH-005 | P2 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/integrate.rs:369 | the head moves onto the candidate commit -> empty cherry-pick -> merge_prepared(already_present) with expected_head == proposed_sha == candidate.commit_sha -> kill before publication -> from_fold infers fast from the SHAs -> the staging worktree survives recovery | introduced_by_feature | crash-consistency | 43d62194 | `a_resume_completes_an_already_present_publication_at_the_candidate_commit_and_reclaims_its_staging` | fixed |
 | PR8-TESTS-002 | P1 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/run.rs:192 | the review-input policy refuses the proposed tree -> Judge invoked with no prior failure -> the proposal is published | introduced_by_feature | correctness | 2d1b4c72 | `an_unjudgeable_proposal_parks_the_candidate_for_a_person` | fixed |
-| PR8-TESTS-003 | P1 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/run.rs:677 | an integration review costs 2.50 -> Spend unchanged live and on replay -> the next selection admits work below an apparent ceiling the real spend has passed | introduced_by_feature | correctness | 2d1b4c72 | `an_integration_reviews_cost_reaches_the_run_spend` | fixed |
+| PR8-TESTS-003 | P1 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/run.rs:677 | an integration review costs 2.50 -> Spend unchanged live and on replay -> the next selection admits work below an apparent ceiling the real spend has passed | introduced_by_feature | correctness | 2d1b4c72 | `an_integration_reviews_cost_reaches_the_run_spend` pins the live charge and the replay of the records merge_prepared and merge_rejected carry; the unavailable terminals' replay is PR8-R2-SPEND-REPLAY | fixed |
 | PR8-TESTS-005 | P2 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/scaffold.rs:719 | the scaffold verifier ignores its workspace and no test supplies a gate -> VerifyRequest.proposed replaced by the candidate SHA -> all fourteen integration tests pass | introduced_by_feature | correctness | 2d1b4c72 | `stale_candidate_takes_staging_path_and_publishes_pinned_proposal` asserts the gate's workspace HEAD is the recorded proposal | fixed |
 | PR8-TESTS-006 | P2 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/integrate/tests.rs:859 | the swap skipped whenever expected_head equals proposed_sha -> unchanged HEAD and object count still hold -> all fourteen integration tests pass | introduced_by_feature | correctness | 9d035939 | `an_already_present_candidate_settles_without_an_empty_commit` counts exactly one compare-and-swap | fixed |
 | PR8-TESTS-007 | P2 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/integrate/tests.rs:952 | the registered repair's intent and worktree created after merge_rejected -> only the last event kind and staging intents checked -> all fourteen integration tests pass | introduced_by_feature | correctness | 9d035939 | `a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect` asserts no task worktree effect after the rejection | fixed |
@@ -276,3 +357,14 @@ owns.
 | PR8-TESTS-013 | P2 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/repair.rs:82 | the whole root entry cloned without a stated reason -> its nested fields cloned again -> an empty_intersection flag duplicates the ladder's admission | introduced_by_feature | correctness | 2d1b4c72 | standards section 6, held by review: the builder borrows the root, clones the specification once, and reads the admission off the ladder | fixed |
 | PR8-AUDIT-R8 | P2 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/topology/fold/check_integration.rs:471 | the body and reading R8 claim an over-limit HumanBinding admission is refused -> the fold accepts it on either side of the limit -> the owner asked to approve a Class B change on a description of what it does not do | introduced_by_feature | docs-contract | 3414dc58 | `a_lineage_past_its_repair_limit_registers_only_a_human_required_repair` accepts HumanBinding at the limit, and R8 now says so | fixed |
 | PR8-AUDIT-R10 | P2 | 3414dc5861c9a523342ea0792a54f0129cf82f2f / src/engine/topology/repair.rs:190 | the mid floor intersects the root's ladder empty -> the root's tiers, floor and ceiling kept and its excluded rungs offered -> reading R10 promised the raised floor, no ceiling and the probed agents | introduced_by_feature | docs-contract | 2d1b4c72 | `an_empty_tier_intersection_registers_a_human_binding_ladder_with_the_allowed_agents` | fixed |
+| PR8-R2-RUNNER-LIVENESS | P1 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/run.rs:257 | merge_verification_started durable -> the gate's container starts -> Docker unreachable so observe, stop and remove fail -> the Runner error is settled as RunnerSpawnFailure -> Deferred appended, both entitlements released, the snapshot the container has mounted removed -> after the defer wake a second sequence starts beside the surviving gate | fix_regression | crash-consistency | f2e0c69f | `a_runner_that_loses_track_of_a_running_gate_refuses_resumably_and_reclaims_nothing` and `a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled`; the Runner's fate is pinned by `the_runner_reports_what_it_established_about_the_process_when_it_fails` | fixed |
+| PR8-R2-SPEND-REPLAY | P1 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/select.rs:52 | 1.20 spent -> a 2.50 review returns needs_human -> live total 3.70 -> restart -> replay restores 1.20 -> the selector admits an integration under a 2.20 ceiling the previous incarnation refused | introduced_by_feature | correctness | 2d1b4c72 | `a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap` pins the live charge, the in-incarnation refusal, and the replayed total as exactly what the frozen unavailable terminal can carry; decisions.coordinator_integration.dispositions requires the spend recorded and MergeVerificationUnavailable has no review record, so the field is a Class C change owed an owner decision (or an erratum) | deferred |
+| PR8-R2-GIT-STATE | P1 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/run.rs:210 | merge_verification_started durable -> the disposable staging index is corrupt -> the review-input reader returns a Git error -> the ? propagates it with no terminal -> resume settles the sequence interrupted and the observed failure never reaches the defer accounting | introduced_by_feature | correctness | f2e0c69f | `a_git_error_observed_by_the_verification_settles_an_infrastructure_outage` | fixed |
+| PR8-R2-GATE-TIMEOUT | P2 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/attempt.rs:574 | a gate reaches its timeout -> the Runner returns timed_out with no verdict -> the ordinary gate-failure branch classifies it GateFailed -> merge_rejected registers a repair for a timeout | introduced_by_feature | correctness | 2d1b4c72 | `a_gate_that_times_out_during_integration_verification_defers_instead_of_registering_a_repair` | fixed |
+| PR8-R2-FROZEN-SPEC | P2 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/repair.rs:60 | a candidate is rejected with failing gate evidence -> the repair is registered -> its spec is the root spec with kind, hints and one acceptance line changed -> neither the evidence nor either SHA is in the spec PR9 dispatches from | introduced_by_feature | docs-contract | 2d1b4c72 | `the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas` | fixed |
+| PR8-R2-TEST-PROVENANCE | P2 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/run.rs:189 | a Test candidate adds a test and a helper -> another candidate publishes the identical test first -> the cherry-pick leaves a helper-only integration diff -> diff_failure rejects it for adding no test code and a repair is registered | fix_regression | correctness | f2e0c69f | `a_test_candidate_whose_test_was_already_published_is_verified_not_rejected_for_provenance` | fixed |
+| PR8-R2-SNAPSHOT-ORACLE | P2 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/integrate/tests.rs:1162 | the production verifier snapshots the candidate commit, or removes snapshots as each role finishes -> the asserting tests use the scaffold's own verifier and the loop tests' runner ignores its workspace -> all 354 engine-topology tests pass | introduced_by_feature | correctness | 2ff9f14a | `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal` | fixed |
+| PR8-R2-SAMPLER-ORACLE | P2 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/recover/tests.rs:8098 | the sampler's child.kill() is deleted -> every cherry-pick completes -> eight classifications of clean picks satisfy the purported kill proof | introduced_by_feature | correctness | d14e1db0 | `sampled_cherry_pick_child_kills_every_residue_classified_and_recovered` now requires each child to die by the kill or to have completed, and at least one to have died by it | fixed |
+| PR8-R2-UNREACHABLE | P2 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/recover/tests.rs:6491 | recovery returns before the armed append, on a third-SHA refusal -> let _ discards the result -> a bare unreachable! ends the child with no report of why | introduced_by_feature | docs-contract | 69463499 | standards section 7, held by review: `two_crash_kill_child` reports what recovery returned into the parent's report file and fails plainly; no unreachable! was added by this pull request | fixed |
+| PR8-R2-RECORD-PROSE | P3 | 916852c9638383af3964f743d48e14bf859138c3 / docs/internals/engine/topology/integrate.md:323 | the prose relocation preserves three statements false against the code -> a StaleNotImplemented refusal that does not exist, a head check skipped under any transaction, a person asked below the limit refused | introduced_by_feature | docs-contract | 4de4c74e | corrected to what `integrate_stale`, `ensure_recorded_integration_ref` and `check_merge_rejected` do; `test-internals-notes.sh` holds the pointers, review holds the sentences | fixed |
+| PR8-R2-RECORD-PROVENANCE | P2 | 916852c9638383af3964f743d48e14bf859138c3 / pr8-body.md:194 | the body names Opus 4.8 at high effort and the review script's default reviewer -> the plan names Fable 5.1 at max -> MAINTAINING.md requires the frontier reviewer model and effort in the body and the body names what did not run | introduced_by_feature | docs-contract | 3414dc58 | the settled values from the owner and the worktree model-intent files are in the Review evidence section; `validate-pr-body.sh` holds the sections | fixed |
