@@ -155,8 +155,8 @@ already settled are marked as such):
 ## Validation
 
 All ten gates green locally, from the repository root, on the last code commit of this branch,
-`243cf617f5ed8070cdd0951e56db4d560c0eb699`; the commit that follows it changes the three record
-files and no code, and the ten gates were rerun on it before the push:
+`243cf617f5ed8070cdd0951e56db4d560c0eb699`; the commits that follow it change the three record
+files and no code, and the ten gates were rerun on the pushed head before the push:
 
 ```
 cargo fmt --check
