@@ -546,27 +546,21 @@ pub fn check_bijection(
     failures
 }
 
-/// Check one phase at every order a fault at this site can leave observable,
+/// Check one phase at the order a fault at this site can leave observable,
 /// or at `None` where it can leave none.
 ///
 /// One spelling for every phase kind. The residue-class loop used to take
 /// `observable_orders()[0]` while the hook loop iterated the slice; the two
-/// agree at this head, because `observable_orders` answers one order or none
-/// by construction, and agreeing by coincidence is not the same as agreeing.
+/// could only be made to agree by construction, never by the type. Now that
+/// `observable_orders` answers `Option<ObservableOrder>`, there is one order
+/// to check, not a loop over a slice that never held more than one.
 fn check_orders(
     failures: &mut Vec<BijectionFailure>,
     entries: &[RegistryEntry],
     site: EffectSiteId,
     phase: EntryPhase,
 ) {
-    let orders = site.observable_orders();
-    if orders.is_empty() {
-        check_evidence(failures, entries, site, phase, None);
-    } else {
-        for order in orders {
-            check_evidence(failures, entries, site, phase, Some(*order));
-        }
-    }
+    check_evidence(failures, entries, site, phase, site.observable_orders());
 }
 
 /// Whether one required key has an entry, and whether that entry's evidence

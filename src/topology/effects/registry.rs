@@ -606,11 +606,9 @@ pub fn validate_entry(entry: &RegistryEntry) -> Result<(), RegistryError> {
     // A no-execution record is not about an order: nothing was performed, so
     // there is no effect to be durable before or after the append. Every other
     // phase carries the site's one order, or `None` where the site has none.
-    let orders = site.observable_orders();
-    let order_ok = match (entry.phase, entry.order) {
-        (EntryPhase::NoExecution, order) => order.is_none(),
-        (_, Some(order)) => orders.contains(&order),
-        (_, None) => orders.is_empty(),
+    let order_ok = match entry.phase {
+        EntryPhase::NoExecution => entry.order.is_none(),
+        _ => entry.order == site.observable_orders(),
     };
     if !order_ok {
         return Err(RegistryError::WrongOrder {
@@ -818,7 +816,7 @@ mod tests {
 
     /// The site's own order, or none where it has none.
     fn order_of(site: EffectSiteId) -> Option<ObservableOrder> {
-        site.observable_orders().first().copied()
+        site.observable_orders()
     }
 
     /// A sound entry, built from the site's own semantics.

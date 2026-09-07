@@ -753,7 +753,7 @@ mod tests {
         assert_eq!(SPAWN_SITE.fault_row(), FaultRow::TAttempt);
         assert_eq!(
             SPAWN_SITE.observable_orders(),
-            &[ObservableOrder::EventBeforeEffect],
+            Some(ObservableOrder::EventBeforeEffect),
             "one order, which is why `A3-REG-001`'s order-free key stays \
              equivalent for this site rather than becoming live debt here"
         );

@@ -61,7 +61,14 @@ pub struct EffectSiteExport {
     pub domain: EnforcementDomain,
     /// Its adjacency.
     pub adjacent: Adjacent,
-    /// The orders a fault here can leave observable.
+    /// The orders a fault here can leave observable: zero or one, in the
+    /// document's own list shape.
+    ///
+    /// `EffectSiteId::observable_orders` answers `Option<ObservableOrder>`;
+    /// this field stays a `Vec` at the wire boundary deliberately — a
+    /// document field is free to grow to more than one without a schema
+    /// break — and the one place that decision is made is here, converting
+    /// the accessor's `Option` rather than inheriting its shape.
     pub observable_orders: Vec<ObservableOrder>,
     /// Its fault-matrix row.
     pub fault_row: FaultRow,
@@ -90,7 +97,7 @@ pub fn effect_sites() -> Vec<EffectSiteExport> {
             row: site.row(),
             domain: site.row().domain(),
             adjacent: site.adjacent(),
-            observable_orders: site.observable_orders().to_vec(),
+            observable_orders: site.observable_orders().into_iter().collect(),
             fault_row: site.fault_row(),
             scope: site.scope(),
             module: site.module().to_owned(),

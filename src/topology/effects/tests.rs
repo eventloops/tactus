@@ -1156,11 +1156,11 @@ fn an_adjacency_before_a_kind_is_not_the_adjacency_after_it() {
         .expect("some site is ordered after its append");
     assert_eq!(
         before_site.observable_orders(),
-        &[ObservableOrder::EffectBeforeEvent]
+        Some(ObservableOrder::EffectBeforeEvent)
     );
     assert_eq!(
         after_site.observable_orders(),
-        &[ObservableOrder::EventBeforeEffect]
+        Some(ObservableOrder::EventBeforeEffect)
     );
     assert_ne!(
         before_site.observable_orders(),
@@ -1182,11 +1182,11 @@ fn an_adjacency_before_a_kind_is_not_the_adjacency_after_it() {
 /// `EffectSiteId::observable_orders` is a method on a site; this is the
 /// same rule applied to the adjacency by itself, so the test above does
 /// not need a site that happens to carry the direction it is testing.
-fn observable_orders_of(adjacent: Adjacent) -> &'static [ObservableOrder] {
+fn observable_orders_of(adjacent: Adjacent) -> Option<ObservableOrder> {
     match adjacent {
-        Adjacent::Before(_) => &[ObservableOrder::EffectBeforeEvent],
-        Adjacent::After(_) => &[ObservableOrder::EventBeforeEffect],
-        Adjacent::None => &[],
+        Adjacent::Before(_) => Some(ObservableOrder::EffectBeforeEvent),
+        Adjacent::After(_) => Some(ObservableOrder::EventBeforeEffect),
+        Adjacent::None => None,
     }
 }
 
@@ -1205,7 +1205,7 @@ fn the_observable_orders_are_the_ones_the_adjacency_admits() {
             Adjacent::Before(_) => {
                 assert_eq!(
                     site.observable_orders(),
-                    &[ObservableOrder::EffectBeforeEvent],
+                    Some(ObservableOrder::EffectBeforeEvent),
                     "{site}"
                 );
                 before += 1;
@@ -1213,13 +1213,13 @@ fn the_observable_orders_are_the_ones_the_adjacency_admits() {
             Adjacent::After(_) => {
                 assert_eq!(
                     site.observable_orders(),
-                    &[ObservableOrder::EventBeforeEffect],
+                    Some(ObservableOrder::EventBeforeEffect),
                     "{site}"
                 );
                 after += 1;
             }
             Adjacent::None => {
-                assert!(site.observable_orders().is_empty(), "{site}");
+                assert_eq!(site.observable_orders(), None, "{site}");
                 neither += 1;
             }
         }
@@ -1903,7 +1903,7 @@ fn fast_path_skipped() -> Vec<EffectSiteId> {
 
 /// The one order an entry for this site must carry, or `None`.
 fn only_order(site: EffectSiteId) -> Option<ObservableOrder> {
-    site.observable_orders().first().copied()
+    site.observable_orders()
 }
 
 /// Run one site through both hook phases and every point required on
@@ -6812,7 +6812,10 @@ fn the_generated_inventory_describes_every_site_and_invents_none() {
         assert_eq!(entry.row, site.row());
         assert_eq!(entry.domain, site.row().domain());
         assert_eq!(entry.adjacent, site.adjacent());
-        assert_eq!(entry.observable_orders, site.observable_orders());
+        assert_eq!(
+            entry.observable_orders,
+            Vec::from_iter(site.observable_orders())
+        );
         assert_eq!(entry.fault_row, site.fault_row());
         assert_eq!(entry.scope, site.scope());
         assert_eq!(entry.module, site.module());

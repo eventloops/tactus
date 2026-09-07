@@ -329,17 +329,18 @@ impl EffectSiteId {
         self.group().module()
     }
 
-    /// The durable orders a fault here can leave observable.
+    /// The durable order a fault here can leave observable, or `None` where
+    /// the site has no adjacency and so no order at all.
     ///
     /// One order, not two, wherever the design fixes which of the effect and
     /// the append is durable first — which it does everywhere it names an
-    /// adjacency. A site with no adjacency has no order at all, and its entry
-    /// carries `None` rather than an arbitrary one.
-    pub const fn observable_orders(self) -> &'static [ObservableOrder] {
+    /// adjacency. The type carries that bound itself now, rather than a
+    /// slice a reader has to know is never longer than one.
+    pub const fn observable_orders(self) -> Option<ObservableOrder> {
         match self.adjacent() {
-            Adjacent::Before(_) => &[ObservableOrder::EffectBeforeEvent],
-            Adjacent::After(_) => &[ObservableOrder::EventBeforeEffect],
-            Adjacent::None => &[],
+            Adjacent::Before(_) => Some(ObservableOrder::EffectBeforeEvent),
+            Adjacent::After(_) => Some(ObservableOrder::EventBeforeEffect),
+            Adjacent::None => None,
         }
     }
 
