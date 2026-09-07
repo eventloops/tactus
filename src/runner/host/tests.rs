@@ -5848,3 +5848,141 @@ fn the_clone_probe_reports_the_trait_however_it_was_implemented() {
     assert!(<CloneProbe<KeyCase>>::IMPLEMENTS_CLONE);
     assert!(!<CloneProbe<HostRunner>>::IMPLEMENTS_CLONE);
 }
+
+/// The contiguous `//` comment block immediately above the first line whose
+/// trimmed start is `item`, with the comment markers stripped and the whole
+/// run normalised to one space-separated line, so a reflow moves nothing.
+/// `None` when the file does not declare `item` at all — an absent item and an
+/// absent comment are different answers, and conflating them is how a pin over
+/// source text goes vacuous. `Some("")` is the item with no comment above it.
+fn comment_block_above(source: &str, item: &str) -> Option<String> {
+    let mut block: Vec<&str> = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(item) {
+            return Some(
+                block
+                    .join(" ")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            );
+        }
+        if trimmed.starts_with("//") {
+            block.push(trimmed.trim_start_matches('/'));
+        } else {
+            block.clear();
+        }
+    }
+    None
+}
+
+/// The control for [`comment_block_above`]. That extractor is the only thing
+/// standing between a deleted protocol and a green suite, so its "nothing is
+/// there" answer is proved on fixtures rather than on the file it guards: a
+/// scan that silently found nothing to read would pass every assertion below
+/// it by returning an empty haystack, and a scan that could not tell an absent
+/// item from an absent comment would report the wrong defect.
+#[test]
+fn the_comment_block_extractor_separates_an_absent_item_from_an_absent_comment() {
+    const ITEM: &str = "pub struct Guarded {";
+
+    assert_eq!(
+        comment_block_above("// one\n//   two\npub struct Guarded {\n", ITEM).as_deref(),
+        Some("one two"),
+        "a contiguous block is read as one line with its markers stripped"
+    );
+    assert_eq!(
+        comment_block_above("// one\n\npub struct Guarded {\n", ITEM).as_deref(),
+        Some(""),
+        "a blank line detaches a comment from the item below it"
+    );
+    assert_eq!(
+        comment_block_above("// one\nstruct Other;\npub struct Guarded {\n", ITEM).as_deref(),
+        Some(""),
+        "an intervening item detaches a comment from the item below it"
+    );
+    assert_eq!(
+        comment_block_above("// one\npub struct Other {\n", ITEM),
+        None,
+        "a source that never declares the item reports absence, not an empty comment"
+    );
+}
+
+/// `PR164-PASS1-03`, alias `R164-ASTRA-01`. The inherited #144 notes migration
+/// moved the `HostRunner` lock protocol out of the source at `929019ca`,
+/// leaving the two `Mutex` fields with no adjacent account of what they
+/// protect, in which order they are taken, how long each guard is held, or
+/// what a failure leaves behind. §13 makes a §10 protocol the concurrency
+/// standard's to place *at* the site and explicitly does not excuse a module
+/// that has a notes file; §6 requires a lock's protected invariant and, where
+/// there is more than one, its acquisition order. PR #156 put the protocol
+/// back at `21e32e65`. Nothing then held it there, so the next prose migration
+/// could take it away again in the same silence: this pins the placement.
+///
+/// The claim is placement and coverage, not prose. It asserts that the comment
+/// block immediately above `pub struct HostRunner {` exists, names both
+/// protected fields, and states the order, the `hooks` critical section, the
+/// release on an unwind and what poisoning leaves behind. Whether the protocol
+/// is *true* of `program_for` and `Runner::run` is review's reading, and
+/// `ASTRA165-002` carries the line-level version of that question. A deliberate
+/// rewording updates the pin it moves, the way `src/export.rs` pins the
+/// sentences it depends on.
+#[test]
+fn the_lock_protocol_stays_beside_the_host_runner_fields() {
+    const SOURCE: &str = include_str!("../host.rs");
+    const ITEM: &str = "pub struct HostRunner {";
+
+    let Some(block) = comment_block_above(SOURCE, ITEM) else {
+        panic!("src/runner/host.rs must declare `{ITEM}`");
+    };
+
+    for (proposition, pin) in [
+        (
+            "names the memoised resolution state the first lock protects",
+            "`resolved`",
+        ),
+        (
+            "names the mutable observer the second lock protects",
+            "`hooks`",
+        ),
+        (
+            "states the acquisition order: the two guards never overlap",
+            "never nest",
+        ),
+        (
+            "states how long the `hooks` critical section lasts",
+            "supervised run",
+        ),
+        (
+            "states that a guard is released on an unwind, not only on a return",
+            "unwind",
+        ),
+        (
+            "states what a poisoned lock leaves behind",
+            "retain their inner state",
+        ),
+    ] {
+        assert!(
+            block.contains(pin),
+            "the protocol beside `{ITEM}` must state that it {proposition}; \
+             looked for {pin:?} in:\n{block}"
+        );
+    }
+
+    assert!(
+        !block.contains("sequential"),
+        "the retired claim that the whole execution system is sequential must \
+         not come back beside `{ITEM}`: `resolved` serialises the lookups of \
+         one runner, which is a different proposition:\n{block}"
+    );
+
+    const NOTES: &str = include_str!("../../../docs/internals/runner/host.md");
+    let notes = NOTES.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        notes.contains("retains its pointer and the lock protocol beside `HostRunner`"),
+        "the notes must record the retained placement exception, so the reader \
+         who starts in the prose is sent to the site instead of being told that \
+         the whole of this module's prose lives in the notes"
+    );
+}

@@ -978,6 +978,30 @@ mod tests {
                     ),
                 ));
                 out.push(Candidate::new(
+                    format!("merge_prepared/fast/with-verification/{name}/g{generation}"),
+                    ev(TopologyEventBody::MergePrepared {
+                        data: Box::new(MergePrepared {
+                            sequence: SequenceId(sequence),
+                            disposition: PreparedDisposition::Fast,
+                            expected_head: sha("base"),
+                            proposed_sha: candidate.commit_sha.clone(),
+                            key,
+                            generation: GenerationId(generation),
+                            candidate_sha: candidate.commit_sha.clone(),
+                            candidate_ref: candidate.candidate_ref.clone(),
+                            prepared_ref: None,
+                            verification_source: source.clone(),
+                            verification: Some(VerificationRecord {
+                                verdict: VerificationVerdict::Passed,
+                                gates_passed: true,
+                                reviews: Vec::new(),
+                                detail: "census verification".to_owned(),
+                            }),
+                            satisfies: vec![key],
+                        }),
+                    }),
+                ));
+                out.push(Candidate::new(
                     format!("merge_verification_started/stale/{name}/g{generation}"),
                     ev(TopologyEventBody::MergeVerificationStarted {
                         data: MergeVerificationStarted {
@@ -1560,6 +1584,7 @@ mod tests {
             "merge_prepared/fast/moved-head/aleph/g0",
             "merge_prepared/fast/other-proposed/aleph/g0",
             "merge_prepared/fast/with-pin/aleph/g0",
+            "merge_prepared/fast/with-verification/aleph/g0",
             "merge_prepared/stale_clean/mismatch/aleph/g0",
             "merge_prepared/already_present/mismatch/aleph/g0",
         ] {
@@ -2881,6 +2906,11 @@ mod tests {
                 &fast,
                 "merge_prepared/fast/with-pin/aleph/g0",
                 "prepared_ref",
+            ),
+            (
+                &fast,
+                "merge_prepared/fast/with-verification/aleph/g0",
+                "verification",
             ),
             (
                 &stale,
