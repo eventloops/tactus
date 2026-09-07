@@ -6109,6 +6109,139 @@ fn interrupted_sequences(fixture: &Fixture) -> Vec<u32> {
         .collect()
 }
 
+/// Plant a fast transaction whose `merge_prepared` reached the file but was
+/// never synced, then was lost to power failure: the candidate is prepared and
+/// created durably, the integration ref is at the base, and the log is
+/// truncated back to before the `merge_prepared` line — the exact prefix the
+/// stable-prefix barrier converges an unsynced tail to.
+fn plant_unsynced_merge_prepared(fixture: &Fixture) -> CommitSha {
+    use crate::workspace_manager::fixture::git;
+    let (commit, tree) = alpha_commit(fixture);
+    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, ALPHA, GEN);
+    git(
+        &fixture.repo_root,
+        &["update-ref", names.prepared_ref.as_str(), commit.as_str()],
+    );
+    git(
+        &fixture.repo_root,
+        &["update-ref", names.candidate_ref.as_str(), commit.as_str()],
+    );
+    git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            fixture.base_sha.as_str(),
+        ],
+    );
+    let candidate = crate::topology::events::CandidateRef {
+        key: ALPHA,
+        generation: GEN,
+        commit_sha: commit.clone(),
+        candidate_ref: names.candidate_ref.clone(),
+    };
+    // The durable prefix: everything through task_candidate_created.
+    append_events(
+        fixture,
+        &[
+            dispatched_at(&fixture.base_sha),
+            attempt_started(1),
+            alpha_candidate_prepared(fixture, &commit, &tree, &names),
+            TopologyEventBody::TaskCandidateCreated {
+                data: crate::topology::events::TaskCandidateCreated {
+                    candidate: candidate.clone(),
+                },
+            },
+        ],
+    );
+    let durable = fixture.log_bytes();
+    // The unsynced append: merge_prepared reaches the file.
+    append_events(
+        fixture,
+        &[TopologyEventBody::MergePrepared {
+            data: Box::new(crate::topology::events::MergePrepared {
+                sequence: crate::topology::events::SequenceId(0),
+                disposition: crate::topology::events::PreparedDisposition::Fast,
+                expected_head: fixture.base_sha.clone(),
+                proposed_sha: commit.clone(),
+                key: ALPHA,
+                generation: GEN,
+                candidate_sha: commit.clone(),
+                candidate_ref: names.candidate_ref.clone(),
+                prepared_ref: None,
+                verification_source:
+                    crate::topology::events::VerificationSource::CandidatePrepared {
+                        key: ALPHA,
+                        generation: GEN,
+                    },
+                verification: None,
+                satisfies: vec![ALPHA],
+            }),
+        }],
+    );
+    assert!(
+        fixture.log_bytes().len() > durable.len(),
+        "merge_prepared reached the file"
+    );
+    // Power failure: the unsynced tail is lost, and the next open sees only the
+    // durable prefix. Rewriting the file to that prefix is the truncation the
+    // barrier's own open would perform, through the sanctioned test writer.
+    crate::workspace_manager::fixture::write_file(&fixture.log(), &durable);
+    commit
+}
+
+#[test]
+fn unsynced_merge_prepared_lost_to_power_failure_keeps_log_and_ref_agreeing() {
+    // The two-crash proof, recovery half. The compare-and-swap is issued only
+    // after the barrier has proven `merge_prepared` durable, so a
+    // `merge_prepared` that never synced — and is lost — cannot have moved the
+    // ref. Recovery must converge to the pre-transaction state: no task_merged,
+    // the ref still at the base, no transaction open. The barrier's own
+    // convergence of an unsynced tail is `events::log`'s
+    // `unsynced_line_lost_before_barrier_converges_to_before_append_order`; this
+    // adds that the ref never ran ahead of it.
+    let fixture = Fixture::healthy("two-crash-lost");
+    let commit = plant_unsynced_merge_prepared(&fixture);
+
+    let before = fixture.log_bytes();
+    assert!(
+        !String::from_utf8_lossy(&before).contains("merge_prepared"),
+        "the lost merge_prepared is gone from the durable prefix"
+    );
+
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let (outcome, _) = resume_holding(&fixture, &harness, &given);
+    outcome.expect("the resume converges rather than refusing on a lost tail");
+
+    assert!(
+        merged_sequences(&fixture).is_empty(),
+        "an unsynced, lost merge_prepared authorized nothing: no task_merged"
+    );
+    assert_eq!(
+        cas_integration_entries(&harness),
+        0,
+        "no compare-and-swap was issued for a transaction that never became durable"
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(fixture.base_sha.as_str()),
+        "the integration ref never ran ahead of the log: it is still at the base"
+    );
+
+    let fold = {
+        let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+        TopologyFold::replay(fixture.inputs(), &events).expect("replays")
+    };
+    assert!(
+        fold.transaction().is_none(),
+        "the proven prefix opens no transaction"
+    );
+    let _ = commit;
+}
+
 #[test]
 fn a_resume_of_a_prepared_transaction_whose_ref_moved_elsewhere_refuses_a_third_sha() {
     // The barrier proved `merge_prepared` durable, but by the time recovery

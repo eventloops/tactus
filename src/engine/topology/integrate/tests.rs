@@ -192,6 +192,45 @@ fn fast_path_publishes_exact_candidate_without_staging_or_proposal_object() {
 }
 
 #[test]
+fn an_append_failure_at_merge_prepared_issues_no_cas_and_leaves_the_integration_ref() {
+    // The two-crash proof, live half. The compare-and-swap follows the
+    // merge_prepared append in `integrate`, so an append that does not complete
+    // — the stable-prefix barrier's sync failing before it returns is one way —
+    // aborts the sequence through `?` before any CAS, so no ref moves. What a
+    // resume then derives from the durable prefix — a lost unsynced line, or a
+    // kept one — is `recover`'s `unsynced_merge_prepared_lost_to_power_failure`
+    // and `events::log`'s barrier tests; here the point is only that the ref
+    // never ran ahead of the append.
+    let mut run = Run::started("append-fails-no-cas");
+    let candidate = run.queue_candidate(ALPHA);
+    let base = run.base();
+
+    // A sync failure at the append is the barrier failing before it can prove
+    // the line durable; `merge_prepared` is the first append after the
+    // candidate is queued.
+    run.arm_point(
+        EffectSiteId::Event(crate::topology::effects::EventSite::Append),
+        crate::topology::effects::SubEffectPoint::Synced,
+        crate::topology::effects::InjectionMode::ErrorReturn,
+    );
+    integrate_through(&mut run, &candidate)
+        .expect_err("the merge_prepared append's sync was made to fail");
+
+    assert!(
+        !run.observed(
+            EffectSiteId::Ref(RefSite::CompareAndSwapIntegration),
+            HookPhase::Before
+        ),
+        "a failed merge_prepared append still reached the compare-and-swap"
+    );
+    assert_eq!(
+        run.head().as_deref(),
+        Some(base.as_str()),
+        "the integration ref moved though the append failed"
+    );
+}
+
+#[test]
 fn fast_dual_holding_released_once() {
     let mut run = Run::started("fast-dual-holding");
     let candidate = run.queue_candidate(ALPHA);
