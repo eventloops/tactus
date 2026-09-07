@@ -1,7 +1,7 @@
 # `src/engine/topology/run/tests.rs`
 
 Repository source for these notes: [`src/engine/topology/run/tests.rs`](../../../../../src/engine/topology/run/tests.rs).
-[Source on GitHub](https://github.com/eventloops/upstroke/blob/master/src/engine/topology/run/tests.rs).
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/engine/topology/run/tests.rs).
 The relative link works in a checkout or on GitHub; the GitHub link also works from the published site.
 
 The code is the authority for what it does. The explanatory prose is preserved below.
@@ -241,3 +241,84 @@ claim (2).
 So this census keeps a real and narrower job: the two *literals* name an
 authority rather than inventing a value. It is not a witness that the value
 arriving at them is right.
+
+## `fn the_settled_notes_separate_the_successful_and_the_failed_settlement() {`
+
+`PR160-NOTES-SUCCESS-SETTLEMENT`. The `Progress::Settled` section of
+`docs/internals/engine/topology/run.md` summarised the whole ready-dispatch
+branch as ending in `attempt_finished`. That is only the rejected half.
+[`TopologyRun::settle`] opens with `let Some(failure) = judgement.failure ...
+else`, so an attempt nothing rejected takes [`TopologyRun::promote_candidate`]
+before any failure settlement is built, and that path appends
+`candidate_prepared` then `task_candidate_created` and no `attempt_finished`
+at all. The fold enforces the same rule — `check_attempt_finished` refuses
+`SettlementTransition::Succeeded` outright — and so do
+`design/15_design_event_log_resume_run_layout.md` and
+`design/26_design_merge_queue_protocol.md` §26.
+
+So a reader using that contract to reconstruct a successful attempt's durable
+record was sent looking for an event that is never written. This pins the two
+settlements separately, and refuses the retired sentence by name so the claim
+cannot come back under a reflow.
+
+**It is a text pin and only a text pin.** The behaviour it describes is held
+elsewhere — `recover::tests::the_driver_carries_an_accepted_attempt_through_the_candidate_sequence`
+for the successful durable sequence, and the fold's
+`candidate_prepared_is_the_sole_successful_settlement` for the settlement
+contract. This one asserts that the prose agrees with them; `src/export.rs` and
+`agent/proc/tests.rs` pin the sentences they own the same way.
+
+## `fn the_settled_notes_separate_the_successful_and_the_failed_settlement()` › `let settled = settled.split_whitespace().collect::<Vec<_>>().join(" ");`
+
+Match on the prose, not on where its line breaks fall: a reflow must not break
+the pin, only a changed claim.
+
+## `fn the_ready_branch_notes_do_not_owe_the_attempt_the_branch_runs() {`
+
+`PR160-NOTES-INCOMPLETE-BRANCHES`. Both ready branches' sections of
+`docs/internals/engine/topology/run.md` opened with the intermediate build's
+paragraph and closed with the current one, so each described the branch as
+half-built and then, two sentences later, as whole. The ready-dispatch
+section said the first three of its four clauses were performed and the run
+was left at `OpenNoAttempt`; the ready-retry section said running and
+settling the retry was "the half still owed". Neither has been true since
+`0eaf6b07` and `59683dc3`: [`TopologyRun::step`] calls
+[`TopologyRun::attempt`] then [`TopologyRun::settle`] before returning
+`Progress::Settled`, and [`TopologyRun::retry_ready`] reaches the same two on
+`RetryOutcome::Start`. Both commits added the corrected paragraph and left
+the one it superseded standing, and the migration into these notes carried
+both across.
+
+A reader taking either section as the contract would look for a state the
+branch does not stop in, and — the sharper cost — would conclude the driver
+does not settle, which is the one thing `decisions.sequential_substrate`
+requires of it.
+
+**It is a text pin and only a text pin.** The behaviour is held elsewhere:
+`recover::tests::the_driver_takes_over_from_the_recovery_order_and_steps` is
+the dispatch branch running an attempt through to `Progress::Settled`, and
+`recover::tests::the_retaining_incarnation_retries_in_place` is the retry
+branch doing the same over two iterations of the loop. This asserts that the
+prose agrees with them, and refuses each retired sentence by name so the
+claim cannot come back under a reflow — the same shape as
+`the_settled_notes_separate_the_successful_and_the_failed_settlement` and as
+the sentence pins in `src/export.rs`.
+
+The `PartlyImplemented` section is pinned with them because it carried the
+third instance of the same class: it gave the ready-dispatch branch as a
+*present* example of an honestly half-built branch, while
+`a_refusal_names_the_branch_and_says_whether_anything_happened` two hundred
+lines above asserts that no branch is `PartlyImplemented` at all.
+
+Measured over the notes as this commit leaves them: six mutations, one per
+pin — each retired sentence restored, each stated proposition removed — and
+all six killed, against an unmutated control that passes.
+
+## `fn the_ready_branch_notes_do_not_owe_the_attempt_the_branch_runs()` › `assert_eq!(`
+
+**The pins are conditioned on the code, not asserted beside it.** A section
+is only required to describe a whole branch while its arm reads
+`Disposition::Performed`; a branch that became half-built again would need
+the opposite prose, and this says so at the point where the two claims
+diverge rather than leaving a stale pin to fail with a message about
+Markdown.

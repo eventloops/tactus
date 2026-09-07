@@ -55,6 +55,36 @@ Which generation of the comparison rules a record was written under.
 Component-wise equal/ancestor/descendant overlap, literal prefix taken
 before the first glob metacharacter, repo-wide for anything unsafe.
 
+The derivation before 2026-09-06. It cut inside a component, so
+`src/eng*` bounded `src/eng`, and it read a backslash as a separator,
+so `src\foo` bounded `src/foo`. The spelling is kept so a log written
+under it still decodes and can be refused by name rather than as a
+serde error.
+
+## `pub enum PathPolicyVersion` › `V2,`
+
+Component-wise equal/ancestor/descendant overlap; the prefix is the
+whole components before the first component that carries a glob
+metacharacter; a hint with a `.` or `..` component, or with **any**
+backslash, derives repo-wide.
+
+`src/eng*` therefore bounds `src`, not `src/eng`, which
+[`crate::topology::leases::paths_overlap`] does not match to the
+`src/engine/mod.rs` the hint covers. A backslash bounds nothing
+because the character has two readings and neither is safe to guess:
+under the frozen [`PathGrammar::Globset`] it is an escape on Unix, so
+`src/foo\?bar.rs` matches the single file `src/foo?bar.rs`, and it is
+a separator on Windows, so the same hint names `src/foo/?bar.rs`. A
+prefix that picks one reading is narrower than the hint under the
+other, and a predicted region narrower than its hint is what admits
+two owners of one file at once. The derivation refuses rather than
+guesses.
+
+This is the derivation this binary applies, and it applies no other:
+a run's durable dispatch records carry the regions its own version
+derived, so `check_run_started` refuses a run frozen under any
+earlier version rather than replaying it under this one.
+
 ## `pub enum PathGrammar {`
 
 The syntax a plan's path hints are interpreted in.
@@ -94,9 +124,21 @@ Whether this region is the everything region.
 The prefixes bounding this region, or `None` when it is unbounded.
 
 `Some(&[])` is a real and different answer from `None`: a task whose
-diff touched nothing has an empty region that overlaps nobody, while a
-task whose paths could not be read has an unbounded one that overlaps
-everybody.
+diff touched nothing has an empty region that overlaps no bounded
+region, while a task whose paths could not be read has an unbounded one
+that overlaps everybody.
+
+The two are not each other's complement, and the asymmetry is the point.
+[`crate::topology::leases::regions_overlap`] answers `false` for the
+empty region against any bounded one and `true` for it against
+[`PathSet::RepoWide`]: `RepoWide` overlaps it, because the safe reading
+of a region nobody could read is that it might be anywhere, and nothing
+can be excluded from a region that might be anywhere. So an empty region
+frees a task from every bounded holder and from none of the unread ones.
+`docs/internals/topology/leases.md` states the same exception from the
+comparison's own side, and
+`regions_overlap_component_wise_and_repo_wide_overlaps_everything`
+asserts both directions of it.
 
 ## `mod tests` › `fn hostile_prefixes() -> Vec<GitPath> {`
 
@@ -108,13 +150,13 @@ multi-byte, and long enough that a truncating writer would show.
 Off-default: `bool::default()` is false, and a policy that lost
 this field would still deserialize to the common case.
 
-## `fn path_policy_round_trips_every_field_it_records()` › `assert!(json.contains(r#""version":"v1""#), "{json}");`
+## `fn path_policy_round_trips_every_field_it_records()` › `assert!(json.contains(r#""version":"v2""#), "{json}");`
 
 Named fields, not positional: a record whose keys were renamed would
 still round-trip, and a resume reading a differently-named record
 would fall back to a default it must never fall back to.
 
-## `fn a_path_policy_refuses_an_unknown_field()` › `let json = r#"{"version":"v1","case_fold":true,"grammar":"globset","ordering":"lexical"}"…`
+## `fn a_path_policy_refuses_an_unknown_field()` › `let json = r#"{"version":"v2","case_fold":true,"grammar":"globset","ordering":"lexical"}"…`
 
 The policy is execution identity; a field this binary does not
 understand means the record was written under rules it cannot apply.
@@ -158,17 +200,19 @@ than about serde agreeing with itself.
 And the two encodings are different documents, so a serializer
 that emitted a constant would collide here.
 
-## `fn an_unsupported_policy_version_or_grammar_spelling_is_ref…` › `for version in ["v2", "V1", "v1 ", "", "v10", "v0"] {`
+## `fn an_unsupported_policy_version_or_grammar_spelling_is_ref…` › `for version in ["v3", "V1", "v1 ", "", "v10", "v0"] {`
 
-The frozen authority defines exactly one version and one grammar. A
-record declaring another one was written under rules this binary
-does not implement, and reading it as v1/globset would apply the
+The frozen authority defines exactly two versions and one grammar. A
+record declaring any other one was written under rules this binary
+does not implement, and reading it as one of them would apply the
 wrong comparison to every lease the run took.
 
 ## `fn an_unsupported_policy_version_or_grammar_spelling_is_ref…` › `assert_eq!(`
 
 The canonical spellings, so the negatives above cannot be satisfied
-by refusing everything.
+by refusing everything -- including `v1`, whose spelling has to keep
+decoding for the fold to refuse a v1 run by name rather than as a
+malformed line.
 
 ## `fn a_path_policy_refuses_a_missing_field_rather_than_defaul…` › `for absent in ["version", "case_fold", "grammar"] {`
 
@@ -179,8 +223,8 @@ a default would silently pick the case-sensitive comparison.
 
 Repo-wide, empty, and non-empty are three different answers and the
 most damaging confusion is between the first two: an unbounded
-region serialized as an empty one overlaps nobody and would admit
-every task in parallel against every other.
+region serialized as an empty one overlaps no bounded region and would
+admit every task in parallel against every other.
 
 ## `fn prefixes_survive_in_the_order_and_bytes_they_were_record…` › `let bounded = PathSet::Prefixes {`
 
@@ -223,6 +267,28 @@ Round trips compare one serde implementation against itself, so a
 symmetric rename of `region`, `paths`, `repo_wide` or `prefixes`
 changes the durable format invisibly. These payloads are written by
 hand, so any such change fails here in both directions.
+
+## `fn the_notes_give_the_empty_region_the_repo_wide_exception_the_comparison_gives_it() {`
+
+`ASTRA165-004`. The `prefixes` section said an empty region overlaps
+nobody, and the wire section said an unbounded region written as an empty
+one does; `regions_overlap` has never said either, because its
+`(None, _) | (_, None)` arm answers `true` before it looks at a single
+prefix. `docs/internals/topology/leases.md` carried the exception all
+along, so the two files disagreed about the same function.
+
+A text pin and only a text pin: it asserts what these two sections must
+state and refuses each retired sentence by name. It does so only while
+`regions_overlap` still answers `true` for the empty region against
+`PathSet::RepoWide` and `false` for it against a bounded one, so the code
+fact conditions the prose — a comparison that changed its answer fails
+here with the reason rather than silently pinning a note that has become
+wrong in the other direction. The behaviour itself stays where it is
+asserted, in
+`regions_overlap_component_wise_and_repo_wide_overlaps_everything`.
+
+Matched on the prose, not on where its line breaks fall: a reflow must
+not break the pin, only a changed claim.
 
 ## `fn a_git_path_is_transparent_on_the_wire()` › `let path = GitPath::from("src/Zebra/ÜBER.rs");`
 

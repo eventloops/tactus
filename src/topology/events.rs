@@ -1036,6 +1036,7 @@ pub enum PreparedDefect {
     FastWithPreparedRef,
     FastProposesAnotherCommit,
     FastWithoutCandidateSource,
+    FastWithVerification,
     StaleWithoutPreparedRef,
     AlreadyPresentMovesTheHead,
     VerifiedWithoutVerificationSource,
@@ -1056,6 +1057,10 @@ impl fmt::Display for PreparedDefect {
             Self::FastWithoutCandidateSource => {
                 "a fast publication citing a verification rather than the candidate record that \
                  judged the commit being published"
+            }
+            Self::FastWithVerification => {
+                "a fast publication carrying a verification record: an exact-base publication \
+                 runs no integration verification for it to carry"
             }
             Self::StaleWithoutPreparedRef => {
                 "a stale publication without the pin keeping its proposal reachable"
@@ -1100,6 +1105,9 @@ impl MergePrepared {
                     VerificationSource::CandidatePrepared { .. }
                 ) {
                     return Err(PreparedDefect::FastWithoutCandidateSource);
+                }
+                if self.verification.is_some() {
+                    return Err(PreparedDefect::FastWithVerification);
                 }
             }
             PreparedDisposition::StaleClean | PreparedDisposition::AlreadyPresent => {
@@ -1446,7 +1454,7 @@ mod tests {
 
     fn path_policy() -> PathPolicy {
         PathPolicy {
-            version: crate::topology::paths::PathPolicyVersion::V1,
+            version: crate::topology::paths::PathPolicyVersion::V2,
             case_fold: true,
             grammar: crate::topology::paths::PathGrammar::Globset,
         }
@@ -3067,6 +3075,8 @@ mod tests {
                                             Err(PreparedDefect::FastProposesAnotherCommit)
                                         } else if !cited_candidate {
                                             Err(PreparedDefect::FastWithoutCandidateSource)
+                                        } else if record.is_some() {
+                                            Err(PreparedDefect::FastWithVerification)
                                         } else {
                                             Ok(())
                                         }
@@ -3149,6 +3159,17 @@ mod tests {
         assert_eq!(
             other.self_consistency(),
             Err(PreparedDefect::FastProposesAnotherCommit)
+        );
+    }
+
+    #[test]
+    fn a_fast_publication_carrying_a_verification_record_is_refused() {
+        let mut carrying = merge_prepared_fast();
+        assert!(carrying.verification.is_none());
+        carrying.verification = Some(verification(VerificationVerdict::Passed));
+        assert_eq!(
+            carrying.self_consistency(),
+            Err(PreparedDefect::FastWithVerification)
         );
     }
 
@@ -4018,7 +4039,7 @@ mod tests {
                         "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
                     "registry_digest":
                         "sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
-                    "path_policy": {"version": "v1", "case_fold": true, "grammar": "globset"},
+                    "path_policy": {"version": "v2", "case_fold": true, "grammar": "globset"},
                     "limits": {"max_parallel": 7, "max_defers": 3, "max_merge_repairs": 5},
                     "gates": ["fmt", "clippy"],
                     "gates_from_config": true,

@@ -25,15 +25,16 @@ pub(super) const WINDOWS_TEST_FLOOR: u32 = 1700;
 pub(super) const WINDOWS_TEST_WITNESS: &str = "cargo test --all-targets --all-features | Tee-Object -Variable log\nif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n$passed = [int](($log | Select-String -Pattern '^test result: ok\\. (\\d+) passed' | ForEach-Object { [int]$_.Matches[0].Groups[1].Value } | Measure-Object -Sum).Sum)\nif ($passed -lt 1700) { throw \"the suite reported $passed passing tests, below the floor of 1700: Cargo compiled the harnesses and executed almost none of them\" }\n";
 
 pub(super) const FMT_GATE: &str = "cargo fmt --check";
-pub(super) const SHELL_GATES: [&str; 5] = [
+pub(super) const SHELL_GATES: [&str; 6] = [
     "bash .github/scripts/test-release-record.sh",
     "bash .github/scripts/test-pr-policy.sh",
     "bash .github/scripts/test-pr-ledger-evidence.sh",
     "bash .github/scripts/test-docs-consistency.sh",
     "bash .github/scripts/test-internals-notes.sh",
+    "bash .github/scripts/test-pr-ready-audit.sh",
 ];
 
-pub(super) const GATE_SCRIPTS: [&str; 8] = [
+pub(super) const GATE_SCRIPTS: [&str; 9] = [
     CLIPPY_GATE,
     WINDOWS_BUILD_WITNESS,
     FMT_GATE,
@@ -42,6 +43,7 @@ pub(super) const GATE_SCRIPTS: [&str; 8] = [
     SHELL_GATES[2],
     SHELL_GATES[3],
     SHELL_GATES[4],
+    SHELL_GATES[5],
 ];
 
 pub(super) const PINNED_ACTIONS: [&str; 3] = [
@@ -59,7 +61,12 @@ pub(super) const ACTION_INPUTS: [(&str, &[&str]); 3] = [
 pub(super) const TOOLCHAIN_COMPONENTS: [&str; 2] = ["clippy", "rustfmt, clippy"];
 
 pub(super) const TEST_WINDOWS_JOB: &str = "test-windows";
-pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", "winguest"];
+/// The third `runs-on:` label picks the lane: a merge-queue entry goes to the `winguest-queue`
+/// guest, every other event to `winguest`, so a queue build never waits behind a pull-request
+/// build on the one guest. Both guests boot the same golden image.
+pub(super) const TEST_WINDOWS_LANE: &str =
+    "${{ github.event_name == 'merge_group' && 'winguest-queue' || 'winguest' }}";
+pub(super) const TEST_WINDOWS_LABELS: [&str; 3] = ["self-hosted", "windows", TEST_WINDOWS_LANE];
 
 pub(super) const SELF_HOSTED_TEST_PLATFORM: &str = "windows-latest";
 

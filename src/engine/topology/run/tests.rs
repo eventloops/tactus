@@ -332,3 +332,150 @@ fn both_attempt_started_arms_take_their_pool_from_an_authority() {
          plan disagree about which pool the attempt drained: {invented:?}"
     );
 }
+
+#[test]
+fn the_settled_notes_separate_the_successful_and_the_failed_settlement() {
+    const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/run.md");
+
+    let settled = NOTES
+        .split("\n## ")
+        .find(|section| section.starts_with("`pub enum Progress` › `Settled {`"))
+        .expect("the notes carry the `Settled {` heading the branch summary sits under");
+    let settled = settled.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for (proposition, pin) in [
+        (
+            "which settlement is appended depends on `accepted`",
+            "depends on `accepted`",
+        ),
+        (
+            "a rejected attempt settles with `attempt_finished`",
+            "rejected attempt ends at `attempt_finished`",
+        ),
+        (
+            "an accepted attempt appends no `attempt_finished`",
+            "never appends `attempt_finished`",
+        ),
+        (
+            "an accepted attempt settles at `candidate_prepared`",
+            "`candidate_prepared`",
+        ),
+        (
+            "and `task_candidate_created` follows it",
+            "`task_candidate_created`",
+        ),
+    ] {
+        assert!(
+            settled.contains(pin),
+            "the `Settled {{` summary must state that {proposition}; looked for {pin:?} in:\n{settled}"
+        );
+    }
+
+    assert!(
+        !settled.contains("the attempt through the Runner, and `attempt_finished`."),
+        "the retired claim that the whole ready-dispatch branch ends in \
+         `attempt_finished` must not come back:\n{settled}"
+    );
+}
+
+#[test]
+fn the_ready_branch_notes_do_not_owe_the_attempt_the_branch_runs() {
+    const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/run.md");
+    const ARM: &str = "`pub const fn disposition(self) -> Disposition` › `Self::";
+
+    let section = |heading: &str| -> String {
+        NOTES
+            .split("\n## ")
+            .find(|section| section.starts_with(heading))
+            .map(|section| section.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_else(|| panic!("the notes carry no {heading:?} heading"))
+    };
+
+    for (branch, variant, states, retired) in [
+        (
+            LoopBranch::ReadyDispatch,
+            "ReadyDispatch",
+            &[
+                (
+                    "the branch performs all four of its clauses",
+                    "All four clauses",
+                ),
+                (
+                    "the fourth of which is the attempt and its settlement",
+                    "run one attempt through the Runner and settle",
+                ),
+            ][..],
+            &[
+                (
+                    "only the first three clauses are performed",
+                    "The first three are here",
+                ),
+                (
+                    "the branch stops before the attempt, at `OpenNoAttempt`",
+                    "leaves instead is `OpenNoAttempt`",
+                ),
+            ][..],
+        ),
+        (
+            LoopBranch::ReadyRetry,
+            "ReadyRetry",
+            &[
+                (
+                    "the branch performs its clause whole",
+                    "generation\", whole:",
+                ),
+                (
+                    "the attempt and its settlement included",
+                    "the attempt itself and its settlement",
+                ),
+                (
+                    "reached through the ready-dispatch branch's own machinery",
+                    "the same `attempt` and `settle`",
+                ),
+            ][..],
+            &[(
+                "running and settling the retry is still owed",
+                "half still owed",
+            )][..],
+        ),
+    ] {
+        assert_eq!(
+            branch.disposition(),
+            Disposition::Performed,
+            "`{}` is no longer `Performed`; these pins describe a branch that \
+             runs its attempt and settles it, so they are the wrong assertions \
+             for whatever it does now",
+            branch.label()
+        );
+
+        let notes = section(&format!("{ARM}{variant} => Disposition::Performed,`"));
+        for (proposition, pin) in states {
+            assert!(
+                notes.contains(pin),
+                "the `{variant}` section must state that {proposition}; looked \
+                 for {pin:?} in:\n{notes}"
+            );
+        }
+        for (claim, pin) in retired {
+            assert!(
+                !notes.contains(pin),
+                "the retired claim that {claim} must not come back — \
+                 `TopologyRun::step` and `TopologyRun::retry_ready` both reach \
+                 `attempt` and `settle`; found {pin:?} in:\n{notes}"
+            );
+        }
+    }
+
+    let partly = section("`pub enum Disposition` › `PartlyImplemented {`");
+    assert!(
+        partly.contains("No branch is `PartlyImplemented` today"),
+        "the `PartlyImplemented` section must say the variant has no \
+         inhabitants, because its example is a build that no longer \
+         exists:\n{partly}"
+    );
+    assert!(
+        !partly.contains("the ready-dispatch branch's first three clauses are"),
+        "the retired claim that the ready-dispatch branch is presently \
+         half-built must not come back:\n{partly}"
+    );
+}
