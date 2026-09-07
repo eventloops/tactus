@@ -567,8 +567,14 @@ ubuntu/macOS/Windows matrix and on the ten gates locally, and the P1 survived ev
 | `fix(engine): a frozen repair carries the gate output and the required changes` | finding 2 (`PR8-R6-REPAIR-EVIDENCE`), the conversion and the test that could not catch it |
 | `fix(runner): a daemon that answered was reached, whatever its message quotes` | the class sweep (`PR8-R6-UNREACHABLE-SWEEP`) |
 | `docs(pr8): the plan and findings of the sixth repair round` | this file, `pr8-triage.md`: §7.3's normalization clearance corrected and the table re-read for text-derived observations, §7.4's derivation widened past `update-ref` (finding 4, `PR8-R6-CENSUS-DOMAIN-2`), and `pr8-body.md`'s Summary and rollback paragraphs qualified (finding 3, `PR8-R6-V01-CLAIM-2`) |
-| `docs(internals): the sixth round's prose moves to the modules' notes` | §13: all eight files this round touched have a notes file, so every comment it wrote moves to `docs/internals/`, and the notes headings follow the signatures that took a target. The pre-existing concurrent-reclaimer comment above `stop_answer` stays at its site, which §13 leaves to §10 |
+| `docs(internals): the sixth round's prose moves to the modules' notes` | §13: all eight files this round touched have a notes file, so every comment it wrote moves to `docs/internals/`. The pre-existing concurrent-reclaimer comment above `stop_answer` stays at its site, which §13 leaves to §10 |
 | `docs(pr8): the record after the sixth repair round` | the Validation section's head and counts |
+| `docs(internals): the notes headings follow the signatures that changed` | the notes headings are grep strings; seven named signatures this round changed. Every heading in the six touched notes files was resolved against its module |
+| `docs(pr8): the Validation section names what the record commits change` | they change the record files **and the modules' notes** |
+| `docs(pr8): the record says which runs measured this worktree` | three full runs late in the round executed a sibling worktree's binary out of the shared slot pool; the closing baseline is re-taken on a private target base and §9 records the incident. Also corrects how the native reproduction is described |
+| `docs(pr8): the census names the function that exists` | `reclaim_gate_workspaces`, and the twelve stale test names in §2's own tables recorded rather than rewritten |
+| `docs(pr8): the observed-and-left notes read as one count` | three paragraphs stating two counts of one set of observations become one |
+| `docs(pr8): the sampler sentence says which runs it counts` | "every full test run passed clean at the first attempt" was false once three runs measured another worktree; it now says every run that measured this one |
 
 Nothing in the round is Class B or Class C. Finding 1 changes the wire commands `DockerCli` issues
 and the private functions around them, not the `ContainerRuntime` trait's signatures; finding 2
