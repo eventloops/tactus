@@ -686,6 +686,175 @@ fn a_recovered_authorization_is_the_live_one_and_completes_through_the_same_publ
     run.replay_twice_equal();
 }
 
+/// Every terminal shape a `merge_verification_started` transaction can reach
+/// through the integrate path.
+#[derive(Debug, Clone, Copy)]
+enum Shape {
+    Fast,
+    StaleClean,
+    AlreadyPresent,
+    Conflict,
+    CodeRejected,
+    Deferred,
+    Parked,
+}
+
+const EVERY_INTEGRATE_SHAPE: [Shape; 7] = [
+    Shape::Fast,
+    Shape::StaleClean,
+    Shape::AlreadyPresent,
+    Shape::Conflict,
+    Shape::CodeRejected,
+    Shape::Deferred,
+    Shape::Parked,
+];
+
+#[test]
+fn terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay() {
+    // The eight-shape coverage table. Seven shapes are reachable through the
+    // integrate path and driven here end to end; each is asserted at its
+    // terminal and then replayed twice for equality. The remaining two live in
+    // other harnesses because they are not integrate terminals:
+    // Declined-after-park is `fold`'s
+    // `declined_parked_verification_fails_task_consumes_queue_position_releases_lease_and_halts_per_policy`
+    // (a question answer, not a verification outcome), and Interrupted is
+    // `recover`'s `a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue`
+    // (a resume terminal, never a live one).
+    for shape in EVERY_INTEGRATE_SHAPE {
+        let tag = format!("table-{}", format!("{shape:?}").to_lowercase());
+        let mut run = match shape {
+            Shape::Deferred => Run::started_with_max_defers(&tag, 2),
+            _ => Run::started(&tag),
+        };
+        match shape {
+            Shape::Fast | Shape::Conflict => {}
+            Shape::StaleClean | Shape::AlreadyPresent => {
+                run.verify_reviewers.push(passing_reviewer());
+            }
+            Shape::CodeRejected => {
+                run.verify_reviewers.push(passing_reviewer());
+                run.verify_review = VerifyReview::NeedsChanges;
+            }
+            Shape::Parked => {
+                run.verify_reviewers.push(passing_reviewer());
+                run.verify_review = VerifyReview::NeedsHuman;
+            }
+            Shape::Deferred => {
+                run.verify_reviewers.push(passing_reviewer());
+                run.verify_review =
+                    VerifyReview::Unavailable(crate::ir::OutcomeStatus::RateLimited);
+            }
+        }
+
+        let terminal = if let Shape::Fast = shape {
+            let candidate = run.queue_candidate(ALPHA);
+            integrate_through(&mut run, &candidate).expect("fast is exact-base")
+        } else {
+            let (a_path, b_path, a_body, b_body) = match shape {
+                Shape::AlreadyPresent => (
+                    "shared.txt",
+                    "shared.txt",
+                    "the shared change
+",
+                    "the shared change
+",
+                ),
+                Shape::Conflict => (
+                    "shared.txt",
+                    "shared.txt",
+                    "alpha's line
+",
+                    "beta's line
+",
+                ),
+                _ => (
+                    "a.txt", "b.txt", "alpha
+", "beta
+",
+                ),
+            };
+            let first = run.queue_candidate_editing(ALPHA, a_path, a_body);
+            let second = run.queue_candidate_editing(BETA, b_path, b_body);
+            published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+            integrate_through(&mut run, &second).expect("beta reaches its terminal")
+        };
+
+        match shape {
+            Shape::Fast => {
+                published(terminal);
+                assert_eq!(
+                    merge_prepared_of_sequence(&run, SequenceId(0)).disposition,
+                    PreparedDisposition::Fast,
+                    "fast"
+                );
+            }
+            Shape::StaleClean => {
+                published(terminal);
+                assert_eq!(
+                    merge_prepared_of_sequence(&run, SequenceId(1)).disposition,
+                    PreparedDisposition::StaleClean,
+                    "stale_clean"
+                );
+            }
+            Shape::AlreadyPresent => {
+                published(terminal);
+                assert_eq!(
+                    merge_prepared_of_sequence(&run, SequenceId(1)).disposition,
+                    PreparedDisposition::AlreadyPresent,
+                    "already_present"
+                );
+            }
+            Shape::Conflict => {
+                assert!(
+                    matches!(terminal, Terminal::Rejected { .. }),
+                    "conflict rejects"
+                );
+                assert!(
+                    matches!(
+                        rejected_of(&run).disposition,
+                        crate::topology::events::RejectionDisposition::Conflict { .. }
+                    ),
+                    "the rejection is a conflict"
+                );
+            }
+            Shape::CodeRejected => {
+                assert!(
+                    matches!(terminal, Terminal::Rejected { .. }),
+                    "code rejection rejects"
+                );
+                assert!(
+                    matches!(
+                        rejected_of(&run).disposition,
+                        crate::topology::events::RejectionDisposition::CodeRejected { .. }
+                    ),
+                    "the rejection is code-attributed"
+                );
+            }
+            Shape::Deferred => {
+                assert!(
+                    matches!(terminal, Terminal::Unavailable { parked: false, .. }),
+                    "an infrastructure outage inside the allowance defers"
+                );
+                assert!(matches!(
+                    unavailable_of(&run).outcome,
+                    crate::topology::events::UnavailableOutcome::Deferred { .. }
+                ));
+            }
+            Shape::Parked => {
+                assert!(
+                    matches!(terminal, Terminal::Unavailable { parked: true, .. }),
+                    "a human-required verdict parks"
+                );
+                assert!(matches!(
+                    unavailable_of(&run).outcome,
+                    crate::topology::events::UnavailableOutcome::Parked { .. }
+                ));
+            }
+        }
+        run.replay_twice_equal();
+    }
+}
+
 #[test]
 fn an_already_present_candidate_settles_without_an_empty_commit() {
     let mut run = Run::started("already-present");
@@ -941,6 +1110,17 @@ fn infrastructure_failure_defers_then_parks_at_max_defers() {
     ));
     assert_eq!(run.task_state(BETA), TaskState::AwaitingInput);
     run.replay_twice_equal();
+}
+
+fn rejected_of(run: &Run) -> crate::topology::events::MergeRejected {
+    run.emitter
+        .durable_events()
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::MergeRejected { data } => Some(*data),
+            _ => None,
+        })
+        .expect("a durable merge_rejected")
 }
 
 fn unavailable_of(run: &Run) -> crate::topology::events::MergeVerificationUnavailable {

@@ -271,8 +271,13 @@ None recorded yet.
   proves a failed append (a barrier sync failure among them) issues no CAS. The barrier's own
   convergence is `events::log::unsynced_line_lost_before_barrier_converges_to_before_append_order`.
 
-- **Commit 9 (terminal-shape coverage) — satisfied by the per-shape tests, no separate table.**
-  Every terminal shape is driven end to end with `replay_twice_equal`: Fast
+- **Commit 9 (terminal-shape coverage) — landed as a table plus the per-shape tests.**
+  `integrate::tests::terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay`
+  drives the seven integrate-path shapes (fast, stale_clean, already_present, conflict,
+  code_rejected, deferred, parked) end to end in one table, each asserted at its terminal and
+  replayed twice for equality; it cites the two shapes that are not integrate terminals —
+  Declined-after-park (`fold`) and Interrupted (`recover`) — which live in their own harnesses.
+  The detailed per-shape tests remain: Fast
   (`fast_path_publishes_exact_candidate_without_staging_or_proposal_object`), StaleClean and
   AlreadyPresent (`stale_candidate_takes_staging_path_and_publishes_pinned_proposal`,
   `an_already_present_candidate_settles_without_an_empty_commit` — each also composing two
