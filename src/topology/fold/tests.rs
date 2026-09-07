@@ -5069,8 +5069,17 @@ fn the_publication_relations_hold_over_the_crossed_disposition_grid() {
                 ),
             },
         ),
+        // `check_merge_prepared` runs `MergePrepared::self_consistency` before any relation
+        // of its own, so a stale-clean record carrying no pin is refused for its shape and
+        // never reaches `check_proposal_pin`. Nothing folded here reaches that refusal:
+        // only a `StaleClean` basis refuses a missing pin, the basis is `StaleClean` only
+        // when the disposition is too -- an earlier relation refuses the crossed pair --
+        // and a stale-clean record with no pin is exactly what `self_consistency` rejects.
+        // So this case names the shape guard it does reach, and the pin comparison stays
+        // at the layer that can observe it, in
+        // `check_integration::tests::only_a_stale_clean_publication_pins_a_proposal`.
         (
-            "no proposal pin",
+            "no pin in the record at all",
             |prepared| prepared.prepared_ref = None,
             FoldError::InconsistentRecord {
                 kind: "merge_prepared",
