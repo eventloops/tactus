@@ -518,7 +518,10 @@ of §8.3 of the triage), the records kept current between them:
 | `fix(workspace): the proposal classifier and the manager's reads write no index` | finding 3 (`PR8-R5-CLASSIFIER-INDEX-WRITE`) and the class sweep (`PR8-R5-READ-ONLY-SWEEP`) |
 | `fix(engine): a reviewer whose process never started settles as a runner spawn failure` | finding 4 (`PR8-R5-REVIEWER-SPAWN-FAILURE`); INV-23 |
 | `chore(effects): classify libc::ENOMEM, which the macOS enumeration test names` | the governance row the new test's constant needs |
-| `docs(pr8): the record after the fifth repair round` | this file, `pr8-body.md`, `pr8-triage.md`: §7.3 corrected and re-examined, §7.4's domain restated and completed across both layers (finding 5, `PR8-R5-CENSUS-DOMAIN`), and the body's v0.1 and rollback claims qualified (finding 6, `PR8-R5-V01-CLAIM`) |
+| `test(engine): the snapshot obstruction is written through the fixture funnel the lint census requires` | the round's own regression: `std::fs::write` and `std::fs::create_dir_all` are denied here (R18/R21) and the reviewer's witness used both, so the first version of finding 2's test compiled and failed clippy |
+| `docs(pr8): the plan and findings of the fifth repair round` | this file, `pr8-body.md`, `pr8-triage.md`: §7.3 corrected and re-examined, §7.4's domain restated and completed across both layers (finding 5, `PR8-R5-CENSUS-DOMAIN`), the body's v0.1 and rollback claims qualified (finding 6, `PR8-R5-V01-CLAIM`), and reading R4 corrected |
+| `docs(internals): the fifth round's prose moves to the modules' notes` | §13: a module with a notes file carries the `Extended notes:` pointer and no other comment, so every doc comment this round wrote in a module that has one moved to `docs/internals/`, and the `review_failure` anchors there were corrected to its new signature. The `SAFETY:` comments on the two `errno` accesses stay at their site, which §13 names as §11's to place. `src/workspace_manager.rs` has no notes file, so its prose stays as rustdoc |
+| `docs(pr8): the record after the fifth repair round` | the Validation section's head and counts |
 
 Nothing in the round is Class B or Class C. `ReviewAccount`, `NoReviewAccount`, the two
 `never_started` fields and `listed_pid_bytes` are in-memory types and a pure function; nothing new

@@ -72,7 +72,14 @@ whether `docker start` was attempted (`src/runner/container/runtime.rs`, `src/ru
 cleanup scope entered wherever the topology run spawns host processes under its lock
 (`src/rundir.rs`, `src/engine/topology/run.rs`, `recover.rs`, `create.rs`); and review doubles
 that run a process in the workspace they are handed (`src/engine/topology/scaffold.rs`,
-`src/engine/topology/recover/tests.rs`).
+`src/engine/topology/recover/tests.rs`). The fifth repair round adds the review account each
+completed pass is charged to as it returns (`src/engine/topology/attempt.rs`, `run.rs`,
+`select.rs`, `scaffold.rs`); the fact of a process that never started, carried from `run_review`
+to the durable outage attribution INV-23 names (`src/review.rs`, `src/ladder.rs`,
+`src/engine/attempt.rs`, `src/engine/topology/integrate.rs`); the macOS process-group scanner's
+distinction between a failed enumeration and an empty group (`src/agent/proc.rs`); and two Git
+reads made read-only — the proposal classifier's unmerged-entry query and every read through
+`read_only_git` (`src/workspace_manager.rs`).
 
 Out of scope, and neither built nor stubbed: repair **execution** (PR9), the production writer, the
 slot broker. A PR8 build refuses, before any append, dispatch of a Repair-origin task and any
@@ -165,13 +172,13 @@ already settled are marked as such):
 ## Validation
 
 All ten gates green locally, from the repository root, on the last code commit of this branch,
-`cdcea6561189ac8c539cb7239704eed454d337d1`; the commit that follows it changes the three record
+`243cf617f5ed8070cdd0951e56db4d560c0eb699`; the commit that follows it changes the three record
 files and no code, and the ten gates were rerun on it before the push:
 
 ```
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features            # 2362 lib tests passed, 0 failed, 43 ignored (Linux)
+cargo test --all-targets --all-features            # 2367 lib tests passed, 0 failed, 43 ignored (Linux)
 cargo +1.85.0 check --locked --all-targets --all-features
 bash .github/scripts/test-release-record.sh
 bash .github/scripts/test-pr-policy.sh
@@ -192,7 +199,17 @@ the first full run had one red in the same test with the other filed fingerprint
 forced removal failed `DirectoryNotEmpty` (os error 39) on `tasks/kalpha-g4` — exactly the
 standing P2 `PR136-SAMPLER-FORCED-REMOVAL-DOES-NOT-CONVERGE` (`reviews/findings/`), whose file
 records that fingerprint verbatim; the full test gate rerun at the same head passed clean (2362
-passed, 0 failed, 43 ignored), and the ten gates named above are green on that rerun.
+passed, 0 failed, 43 ignored), and the ten gates named above are green on that rerun. The fifth
+repair round saw neither fingerprint: its three full test runs, at
+`85bdb8c7`, `fe7966da` and `243cf617`, each passed clean at the first attempt, so the sampler is
+not counted against this round.
+
+Two platform checks the box can make and the local gates do not. The macOS repair changes code no
+Linux gate compiles, so the branch is also `cargo clippy --target x86_64-apple-darwin --all-targets
+--all-features -- -D warnings` clean here, which type-checks and lints the whole macOS `cfg` tree
+including the scanner and its `errno` protocol. **It is not executed on this box** — CI's macOS leg
+is the first thing that runs it, and the rule the repair rests on is exercised on every platform by
+`listed_pid_bytes`'s test.
 
 Proof obligations from the contract, and where each is met:
 
