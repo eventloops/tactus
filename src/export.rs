@@ -1,7 +1,7 @@
-//! Local, read-only projection of a run's recorded routing decisions.
-// LEGACY-EFFECT: this module is in the **frozen legacy section** of
-// `effects/allowlist.toml`, which carries its justification and the condition
-// under which the section shrinks. `decisions.effect_site_inventory.mechanism` (2).
+//! Extended notes: `docs/internals/export.md`
+
+// LEGACY-EFFECT: this module is in the frozen legacy section of
+// `effects/allowlist.toml`, which carries its justification.
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,15 +88,11 @@ struct Review {
     outcome: &'static str,
 }
 
-/// A successful load plus recoverable residue the caller must surface on a
-/// separate channel from the machine-readable export.
 pub struct Loaded {
     pub rows: Vec<Row>,
     pub warnings: Vec<String>,
 }
 
-/// Export-schema-1 usage. This intentionally is not the engine's `Usage`:
-/// adding an internal field must not silently add a public JSON key.
 #[derive(Serialize)]
 struct ExportUsage {
     input_tokens: Option<u64>,
@@ -132,17 +128,12 @@ struct RunContext<'a> {
     started_at: &'a str,
 }
 
-/// Load and validate one stable run snapshot. No config, source plan, adapter,
-/// or report is consulted.
 pub fn load(repo_root: &Path, wanted: &str) -> Result<Loaded, UpstrokeError> {
     let run_id = rundir::resolve_run_id(repo_root, wanted)?;
     let public = rundir::public_dir(repo_root, &run_id);
     let events_path = public.join("events.jsonl");
     let snapshot_bytes = begin_snapshot(&public, &run_id, &events_path)?;
 
-    // Always perform the closing stability check before returning a projection
-    // error. Otherwise a racing resume could make a transient moving view look
-    // like permanently invalid input.
     let projected = (|| {
         let events::ParsedLines {
             events: log,
@@ -773,7 +764,6 @@ fn export_usage(value: &Usage) -> ExportUsage {
     }
 }
 
-/// Deliberately exhaustive and wildcard-free: a new FailureKind is a compile error here.
 fn failure_projection(kind: FailureKind) -> (&'static str, &'static str) {
     match kind {
         FailureKind::GateFailed => ("capability", "gate"),
@@ -826,12 +816,6 @@ fn validate_timestamp(path: &Path, label: &str, value: &str) -> Result<(), Upstr
     Ok(())
 }
 
-/// Validate the RFC 3339 subset Upstroke can record.
-///
-/// Event timestamps come from `SystemTime` as ordinary Unix seconds, so the
-/// writer can never emit `:60`. Rejecting leap-second notation avoids accepting
-/// it on arbitrary dates (which requires an external announcement table) while
-/// retaining every timestamp an authentic Upstroke writer can produce.
 fn is_supported_rfc3339(value: &str) -> bool {
     let bytes = value.as_bytes();
     if bytes.len() < 20
@@ -1088,11 +1072,11 @@ mod tests {
 
     #[test]
     fn the_decision_index_names_the_shipped_export_schema() {
-        let index = include_str!("../decisions/README.md");
+        let index = include_str!("../design/25_design_export_decisions_schema.md");
         let expected = format!("schema-{EXPORT_SCHEMA_VERSION} JSONL/CSV projection");
         assert!(
             index.contains(&expected),
-            "decision index must track the public exporter constant: expected `{expected}`"
+            "the design must track the public exporter constant: expected `{expected}`"
         );
     }
 
@@ -1112,7 +1096,7 @@ mod tests {
 
     #[test]
     fn export_schema_decision_lists_every_failure_kind() {
-        let decision = include_str!("../decisions/2026-08-11-export-decisions-schema.md");
+        let decision = include_str!("../design/25_design_export_decisions_schema.md");
         for kind in [
             FailureKind::NoChain,
             FailureKind::EmptyDiff,
@@ -1132,7 +1116,7 @@ mod tests {
             let token = failure_kind(kind);
             assert!(
                 decision.contains(&format!("| `{token}` |")),
-                "export decision omits `{token}`"
+                "the export schema omits `{token}`"
             );
         }
     }
@@ -1150,7 +1134,7 @@ mod tests {
     #[test]
     fn windows_crash_containment_docs_match_shipped_job_ownership() {
         let readme = include_str!("../README.md");
-        let design = include_str!("../DESIGN.md");
+        let design = include_str!("../design/15_design_event_log_resume_run_layout.md");
         assert!(readme.contains("kill-on-close Job Object"), "{readme}");
         assert!(readme.contains("before its primary"), "{readme}");
         assert!(readme.contains("thread runs"), "{readme}");
@@ -1165,7 +1149,7 @@ mod tests {
 
     #[test]
     fn design_does_not_authorize_legacy_subject_only_adoption() {
-        let design = include_str!("../DESIGN.md");
+        let design = include_str!("../design/15_design_event_log_resume_run_layout.md");
         assert!(
             design.contains("never** adopted from parent plus subject alone"),
             "schema-1/2 recovery must stay fail-closed"
@@ -1456,8 +1440,6 @@ mod tests {
             "2026-08-01T24:00:00Z",
             "2026-08-01T00:00:00",
             "2026-08-01T00:00:00.Z",
-            // `:60` is not accepted blindly on a leap-year date, and even a
-            // historical leap second is outside the writer's supported subset.
             "2024-02-29T23:59:60.123Z",
             "2016-12-31T23:59:60Z",
         ] {
@@ -1517,7 +1499,6 @@ mod tests {
             ],
             vec![task("first", "first, \"quoted\""), task("second", "second")],
         );
-        // These current inputs are traps: the exporter must never consult them.
         fs::write(
             fixture.root.join("today.md"),
             "# today\n<!-- upstroke: kind=docs tier=frontier paths=WRONG -->",
