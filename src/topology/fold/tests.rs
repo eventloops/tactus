@@ -3773,9 +3773,6 @@ fn an_interruption_closes_its_generation_and_returns_its_task_to_pending() {
 
 #[test]
 fn an_interruption_returns_a_task_to_pending_even_if_it_was_not_pending() {
-    // `check_dispatched` never lets a real event stream reach `apply` with the task away from
-    // `Pending` here, so the postcondition below can only be witnessed by calling `RunState::apply`
-    // directly, bypassing the checker that normally guarantees it.
     let mut fold = started();
     let mut run = fold.run.take().expect("started");
     run.tasks[ZETA.index()].state = TaskState::AwaitingRepair;
@@ -3801,9 +3798,6 @@ fn an_interruption_returns_a_task_to_pending_even_if_it_was_not_pending() {
 
 #[test]
 fn a_decline_spares_a_transaction_that_already_authorized_publication() {
-    // `check_question_answered` refuses a decline on a `Prepared` transaction's own lineage
-    // before it is ever appended, so the arm below can only be witnessed by calling
-    // `RunState::apply` directly with a state the checker would never let this event reach.
     let mut fold = started();
     let mut run = fold.run.take().expect("started");
     run.transaction = Some(Transaction {

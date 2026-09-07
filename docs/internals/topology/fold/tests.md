@@ -1342,6 +1342,51 @@ is a state no reader could recompute from the log.
 A repair holds nothing of its own, so its interruption records
 `LineageHeld` and its lineage lease is untouched.
 
+## `fn an_interruption_returns_a_task_to_pending_even_if_it_was_not_pending() {`
+
+`check_dispatched` refuses a dispatch whose task is not `Pending`, so no
+event stream the checker admits reaches `apply` with the task away from
+`Pending` when `attempt_interrupted` arrives. The `set_state(..,
+Pending)` in that arm is therefore a no-op on every reachable trace:
+deleting it changed nothing the tests above could see, which is what
+`SWEEP-FOLD-APPLY-UNREACHABLE-GUARDS` recorded — an assignment no
+mutation witness could reach, not a defect.
+
+It is kept rather than deleted because it states the interrupted
+attempt's postcondition where the application can be read: the task
+returns to `Pending`, whatever state it was found in. Pinning it means
+bypassing the checker that makes it unreachable. This test takes the
+run out of the fold, forces `AwaitingRepair`, and calls
+`RunState::apply` directly instead of going through `plan_transition`
+— the same reach into `RunState` that [`grid_state`] and the residue
+fixtures make. The forced state is the witness: with the assignment
+removed the task is still `AwaitingRepair` after the event and the
+assertion fails. The test claims no reachable trace for that state; it
+says what `apply` owes if the checker ever stops guaranteeing it.
+
+## `fn a_decline_spares_a_transaction_that_already_authorized_publication() {`
+
+`fail_lineage` cancels a verification in flight for the failing
+lineage, and the `Prepared` arm of that guard answers `false`: a
+transaction already prepared has authorized publication, and a later
+decline on its own lineage must not take that authorization back.
+`check_question_answered` refuses such a decline before it is ever
+appended — "integration sequence N already authorizes publication;
+complete it before declining its lineage" — so the arm answers on no
+admitted trace, and flipping it to `true` survived the whole suite.
+
+The refusal and the arm are two statements of one rule, and only the
+arm is where the transaction would actually be released, so narrowing
+the refusal without it would cancel a prepared transaction on a
+decline. Witnessing the arm takes the same bypass as the interruption
+above: the transaction is set to `Prepared` by hand, and the
+`question_answered` body goes to `RunState::apply` directly, carrying
+the `Derived::Answer(QuestionOrigin::Admission)` the checker would have
+derived — `apply` reaches `apply_answer` only for a parked or admission
+answer. `run.transaction.is_some()` afterwards is the mutation witness:
+with the arm answering `true`, `release_transaction` takes the
+transaction and the assertion fails.
+
 ## `fn an_override_replaces_the_frozen_binding_for_every_later_…` › `let base = sha("base");`
 
 The other half of refusals[11]: when a human named a binding, that is
