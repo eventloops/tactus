@@ -33,9 +33,12 @@ Lints:
   the crate-wide entry `standards/SWEEP.md`'s activation rule says is owed once a file is swept
   (`src/validate/graph.rs`'s `clippy::indexing_slicing`/`clippy::unreachable`, §7) — that file is
   stricter than the rest of the tree until the transitional wording retires, which is the point of
-  a per-file activation, not a policy this bullet forbids. Nor does it cover `clippy.toml`'s
-  `disallowed-*` census, which is enforced only through the module-level attributes the next bullet
-  describes.
+  a per-file activation, not a policy this bullet forbids. Nor does it cover the attributes that
+  carry `clippy.toml`'s `disallowed-*` census. Those take two governed forms, each recorded by an
+  `effects/allowlist.toml` row: a module-level `allow`, which that file's header explains an
+  `#[expect]` cannot replace, and a reasoned per-site `#[expect]` under a file-level deny of the
+  same lint, which the row counts exactly (`src/agent/proc/test_support/readiness.rs`). The
+  `clippy.toml` bullet below states the second.
 - Fix warnings at their cause. A suppression is as narrow as practical and says why. Prefer
   `#[expect(lint, reason = "…")]`, which retires itself when its cause goes; it only works on a leg
   that compiles the region and promotes warnings to errors (§11).
