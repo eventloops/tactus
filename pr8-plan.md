@@ -243,3 +243,43 @@ None recorded yet.
   and the fold it appends through does the substantive work. An end-to-end `step()`→hard_block
   ingestion test needs a resumed log carrying a park, whose hand-construction the recover harness
   does not yet make cheap; it is left to the acceptance harness rather than duplicated here.
+
+- **Commit 7 (integration recovery) — landed.** `recover::finish_integration` resolves the open
+  transaction at step (f): a `Prepared` one through the live `integrate::publish` (barrier-proven
+  CAS, third-sha refusal, record-only when the ref already names the proposal), a
+  `VerificationStarted` one through `merge_verification_interrupted` with the pin pruned and the
+  staging reclaimed. `reclaim_stale_residue` clears T-PROPOSAL orphan staging and orphan pins
+  before the namespace check; the run's own integration ref and a live stale verification's pin
+  are added to the check's expected set. The P7/P8 ref repair is skipped under an open
+  transaction, so `finish_integration` is the single writer of the ref. Tests in
+  `recover/tests.rs`: `a_resume_completes_a_prepared_fast_transaction_through_the_barrier_and_cas`,
+  `a_resume_completes_a_prepared_transaction_whose_cas_already_ran_by_recording_the_merge`,
+  `a_resume_of_a_prepared_transaction_whose_ref_moved_elsewhere_refuses_a_third_sha`,
+  `a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue`,
+  `a_resume_reclaims_orphan_staging_and_an_orphan_prepared_pin_with_no_transaction`.
+
+- **R21 (effect-site kill coverage reused).** The per-site kill/residue coverage the plan's
+  commit-7 row lists (both `Object.ProposalCherryPick` phases, the new appends' Event points,
+  sampled cherry-pick child kills classified and recovered) is owned by the `effects` census
+  framework (`src/topology/effects/tests.rs`), which enumerates every site including the PR8 ones
+  and was extended in commits 2–3. Recovery adds the resume-path resolution of what those sites
+  leave, not a second copy of the site census.
+
+- **Commit 8 (two-crash proof) — landed.** `recover::tests::unsynced_merge_prepared_lost_to_power_failure_keeps_log_and_ref_agreeing`
+  proves the ref never runs ahead of an unsynced, lost `merge_prepared`;
+  `integrate::tests::an_append_failure_at_merge_prepared_issues_no_cas_and_leaves_the_integration_ref`
+  proves a failed append (a barrier sync failure among them) issues no CAS. The barrier's own
+  convergence is `events::log::unsynced_line_lost_before_barrier_converges_to_before_append_order`.
+
+- **Commit 9 (terminal-shape coverage) — satisfied by the per-shape tests, no separate table.**
+  Every terminal shape is driven end to end with `replay_twice_equal`: Fast
+  (`fast_path_publishes_exact_candidate_without_staging_or_proposal_object`), StaleClean and
+  AlreadyPresent (`stale_candidate_takes_staging_path_and_publishes_pinned_proposal`,
+  `an_already_present_candidate_settles_without_an_empty_commit` — each also composing two
+  sequential sequences in one run, dense 0 then 1, the ST-13 sequential subset), Conflict and
+  CodeRejected (`a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect`,
+  `a_code_rejected_candidate_registers_a_repair`), HumanRequired and Infrastructure→Defer→Park
+  (`a_human_required_verdict_parks_the_task`, `infrastructure_failure_defers_then_parks_at_max_defers`).
+  ST-13's fast no-staging assertion is in the fast-path test; the dual-hold release is
+  `fast_dual_holding_released_once`. A consolidated table would duplicate these without adding a
+  reachable shape, so it is not written.
