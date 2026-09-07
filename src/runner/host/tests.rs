@@ -6043,10 +6043,14 @@ fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {
         '\u{2029}',
     ];
 
+    fn is_rust_whitespace(character: char) -> bool {
+        PATTERN_WHITE_SPACE.contains(&character)
+    }
+
     fn continues_an_identifier(character: char) -> bool {
         character == '_'
             || character.is_ascii_alphanumeric()
-            || !(character.is_ascii() || PATTERN_WHITE_SPACE.contains(&character))
+            || !(character.is_ascii() || is_rust_whitespace(character))
     }
 
     const EXPRESSION_MACROS: [&str; 21] = [
@@ -6174,6 +6178,56 @@ fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {
         Ok(found)
     }
 
+    fn last_character(text: &str) -> Option<char> {
+        text.chars().next_back()
+    }
+
+    fn ends_with_token(text: &str, token: &str) -> bool {
+        let Some(head) = text.strip_suffix(token) else {
+            return false;
+        };
+        !last_character(head).is_some_and(continues_an_identifier)
+    }
+
+    fn identifier_tokens(code: &str, word: &str) -> Vec<usize> {
+        let mut found = Vec::new();
+        for (at, _) in code.match_indices(word) {
+            let head = code.get(..at).unwrap_or_default();
+            let head = head.strip_suffix("r#").unwrap_or(head);
+            let tail = code.get(at + word.len()..).unwrap_or_default();
+            if last_character(head).is_some_and(continues_an_identifier) {
+                continue;
+            }
+            if tail.starts_with(continues_an_identifier) {
+                continue;
+            }
+            found.push(at);
+        }
+        found
+    }
+
+    fn defines_a_macro(head: &str) -> bool {
+        let Some(text) = head.strip_suffix('!') else {
+            return false;
+        };
+        ends_with_token(text.trim_end_matches(is_rust_whitespace), "macro_rules")
+    }
+
+    fn shadowed_macro_name(code: &str) -> Option<(&'static str, usize)> {
+        for listed in INERT_MACROS.iter().chain(EXPRESSION_MACROS.iter()) {
+            let name = *listed;
+            for at in identifier_tokens(code, name) {
+                let head = code.get(..at).unwrap_or_default();
+                let head = head.strip_suffix("r#").unwrap_or(head);
+                let head = head.trim_end_matches(is_rust_whitespace);
+                if defines_a_macro(head) || ends_with_token(head, "as") {
+                    return Some((name, line_of(code, at)));
+                }
+            }
+        }
+        None
+    }
+
     fn site_obligations(source: &str) -> Result<Vec<String>, String> {
         let lines: Vec<&str> = source
             .lines()
@@ -6186,6 +6240,12 @@ fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {
                 "the blanked view has {} lines where the source has {}",
                 code.len(),
                 lines.len()
+            ));
+        }
+        if let Some((name, index)) = shadowed_macro_name(&blanked) {
+            return Err(format!(
+                "{}: `{name}` is bound here, so `{name}!` need not be the built-in",
+                index + 1
             ));
         }
         let invocations = macro_invocations(&blanked)?;
@@ -6237,6 +6297,19 @@ fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {
         Ok(obligations)
     }
 
+    for (module, text) in [
+        ("src/lib.rs", include_str!("../../lib.rs")),
+        ("src/runner/mod.rs", include_str!("../mod.rs")),
+        ("src/runner/host.rs", include_str!("../host.rs")),
+    ] {
+        let blanked = crate::effects::blank_comments_and_strings(text);
+        assert_eq!(
+            shadowed_macro_name(&blanked).map(|(name, _)| name),
+            None,
+            "{module} is in this module's textual macro scope, so a name it binds reaches the census"
+        );
+    }
+
     let site_obligations_here = site_obligations(SOURCE)
         .unwrap_or_else(|refusal| panic!("src/runner/host/tests.rs:{refusal}"));
     assert!(
@@ -6280,6 +6353,28 @@ fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {
             lines_here + 2
         )),
         "the keyword inside a macro the census does not know is refused, not guessed"
+    );
+    let shadowed = format!(
+        "{SOURCE}macro_rules! stringify {{\n    ($body:expr) => {{\n        $body\n    }};\n}}\nfn injected() {{\n    let value = 0_u8;\n    let _ = stringify!({KEYWORD} {{ std::ptr::read_volatile(&value) }});\n}}\n"
+    );
+    assert_eq!(
+        site_obligations(&shadowed),
+        Err(format!(
+            "{}: `stringify` is bound here, so `stringify!` need not be the built-in",
+            lines_here + 1
+        )),
+        "a listed macro name this module binds itself is refused, not read as the built-in"
+    );
+    let aliased = format!(
+        "{SOURCE}use crate::forwarding as stringify;\nfn injected() {{\n    let value = 0_u8;\n    let _ = stringify!({KEYWORD} {{ std::ptr::read_volatile(&value) }});\n}}\n"
+    );
+    assert_eq!(
+        site_obligations(&aliased),
+        Err(format!(
+            "{}: `stringify` is bound here, so `stringify!` need not be the built-in",
+            lines_here + 1
+        )),
+        "an alias onto a listed macro name is refused the same way a definition is"
     );
     let obliged = format!(
         "{SOURCE}// {OBLIGATION} injected obligation, read from the source, not the blanked view.\nconst _: u8 = {KEYWORD} {{ 0 }};\n"

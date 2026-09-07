@@ -3029,7 +3029,10 @@ boundary the census does not cross: the keyword inside it is refused with the
 macro's name, because the census cannot tell whether that macro expands its
 input, and a guess in either direction is the defect this census exists to
 refuse. An inert macro anywhere in the nest wins, since nothing inside it is
-expanded; otherwise the first unknown macro in the nest refuses.
+expanded; otherwise the first unknown macro in the nest refuses. Both lists are
+spellings and not resolutions, so neither is trusted on its own:
+`shadowed_macro_name` below refuses the whole module when this scope binds one
+of these names itself.
 
 ## `fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {` › `fn keyword_tokens(code: &str) -> impl Iterator<Item = usize> + '_ {`
 
@@ -3053,6 +3056,56 @@ which is reliable only because literals and comments are already blank.
 brace and is skipped over the same way. A `!` with no identifier before it --
 negation, `!=`, the never type -- names no macro. A token tree that never
 closes is a refusal, not a silent end of the scan.
+
+## `fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {` › `fn shadowed_macro_name(code: &str) -> Option<(&'static str, usize)> {`
+
+The two lists match a macro by its spelling, and a spelling is not a
+resolution. Rust lets a `macro_rules!` definition or a `use ... as` alias bind
+any of those names to a macro of the module's own, and the dangerous half is
+`INERT_MACROS`, because that is the list that makes the census *skip* a token:
+a local macro named `stringify` that forwards its input expands and executes
+`stringify!(unsafe { ... })` with nothing above it, while the census records
+the enclosing name, skips the token and returns its obligation set unchanged.
+That is a false negative, the direction this census exists to make impossible,
+and in the census's own code. `PR157-ASTRA-SITE-SAFETY-RECOVERY-R4-001` is that
+finding.
+
+So the census refuses where it cannot resolve. Before any token is classified
+it looks for a name on either list that the text it is about to read binds
+itself -- the identifier after `macro_rules!`, or the identifier after `as` --
+each required to stand as a whole token, and finding one is a refusal naming
+that name and its line, never a guess about which macro it now is. It fails
+closed in both directions: a shadowed inert name can no longer hide an
+operation, and a shadowed expression name can no longer be read as expanding
+input it does not expand. It costs nothing while the module binds none of
+them, which is the state the controls pin.
+
+`identifier_tokens` is `keyword_tokens`' rule with one difference. `r#` before
+the word is stripped rather than disqualifying, because `r#stringify` and
+`stringify` are one identifier and a definition may be written either way,
+where `r#unsafe` is a binding and not the keyword.
+
+What this leaves is a macro reached by path under a listed name --
+`use some::path::stringify;`, or a glob that carries one. It is deliberately
+not read from the spelling of a `use` item, because a `use` binds in a
+namespace the text does not show: `use std::env;` binds a module and leaves
+`env!` the built-in, so refusing on a leaf would refuse ordinary imports and
+make the census brittle instead of closed. This crate exports no macro by path
+-- no `#[macro_export]`, no `pub macro` -- so no such import can resolve to a
+macro today, and the change that adds the first one is the change that extends
+this check.
+
+## `fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {` › `for (module, text) in [`
+
+A `macro_rules!` definition is in textual scope for everything below it,
+nested modules included, so a definition in `src/runner/host.rs`,
+`src/runner/mod.rs` or `src/lib.rs` above the `mod` that reaches this file
+would shadow a listed name here without appearing in this file at all. Those
+three are exactly this module's textual macro scope. The census reads each
+through `include_str!` and holds that none of them binds a listed name, so the
+refusal above covers the scope and not merely the file. A module tree that
+moves breaks those paths at compile time, which is the loud failure rather than
+the silent one.
 
 ## `fn every_site_obligation_is_complete_and_agrees_with_its_notes_copy() {` › `fn continues_an_identifier(character: char) -> bool {`
 
@@ -3116,3 +3169,12 @@ operation inside `assert_eq!` must be refused the same way; the keyword inside
 a macro on neither list must be refused with that macro's name; and an operation appended under a fresh
 `SAFETY:` line must contribute exactly that line's text, read from the source
 where the blanked view has already erased it.
+
+Two more controls hold the shadowing refusal, and they are the ones
+`PR157-ASTRA-SITE-SAFETY-RECOVERY-R4-001` asks for: a `macro_rules! stringify`
+that forwards its input, appended above a real unannotated
+`stringify!(unsafe { ... })`, and a `use ... as stringify` above the same
+operation, must each be refused at the line that binds the name rather than
+letting that operation through. The built-in `stringify!` and `concat!` cases
+above stay green beside them, so the refusal is the shadowing and not the
+name.

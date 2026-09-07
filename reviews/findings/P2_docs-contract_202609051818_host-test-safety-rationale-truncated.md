@@ -1,5 +1,5 @@
 ---
-status: owner attention required
+status: repaired on the branch, in the tree until PR #197 merges
 id: PR157-ASTRA-SITE-SAFETY
 severity: P2
 disposition: deferred
@@ -48,35 +48,28 @@ useful. Check complete comment blocks when moving prose, rather than retaining
 only their first `SAFETY:` line. This is future documentation maintenance,
 not a prerequisite repair for this review's PASS.
 
-## Owner attention required
+## Why this file is still here
 
 Recorded 2026-09-06T21:45Z by the parked-PR recovery workflow, task pr197 (earlier record:
-2026-09-06T09:14Z, findings-workflow task 2b802b011b29).
+2026-09-06T09:14Z, findings-workflow task 2b802b011b29); the park was lifted 2026-09-08.
 
-The recovery spent its full budget -- an initial review and three repair rounds, four started
-reviews of `gpt-5.6-sol` at high effort -- and pass 4 of 4 still returned one blocking P2, so the
-pull request is parked again rather than merged. Each round repaired the previous round's finding
-in the census this pull request adds and each was confirmed fixed by the next pass; the original
-finding's repair has been recorded intact by every pass.
+The finding itself is fixed and proved on the branch: the six truncated `SAFETY:` blocks and the
+`HeldFork` protocol are restored complete and adjacent, no executable token of the existing module
+changed, the nine-command baseline and `test-pr-ready-audit.sh` were green at
+`cbd42faa60df93807602a2e8100f7624193b553a` with both required CI contexts, and seventeen mutation
+arms each detect a different way of losing a site copy or misreading the module. The truncation is
+still in `master`'s tree, so the file stays until PR #197 merges and its ledger row records the
+disposition; that is the only reason it is here.
 
-The finding itself is fixed and proved on the branch at
-`cbd42faa60df93807602a2e8100f7624193b553a`: the six truncated `SAFETY:` blocks and the `HeldFork`
-protocol are restored complete and adjacent, no executable token of the existing module changed,
-the nine-command baseline and `test-pr-ready-audit.sh` are green at that head, both required CI
-contexts are green at it, and seventeen mutation arms each detect a different way of losing a site
-copy or misreading the module.
+What parked the pull request on 2026-09-06 was `PR157-ASTRA-SITE-SAFETY-RECOVERY-R4-001` (P2,
+`correctness`): the census classified a keyword token by the terminal name of the macros around
+it, so a local `macro_rules!` named `stringify` that forwards its input let a real unannotated
+unsafe expression evade it. That is repaired on 2026-09-08 by the first of the two repairs the
+finding named -- the census now refuses the module when its own text, or any file in its textual
+macro scope, binds a name on either macro list -- and its finding file is deleted. The repair has
+not been through a frontier review pass; the owner reads it before this pull request merges.
 
-What blocks the merge is `PR157-ASTRA-SITE-SAFETY-RECOVERY-R4-001` (P2, `correctness`), filed as
-`reviews/findings/P2_correctness_202609062143_host-test-census-trusts-macro-names.md`: the census
-classifies a keyword token by the terminal name of the macros around it, so a local `macro_rules!`
-named `stringify` that forwards its input lets a real unannotated unsafe expression evade the
-census. The recovery's three earlier rounds closed raw identifiers, Unicode identifiers and inert
-macro input; this is the fourth shape of the same class, a scanner whose notion of an operation is
-not the compiler's, and the finding file names the two repairs that would close the class (fail
-closed on a shadowed built-in name, or an explicitly anchored census with asserted boundaries).
-
-Preserved for the owner: branch `codex/findings-2b802b011b29`, worktree
-`/srv/worktrees/findings-workflow/tasks/2b802b011b29`, draft PR
-https://github.com/eventloops/upstroke/pull/197 (not closed), all six verdicts posted verbatim as
+Preserved: branch `codex/findings-2b802b011b29`, draft PR
+https://github.com/sourcemaps/upstroke/pull/197 (not closed), all six verdicts posted verbatim as
 SHA-bound comments, the audit at `/home/ubuntu/parked-pr-workflow/tasks/pr197/history.md`, and
 the mutation witnesses under `/home/ubuntu/parked-pr-workflow/tasks/pr197/evidence/`.
