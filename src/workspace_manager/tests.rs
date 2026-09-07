@@ -8650,10 +8650,14 @@ fn sampled_git_child_kills_every_residue_classified_and_recovered() {
 /// One site's row of the evidence file: everything the packet's
 /// [`SamplingRecord`] cannot carry.
 ///
-/// A struct rather than the tuple this was, because the tuple had reached six
-/// fields and a reader had to count commas. `records` is built once per site and read twice -- once to write the
-/// artifact, once to check what was written -- so both readers name the same
-/// fields.
+/// A struct rather than the tuple this was. The tuple was
+/// `(site, record, run.budget, run.replayed)` -- four fields, two of them
+/// bare booleans and durations that a reader had to count commas to tell
+/// apart. This doc said six, and pass 5's finding 5 counted them: a record
+/// that miscounts the thing it is describing is the defect class this file
+/// keeps finding in its own text. `records` is built once per site and read
+/// twice -- once to write the artifact, once to check what was written -- so
+/// both readers name the same fields.
 struct SiteEvidence {
     site: EffectSiteId,
     record: SamplingRecord,
@@ -9030,13 +9034,6 @@ fn sample_site(site: EffectSiteId) -> SamplingRun {
         kill_git_child(&fixture.manager, &cwd, &args, delay);
 
         let target = ResidueTarget::new(&base).at(&path).from_base(&fixture.head);
-        // Bounded retry, and then `.ok()`. The `.ok()` is what the tally
-        // needs, and it is not what a reader of a red run needs: it folds
-        // "the classifier refused, and here is why" into the same `None` as
-        // "this residue is in no class", and the assertion those `None`s fail
-        // is worded for the second. §7 asks that a discard be best-effort
-        // with defined observability, so every attempt's own words are kept
-        // and go into that assertion's message. The bound and the argument
         // `.ok()` is what the tally needs, and it is not what a reader of a
         // red run needs: it folds "the classifier refused, and here is why"
         // into the same `None` as "this residue is in no class", and the
@@ -9677,13 +9674,29 @@ impl SampledChild {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        Self::spawn_command(&mut command)
+    }
+
+    /// Spawn `command` in a process group of its own, and wrap it.
+    ///
+    /// Split out of [`Self::spawn`] for PR #145 pass 5, finding 2, and for
+    /// nothing else. The four sampled Git commands cannot witness the
+    /// *group* half of the kill — their descendants finish in about a
+    /// millisecond whether they are signalled or not — so the witness needs
+    /// a leader whose descendant does not, and it must drive these same
+    /// three calls rather than a copy of them. That fixture is
+    /// `the_group_kill_reaches_a_member_that_is_not_the_leader`, and this
+    /// is the seam it takes. Nothing about the sampler's own path changes:
+    /// [`Self::spawn`] builds the same `Command` it built before and hands
+    /// it here.
+    fn spawn_command(command: &mut Command) -> Self {
         // `setpgid(0, 0)` in the forked child before `exec`, which is where
         // `agent::proc::run_with_timeout_at` puts it and what `std` does for
         // this call. Without it the child shares this test binary's group and
         // there is no group of the child's own for a kill to name.
         #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
-        let child = command.spawn().expect("spawn the sampled git child");
+        std::os::unix::process::CommandExt::process_group(command, 0);
+        let child = command.spawn().expect("spawn the sampled child");
         let spawned = std::time::Instant::now();
         #[cfg(unix)]
         let led_its_own_group = crate::agent::proc::child_leads_its_own_group(child.id());
@@ -9713,9 +9726,14 @@ impl SampledChild {
     /// kill's own answer is returned and recorded by the caller; nothing
     /// here decides what it means.
     ///
-    /// **The group first, the child second**, which is `kill_tree`'s order.
-    /// The group kill reaches the child too; `Child::kill` after it is what
-    /// leaves `std` holding a child it agrees is dead.
+    /// **On Unix the group kill is the only kill**, and this paragraph used
+    /// to say "the group first, the child second" after `kill_tree`'s order.
+    /// It described the code pass 4 removed, and PR #145 pass 5, finding 3
+    /// caught it still standing: a reader following it back — group signal,
+    /// then `Child::kill` — restores exactly the survivor the paragraph
+    /// below explains, because the leader then dies whether or not the group
+    /// signal did anything. The group kill reaches the leader too, which is
+    /// why nothing needs to follow it.
     ///
     /// What that still leaves reachable is a fake that keeps the call and
     /// throws its effect away. The kill floor at the end of the sampling
@@ -9737,6 +9755,15 @@ impl SampledChild {
     /// process can read. Signal 0 leaves every leader to reach its own exit,
     /// and the floor fails. On Windows there is no group and `Child::kill`
     /// remains the kill, as on master.
+    ///
+    /// **What the leader's status does not observe is that the signal went to
+    /// the group rather than to the leader** (pass 5, finding 2). The leader
+    /// dies under `kill(pid, SIGKILL)` as well, and every other oracle over
+    /// the sampling survives that rewrite too.
+    /// `the_group_kill_reaches_a_member_that_is_not_the_leader` is the
+    /// witness for that half, and it is a fixture rather than one more
+    /// assertion over the sampling because the sampled commands' own
+    /// descendants are gone in a millisecond either way.
     fn kill(&mut self) -> std::io::Result<()> {
         let now = std::time::Instant::now();
         let fired = now.duration_since(self.spawned);
@@ -9927,6 +9954,103 @@ impl SampledChild {
             std::thread::sleep(std::time::Duration::from_micros(50));
         }
     }
+}
+
+/// **The kill is aimed at the group, and a member that is not the leader is
+/// what witnesses it** (PR #145 pass 5, finding 2).
+///
+/// The sampler cannot witness this, and every oracle it has says otherwise.
+/// Rewrite `kill(-pid, SIGKILL)` in [`SampledChild::kill_group`] as
+/// `kill(pid, SIGKILL)` and: the leader *is* the group leader, so it dies
+/// under both and the killed-child floor holds; `kill` answers 0 under both,
+/// so the Linux delivery assertion holds; and the four sampled commands'
+/// descendants finish in about a millisecond whether they are signalled or
+/// not, so the barrier sees an empty group under both. The sampler has
+/// reverted to a bare-child kill plus a completion wait — master's shape,
+/// the one this pull request exists to remove — with the whole file green.
+/// That is pass 4's survivor one layer down, and it is the reason this test
+/// is here rather than another assertion over the sampling.
+///
+/// **A signal to a group and a signal to a process differ in exactly one
+/// thing: which processes receive it.** Nothing this process can observe at a
+/// leader that dies under both can tell them apart, so the witness has to be
+/// a **second member of the group**, and one that outlives the leader unless
+/// something kills it. The fixture is `agent::proc`'s own, in
+/// `kill_tree_settles_the_whole_unix_group_before_it_returns`: a shell whose
+/// backgrounded descendant sleeps for a minute in the leader's group. Under
+/// the group kill the group is empty in microseconds; under a kill of the
+/// leader alone that descendant holds the group for its whole minute and the
+/// barrier fails at [`GROUP_SETTLE_BOUND`]. The margin is fifty seconds, so
+/// this is not a timing assertion — what it cannot absorb is a member that
+/// was never signalled.
+///
+/// The kill's *answer* is printed and not asserted, which is this file's
+/// standing treatment of it and, on this branch, three times the right one:
+/// the group's emptiness is the oracle, and it is an observation of the world
+/// rather than of an errno.
+///
+/// A failing run leaves the fixture's sleeper behind for its minute. Killing
+/// `-pid` after [`SampledChild::wait`] has reaped the leader would be naming
+/// a group id the kernel has already put back in its reuse pool, which is the
+/// one thing [`SampledChild::kill_group`]'s safety argument rests on not
+/// doing.
+#[cfg(unix)]
+#[test]
+fn the_group_kill_reaches_a_member_that_is_not_the_leader() {
+    let root = scratch("group-kill-witness");
+    let ready = root.join("ready");
+    // The marker is staged under another name and renamed, never written in
+    // place: the wait below is an existence test, and a path that is created
+    // and then filled is observable before the state it stands for (§12).
+    // The descendant is backgrounded and the leader waits, so both are in the
+    // leader's group and both outlive a kill that does not reach the group.
+    let script = "sh -c 'printf ready > \"$UPSTROKE_READY.publishing\"; \
+                  mv \"$UPSTROKE_READY.publishing\" \"$UPSTROKE_READY\"; sleep 60' & sleep 60";
+    let mut command = Command::new("/bin/sh");
+    command
+        .arg("-c")
+        .arg(script)
+        .env("UPSTROKE_READY", &ready)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut child = SampledChild::spawn_command(&mut command);
+
+    // The premise, and the whole of what makes the assertion below mean
+    // anything: a second member of this group is running before the kill
+    // fires. A group that never had one settles for the wrong reason and
+    // this test would pass on a leader-only kill after all.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !ready.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fixture's descendant never published its marker, so this test would \
+             be witnessing an empty group rather than a killed one"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let answered = child.kill();
+    if let Err(error) = &answered {
+        println!("the group kill at the witness fixture answered {error}");
+    }
+    let status = child.wait();
+    let settled = child.settle_group();
+    let _ = fs::remove_dir_all(&root);
+
+    assert!(
+        died_by_kill(&status),
+        "the fixture's leader sleeps for a minute, so it did not reach an exit of its \
+         own: {status:?}"
+    );
+    assert!(
+        matches!(settled, GroupSettle::Empty { .. }),
+        "{settled:?} -- the fixture's descendant sleeps for a minute in the leader's \
+         own process group, so a group still holding an entry {GROUP_SETTLE_BOUND:?} \
+         after the kill is a group the kill did not reach. This is what \
+         `kill(-pid, SIGKILL)` written as `kill(pid, SIGKILL)` fails on, and it is the \
+         only thing in this file that does"
+    );
 }
 
 fn kill_git_child(

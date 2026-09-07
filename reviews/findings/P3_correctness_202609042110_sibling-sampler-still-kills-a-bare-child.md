@@ -19,8 +19,10 @@ samples four commands, and `fixture::KillableGitChild`, which samples the two ca
 child kill leaves `git worktree add`'s descendants writing into a worktree forced removal then
 races. The second still kills the bare child.
 
-**It is not a defect today**, which is why this is P3 and not the severity of the finding it
-mirrors. `KillableGitChild` is driven at `Object.CandidateStage` and `Object.CandidateWriteTree`
+**Nothing has produced it on the machines this suite has run on**, which is why this is P3 and not
+the severity of the finding it mirrors — and that is a weaker statement than "it is not a defect
+today", which is what this paragraph used to open with and which PR #145's fifth pass was right to
+refuse. `KillableGitChild` is driven at `Object.CandidateStage` and `Object.CandidateWriteTree`
 only (`sampled_argv` panics on any other site), and `git add -A` and `git write-tree` spawn no
 children **only where the user's Git configuration assigns no filter**: PR #145's fourth pass
 probed a global-style attributes file with a clean filter and `git add` spawned it even under every
@@ -58,11 +60,18 @@ because this sampler has nothing to orphan yet.
 
 The same repair, and it is **not** four lines — PR #145's first pass showed the four-line version
 insufficient, and a durable finding that advertises a known-insufficient repair is worse than none.
-It is two pieces:
+It is three pieces:
 
-1. **The group kill.** Spawn with `process_group(0)` on Unix, `SIGKILL` the group before the child,
-   refuse to aim a group kill at a child the kernel does not confirm leads its own group, and record
-   the outcome inside the kill so that deleting it is a compile error rather than a weaker sampler.
+1. **The group kill, and on Unix it is the only kill.** Spawn with `process_group(0)`, send
+   `SIGKILL` to the group, refuse to aim a group kill at a child the kernel does not confirm leads
+   its own group, and record the outcome inside the kill so that deleting it is a compile error
+   rather than a weaker sampler. **Do not follow it with a kill of the child.** This instruction
+   used to read "`SIGKILL` the group before the child", which is what PR #145 did until its fourth
+   pass mutated the group signal to signal `0` and every oracle stayed green: with a second kill
+   behind it the leader dies whether or not the group signal did anything, and the sampler is a
+   bare-child kill again wearing the group kill's evidence. The group signal reaches the leader,
+   so nothing needs to follow it. Windows has no group here and keeps `Child::kill`; that gap is
+   `SAMPLER-WINDOWS-STILL-KILLS-A-BARE-CHILD`.
 2. **The barrier, without which the first piece closes nothing.** `kill(-pgid, SIGKILL)` queues
    signals and returns; `agent::proc::tests::kill_tree_settles_the_whole_unix_group_before_it_returns`
    says so. So after reaping the leader, poll `kill(-pgid, 0)` until it answers **`ESRCH`** — only
@@ -71,8 +80,20 @@ It is two pieces:
    timeout as a hard failure **at the point it is detected**, before the sample reads anything. Measured next door: on `git worktree add`, six to seven of every eight
    samples still had a live group when the four-line version went on to classify and remove.
 
-`SampledChild` in `src/workspace_manager/tests.rs` is both pieces written out — `kill_group` and
-`settle_group` — with the witness for the first (`crate::agent::proc::child_leads_its_own_group`,
+3. **A witness for the group half, which neither of the first two provides.** A signal to a group
+   and a signal to a process differ in exactly one thing — which processes receive it — and the
+   leader dies under both. So `kill(-pgid, SIGKILL)` rewritten as `kill(pgid, SIGKILL)` passes a
+   delivery answer, a killed-child floor and the barrier alike, because the sampled commands'
+   descendants finish in about a millisecond whether they are signalled or not. The oracle is a
+   **second group member that outlives the leader unless something kills it**: a fixture whose
+   backgrounded descendant sleeps for a minute in the leader's group, driven through the same kill,
+   reap and barrier the sampler uses, asserting the group is empty. Under the group kill it is
+   empty in microseconds; under a leader-only kill the barrier times out on a fifty-second margin,
+   so it is not a timing assertion.
+
+`SampledChild` in `src/workspace_manager/tests.rs` is all three pieces written out — `kill_group`,
+`settle_group` and `the_group_kill_reaches_a_member_that_is_not_the_leader` — with the witness for
+the first (`crate::agent::proc::child_leads_its_own_group`,
 production's own kernel oracle for the same fact), the Linux-only delivery assertion and why it is
 Linux-only, and the argument for the Unix `cfg`. Do not retry a refused inspection: PR #145 tried
 a bounded retry and withdrew it after three passes each found it unsound on the platform its
