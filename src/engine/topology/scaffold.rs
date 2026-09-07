@@ -794,23 +794,26 @@ impl super::integrate::Verification for Run {
             paths: &self.paths,
             reviews: &reviews,
         };
-        match judge.judge(&Subject {
-            snapshot: SnapshotOf::Commit(proposed),
-            disposal: SnapshotDisposal::AfterTheTerminal,
-            names: JudgeNames::Integration {
-                sequence: u64::from(request.sequence.0),
+        match judge.judge(
+            &Subject {
+                snapshot: SnapshotOf::Commit(proposed),
+                disposal: SnapshotDisposal::AfterTheTerminal,
+                names: JudgeNames::Integration {
+                    sequence: u64::from(request.sequence.0),
+                },
+                identities: JudgeIdentities::Sequence(identities),
+                stem: format!("integration-s{}", request.sequence.0),
+                gates: &gates,
+                reviewers: &reviewers,
+                inputs: &inputs,
+                prior_failure: None,
+                invocations: &move |pass| crate::review::ReviewInvocations {
+                    pass: identities.review_pass(pass, 0),
+                    reask: identities.review_reask(pass, 0),
+                },
             },
-            identities: JudgeIdentities::Sequence(identities),
-            stem: format!("integration-s{}", request.sequence.0),
-            gates: &gates,
-            reviewers: &reviewers,
-            inputs: &inputs,
-            prior_failure: None,
-            invocations: &move |pass| crate::review::ReviewInvocations {
-                pass: identities.review_pass(pass, 0),
-                reask: identities.review_reask(pass, 0),
-            },
-        }) {
+            &mut super::attempt::NoReviewAccount,
+        ) {
             Ok(judgement) => Ok(super::integrate::Verified::Judged(judgement)),
             Err(super::attempt::JudgeError::Runner(error)) => {
                 Ok(super::integrate::Verified::Unavailable {

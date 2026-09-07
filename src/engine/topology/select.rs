@@ -35,7 +35,20 @@ impl Spend {
     }
 
     pub fn record_reviews(&mut self, key: TaskKey, reviews: &[crate::events::ReviewRecord]) {
-        let cost: f64 = reviews.iter().filter_map(|review| review.cost_usd).sum();
+        for review in reviews {
+            self.record_review_cost(key, review.cost_usd);
+        }
+    }
+
+    /// Charge one review pass, whose reported cost may be unknown.
+    ///
+    /// The live integration account charges here as each pass completes
+    /// (`topology::attempt::ReviewAccount`), and [`Self::record_reviews`]
+    /// charges the same way from the records a durable terminal carries, so a
+    /// replayed total accumulates by the same additions in the same order as
+    /// the total the incarnation that wrote them held.
+    pub fn record_review_cost(&mut self, key: TaskKey, cost_usd: Option<f64>) {
+        let cost = cost_usd.unwrap_or(0.0);
         self.run += cost;
         *self.per_task.entry(key).or_insert(0.0) += cost;
     }

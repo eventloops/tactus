@@ -108,6 +108,36 @@ pub trait ReviewPasses {
     ) -> Result<review::ReviewOutcome, UpstrokeError>;
 }
 
+/// Where a completed review pass's cost is charged.
+///
+/// A review that returned has been paid for, whatever becomes of the judgement
+/// it belongs to. [`Judge::judge`] can still fail after one — the next
+/// reviewer's snapshot, the invocation ledger, an absent adapter — and those
+/// exits carry no [`Judgement`] and so no reviews, while an integration that
+/// settles on a Git error settles *unavailable* rather than ending the
+/// command, and the loop then admits another sequence in the same incarnation
+/// against a run total the reviews are missing from. So the charge is reported
+/// here as each pass completes rather than read off the judgement that
+/// returns, and every exit from `judge` leaves the account holding what was
+/// spent.
+///
+/// A pass whose `run` returns an error is not charged: no outcome means no cost
+/// was reported, and unknown spend is reported as unknown (INV-14).
+pub trait ReviewAccount {
+    /// Charge one completed review pass, whose reported cost may be unknown.
+    fn charge(&mut self, cost_usd: Option<f64>);
+}
+
+/// The account of a caller that keeps none.
+///
+/// The legacy attempt path charges from the durable `AttemptRecord` its
+/// settlement writes, and the test scaffold judges nothing it pays for.
+pub struct NoReviewAccount;
+
+impl ReviewAccount for NoReviewAccount {
+    fn charge(&mut self, _cost_usd: Option<f64>) {}
+}
+
 #[derive(Debug, Clone)]
 pub struct AttemptPlan {
     pub attempt: AttemptNumber,
@@ -393,7 +423,7 @@ impl AttemptContext<'_> {
             prior_failure: assessed.failure.clone(),
             invocations,
         };
-        Ok(self.judge_core().judge(&subject)?)
+        Ok(self.judge_core().judge(&subject, &mut NoReviewAccount)?)
     }
 
     pub fn settle_interrupted(
@@ -557,7 +587,11 @@ pub struct Judge<'a> {
 }
 
 impl Judge<'_> {
-    pub fn judge(&mut self, subject: &Subject<'_>) -> Result<Judgement, JudgeError> {
+    pub fn judge(
+        &mut self,
+        subject: &Subject<'_>,
+        account: &mut dyn ReviewAccount,
+    ) -> Result<Judgement, JudgeError> {
         let mut failure = subject.prior_failure.clone();
         let mut gates = Vec::with_capacity(subject.gates.len());
         if !subject.gates.is_empty() && failure.is_none() {
@@ -658,6 +692,9 @@ impl Judge<'_> {
                     &(subject.invocations)(pass),
                 )
                 .map_err(JudgeError::Other)?;
+            // The pass has returned, so its cost is spent. Charge it before
+            // anything below can fail and discard the judgement.
+            account.charge(outcome.cost_usd);
 
             let ids = (subject.invocations)(pass);
             for ordinal in 0..outcome.invocations {

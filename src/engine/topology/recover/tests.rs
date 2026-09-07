@@ -108,6 +108,7 @@ struct Damage {
     two_tier: bool,
     deep_ladder: bool,
     alternative_reviewer: bool,
+    integration_second_opinion: bool,
     no_automatic_repairs: bool,
     alpha_kind: Option<TaskKind>,
     host_gate: Option<&'static str>,
@@ -541,7 +542,14 @@ fn run_started(
         run_id: RUN_ID.to_owned(),
         incarnation: IncarnationId(CREATOR.to_owned()),
         runner,
-        probed_agents: vec![AGENT.to_owned()],
+        probed_agents: if damage.integration_second_opinion {
+            vec![
+                AGENT.to_owned(),
+                crate::engine::topology::scaffold::REVIEW_AGENT.to_owned(),
+            ]
+        } else {
+            vec![AGENT.to_owned()]
+        },
         branch: "upstroke/run".to_owned(),
         integration_ref: GitRef(format!("refs/upstroke/runs/{RUN_ID}/integration")),
         base_sha: base.clone(),
@@ -607,6 +615,14 @@ fn run_started(
             let mut reviews = review_plan();
             if damage.two_tasks {
                 reviews.second_opinion.push(None);
+            }
+            if damage.integration_second_opinion {
+                if let Some(first) = reviews.second_opinion.first_mut() {
+                    *first = Some(PassBinding::new(
+                        crate::engine::topology::scaffold::REVIEW_AGENT,
+                        "gpt-5.6",
+                    ));
+                }
             }
             if damage.alternative_reviewer {
                 reviews.alternative = Some(PassBinding::new(AGENT, "claude-fable-5"));
@@ -9681,5 +9697,145 @@ fn every_packet_named_recovery_action_has_a_production_caller() {
          not performed by any run — which is how this slice shipped a converged promotion that \
          stalled forever and a resumed run that forgot its spend:\n  {}",
         uncalled.join("\n  ")
+    );
+}
+
+/// The obstruction the reviewer's witness used: the second reviewer's snapshot
+/// slot is occupied by a foreign non-empty directory just before its
+/// `git worktree add` runs, so that `add` fails with a genuine Git error after
+/// the first reviewer has already been paid for.
+struct BlockNthSnapshotAdd {
+    rest: HarnessTopologyHooks,
+    blocked: PathBuf,
+    at: usize,
+    adds: usize,
+}
+
+impl crate::workspace_manager::EffectHooks for BlockNthSnapshotAdd {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == EffectSiteId::Snapshot(crate::topology::effects::SnapshotSite::Add)
+            && phase == HookPhase::Before
+        {
+            self.adds += 1;
+            if self.adds == self.at {
+                std::fs::create_dir_all(&self.blocked).expect("create the obstructing directory");
+                std::fs::write(
+                    self.blocked.join("occupied"),
+                    b"a foreign non-empty directory",
+                )
+                .expect("make the worktree add fail");
+            }
+        }
+        Injection::Proceed
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        None
+    }
+}
+
+impl TopologyHooks for BlockNthSnapshotAdd {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        self
+    }
+
+    fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+        self.rest.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        self.rest.events()
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.rest.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.rest.spawn()
+    }
+}
+
+#[test]
+fn a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fails() {
+    // Two reviewers on the integration judgement. The first returns, costing
+    // 2.50 against a 2.20 run ceiling; creating the second's snapshot then
+    // fails with a Git error, which `verify` settles as an infrastructure
+    // deferral rather than ending the command. The completed pass is spent
+    // whatever the judgement does next, so the loop's next admission — in this
+    // same incarnation, with no restart — has to be made against a total that
+    // holds it. Charging only on a successful judgement return discarded the
+    // whole vector with `?` and let another sequence in.
+    //
+    // Distinct from `PR8-R2-SPEND-REPLAY`, which is a restart losing costs the
+    // frozen terminal cannot carry: this one involves no restart, and the cost
+    // is known and in memory when it is thrown away.
+    let fixture = Fixture::build(
+        "paid-review-then-failed-snapshot",
+        Damage {
+            two_tasks: true,
+            integration_second_opinion: true,
+            ..Damage::default()
+        },
+    );
+    plant_stale_verification(&fixture);
+    let blocked = fixture
+        .manager()
+        .slot_path(&crate::workspace_manager::Slot::Snapshot {
+            name: crate::workspace_manager::SnapshotName::integration_review(2, 1),
+        });
+    let mut hooks = BlockNthSnapshotAdd {
+        rest: HarnessTopologyHooks::new(harness()),
+        blocked,
+        at: 3,
+        adds: 0,
+    };
+    let driven = drive_hooked(
+        &fixture,
+        &DriveSeams {
+            review_cost_usd: Some(2.5),
+            run_ceiling_usd: Some(2.2),
+            ..DriveSeams::default()
+        },
+        3,
+        &mut hooks,
+    );
+
+    let unavailable = unavailable_terminals(&driven.log);
+    assert_eq!(
+        unavailable.len(),
+        1,
+        "the failed snapshot settles one unavailable terminal: {unavailable:?}"
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(crate::engine::topology::run::Progress::Unavailable {
+                parked: false,
+                ..
+            }))
+        ),
+        "the second snapshot's Git error is an infrastructure deferral, not a park and not the \
+         end of the command: {:?}",
+        driven.progress
+    );
+    assert!(
+        (driven.spend_after - driven.spend_before - 2.5).abs() < 1e-9,
+        "the review that returned is charged live even though the judgement it belonged to \
+         failed afterwards: {} -> {}",
+        driven.spend_before,
+        driven.spend_after
+    );
+    assert!(
+        driven.spend_before < 2.2 && driven.spend_after > 2.2,
+        "the ceiling sits between the replayed and the live total: {} < 2.2 < {}",
+        driven.spend_before,
+        driven.spend_after
+    );
+    assert_eq!(
+        driven.reviewer_models.len(),
+        1,
+        "one review crossed the ceiling, so this incarnation admits no further review: {:?}",
+        driven.reviewer_models
     );
 }

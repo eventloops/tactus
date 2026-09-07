@@ -145,12 +145,14 @@ fn implementer_binding(
 
 impl Verification for IntegrationCx<'_, '_> {
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
+        // The reviews are charged as each pass completes, inside `judge`
+        // (`SpendAccount`), and not from the judgement returned here: a
+        // judgement that fails after a paid pass carries no reviews, and the
+        // Git-error arm below settles unavailable rather than ending the
+        // command, so the loop would go on to admit another sequence against a
+        // total that pass is missing from.
         match self.judge_proposal(request) {
-            Ok(judgement) => {
-                self.spend
-                    .record_reviews(request.candidate.key, &judgement.reviews);
-                Ok(Verified::Judged(judgement))
-            }
+            Ok(judgement) => Ok(Verified::Judged(judgement)),
             Err(JudgeError::Runner(error)) => match error.fate {
                 ProcessFate::NeverStarted => Ok(Verified::Unavailable {
                     kind: InfrastructureKind::RunnerSpawnFailure,
@@ -299,23 +301,44 @@ impl IntegrationCx<'_, '_> {
             paths: self.seams.paths,
             reviews: self.seams.reviews,
         };
-        judge.judge(&Subject {
-            snapshot: SnapshotOf::Commit(proposed),
-            disposal: SnapshotDisposal::AfterTheTerminal,
-            names: JudgeNames::Integration {
-                sequence: u64::from(request.sequence.0),
+        let mut account = SpendAccount {
+            spend: &mut *self.spend,
+            key,
+        };
+        judge.judge(
+            &Subject {
+                snapshot: SnapshotOf::Commit(proposed),
+                disposal: SnapshotDisposal::AfterTheTerminal,
+                names: JudgeNames::Integration {
+                    sequence: u64::from(request.sequence.0),
+                },
+                identities: JudgeIdentities::Sequence(identities),
+                stem: format!("integration-s{}", request.sequence.0),
+                gates: &plan.gates,
+                reviewers: &plan.reviewers,
+                inputs: &inputs,
+                prior_failure,
+                invocations: &move |pass| review::ReviewInvocations {
+                    pass: identities.review_pass(pass, 0),
+                    reask: identities.review_reask(pass, 0),
+                },
             },
-            identities: JudgeIdentities::Sequence(identities),
-            stem: format!("integration-s{}", request.sequence.0),
-            gates: &plan.gates,
-            reviewers: &plan.reviewers,
-            inputs: &inputs,
-            prior_failure,
-            invocations: &move |pass| review::ReviewInvocations {
-                pass: identities.review_pass(pass, 0),
-                reask: identities.review_reask(pass, 0),
-            },
-        })
+            &mut account,
+        )
+    }
+}
+
+/// The run's live account: each completed integration review is charged to the
+/// run's `Spend` as it returns, so the ceiling the next selection is admitted
+/// against has already paid for it.
+struct SpendAccount<'a> {
+    spend: &'a mut Spend,
+    key: TaskKey,
+}
+
+impl crate::engine::topology::attempt::ReviewAccount for SpendAccount<'_> {
+    fn charge(&mut self, cost_usd: Option<f64>) {
+        self.spend.record_review_cost(self.key, cost_usd);
     }
 }
 
