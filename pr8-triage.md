@@ -469,6 +469,16 @@ No new Class B change and no Class C: `ReviewAccount`, `never_started` and `list
 in-memory types and a pure function, nothing is serialized, and the frozen fold, the frozen event
 vocabulary and `src/topology/**` are untouched.
 
+**One thing this round moved for a reason that is not a finding.** With the round's rows and
+paragraphs added, `pr8-body.md` reached 73,026 characters and GitHub refuses a pull-request body
+over 65,536. The ledger cannot move — `validate-pr-ledger-evidence.sh` greps it out of the
+*published* body — so what moved is the Validation section's proof-obligation enumeration, one
+bullet per obligation with the tests that discharge it, to `pr8-plan.md` §6, tracked at this head.
+The body keeps the claim, the twenty-two obligation names and a pointer, and says plainly that the
+list moved and why. The per-round file lists in Scope were compressed the same way, against
+`pr8-plan.md` §2 which already carried them. The published body is 59,147 characters, which leaves
+a sixth round somewhere to put its rows.
+
 ### 8.3 The mutations replayed this round
 
 Each applied by an asserted replacement against the repaired tree, the named tests run, and the file

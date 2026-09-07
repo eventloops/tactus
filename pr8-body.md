@@ -49,37 +49,20 @@ frozen-repair builder), the integration recovery in `src/engine/topology/recover
 (the verification context, the implementer binding, the review-input classification, the charged
 reviews), the judge's typed Runner error and snapshot disposal in `attempt.rs`, the verification
 harness in `scaffold.rs`, and the supporting `workspace_manager` reads (`proposal_state`) and
-names (`SnapshotName::integration_review`). The second repair round adds the process fate a
-Runner reports when it fails: `Runner::run` returns `RunnerError` (`src/runner/mod.rs`,
-`src/error.rs`), the host funnel classifies its failures (`src/agent/proc.rs`, `src/runner/host.rs`),
-the container runner classifies from its cancel and release results (`src/runner/container.rs`,
-`src/runner/container/exec.rs`), `run_review` propagates an unresolved one (`src/review.rs`), the
-probe boundaries carry it through (`src/engine/topology/preflight.rs`, `create.rs`), and the
-review-input classifier is split so the integration consults its size/opacity half
-(`src/engine/classify.rs`). Every Runner test double changed signature with the trait. The third
-repair round changes the same seam again and nothing else: the host funnel claims `Gone` only from
-group evidence and its Windows spawn boundary carries the fate its own cleanup established
-(`src/agent/proc.rs`); the container runner's launch records whether `docker start` was attempted,
-its release reports process evidence apart from which cleanup steps completed, and a container the
-runtime cannot confirm stopped keeps its Git view and intent for the next census
-(`src/runner/container.rs`, `src/runner/container/exec.rs`); the engine gains a read-only count of
-cancelled reservations for a test (`src/engine/topology/identity.rs`, `run.rs`). The fourth
-repair round adds the one head rule the live decision and the resume check share, with the event
-mirror the emit funnel keeps for both writers (`src/engine/topology/integrate.rs`, `recover.rs`,
-`emit.rs`, `run.rs`); the typed outcome of a container stop or removal and the funnel's report of
-whether `docker start` was attempted (`src/runner/container/runtime.rs`, `src/runner/container.rs`,
-`src/runner/container/exec.rs`, `src/runner/container/fake.rs`, every runtime double); the owned
-cleanup scope entered wherever the topology run spawns host processes under its lock
-(`src/rundir.rs`, `src/engine/topology/run.rs`, `recover.rs`, `create.rs`); and review doubles
-that run a process in the workspace they are handed (`src/engine/topology/scaffold.rs`,
-`src/engine/topology/recover/tests.rs`). The fifth repair round adds the review account each
-completed pass is charged to as it returns (`src/engine/topology/attempt.rs`, `run.rs`,
-`select.rs`, `scaffold.rs`); the fact of a process that never started, carried from `run_review`
-to the durable outage attribution INV-23 names (`src/review.rs`, `src/ladder.rs`,
-`src/engine/attempt.rs`, `src/engine/topology/integrate.rs`); the macOS process-group scanner's
-distinction between a failed enumeration and an empty group (`src/agent/proc.rs`); and two Git
-reads made read-only — the proposal classifier's unmerged-entry query and every read through
-`read_only_git` (`src/workspace_manager.rs`).
+names (`SnapshotName::integration_review`). The five repair rounds change the same seams and add no new ones. `pr8-plan.md` §2 carries each
+round's commit table and its file list; in outline: rounds two and three are the Runner's typed
+error and what each of the two Runners may claim about a process (`src/runner/**`,
+`src/agent/proc.rs`, `src/review.rs`, `src/engine/classify.rs`, `src/engine/topology/preflight.rs`,
+`create.rs`, and every Runner double); round four is the shared head rule and the emit funnel's
+event mirror (`integrate.rs`, `recover.rs`, `emit.rs`, `run.rs`), the typed outcome of a container
+stop or removal (`src/runner/container/**`), the owned cleanup scope (`src/rundir.rs` and the three
+sites that spawn under the lock), and review doubles that run a process in the workspace they are
+handed (`scaffold.rs`, `recover/tests.rs`); round five is the review account each completed pass is
+charged to (`attempt.rs`, `run.rs`, `select.rs`, `scaffold.rs`), the fact of a process that never
+started carried to the durable outage attribution (`src/review.rs`, `src/ladder.rs`,
+`src/engine/attempt.rs`, `integrate.rs`), the macOS scanner's distinction between a failed
+enumeration and an empty group (`src/agent/proc.rs`), and two Git reads made read-only
+(`src/workspace_manager.rs`).
 
 Out of scope, and neither built nor stubbed: repair **execution** (PR9), the production writer, the
 slot broker. A PR8 build refuses, before any append, dispatch of a Repair-origin task and any
@@ -211,163 +194,20 @@ including the scanner and its `errno` protocol. **It is not executed on this box
 is the first thing that runs it, and the rule the repair rests on is exercised on every platform by
 `listed_pid_bytes`'s test.
 
-Proof obligations from the contract, and where each is met:
-
-- **Real-repository CAS, orphan, third-SHA.** `integrate::tests` fast/stale/already-present publish
-  against a real repository; `third_sha_refused_and_a_ref_already_at_the_proposal_only_records`;
-  `recover::tests::a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging`,
-  `a_resume_refuses_a_prepared_pin_outside_the_sequences_the_log_pinned`,
-  `a_resume_refuses_a_substituted_verification_pin_before_settling_it`,
-  `a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses`,
-  `a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses_it_elsewhere`,
-  `a_resume_of_a_prepared_transaction_whose_ref_moved_elsewhere_refuses_a_third_sha`.
-- **Fast no-staging.** `fast_path_publishes_exact_candidate_without_staging_or_proposal_object`: the
-  hook harness records no `Worktree.AddStaging`, no `Object.ProposalCherryPick`, no
-  `Ref.PinPrepared`; object count unchanged; no `merge/s<seq>` intent.
-- **The three fast mismatches, live and on replay.**
-  `merge_prepared_fast_with_moved_head_or_wrong_proposed_or_pin_refused_live_and_on_replay`.
-- **Stale path.** `stale_candidate_takes_staging_path_and_publishes_pinned_proposal`, whose gate
-  is asserted to have run on a snapshot whose HEAD is the recorded proposal and never in the
-  staging worktree.
-- **The two-crash proof.** `recover::tests::unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing`:
-  a complete, unsynced `merge_prepared`; the restart in a child process whose barrier reports its
-  sync of the log file before the swap is entered; the CAS; the kill at the `task_merged` write; the
-  loss of every byte the barrier did not prove durable; the log still holding `merge_prepared`,
-  the ref at `proposed_sha`, and the next resume appending `task_merged` without a second swap,
-  replay twice equal. `barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss`:
-  the sync fails at the barrier, no CAS, nothing appended, and after the loss the candidate is
-  still queued and integrates. The crash reviewer's mutation (the barrier's `sync_log_file`
-  removed) fails both.
-- **Completed publications resume.** `a_resume_after_a_completed_publication_accepts_its_own_head`,
-  `a_resume_after_a_publication_refuses_a_ref_that_disagrees_with_the_log`, and
-  `a_resume_completes_a_prepared_transaction_whose_cas_already_ran_by_recording_the_merge`
-  (kill between CAS and `task_merged` converges).
-- **Terminal-shape coverage table.** `integrate::tests::terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay`
-  drives fast, stale_clean, already_present, conflict, code_rejected, deferred and parked end to end,
-  each replayed twice for equality and each verifying shape's gate asserted to have judged the
-  recorded proposal; Declined-after-park is `fold::tests`'
-  `declined_parked_verification_fails_task_consumes_queue_position_releases_lease_and_halts_per_policy`
-  and Interrupted is `recover::tests`'
-  `a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue`, which then
-  re-verifies and publishes the candidate under the next sequence.
-- **Kill/residue for the cherry-pick class.** `recover::tests::synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges`
-  and `sampled_cherry_pick_child_kills_every_residue_classified_and_recovered`: the Internal residue
-  class constructed by hand and sampled from real killed `git cherry-pick` children, each classified
-  by the workspace manager's classifier and each reclaimed through the resume, the objects left to
-  Git and the candidate integrating afterwards. Snapshot residue: `verification_snapshots_are_removed_only_after_the_terminal`
-  and `a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it`.
-- **Outages, parks and answers, driven through the loop.**
-  `a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers`,
-  `a_gate_whose_runner_lost_it_after_start_and_reclaimed_it_defers_as_an_outage`,
-  `a_git_error_observed_by_the_verification_settles_an_infrastructure_outage`,
-  `a_gate_that_times_out_during_integration_verification_defers_instead_of_registering_a_repair`,
-  `an_unjudgeable_proposal_parks_the_candidate_for_a_person`,
-  `a_test_candidate_whose_test_was_already_published_is_verified_not_rejected_for_provenance`,
-  `an_integration_review_is_selected_against_the_candidates_recorded_implementer`,
-  `an_integration_reviews_cost_reaches_the_run_spend`,
-  `a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap`,
-  `a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append`.
-- **A lost gate process is never settled over.**
-  `a_runner_that_loses_track_of_a_running_gate_refuses_resumably_and_reclaims_nothing` (the
-  production `ContainerRunner` over the fake runtime with observe, stop and remove unreachable:
-  the step ends in an error, the container survives running, its snapshot and intent are
-  retained, no terminal is appended) and
-  `a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled` (a
-  resume refuses while the runtime is unreachable and appends nothing; with it back the census
-  stops and removes the container before any recovery event, then the verification settles
-  interrupted, the snapshot goes, and the candidate re-verifies under the next sequence). The
-  Runner's own classification:
-  `runner::container::exec::tests::the_runner_reports_what_it_established_about_the_process_when_it_fails`,
-  `review::tests::an_unresolved_runner_error_propagates_instead_of_reporting_the_review_unavailable`.
-- **The fate is process evidence, at both Runners** (the third repair round). The container
-  runner: `the_runner_reports_what_it_established_about_the_process_when_it_fails` is a
-  thirteen-cell matrix over the fake runtime — the runtime down before `docker create`, a refused
-  create, an image mismatch, a refused start, a committed start whose launch then fails, a start
-  lost with the cancel establishing nothing, an observation lost with the release completing, a
-  lost stop followed by a successful forced removal, all three lost, an observed exit followed by
-  a lost collection and release, and three timed-out outputs (a failed view discard only, a failed
-  stop with a successful removal, neither stop nor removal) — each asserting the fate, whether
-  `docker start` was attempted, what survived and in what state, and whether the view and intent
-  were retained; `a_container_the_runtime_cannot_confirm_stopped_keeps_its_mounted_git_view_and_intent`
-  keeps both and reclaims them through the intent once the runtime is back;
-  `recover::tests::repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner`
-  drives three restarts of the production runner over a runtime lost at `docker create` each time
-  (Deferred 1, Deferred 2, Parked, no `docker start` ever issued). The host funnel:
-  `agent::proc::tests::a_reaped_leader_does_not_prove_its_group_gone_when_the_reaper_failed`
-  (Linux: the leader killed and reaped, a same-group `sleep` verified running, the fate
-  `Unresolved`), `a_lost_group_settles_unresolved_even_when_the_leader_reaps_cleanly`,
-  `an_established_group_settles_gone_whatever_the_leaders_own_reap_says`,
-  `a_containment_failure_after_the_spawn_leaves_the_fate_unresolved` (the three post-spawn
-  containment points), `a_spawn_that_fails_before_any_process_exists_is_never_started`, and on
-  Windows `a_windows_spawn_that_fails_after_creation_leaves_no_suspended_stub` (now asserting the
-  boundary's fate) and `a_windows_spawn_that_fails_before_creation_is_never_started`. The
-  entitlements after an unresolved verification:
-  `recover::tests::an_unresolved_verification_leaves_its_entitlements_with_the_open_transaction`
-  (the transaction open, the fold counting it as holding the pipeline entitlement, the provisional
-  reservation converted at the start append and not cancelled, a second step admitting nothing).
-- **The production verifier, observed through the loop.**
-  `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal`:
-  for the prepared, rejected and parked shapes the gate ran on a checkout whose HEAD is the
-  recorded proposal and never the candidate commit, and every snapshot removal began with the
-  sequence's terminal as the last durable event.
-- **The frozen repair spec.** `repair::tests::the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas`:
-  a conflict's paths, a code rejection's verdict, gates, review passes and detail, the rejected
-  candidate's commit and ref, and the rejecting head, all in the registered spec's body.
-- **Refusals proven, not merely coded.** Third SHA / symbolic / checked-out
-  (`integrate::tests`, `recover::tests`); orphan pin outside the next sequence (`recover::tests`)
-  and a second unresolved transaction (`fold::tests`); non-eligible starts, the three fast
-  mismatches, `Deferred` at `max_defers`, non-consecutive defers, `Parked` without a question,
-  `HumanRequired` without `Parked` (`fold::tests`); a lineage that has consumed its allowance
-  (`a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_repair`);
-  repair-origin dispatch and repair-admission answers refused before any append (`select`,
-  `recover::tests`).
-- **Verification isolation.** The integration verification runs on fresh snapshots of the proposal
-  or head commit, creates no new object, and the recording runner's workspace HEAD is the proposal
-  for every verifying shape (`integrate::tests`).
-- **The head the log authorizes, live** (the fourth repair round).
-  `integrate::tests::a_foreign_reset_of_the_integration_ref_refuses_before_any_append_and_keeps_the_merged_task`:
-  alpha published, the ref reset to the base by an external writer, beta refused before any
-  append with the refusal naming the base, alpha's commit and sequence 0; nothing appended, no
-  staging effect, no object, the ref untouched, alpha still `Merged`; the ref put back, beta
-  integrates and its publication still carries alpha's change. The rule is one function with two
-  callers (`authorized_head`, read by `decide` and by `ensure_recorded_integration_ref`).
-- **A removal another reclaimer holds is not evidence.**
-  `the_runner_reports_what_it_established_about_the_process_when_it_fails` is now a sixteen-cell
-  matrix: the two cells with the daemon's removal-in-progress answer are `Unresolved` with the
-  container surviving `Running` and its view and intent retained, and the cell with the funnel
-  refusing before `docker start` is `NeverStarted` with no `Start` op;
-  `recover::tests::a_removal_another_reclaimer_holds_is_not_proof_the_gate_is_gone` drives the
-  answer through the loop (no terminal, the snapshot retained, the transaction open holding its
-  entitlements); `a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not`
-  pins the typed normalization, and the fake routes an armed diagnostic through the production
-  normalizers.
-- **The reapers hold the lease.** `recover::tests::a_host_integration_reaper_holds_the_runs_cleanup_lease`
-  (Unix): a stale verification re-verified through the production `HostRunner`, the real reaper
-  observed holding the run's `cleanup.lock` at `ReaperStarted`, and the hold released once the
-  reaper is gone.
-- **A substituted pin at a live terminal.**
-  `integrate::tests::a_rejected_or_unavailable_terminal_refuses_to_delete_a_pin_another_writer_substituted`:
-  rejected and parked, the refusal names the foreign object, the pin still names it, the terminal
-  is the last durable event, and the staging worktree and snapshots are reclaimed.
-- **The reviewers' checkouts.** The review doubles run a process in the workspace they are
-  handed, and `stale_candidate_takes_staging_path_and_publishes_pinned_proposal`, the terminal
-  coverage table and `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal`
-  assert each reviewer's HEAD is the recorded proposal and its workspace is its own
-  `integration_review` snapshot slot, never staging and never the gate's snapshot; the reviewer's
-  mutation that had passed 366 tests fails all three.
-- **Both class sweeps** are recorded in `pr8-triage.md` §7.3 and §7.4: every production site that
-  concludes a process gone, with what it observed, and every cleanup that takes an expected-old
-  value or removes a resource, with where its authority comes from.
-- **Mutation witnesses replayed against the repaired tree**, each killed by the test its ledger
-  row names: the reviewer's m01, m02, m03, m05 and m06; the barrier sync removed; one mutation
-  per repair of the first round; and, for the second round, the blanket Runner-error conversion
-  restored, the Git arm removed, the timed-out-gate check disabled, the provenance rule restored
-  at integration, the spec body not embedded, the two snapshot mutations the reviewers found
-  surviving, and the sampler's kill deleted; and, for the third round, the two mutations that
-  survived the suite at `79ddbffb` (M3, the host's post-spawn `Unresolved` made `Gone`; M4, a
-  timed-out output with a failed release made `Gone`) and one mutation per repair of the round
-  (`pr8-plan.md` §5); and, for the fourth round, the seven mutations of `pr8-triage.md` §7.5,
-  the reviewer's staging mutation among them.
+Proof obligations from the contract, and where each is met: the enumeration, one bullet per
+obligation with the tests that discharge it, is **`pr8-plan.md` §6**, tracked at this head. It
+moved there in the fifth repair round because the body reached GitHub's 65,536-character limit for
+a pull-request description and the ledger below, which the policy gate greps from the published
+body, cannot move. Nothing was dropped: the twenty-two obligations are real-repository CAS, orphan
+and third-SHA publication; fast with no staging; the three fast mismatches live and on replay; the
+stale path; the two-crash proof; completed publications resuming; the terminal-shape coverage
+table; kill and residue for the cherry-pick class; outages, parks and answers driven through the
+loop; a lost gate process never settled over; the fate as process evidence at both Runners; the
+production verifier observed through the loop; the frozen repair spec; refusals proven rather than
+coded; verification isolation; the head the log authorizes on the live path; a removal another
+reclaimer holds not counting as evidence; the reapers holding the lease; a substituted pin at a
+live terminal; the reviewers' checkouts; both class sweeps; and the mutation witnesses replayed
+against the repaired tree.
 
 ## Review evidence
 
