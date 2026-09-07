@@ -382,6 +382,7 @@ impl AttemptContext<'_> {
                 tree: captured_object_id("`git write-tree`", capture.tree.clone())?,
                 parent: captured_object_id("the recorded base commit", capture.parent.clone())?,
             },
+            disposal: SnapshotDisposal::AsEachRoleFinishes,
             names: JudgeNames::Attempt {
                 generation: site.generation.0,
                 attempt: plan.attempt.0,
@@ -521,10 +522,32 @@ impl JudgeIdentities {
     }
 }
 
+/// When a judgement's snapshots are removed.
+///
+/// The attempt path removes each snapshot as its role finishes, before
+/// `attempt_finished` — the order the effect inventory registers for
+/// `Snapshot.Remove` (`Before(AttemptFinished)`). The integration path may
+/// not: `pr_sequence[9].slice_contract.side_effect_vs_event_ordering` puts
+/// "staging and snapshot removal (forced) after terminal (incl.
+/// Deferred/Parked)", so its judge leaves every snapshot in place and the
+/// sequence reclaims them once the terminal is durable — a removal that
+/// failed can then no longer strand a completed judgement behind an
+/// unterminated verification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotDisposal {
+    /// Remove each snapshot as soon as its gate set or reviewer is done.
+    AsEachRoleFinishes,
+    /// Leave every snapshot, with its intent, for the caller to reclaim
+    /// after the terminal it appends.
+    AfterTheTerminal,
+}
+
 /// One thing to judge: what to snapshot, what to run in the snapshots, and
 /// what the reviewers are told.
 pub struct Subject<'s> {
     pub snapshot: SnapshotOf,
+    /// When the snapshots this judgement creates are removed.
+    pub disposal: SnapshotDisposal,
     pub names: JudgeNames,
     pub identities: JudgeIdentities,
     /// The stem the review transcripts are filed under.
@@ -614,8 +637,10 @@ impl Judge<'_> {
                     break;
                 }
             }
-            self.manager
-                .remove_snapshot(self.hooks.effects(), &snapshot)?;
+            if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
+                self.manager
+                    .remove_snapshot(self.hooks.effects(), &snapshot)?;
+            }
         }
 
         let mut reviews = Vec::with_capacity(subject.reviewers.len());
@@ -688,8 +713,10 @@ impl Judge<'_> {
                 }
                 .record(),
             );
-            self.manager
-                .remove_snapshot(self.hooks.effects(), &snapshot)?;
+            if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
+                self.manager
+                    .remove_snapshot(self.hooks.effects(), &snapshot)?;
+            }
         }
 
         Ok(Judgement {

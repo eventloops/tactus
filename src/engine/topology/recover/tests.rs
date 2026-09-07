@@ -6185,6 +6185,22 @@ fn plant_staging_worktree(fixture: &Fixture, sequence: u32, head: &str) -> PathB
         .expect("plant a staging worktree")
 }
 
+/// Add the integration gate snapshot of `sequence` at `commit` through the
+/// manager, as a verification that was killed mid-gate leaves it.
+fn plant_snapshot(fixture: &Fixture, sequence: u64, commit: &str) -> PathBuf {
+    let snapshot = fixture
+        .manager()
+        .add_snapshot(
+            &mut crate::workspace_manager::NoHooks,
+            &crate::workspace_manager::SnapshotName::integration(sequence),
+            &crate::workspace_manager::SnapshotInput::Commit(
+                crate::workspace_manager::ObjectId::new(commit.to_owned()).expect("an object id"),
+            ),
+        )
+        .expect("plant a snapshot");
+    snapshot.path().to_path_buf()
+}
+
 /// Plant an interrupted stale-clean verification: the candidate on the base,
 /// the integration head moved past it, the cherry-pick proposal pinned under
 /// `prepared/0`, the staging worktree at the proposal with its intent, and the
@@ -6581,6 +6597,64 @@ fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue()
 }
 
 #[test]
+fn a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it() {
+    // T-VERIFY's resume action: "append merge_verification_interrupted; delete
+    // pin expected-old; reclaim snapshots". The gate snapshot a killed
+    // verification left is reclaimed with force — and only after the
+    // interrupted terminal is durable, the order the contract fixes.
+    let fixture = Fixture::healthy("interrupted-snapshot");
+    let (_candidate, _head, pin) = plant_stale_verification(&fixture);
+    let proposed = ref_target(&fixture, pin.as_str()).expect("the recorded proposal");
+    let snapshot = plant_snapshot(&fixture, 0, &proposed);
+    let slot = crate::workspace_manager::Slot::Snapshot {
+        name: crate::workspace_manager::SnapshotName::integration(0),
+    };
+    assert!(
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+            && snapshot.exists(),
+        "the fixture left the snapshot and its intent"
+    );
+
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let (outcome, _) = resume_holding(&fixture, &harness, &given);
+    outcome.expect("the resume settles the interrupted verification");
+    assert_eq!(interrupted_sequences(&fixture), vec![0]);
+    assert!(
+        !fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+            && !snapshot.exists(),
+        "the interrupted verification's snapshot and its intent were reclaimed"
+    );
+
+    let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+    let position = |site: EffectSiteId, phase: HookPhase| {
+        seen.coverage()
+            .iter()
+            .position(|observation| observation.site == site && observation.phase == phase)
+            .unwrap_or_else(|| panic!("`{site}` `{phase}` was never observed"))
+    };
+    let terminal = position(EffectSiteId::Event(EventSite::Append), HookPhase::After);
+    let removed = position(
+        EffectSiteId::Snapshot(crate::topology::effects::SnapshotSite::Remove),
+        HookPhase::Before,
+    );
+    assert!(
+        terminal < removed,
+        "the snapshot was removed (at {removed}) before the interrupted terminal (at {terminal})"
+    );
+}
+
+#[test]
 fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {
     // T-PROPOSAL (a', a, b) with no transaction open: a cherry-pick killed
     // before anything was recorded left `merge/s0` and, killed between the pin
@@ -6604,9 +6678,14 @@ fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {
     );
     let staging = plant_staging_worktree(&fixture, 0, orphan_commit.as_str());
     plant_staging_intent(&fixture, 7);
+    // A kill between a verification's terminal and its snapshot removal
+    // leaves a snapshot with no transaction to own it.
+    let snapshot = plant_snapshot(&fixture, 0, orphan_commit.as_str());
     assert!(
-        ref_target(&fixture, orphan_pin.as_str()).is_some() && staging.exists(),
-        "the fixture left the orphan pin and the staging worktree"
+        ref_target(&fixture, orphan_pin.as_str()).is_some()
+            && staging.exists()
+            && snapshot.exists(),
+        "the fixture left the orphan pin, the staging worktree and the snapshot"
     );
 
     let harness = harness();
@@ -6622,8 +6701,10 @@ fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {
         "the orphan pin at the next sequence was deleted so the sequence can take the name"
     );
     assert!(
-        fixture.manager().intents().expect("intents").is_empty() && !staging.exists(),
-        "the staging residue was reclaimed with force"
+        fixture.manager().intents().expect("intents").is_empty()
+            && !staging.exists()
+            && !snapshot.exists(),
+        "the staging and snapshot residue was reclaimed with force"
     );
     assert!(
         crate::workspace_manager::fixture::git_out(

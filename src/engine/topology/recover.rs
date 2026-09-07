@@ -1080,7 +1080,7 @@ pub fn finish_integration(
 ) -> Result<(), UpstrokeError> {
     use crate::topology::fold::TransactionClass;
     let Some(transaction) = fold_of(certified).transaction() else {
-        return Ok(());
+        return reclaim_snapshot_residue(manager, context);
     };
     let sequence = transaction.sequence;
     match &transaction.class {
@@ -1130,6 +1130,28 @@ pub fn finish_integration(
             }
             manager.remove_worktree(context.hooks.effects(), &staging)?;
             manager.remove_intent(context.hooks.effects(), &staging)?;
+        }
+    }
+    reclaim_snapshot_residue(manager, context)
+}
+
+/// Reclaim every verification snapshot, with force, once every terminal a
+/// snapshot could belong to is durable: the attempts settled at (d), and the
+/// integration transaction resolved just above.
+///
+/// `C.cancellation`: "snapshots reclaimed"; `[T-VERIFY].resume_action`. The
+/// live path removes snapshots only after its terminal, so a kill between the
+/// terminal and the removal — or during the judgement itself, whose terminal
+/// this step has now appended — leaves exactly this residue, and nothing
+/// still running can own a snapshot when a fresh process reaches here.
+fn reclaim_snapshot_residue(
+    manager: &WorkspaceManager,
+    context: &mut EmitContext<'_>,
+) -> Result<(), UpstrokeError> {
+    for slot in manager.intents()? {
+        if matches!(slot, crate::workspace_manager::Slot::Snapshot { .. }) {
+            manager.remove_worktree(context.hooks.effects(), &slot)?;
+            manager.remove_intent(context.hooks.effects(), &slot)?;
         }
     }
     Ok(())

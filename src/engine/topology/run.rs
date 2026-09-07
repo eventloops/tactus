@@ -22,7 +22,7 @@ use crate::workspace_manager::WorkspaceManager;
 use super::attempt::{
     Assessment, AttemptContext, AttemptPlan, AttemptPlans, AttemptSite, Capture, InputsRequest,
     Judge, JudgeIdentities, JudgeNames, Judgement, Judging, PlanRequest, ReviewInputPolicy,
-    ReviewPasses, SnapshotOf, Subject, VerificationRequest,
+    ReviewPasses, SnapshotDisposal, SnapshotOf, Subject, VerificationRequest,
 };
 use super::candidate::{
     CandidateJournal, JudgedTree, append_candidate_created, append_candidate_prepared,
@@ -191,6 +191,7 @@ impl Verification for IntegrationCx<'_, '_> {
         };
         judge.judge(&Subject {
             snapshot: SnapshotOf::Commit(proposed),
+            disposal: SnapshotDisposal::AfterTheTerminal,
             names: JudgeNames::Integration {
                 sequence: u64::from(request.sequence.0),
             },

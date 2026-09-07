@@ -721,7 +721,9 @@ impl super::integrate::Verification for Run {
         &mut self,
         request: &super::integrate::VerifyRequest<'_>,
     ) -> Result<super::attempt::Judgement, UpstrokeError> {
-        use super::attempt::{Judge, JudgeIdentities, JudgeNames, SnapshotOf, Subject};
+        use super::attempt::{
+            Judge, JudgeIdentities, JudgeNames, SnapshotDisposal, SnapshotOf, Subject,
+        };
         let manager = self.fixture.manager.clone();
         let parent = if request.already_present {
             self.base().0
@@ -764,6 +766,7 @@ impl super::integrate::Verification for Run {
         };
         judge.judge(&Subject {
             snapshot: SnapshotOf::Commit(proposed),
+            disposal: SnapshotDisposal::AfterTheTerminal,
             names: JudgeNames::Integration {
                 sequence: u64::from(request.sequence.0),
             },

@@ -1105,6 +1105,82 @@ fn infrastructure_failure_defers_then_parks_at_max_defers() {
     run.replay_twice_equal();
 }
 
+/// One gate the scaffold's recording runner answers with exit 0.
+fn passing_gate() -> crate::engine::topology::attempt::GatePlan {
+    crate::engine::topology::attempt::GatePlan {
+        name: "scaffold-gate".to_owned(),
+        command: crate::runner::CommandSpec::new("gate").arg("--check"),
+        timeout: std::time::Duration::from_secs(60),
+    }
+}
+
+#[test]
+fn verification_snapshots_are_removed_only_after_the_terminal() {
+    // `side_effect_vs_event_ordering`: "staging and snapshot removal (forced)
+    // after terminal (incl. Deferred/Parked)". For each terminal a verification
+    // can reach — merge_prepared, merge_rejected, merge_verification_unavailable
+    // — every Snapshot.Remove the sequence performs comes after the terminal's
+    // append, and the sequence leaves no snapshot behind.
+    for (label, review) in [
+        ("prepared", VerifyReview::Passed),
+        ("rejected", VerifyReview::NeedsChanges),
+        ("parked", VerifyReview::NeedsHuman),
+    ] {
+        let mut run = Run::started(&format!("snapshots-after-{label}"));
+        run.verify_gates.push(passing_gate());
+        run.verify_reviewers.push(passing_reviewer());
+        run.verify_review = review;
+        let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+        let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
+        published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+        let mark = run.mark();
+        integrate_through(&mut run, &second).expect("beta reaches its terminal");
+
+        let appends: Vec<usize> = run
+            .timeline
+            .positions(
+                EffectSiteId::Event(crate::topology::effects::EventSite::Append),
+                HookPhase::After,
+            )
+            .into_iter()
+            .filter(|position| *position > mark)
+            .collect();
+        // The first append after the mark is merge_verification_started; the
+        // second is the verification's terminal, whichever shape it took.
+        let terminal = *appends
+            .get(1)
+            .unwrap_or_else(|| panic!("{label}: the sequence appended fewer than two events"));
+        let removals: Vec<usize> = run
+            .timeline
+            .positions(
+                EffectSiteId::Snapshot(crate::topology::effects::SnapshotSite::Remove),
+                HookPhase::Before,
+            )
+            .into_iter()
+            .filter(|position| *position > mark)
+            .collect();
+        assert_eq!(
+            removals.len(),
+            2,
+            "{label}: one gate snapshot and one reviewer snapshot were removed: {removals:?}"
+        );
+        assert!(
+            removals.iter().all(|position| *position > terminal),
+            "{label}: a snapshot was removed at {removals:?}, before the terminal at {terminal}"
+        );
+        assert!(
+            run.fixture
+                .manager
+                .intents()
+                .expect("intents")
+                .iter()
+                .all(|slot| !matches!(slot, crate::workspace_manager::Slot::Snapshot { .. })),
+            "{label}: a snapshot intent survived the terminal"
+        );
+        run.replay_twice_equal();
+    }
+}
+
 fn rejected_of(run: &Run) -> crate::topology::events::MergeRejected {
     run.emitter
         .durable_events()

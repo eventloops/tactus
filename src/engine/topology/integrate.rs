@@ -766,6 +766,9 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             let record = passing_record(&judgement);
             let authorized =
                 prepare_verified(journal, request, head, proposed, pin, disposition, record)?;
+            // `merge_prepared` is the verification's terminal: the snapshots
+            // go now, before the ref moves, and never before the append.
+            reclaim_snapshots(journal, manager)?;
             Ok(Terminal::Merged(publish(journal, manager, authorized)?))
         }
         Some(failure) if failure.is_outage() => unavailable(
@@ -989,14 +992,39 @@ fn run_id_of<J: IntegrationJournal>(journal: &J) -> Result<String, UpstrokeError
         .clone())
 }
 
-/// Remove a stale transaction's staging worktree with force, then its intent,
-/// then delete its pin expected-old.
+/// Remove every verification snapshot with force, each with its intent.
+///
+/// `side_effect_vs_event_ordering`: "staging and snapshot removal (forced)
+/// after terminal (incl. Deferred/Parked)". The judge leaves its snapshots
+/// in place ([`super::attempt::SnapshotDisposal::AfterTheTerminal`]) and
+/// this runs once the terminal is durable, so a removal that fails can no
+/// longer strand a completed judgement behind an unterminated verification.
+/// Every snapshot intent is reclaimed rather than an exact list, because a
+/// judgement that returned an error after adding a snapshot has no list to
+/// hand back, and this sequential coordinator runs one judgement at a time.
+fn reclaim_snapshots(
+    journal: &mut dyn IntegrationJournal,
+    manager: &WorkspaceManager,
+) -> Result<(), UpstrokeError> {
+    for slot in manager.intents()? {
+        if matches!(slot, Slot::Snapshot { .. }) {
+            manager.remove_worktree(journal.hooks().effects(), &slot)?;
+            manager.remove_intent(journal.hooks().effects(), &slot)?;
+        }
+    }
+    Ok(())
+}
+
+/// After a rejection or an unavailable terminal: the snapshots, then the
+/// stale transaction's staging worktree with force and its intent, then its
+/// pin deleted expected-old.
 fn reclaim_staging(
     journal: &mut dyn IntegrationJournal,
     manager: &WorkspaceManager,
     staging: &Slot,
     pin: Option<&GitRef>,
 ) -> Result<(), UpstrokeError> {
+    reclaim_snapshots(journal, manager)?;
     manager.remove_worktree(journal.hooks().effects(), staging)?;
     manager.remove_intent(journal.hooks().effects(), staging)?;
     if let Some(pin) = pin {
