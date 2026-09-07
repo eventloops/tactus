@@ -6323,137 +6323,453 @@ fn interrupted_sequences(fixture: &Fixture) -> Vec<u32> {
         .collect()
 }
 
-/// Plant a fast transaction whose `merge_prepared` reached the file but was
-/// never synced, then was lost to power failure: the candidate is prepared and
-/// created durably, the integration ref is at the base, and the log is
-/// truncated back to before the `merge_prepared` line — the exact prefix the
-/// stable-prefix barrier converges an unsynced tail to.
-fn plant_unsynced_merge_prepared(fixture: &Fixture) -> CommitSha {
-    use crate::workspace_manager::fixture::git;
-    let (commit, tree) = alpha_commit(fixture);
-    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, ALPHA, GEN);
-    git(
-        &fixture.repo_root,
-        &["update-ref", names.prepared_ref.as_str(), commit.as_str()],
-    );
-    git(
-        &fixture.repo_root,
-        &["update-ref", names.candidate_ref.as_str(), commit.as_str()],
-    );
-    git(
-        &fixture.repo_root,
-        &[
-            "update-ref",
-            fixture.started.integration_ref.as_str(),
-            fixture.base_sha.as_str(),
-        ],
-    );
-    let candidate = crate::topology::events::CandidateRef {
-        key: ALPHA,
-        generation: GEN,
-        commit_sha: commit.clone(),
-        candidate_ref: names.candidate_ref.clone(),
-    };
-    // The durable prefix: everything through task_candidate_created.
-    append_events(
-        fixture,
-        &[
-            dispatched_at(&fixture.base_sha),
-            attempt_started(1),
-            alpha_candidate_prepared(fixture, &commit, &tree, &names),
-            TopologyEventBody::TaskCandidateCreated {
-                data: crate::topology::events::TaskCandidateCreated {
-                    candidate: candidate.clone(),
-                },
-            },
-        ],
-    );
-    let durable = fixture.log_bytes();
-    // The unsynced append: merge_prepared reaches the file.
-    append_events(
-        fixture,
-        &[TopologyEventBody::MergePrepared {
-            data: Box::new(crate::topology::events::MergePrepared {
-                sequence: crate::topology::events::SequenceId(0),
-                disposition: crate::topology::events::PreparedDisposition::Fast,
-                expected_head: fixture.base_sha.clone(),
-                proposed_sha: commit.clone(),
-                key: ALPHA,
-                generation: GEN,
-                candidate_sha: commit.clone(),
-                candidate_ref: names.candidate_ref.clone(),
-                prepared_ref: None,
-                verification_source:
-                    crate::topology::events::VerificationSource::CandidatePrepared {
-                        key: ALPHA,
-                        generation: GEN,
-                    },
-                verification: None,
-                satisfies: vec![ALPHA],
-            }),
-        }],
-    );
+/// Append one event through the hooked Event funnel, so an injection armed
+/// on `harness` fires inside the append exactly as it would in a live run.
+fn append_event_hooked(
+    fixture: &Fixture,
+    body: TopologyEventBody,
+    hooks: &mut HarnessTopologyHooks,
+) -> Result<(), UpstrokeError> {
+    let mut warnings = Vec::new();
+    let mut log = EventLog::open_hooked(
+        EventSite::OpenLog,
+        &fixture.log(),
+        &mut warnings,
+        hooks.events(),
+    )?;
+    let site = crate::events::log::site_for(&body);
+    let (line, _) = TopologyLine::round_trip(&event(body)).expect("a valid event");
+    log.append_topology_hooked(site, &line, hooks.events())
+}
+
+/// The length the durability ledger proves durable for the fixture's log: the
+/// last file length a sync reported, after which every write is unsynced.
+fn proven_durable_len(hooks: &HarnessTopologyHooks, fixture: &Fixture) -> u64 {
+    hooks
+        .event_observer()
+        .ledger()
+        .records_for(&fixture.log())
+        .into_iter()
+        .filter(|record| {
+            matches!(
+                record.step,
+                crate::util::DurableStep::SyncedData | crate::util::DurableStep::SyncedFile
+            )
+        })
+        .map(|record| record.len)
+        .last()
+        .expect("a sync was recorded")
+}
+
+/// A simulated power loss: every byte no sync proved durable is gone.
+fn lose_unsynced_writes(fixture: &Fixture, durable: u64) {
+    let bytes = fixture.log_bytes();
+    let keep = usize::try_from(durable).expect("a small fixture log");
     assert!(
-        fixture.log_bytes().len() > durable.len(),
-        "merge_prepared reached the file"
+        keep <= bytes.len(),
+        "the ledger proved more durable than exists"
     );
-    // Power failure: the unsynced tail is lost, and the next open sees only the
-    // durable prefix. Rewriting the file to that prefix is the truncation the
-    // barrier's own open would perform, through the sanctioned test writer.
-    crate::workspace_manager::fixture::write_file(&fixture.log(), &durable);
-    commit
+    crate::workspace_manager::fixture::write_file(&fixture.log(), &bytes[..keep]);
+}
+
+/// The first crash of the two-crash proof: `merge_prepared(fast)` is written
+/// to the log as one complete line and never synced — the append's flush was
+/// made to fail after the full write — and the process ends under the
+/// append-error protocol. Returns the hooks whose ledger recorded it.
+fn crash_with_unsynced_merge_prepared(
+    fixture: &Fixture,
+    planted: &PlantedTransaction,
+) -> HarnessTopologyHooks {
+    let durable_before = fixture.log_bytes().len();
+    let harness = harness();
+    harness
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(
+            EffectSiteId::Event(EventSite::Append),
+            SubEffectPoint::WrittenFull,
+            InjectionMode::ErrorReturn,
+        )
+        .expect("`Event.Append` exposes `WrittenFull` with an error contract");
+    let mut hooks = HarnessTopologyHooks::new(harness).recording_durability();
+    let error = append_event_hooked(fixture, fast_prepared(fixture, planted), &mut hooks)
+        .expect_err("the append was made to fail after the full line was written");
+    assert!(
+        message(&error).contains("WrittenFull"),
+        "the failure is the injected one: {}",
+        message(&error)
+    );
+    let bytes = fixture.log_bytes();
+    assert!(
+        bytes.len() > durable_before
+            && bytes.ends_with(b"\n")
+            && String::from_utf8_lossy(&bytes).contains("merge_prepared"),
+        "the complete merge_prepared line reached the file"
+    );
+    let last = hooks
+        .event_observer()
+        .ledger()
+        .records_for(&fixture.log())
+        .pop()
+        .expect("the ledger recorded the append");
+    assert_eq!(
+        last.step,
+        crate::util::DurableStep::Wrote,
+        "the write was the last thing recorded: nothing flushed or synced it"
+    );
+    assert_eq!(
+        proven_durable_len(&hooks, fixture),
+        u64::try_from(durable_before).expect("a small fixture log"),
+        "the ledger proves durable exactly the prefix before the unsynced line"
+    );
+    hooks
+}
+
+/// A hook bundle for a child that will be killed: it forwards to the harness
+/// bundle and writes, in order, every sync of the log file and every entry
+/// into the integration compare-and-swap to a report file the parent reads
+/// after the kill — the durability oracle carried across the process
+/// boundary, since the child's ledger dies with it.
+struct ReportingHooks {
+    inner: HarnessTopologyHooks,
+    effects: ReportingEffects,
+    events: ReportingEvents,
+}
+
+struct ReportingEffects {
+    inner: crate::workspace_manager::HarnessEffects,
+    report: PathBuf,
+}
+
+struct ReportingEvents {
+    inner: crate::events::log::HarnessEventHooks,
+    report: PathBuf,
+}
+
+fn report(path: &Path, line: &str) {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .expect("the report file opens");
+    writeln!(file, "{line}").expect("the report line is written");
+}
+
+impl ReportingHooks {
+    fn new(harness: Arc<Mutex<HookHarness>>, report: &Path) -> Self {
+        Self {
+            inner: HarnessTopologyHooks::new(Arc::clone(&harness)),
+            effects: ReportingEffects {
+                inner: crate::workspace_manager::HarnessEffects::new(Arc::clone(&harness)),
+                report: report.to_path_buf(),
+            },
+            events: ReportingEvents {
+                inner: crate::events::log::HarnessEventHooks::new(harness),
+                report: report.to_path_buf(),
+            },
+        }
+    }
+}
+
+impl crate::workspace_manager::EffectHooks for ReportingEffects {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        if site == EffectSiteId::Ref(RefSite::CompareAndSwapIntegration)
+            && phase == HookPhase::Before
+        {
+            report(&self.report, "cas");
+        }
+        self.inner.phase(site, phase)
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        self.inner.refusal_cause()
+    }
+}
+
+impl crate::events::log::EventHooks for ReportingEvents {
+    fn phase(&mut self, site: EventSite, phase: HookPhase) {
+        self.inner.phase(site, phase);
+    }
+
+    fn point(&mut self, site: EventSite, point: SubEffectPoint, mode: InjectionMode) -> Injection {
+        self.inner.point(site, point, mode)
+    }
+
+    fn written_kill_shape(&mut self, site: EventSite) -> crate::events::log::WrittenShape {
+        self.inner.written_kill_shape(site)
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+
+    fn synced(&mut self, record: &crate::events::log::SyncRecord) {
+        if record.target == crate::events::log::SyncTarget::LogFile {
+            report(&self.report, &format!("synced {}", record.len));
+        }
+        self.inner.synced(record);
+    }
+}
+
+impl TopologyHooks for ReportingHooks {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        &mut self.effects
+    }
+
+    fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+        self.inner.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        &mut self.events
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
 }
 
 #[test]
-fn unsynced_merge_prepared_lost_to_power_failure_keeps_log_and_ref_agreeing() {
-    // The two-crash proof, recovery half. The compare-and-swap is issued only
-    // after the barrier has proven `merge_prepared` durable, so a
-    // `merge_prepared` that never synced — and is lost — cannot have moved the
-    // ref. Recovery must converge to the pre-transaction state: no task_merged,
-    // the ref still at the base, no transaction open. The barrier's own
-    // convergence of an unsynced tail is `events::log`'s
-    // `unsynced_line_lost_before_barrier_converges_to_before_append_order`; this
-    // adds that the ref never ran ahead of it.
-    let fixture = Fixture::healthy("two-crash-lost");
-    let commit = plant_unsynced_merge_prepared(&fixture);
-
-    let before = fixture.log_bytes();
-    assert!(
-        !String::from_utf8_lossy(&before).contains("merge_prepared"),
-        "the lost merge_prepared is gone from the durable prefix"
+#[ignore = "spawned as a subprocess by the two-crash proof"]
+fn two_crash_kill_child() {
+    // The restart of the two-crash proof, in a process of its own: the
+    // barrier, the compare-and-swap, and then a kill at `Written` of the
+    // task_merged append — the whole line in the file, nothing having synced
+    // it — reported to the parent as it happens.
+    let repo_root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_REPO").expect("the parent names the repository"),
     );
+    let git_dir = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_GITDIR").expect("the parent names the git dir"),
+    );
+    let report_path = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_REPORT").expect("the parent names the report"),
+    );
+    let repo_key = RepoKey::v1(&std::fs::canonicalize(&git_dir).expect("the git dir exists"));
 
     let harness = harness();
+    harness
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(
+            EffectSiteId::Event(EventSite::Append),
+            SubEffectPoint::Written,
+            InjectionMode::Kill,
+        )
+        .expect("the Written point supports a kill");
+    let mut hooks = ReportingHooks::new(harness, &report_path);
     let runtime = runtime_holding_the_record();
+    let liveness = FakeOwnerLiveness::new();
+    let view = DisposableDirView::new(ContainerTrace::default());
     let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    outcome.expect("the resume converges rather than refusing on a lost tail");
+    let incarnation = IncarnationId(RESUMER.to_owned());
+    let today = container_selection();
+    let mut warnings = Vec::new();
 
-    assert!(
-        merged_sequences(&fixture).is_empty(),
-        "an unsynced, lost merge_prepared authorized nothing: no task_merged"
+    let root = RootDerived::derive_with(&repo_root, RUN_ID, None, TOPOLOGY_SCHEMA)
+        .expect("(a0) derives in the child");
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &repo_root,
+        root.private_root(),
+        RUN_ID,
+        RESUMER,
+    )
+    .expect("the child's repository and private root are real directories");
+    let _ = run_recovery_order(
+        root,
+        &ResumeSeams {
+            repo_root: &repo_root,
+            worktree_git_dir: &git_dir,
+            repo_key: &repo_key,
+            incarnation: &incarnation,
+            inputs: FrozenInputs {
+                plan: plan(),
+                normalized_plan_digest: "sha256:aaaa".to_owned(),
+            },
+            today: &today,
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+            preflight: &certifies,
+            refs: &manager,
+            manager: &manager,
+            clock: &Frozen,
+        },
+        &mut hooks,
+        &mut warnings,
     );
+    unreachable!("the kill must have taken this process");
+}
+
+#[test]
+fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()
+{
+    // `C.proof_tests[3]` and `[T-PREPARED].test`, the two-crash proof. A
+    // complete but unsynced merge_prepared line; restart; recovery step (a1)
+    // syncs and proves the prefix before the pre-CAS recovery of T-FAST; the
+    // CAS moves the integration ref; a kill at `Written` of task_merged; then
+    // a simulated power loss discards every unsynced write. The log still
+    // contains merge_prepared, the ref is at proposed_sha, and the next resume
+    // appends task_merged — on a real repository, with the sync ledger as the
+    // durability oracle: in-process for the first crash, reported across the
+    // process boundary for the second.
+    let fixture = Fixture::healthy("two-crash");
+    let planted = plant_queued_candidate(&fixture);
+    let first = crash_with_unsynced_merge_prepared(&fixture, &planted);
+    let prefix_with_prepared = u64::try_from(fixture.log_bytes().len()).expect("a small log");
+    drop(first);
+
+    // Restart, in a process of its own, killed at the task_merged write.
+    let report_path = fixture.root.join("two-crash-report");
+    let status = crate::workspace_manager::fixture::run_kill_child(
+        "engine::topology::recover::tests::two_crash_kill_child",
+        &[
+            ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
+            ("UPSTROKE_TEST_KILL_GITDIR", fixture.git_dir.as_os_str()),
+            ("UPSTROKE_TEST_KILL_REPORT", report_path.as_os_str()),
+        ],
+    );
+    assert!(
+        crate::workspace_manager::fixture::died_by_abort(&status),
+        "the child must have died at the task_merged write, and it ended {status:?}"
+    );
+
+    // (a1) before the CAS: the child's barrier synced the whole surviving
+    // prefix — the unsynced merge_prepared included — and only then was the
+    // swap entered, once.
+    let reported = std::fs::read_to_string(&report_path).expect("the child reported");
     assert_eq!(
-        cas_integration_entries(&harness),
-        0,
-        "no compare-and-swap was issued for a transaction that never became durable"
+        reported.lines().collect::<Vec<_>>(),
+        vec![format!("synced {prefix_with_prepared}").as_str(), "cas"],
+        "the barrier's sync covered the merge_prepared line and preceded the swap"
     );
     assert_eq!(
         ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
-        Some(fixture.base_sha.as_str()),
-        "the integration ref never ran ahead of the log: it is still at the base"
+        Some(planted.commit.as_str()),
+        "the swap moved the ref to the proposal"
+    );
+    let killed = fixture.log_bytes();
+    assert!(
+        u64::try_from(killed.len()).expect("a small log") > prefix_with_prepared
+            && killed.ends_with(b"\n")
+            && String::from_utf8_lossy(&killed).contains("task_merged"),
+        "the complete task_merged line reached the file before the kill"
     );
 
-    let fold = {
-        let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
-        TopologyFold::replay(fixture.inputs(), &events).expect("replays")
-    };
+    // The second power loss: every unsynced write is discarded. What the
+    // child proved durable is exactly what its barrier synced — the prefix
+    // through merge_prepared — and nothing after it.
+    lose_unsynced_writes(&fixture, prefix_with_prepared);
+    let surviving = String::from_utf8_lossy(&fixture.log_bytes()).into_owned();
     assert!(
-        fold.transaction().is_none(),
-        "the proven prefix opens no transaction"
+        surviving.contains("merge_prepared") && !surviving.contains("task_merged"),
+        "the log still contains merge_prepared and lost task_merged"
     );
-    let _ = commit;
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str()),
+        "the ref is at proposed_sha: the log and the ref agree on an authorized, completed swap"
+    );
+
+    // The next resume records the merge it finds done, with no second swap.
+    let third = harness();
+    let (_, handle) = resume_with_real_refs(&fixture, &third)
+        .expect("the ref already at the proposal is recorded, not swapped again");
+    assert_eq!(merged_sequences(&fixture), vec![0]);
+    assert_eq!(cas_integration_entries(&third), 0);
+    assert!(handle.fold.transaction().is_none());
+    assert_eq!(handle.fold.task_state(ALPHA), Some(TaskState::Merged));
+    drop(handle);
+
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+    let once = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+}
+
+#[test]
+fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {
+    // `C.proof_tests[3]`, second sequence: the barrier's sync fails at
+    // (a1). No CAS is issued, the command ends resumably having done nothing,
+    // and after the loss of the unsynced line the before-append order holds:
+    // the candidate is still queued, and the next incarnation integrates it.
+    let fixture = Fixture::healthy("barrier-sync-fails");
+    let planted = plant_queued_candidate(&fixture);
+    let first = crash_with_unsynced_merge_prepared(&fixture, &planted);
+    let durable = proven_durable_len(&first, &fixture);
+    drop(first);
+    let before = fixture.log_bytes();
+
+    let harness = harness();
+    harness
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(
+            EffectSiteId::Event(EventSite::OpenLog),
+            SubEffectPoint::SyncPrefix,
+            InjectionMode::ErrorReturn,
+        )
+        .expect("`Event.OpenLog` exposes `SyncPrefix` with an error contract");
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness)).recording_durability();
+    let error = resume_with_real_refs_hooked(&fixture, &mut hooks)
+        .err()
+        .expect("a barrier whose sync fails ends the command");
+    let text = message(&error);
+    assert!(
+        text.contains("SyncPrefix"),
+        "the refusal names the barrier step that failed: {text}"
+    );
+    assert_eq!(cas_integration_entries(&harness), 0, "no CAS was issued");
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(fixture.base_sha.as_str()),
+        "the ref did not move"
+    );
+    assert_eq!(fixture.log_bytes(), before, "nothing was appended");
+    assert!(
+        hooks
+            .event_observer()
+            .ledger()
+            .records_for(&fixture.log())
+            .is_empty(),
+        "the failed barrier synced nothing, so the unsynced line is still unsynced"
+    );
+
+    // The loss: the unsynced merge_prepared is gone, and the before-append
+    // order stands — the candidate queued, no transaction, the ref at the
+    // base — which the next incarnation carries through to publication.
+    lose_unsynced_writes(&fixture, durable);
+    assert!(
+        !String::from_utf8_lossy(&fixture.log_bytes()).contains("merge_prepared"),
+        "the unsynced line was lost"
+    );
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(0),
+                ..
+            }))
+        ),
+        "the candidate was still queued and integrated under sequence 0: {:?}",
+        driven.progress
+    );
+    assert_eq!(merged_sequences(&fixture), vec![0]);
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str())
+    );
 }
 
 #[test]
