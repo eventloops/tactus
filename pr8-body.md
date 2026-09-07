@@ -59,8 +59,10 @@ slot broker. A PR8 build refuses, before any append, dispatch of a Repair-origin
 repair-admission answer. No attributed `DesignDefect` record is emitted; questions carry no
 attribution.
 
-**`src/topology/**` freeze — Class B changes, owner approval owed before merge.** Three changes
-touch the frozen fold layer. All are behavioural and are listed here for per-instance approval:
+**`src/topology/**` freeze — Class B changes, approved by the owner on 2026-09-07.** Three changes
+touch the frozen fold layer. All are behavioural, each was approved per-instance against the
+description below, and each description was verified against the code by the `gpt-6-astra`
+record pass of 2026-09-07:
 
 - `TransactionClass::Prepared` retains `expected_head` (set in `apply_merge_prepared`, read by the
   CAS recovery). Retaining it in the fold rather than re-deriving it from the event list a second
@@ -318,7 +320,8 @@ runner's errors are the same errors with a fate attached, and `run_review` repor
 unavailable exactly as before unless the Runner says the process may still be running, which the
 host funnel says only when its kill was not reaped.
 
-Two known gaps are deferred to owner decisions. `PR8-CRASH-002`: a lock file left by a coordinator
+Two known gaps were deferred by the owner on 2026-09-07, each with a standing finding filed in
+`reviews/findings/`. `PR8-CRASH-002`: a lock file left by a coordinator
 killed inside `git update-ref`; the refusal it causes is resumable and loses nothing, and the
 operator's removal of the lock lets the next resume complete the publication; reclaiming it needs
 a `Ref.*` residue class in the frozen inventory. `PR8-R2-SPEND-REPLAY`: a paid review that parks
