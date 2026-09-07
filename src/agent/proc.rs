@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::topology::effects::ProcessSite;
 
-use crate::error::UpstrokeError;
+use crate::error::{ProcessFate, UpstrokeError};
 use crate::topology::effects::SubEffectPoint;
 
 mod hooks;
@@ -102,7 +102,35 @@ pub fn run_with_timeout_at(
     timeout: Duration,
     hooks: &mut dyn SpawnHooks,
 ) -> Result<ProcessOutput, UpstrokeError> {
-    validate_process_sites(spawn_site, terminate_site)?;
+    run_with_timeout_classified(
+        spawn_site,
+        terminate_site,
+        command,
+        stdin_data,
+        timeout,
+        hooks,
+    )
+    .map_err(|failure| failure.error)
+}
+
+#[derive(Debug)]
+pub struct ProcessFailure {
+    pub fate: ProcessFate,
+    pub error: UpstrokeError,
+}
+
+pub fn run_with_timeout_classified(
+    spawn_site: ProcessSite,
+    terminate_site: ProcessSite,
+    command: Command,
+    stdin_data: &[u8],
+    timeout: Duration,
+    hooks: &mut dyn SpawnHooks,
+) -> Result<ProcessOutput, ProcessFailure> {
+    validate_process_sites(spawn_site, terminate_site).map_err(|error| ProcessFailure {
+        fate: ProcessFate::NeverStarted,
+        error,
+    })?;
     run_with_timeout_and_limit(
         spawn_site,
         terminate_site,
@@ -138,8 +166,12 @@ fn run_with_timeout_and_limit(
     timeout: Duration,
     output_limit: usize,
     hooks: &mut dyn SpawnHooks,
-) -> Result<ProcessOutput, UpstrokeError> {
-    validate_process_sites(spawn_site, terminate_site)?;
+) -> Result<ProcessOutput, ProcessFailure> {
+    let fate = std::cell::Cell::new(ProcessFate::NeverStarted);
+    validate_process_sites(spawn_site, terminate_site).map_err(|error| ProcessFailure {
+        fate: fate.get(),
+        error,
+    })?;
     let mut reports = [None, None, None];
     let [input_report, stdout_report, stderr_report] = &mut reports;
     let outcome = (|| {
@@ -166,6 +198,7 @@ fn run_with_timeout_and_limit(
                     command.get_program().to_string_lossy()
                 ),
             })?;
+        fate.set(ProcessFate::Unresolved);
         drop(command);
         #[cfg(unix)]
         apply(
@@ -177,7 +210,11 @@ fn run_with_timeout_and_limit(
         #[cfg(unix)]
         if let Err(error) = termination.register(child.id()) {
             drop(termination);
-            return Err(error.with_cleanup(kill_tree(terminate_site, &mut child)));
+            let killed = kill_tree(terminate_site, &mut child);
+            if killed.is_ok() {
+                fate.set(ProcessFate::Gone);
+            }
+            return Err(error.with_cleanup(killed));
         }
         #[cfg(unix)]
         apply(
@@ -217,10 +254,17 @@ fn run_with_timeout_and_limit(
                         error,
                         termination.finish(),
                         &mut child,
+                        &fate,
                     ));
                 }
                 #[cfg(not(unix))]
-                return Err(error.with_cleanup(kill_tree(terminate_site, &mut child)));
+                {
+                    let killed = kill_tree(terminate_site, &mut child);
+                    if killed.is_ok() {
+                        fate.set(ProcessFate::Gone);
+                    }
+                    return Err(error.with_cleanup(killed));
+                }
             }
         };
 
@@ -231,8 +275,9 @@ fn run_with_timeout_and_limit(
             match child_exited_unreaped(&child) {
                 Ok(true) => {
                     if let Err(error) = termination.finish() {
-                        return Err(settle_failed_supervision(error, Ok(()), &mut child));
+                        return Err(settle_failed_supervision(error, Ok(()), &mut child, &fate));
                     }
+                    fate.set(ProcessFate::Gone);
                     let status = child.wait().map_err(|e| UpstrokeError::Agent {
                         message: format!("reaping agent process: {e}"),
                     })?;
@@ -242,18 +287,32 @@ fn run_with_timeout_and_limit(
                     if drain_limit_exceeded(&stdout_drain, &stderr_drain) {
                         output_limited = true;
                         if let Err(error) = termination.finish() {
-                            return Err(settle_failed_supervision(error, Ok(()), &mut child));
+                            return Err(settle_failed_supervision(
+                                error,
+                                Ok(()),
+                                &mut child,
+                                &fate,
+                            ));
                         }
                         let _ = child.kill();
-                        let _ = child.wait();
+                        if child.wait().is_ok() {
+                            fate.set(ProcessFate::Gone);
+                        }
                         break None;
                     } else if started.elapsed() >= timeout {
                         timed_out = true;
                         if let Err(error) = termination.finish() {
-                            return Err(settle_failed_supervision(error, Ok(()), &mut child));
+                            return Err(settle_failed_supervision(
+                                error,
+                                Ok(()),
+                                &mut child,
+                                &fate,
+                            ));
                         }
                         let _ = child.kill();
-                        let _ = child.wait();
+                        if child.wait().is_ok() {
+                            fate.set(ProcessFate::Gone);
+                        }
                         break None;
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -266,6 +325,7 @@ fn run_with_timeout_and_limit(
                         primary,
                         termination.finish(),
                         &mut child,
+                        &fate,
                     ));
                 }
             }
@@ -274,6 +334,7 @@ fn run_with_timeout_and_limit(
         let code = loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
+                    fate.set(ProcessFate::Gone);
                     child.finish_direct_exit()?;
                     break status.code();
                 }
@@ -281,10 +342,12 @@ fn run_with_timeout_and_limit(
                     if drain_limit_exceeded(&stdout_drain, &stderr_drain) {
                         output_limited = true;
                         kill_tree(terminate_site, &mut child)?;
+                        fate.set(ProcessFate::Gone);
                         break None;
                     } else if started.elapsed() >= timeout {
                         timed_out = true;
                         kill_tree(terminate_site, &mut child)?;
+                        fate.set(ProcessFate::Gone);
                         break None;
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -293,7 +356,11 @@ fn run_with_timeout_and_limit(
                     let primary = UpstrokeError::Agent {
                         message: format!("waiting on agent process: {e}"),
                     };
-                    return Err(primary.with_cleanup(kill_tree(terminate_site, &mut child)));
+                    let killed = kill_tree(terminate_site, &mut child);
+                    if killed.is_ok() {
+                        fate.set(ProcessFate::Gone);
+                    }
+                    return Err(primary.with_cleanup(killed));
                 }
             }
         };
@@ -333,7 +400,10 @@ fn run_with_timeout_and_limit(
             output_limited,
         })
     })();
-    finish_pipe_reports(outcome, reports)
+    finish_pipe_reports(outcome, reports).map_err(|error| ProcessFailure {
+        fate: fate.get(),
+        error,
+    })
 }
 
 fn finish_pipe_reports<T>(
@@ -364,10 +434,14 @@ fn settle_failed_supervision(
     primary: UpstrokeError,
     cleanup: Result<(), UpstrokeError>,
     child: &mut ProcessTree,
+    fate: &std::cell::Cell<ProcessFate>,
 ) -> UpstrokeError {
     let primary = primary.with_cleanup(cleanup);
     let kill = child.kill();
     let wait = child.wait().map(|_| ());
+    if wait.is_ok() {
+        fate.set(ProcessFate::Gone);
+    }
     finish_failed_supervision_cleanup(primary, kill, wait)
 }
 

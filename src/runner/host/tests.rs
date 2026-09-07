@@ -1646,8 +1646,8 @@ fn a_gate_child_is_told_where_no_agents_credentials_live() {
 struct StubRunner(Box<dyn Fn() -> Result<ProcessOutput, UpstrokeError> + Send + Sync>);
 
 impl Runner for StubRunner {
-    fn run(&self, _request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
-        (self.0)()
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        (self.0)().map_err(|error| RunnerError::never_started(&request.invocation, error))
     }
 }
 
@@ -5298,8 +5298,9 @@ fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {
         .run(&named_request(&name, "arg", &workspace))
         .expect_err("nothing of that name is installed");
     assert!(
-        matches!(first, UpstrokeError::Refused { .. }),
-        "an unresolvable name is a refusal: {first:?}"
+        matches!(*first.source, UpstrokeError::Refused { .. })
+            && first.fate == crate::error::ProcessFate::NeverStarted,
+        "an unresolvable name is a refusal before any process: {first:?}"
     );
     let first = first.to_string();
     assert!(first.contains(&name), "{first}");

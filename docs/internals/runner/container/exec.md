@@ -699,7 +699,12 @@ distinguishable error is the `cause` R1's `cancelled` carries.
 ## `impl ContainerRunner` › `fn cancelled(`
 
 Release what a failed launch reached and answer `cause` with whatever
-could not be released appended.
+could not be released appended, as a `RunnerError` whose fate is what the
+cancel established: `NeverStarted` when no container was reached or the
+cancel stopped and removed the one that was, `Unresolved` when a container
+was reached and the runtime did not confirm it released. A `create` that
+returned an error is treated as having reached a container, because the
+daemon may have created it before the answer was lost.
 
 The answer is never the cleanup's own failure: an operator holding "the
 container could not be stopped" instead of "the runtime executed a
@@ -725,7 +730,10 @@ were each self-consistent and nothing crossed them.
 
 ## `impl ContainerRunner` › `fn release(`
 
-"stop/rm, view removal, intent removal **after completion**".
+"stop/rm, view removal, intent removal **after completion**", answered as
+[`super::release_classified`] answers it: a failure says whether the
+container itself was stopped and removed, which is what `run` needs to
+classify the process.
 
 [`super::release`], which is the one place those four sites are
 performed in that order. It was a second copy until repair round R3b,
@@ -737,7 +745,8 @@ never reached `Runner::run`.
 
 ### Errors
 
-[`UpstrokeError::Refused`] naming every step that could not be completed.
+A `ReleaseFailure` whose error is [`UpstrokeError::Refused`] naming every
+step that could not be completed.
 
 ## `impl ContainerRunner` › `fn supervise(&self, name: &ContainerName, deadline: Instant) -> Result<bool, UpstrokeError> {`
 
@@ -860,11 +869,26 @@ id) -> Start, in that order and in one place.
 Release whatever the invocation reached, whether or not it succeeded:
 R26 is "released on complete (stop/rm, view removed, intent removed),
 **cancel**, or shutdown", and R19's "pruned on complete or cancel".
-So the release runs on both paths and its own failure is reported
-only when there is no earlier one to report — a release that could
-not finish leaves residue the census reclaims, and hiding the reason
-the invocation failed behind it would trade a diagnosis for a
-symptom.
+So the release runs on both paths, and the two results together decide
+the fate the error carries. Outcome and release both fine: the output.
+Outcome fine, release failed: `Gone` when the runtime confirmed the
+container stopped and removed (the process was observed terminated and
+only the view or the intent is residue), `Unresolved` when it did not or
+when the output was a timeout — a stop that failed on a container the
+supervisor never saw exit leaves it running. Outcome failed, release
+fine: `Gone`, with the outcome's error, since the release stopped and
+removed the container. Both failed: the outcome's error with the release
+failure attached as cleanup, `Unresolved` unless the release confirmed
+the container gone.
+
+The reviews of `916852c9` reproduced the case this decides: Docker lost
+after `start`, so observe, stop and remove all failed, and the one error
+the caller saw was settled as a spawn failure — an outage terminal that
+released the transaction and reclaimed the snapshot beside a gate still
+running. A release that could not finish leaves residue the census
+reclaims on the next resume, and that census runs before any recovery
+event, so ending the command with the fate unresolved is what lets the
+container be reclaimed before the verification is settled.
 
 ## `impl ContainerRunner` › `fn finish(`
 

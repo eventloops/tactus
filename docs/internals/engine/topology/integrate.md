@@ -93,10 +93,11 @@ and the review-input policy; no gate or reviewer runs in it.
 
 ### Errors
 
-A snapshot funnel refusal, or a plan the run cannot assemble. A Runner
-that could not run a gate is not an error but
-[`Verified::RunnerUnavailable`]: an observed infrastructure failure
-with a terminal of its own.
+A plan the run cannot assemble, a refusal of the run's own records, or a
+Runner error whose process fate is `Unresolved` — a gate or reviewer
+process that may still be running, which no terminal may be settled over.
+An observed infrastructure failure is not an error but
+[`Verified::Unavailable`], with a terminal of its own.
 
 ## `pub trait Verification {` › `fn ids(&self) -> &dyn IdSource;`
 
@@ -110,13 +111,18 @@ What a verification came back with.
 
 The gates and reviewers ran, or a prior failure stood in for them.
 
-## `pub enum Verified {` › `RunnerUnavailable { detail: String },`
+## `pub enum Verified {` › `Unavailable {`
 
-The Runner could not run a gate process: `invariants[INV-23]`'s
-mid-run `RunnerSpawnFailure`, an observed infrastructure failure the
-sequence terminates `merge_verification_unavailable{Infrastructure}`,
-deferred inside the frozen allowance and parked at it
-(`transaction_fault_matrix[T-VERIFY].resume_action`).
+An observed infrastructure failure the sequence terminates
+`merge_verification_unavailable{Infrastructure{kind}}`, deferred inside
+the frozen allowance and parked at it
+(`transaction_fault_matrix[T-VERIFY].resume_action`). The kinds this
+build settles: `RunnerSpawnFailure` for a Runner that established no
+process of a gate was started (`invariants[INV-23]`), and `Other` for a
+gate process the Runner lost after it started and has since established
+gone, and for foreign Git state the verification observed
+(`decisions.repairs.not_repairs`). `detail` is what the infrastructure
+reported, carried into the park question.
 
 ## `pub struct VerifyRequest<'a> {`
 
@@ -353,7 +359,11 @@ classification and (for a clean or empty pick) the verification decide.
 ## `fn start_and_verify<J: IntegrationJournal + Verification>(`
 
 Append `merge_verification_started`, run the verification, and reach the
-terminal the judgement decides.
+terminal the judgement decides. A gate that timed out is asked about
+before the judgement's failure is read: `decisions.repairs.not_repairs`
+lists timeout among the outcomes that terminate unavailable at
+integration, so it settles `Infrastructure{Other}` and registers no
+repair, where the ordinary gate-failure branch would have.
 
 ## `fn start_and_verify<J: IntegrationJournal + Verification>(` › `reclaim_snapshots(journal, manager)?;`
 

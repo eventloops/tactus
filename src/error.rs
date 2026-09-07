@@ -64,6 +64,29 @@ impl std::error::Error for CleanupError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProcessFate {
+    NeverStarted,
+    Gone,
+    Unresolved,
+}
+
+impl ProcessFate {
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::NeverStarted => "no process of it was started",
+            Self::Gone => "its process is gone",
+            Self::Unresolved => "a process of it may still be running",
+        }
+    }
+
+    #[must_use]
+    pub const fn is_unresolved(self) -> bool {
+        matches!(self, Self::Unresolved)
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum UpstrokeError {
     #[error("failed to read {}: {source}", .path.display())]
@@ -106,6 +129,14 @@ pub enum UpstrokeError {
 
     #[error("gate error: {message}")]
     Gate { message: String },
+
+    #[error("the Runner could not complete `{invocation}` ({}): {source}", .fate.describe())]
+    Runner {
+        invocation: String,
+        fate: ProcessFate,
+        #[source]
+        source: Box<UpstrokeError>,
+    },
 
     #[error("event log {}: {message}", .path.display())]
     EventLog { path: PathBuf, message: String },

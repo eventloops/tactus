@@ -123,7 +123,7 @@ use crate::rundir::{
     remove_marker, remove_private_husk, remove_public_husk, stage_commit_record, stage_marker,
     stage_owner_record, write_plan,
 };
-use crate::runner::{InvocationId, Runner, RunnerRequest};
+use crate::runner::{InvocationId, Runner, RunnerError, RunnerRequest};
 use crate::topology::effects::EventSite;
 use crate::topology::events::{RunStarted4, TopologyEvent, TopologyEventBody};
 use crate::topology::fold::{FrozenInputs, TopologyDelta, TopologyFold};
@@ -286,7 +286,7 @@ pub struct ShellProbe<'a> {
 }
 
 impl Runner for ShellProbe<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         self.through.run(request)
     }
 }
@@ -302,15 +302,18 @@ pub struct AgentProbe<'a> {
 }
 
 impl Runner for AgentProbe<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         if !super::identity::is_slotted(&request.invocation) {
-            return Err(UpstrokeError::Refused {
-                message: format!(
-                    "`{}` takes no slot and this is an agent probe's boundary; INV-23's \
-                     non-slotted probe is the recorded shell, which runs on its own path",
-                    request.invocation
-                ),
-            });
+            return Err(RunnerError::never_started(
+                &request.invocation,
+                UpstrokeError::Refused {
+                    message: format!(
+                        "`{}` takes no slot and this is an agent probe's boundary; INV-23's \
+                         non-slotted probe is the recorded shell, which runs on its own path",
+                        request.invocation
+                    ),
+                },
+            ));
         }
         self.through.run(request)
     }

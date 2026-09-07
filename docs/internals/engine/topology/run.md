@@ -376,16 +376,24 @@ the alternative, and a model could be handed its own work to review
 gates and review passes", and the recorded passes were selected against this
 binding.
 
-## `impl Verification for IntegrationCx<'_, '_>` › `let prior_failure = match crate::engine::classify::diff_failure(`
+## `impl IntegrationCx<'_, '_>` › `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {`
 
-What the attempt path decides in `assess` before it judges, decided here
-too: a review diff no reviewer can judge (too large, opaque) and the
-review-input policy's answer for the proposed tree, read in the staging
-worktree. Either stands in for the gates and reviewers as the judge's
-prior failure, and the sequence parks the candidate `HumanRequired` (R4).
-Without it the real refusal escaped from `review::materialize_prompt` as an
-error, and a policy that refused the tree still published (`pr8-triage.md`,
-tests 2).
+The verification proper, every error typed so [`Verification::verify`]
+can decide what each one means: the review diff, the plan, the input
+classification, the review inputs, and the judge.
+
+The input classification is `classify::unjudgeable_diff` — a review diff
+no reviewer can judge (too large, opaque) — and the review-input policy's
+answer for the proposed tree, read in the staging worktree. Either stands
+in for the gates and reviewers as the judge's prior failure, and the
+sequence parks the candidate `HumanRequired` (R4). Without it the real
+refusal escaped from `review::materialize_prompt` as an error, and a policy
+that refused the tree still published (`pr8-triage.md`, tests 2). The
+attempt path's `diff_failure` also checks a Test task's provenance; that
+is a judgement of the candidate when it was produced, and the reviews of
+`916852c9` reproduced it rejecting a Test candidate whose identical test
+another candidate had published first, so the integration diff is not
+asked it (`pr8-triage.md` §5, adequacy 2).
 
 ## `impl Verification for IntegrationCx<'_, '_>` › `self.spend.record_reviews(key, &judgement.reviews);`
 
@@ -395,16 +403,39 @@ from the terminal's record. An unavailable terminal carries no review
 record, so a review that ended in a park or an outage is charged live and
 not on replay (`pr8-plan.md` R22).
 
-## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Runner { invocation, error }) => Ok(Verified::RunnerUnavailable {`
+## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Runner(error)) => match error.fate {`
 
-A Runner that could not run a gate is not an error of the sequence but an
-observed infrastructure failure with a terminal of its own:
-`transaction_fault_matrix[T-VERIFY].resume_action` and `invariants[INV-23]`
-("a RunnerSpawnFailure outage settlement mid-run"). Left to `?`, it escaped
-after `merge_verification_started`, the transaction stayed open, and every
-repeat bypassed the defer and park limit (`pr8-triage.md` C3). A reviewer's
-process failure already reaches the judgement as `ReviewResult::Unavailable`
-through `run_review`; this covers the gate path.
+What a Runner error means is what the Runner established about the
+process. `NeverStarted` is `invariants[INV-23]`'s mid-run
+`RunnerSpawnFailure`: an observed infrastructure failure with a terminal
+of its own (`transaction_fault_matrix[T-VERIFY].resume_action`); left to
+`?` at `3414dc58`, it escaped after `merge_verification_started`, the
+transaction stayed open, and every repeat bypassed the defer and park
+limit (`pr8-triage.md` C3). `Gone` — a gate process that started and the
+Runner has since established gone — is an outage too, `Other` because it
+is not a spawn failure. `Unresolved` is neither: the repair round settled
+it as a spawn failure, and the reviews of `916852c9` reproduced a gate
+still running in Docker beside a `Deferred` terminal that had released
+both entitlements and removed the snapshot the container had mounted, then
+a second sequence started beside it. A terminal authorizes cleanup and
+readmission, so an error that leaves the process's liveness unknown ends
+the command with the transaction open and nothing appended; the next
+resume's census reclaims the container before recovery step (f) settles
+the verification interrupted. A reviewer's Runner error reaches the
+judgement through `run_review`, which reports it unavailable on the same
+two fates and propagates the third.
+
+## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Other(UpstrokeError::Git { message })) => Ok(Verified::Unavailable {`
+
+Foreign Git state observed by the verification — a corrupt staging index
+under the review-input reader, a proposal whose object cannot be read, a
+snapshot the checkout could not make — is among the failures
+`decisions.repairs.not_repairs` says "at integration terminate in
+merge_verification_unavailable with outcome Deferred or Parked". Every
+Git command the verification issues runs before or between its processes,
+never beside one, so the terminal is safe to settle. R24 at `916852c9`
+excluded these and the `?` propagated them as an interruption
+(`pr8-triage.md` §5, record F3).
 
 ## `impl LoopBranch` › `pub fn owes(self, clause: &str) -> UpstrokeError {`
 
@@ -1573,21 +1604,21 @@ bundle for the funnels, and the seams and ledgers the verification runs
 through. One object, so `emit`, `verify` and `converted` are all `&mut
 self` methods over disjoint fields rather than three overlapping borrows.
 
-## `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {` › `let (diff_parent, diff_tree) = if request.already_present {`
+## `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {` › `let (diff_parent, diff_tree) = if request.already_present {`
 
 The review diff: the proposal against the head for a stale
 candidate, and the candidate's own patch (base..commit) for an
 already-present one, whose proposal is the head itself.
 
-## `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {` › `let prior_failure = match crate::engine::classify::diff_failure(`
+## `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {` › `match crate::engine::classify::unjudgeable_diff(&diff, !plan.reviewers.is_empty()) {`
 
-What the attempt path decides before it judges (`assess`): a diff
-no reviewer can judge — too large, or opaque — and the review-input
-policy's answer for the proposed tree, read in the staging worktree.
-Either stands in for the gates and reviewers as the prior failure,
-and the sequence parks the candidate for a person (R4): a Fix task
-cannot be asked to edit code without code evidence, and waiting
-cannot make the same diff fit.
+What the attempt path decides before it judges (`assess`), less the
+Test-provenance rule: a diff no reviewer can judge — too large, or
+opaque — and the review-input policy's answer for the proposed tree,
+read in the staging worktree. Either stands in for the gates and
+reviewers as the prior failure, and the sequence parks the candidate for
+a person (R4): a Fix task cannot be asked to edit code without code
+evidence, and waiting cannot make the same diff fit.
 
 ## `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {` › `self.spend.record_reviews(key, &judgement.reviews);`
 

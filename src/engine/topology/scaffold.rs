@@ -458,7 +458,7 @@ impl RecordingRunner {
 }
 
 impl Runner for RecordingRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, crate::runner::RunnerError> {
         let durable_at_spawn = self.durable_now();
         let head_at_spawn = {
             let output = crate::workspace_manager::fixture::git_out(
@@ -791,9 +791,10 @@ impl super::integrate::Verification for Run {
             },
         }) {
             Ok(judgement) => Ok(super::integrate::Verified::Judged(judgement)),
-            Err(super::attempt::JudgeError::Runner { invocation, error }) => {
-                Ok(super::integrate::Verified::RunnerUnavailable {
-                    detail: format!("`{invocation}`: {error}"),
+            Err(super::attempt::JudgeError::Runner(error)) => {
+                Ok(super::integrate::Verified::Unavailable {
+                    kind: crate::topology::events::InfrastructureKind::RunnerSpawnFailure,
+                    detail: error.to_string(),
                 })
             }
             Err(super::attempt::JudgeError::Other(error)) => Err(error),

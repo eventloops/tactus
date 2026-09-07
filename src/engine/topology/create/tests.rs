@@ -387,6 +387,7 @@ impl Probes for RecordingProbes {
         through
             .run(&probe_request_for(invocation, None))
             .map(|_output| ())
+            .map_err(UpstrokeError::from)
     }
 
     fn agent(&self, agent: &str, through: &AgentProbe<'_>) -> Result<(), UpstrokeError> {
@@ -408,6 +409,7 @@ impl Probes for RecordingProbes {
                 Some(agent),
             ))
             .map(|_output| ())
+            .map_err(UpstrokeError::from)
     }
 }
 
@@ -2918,6 +2920,7 @@ impl Probes for ContainerProbes {
                 Some(agent),
             ))
             .map(|_output| ())
+            .map_err(UpstrokeError::from)
     }
 }
 
@@ -3190,7 +3193,7 @@ impl crate::runner::Runner for RecordingRunner {
     fn run(
         &self,
         request: &crate::runner::RunnerRequest,
-    ) -> Result<crate::agent::proc::ProcessOutput, UpstrokeError> {
+    ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
         self.requests
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -3215,13 +3218,16 @@ impl crate::runner::Runner for FailsTheSecondRequest {
     fn run(
         &self,
         request: &crate::runner::RunnerRequest,
-    ) -> Result<crate::agent::proc::ProcessOutput, UpstrokeError> {
+    ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
         let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         seen.push(request.invocation.to_string());
         if seen.len() >= 2 {
-            return Err(UpstrokeError::Agent {
-                message: "the help probe did not answer".to_owned(),
-            });
+            return Err(crate::runner::RunnerError::gone(
+                &request.invocation,
+                UpstrokeError::Agent {
+                    message: "the help probe did not answer".to_owned(),
+                },
+            ));
         }
         Ok(crate::agent::proc::ProcessOutput {
             code: Some(0),
@@ -3537,7 +3543,11 @@ impl Probes for RunsThroughWhatItIsHanded {
         } else {
             probe_request_for(invocation, None)
         };
-        let outcome = through.run(&request).map(|_| ()).map_err(|e| e.to_string());
+        let outcome = through
+            .run(&request)
+            .map(|_| ())
+            .map_err(UpstrokeError::from)
+            .map_err(|e| e.to_string());
         *self
             .shell_result
             .lock()
@@ -3557,7 +3567,11 @@ impl Probes for RunsThroughWhatItIsHanded {
                 Some(agent),
             )
         };
-        let outcome = through.run(&request).map(|_| ()).map_err(|e| e.to_string());
+        let outcome = through
+            .run(&request)
+            .map(|_| ())
+            .map_err(UpstrokeError::from)
+            .map_err(|e| e.to_string());
         *self
             .agent_result
             .lock()
@@ -3773,9 +3787,15 @@ impl Probes for IgnoresTheCapability {
     ) -> Result<(), UpstrokeError> {
         let request = probe_request_for(invocation, None);
         if self.ignore_shell {
-            self.elsewhere.run(&request).map(|_| ())
+            self.elsewhere
+                .run(&request)
+                .map(|_| ())
+                .map_err(UpstrokeError::from)
         } else {
-            through.run(&request).map(|_| ())
+            through
+                .run(&request)
+                .map(|_| ())
+                .map_err(UpstrokeError::from)
         }
     }
 
@@ -3785,9 +3805,15 @@ impl Probes for IgnoresTheCapability {
             Some(agent),
         );
         if self.substitutes(agent) {
-            self.elsewhere.run(&request).map(|_| ())
+            self.elsewhere
+                .run(&request)
+                .map(|_| ())
+                .map_err(UpstrokeError::from)
         } else {
-            through.run(&request).map(|_| ())
+            through
+                .run(&request)
+                .map(|_| ())
+                .map_err(UpstrokeError::from)
         }
     }
 }
@@ -3855,12 +3881,15 @@ struct RefusesEveryRequest {
 impl crate::runner::Runner for RefusesEveryRequest {
     fn run(
         &self,
-        _request: &crate::runner::RunnerRequest,
-    ) -> Result<crate::agent::proc::ProcessOutput, UpstrokeError> {
+        request: &crate::runner::RunnerRequest,
+    ) -> Result<crate::agent::proc::ProcessOutput, crate::runner::RunnerError> {
         *self.seen.lock().unwrap_or_else(PoisonError::into_inner) += 1;
-        Err(UpstrokeError::Agent {
-            message: "the probe's process did not answer".to_owned(),
-        })
+        Err(crate::runner::RunnerError::gone(
+            &request.invocation,
+            UpstrokeError::Agent {
+                message: "the probe's process did not answer".to_owned(),
+            },
+        ))
     }
 }
 

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
@@ -44,16 +44,16 @@ struct State {
     substitutions: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct FakeRuntime {
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
     trace: ContainerTrace,
 }
 
 impl FakeRuntime {
     pub(crate) fn new(trace: ContainerTrace) -> Self {
         Self {
-            state: Mutex::new(State::default()),
+            state: Arc::new(Mutex::new(State::default())),
             trace,
         }
     }

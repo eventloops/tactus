@@ -120,6 +120,13 @@ one arming that goes through `super::classify_docker_failure`.
 
 ## `pub(crate) struct FakeRuntime {`
 
+`Clone`, with its state behind an `Arc<Mutex<_>>` since the repair round of
+`916852c9`: a Runner owns its runtime as a `Box<dyn ContainerRuntime>`, and
+the test that hands the production `ContainerRunner` a fake must still be
+able to arm the fake mid-test and inspect what survived afterwards. The
+shared ownership is the test's handle beside the runner's, nothing more;
+the trace was already shared the same way.
+
 The fake container runtime.
 
 Interior-mutable so it can be handed out as `&dyn ContainerRuntime` and

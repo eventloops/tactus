@@ -639,6 +639,16 @@ failed gate, `engine::attempt::review_failure` for a review — because
 the allowance decision from it. A second opinion formed here would
 change what a task costs.
 
+## `impl Judgement` › `pub fn timed_out_gate(&self) -> Option<&Verdict> {`
+
+The gate verdict that reached its timeout, if one did. A timed-out gate
+is the last verdict — the loop stops at the first refusal — and its
+`failure` reads `GateFailed`, which is right for an attempt (PR7's: the
+worker gets the log tail as feedback) and wrong at integration, where
+`decisions.repairs.not_repairs` lists timeout among the outcomes that
+terminate `merge_verification_unavailable` rather than register a repair.
+The integration path asks this before it reads `failure`.
+
 ## `impl Judgement` › `pub fn accepted(&self) -> bool {`
 
 Whether every gate and every reviewer passed.
@@ -1232,10 +1242,16 @@ skips them.
 
 The pass and re-ask invocation ids of review pass `n`.
 
-## `pub enum JudgeError {` › `Runner {`
+## `pub enum JudgeError {` › `Runner(RunnerError),`
 
-The Runner returned an error for `invocation` instead of a process
-output: the process could not be spawned or supervised.
+The Runner returned an error instead of a process output, with the
+[`crate::error::ProcessFate`] it established for the invocation's process.
+The integration verification decides by that fate — `NeverStarted` and
+`Gone` are observed outages with a terminal of their own, `Unresolved` ends
+the command — because the repair round of `3414dc58` had settled every
+Runner error as a spawn failure and the reviews of `916852c9` reproduced a
+gate still running in Docker beside a `Deferred` terminal that had already
+released the transaction and removed its snapshot.
 
 ## `pub enum JudgeError {` › `Other(UpstrokeError),`
 
@@ -1268,4 +1284,6 @@ answers to, or a review pass that could not be run.
 
 [`Self::execute`], telling a Runner error apart from a ledger or slot
 refusal: the Runner's own `Err` is [`JudgeError::Runner`], settled in
-the ledger as a cancellation exactly as before.
+the ledger as a cancellation exactly as before. The in-memory registration
+is cancelled whatever the fate: the ledger is this process's, and a process
+the Runner could not resolve is the next incarnation's census to reclaim.

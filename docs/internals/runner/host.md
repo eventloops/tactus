@@ -196,6 +196,17 @@ ordering predicate ("resolved once per spawn, before any of the spawn") and the 
 
 ## `impl Runner for HostRunner` — `run`
 
+### What the error says about the process
+
+Every error is a `RunnerError` carrying a [`ProcessFate`]. The environment
+composition and the name resolution happen before anything is spawned, so
+their refusals are `NeverStarted`; everything after is the funnel's own
+classification through `proc::run_with_timeout_classified` — `NeverStarted`
+for a spawn that failed, `Gone` once the tree was killed and reaped or its
+exit reaped, `Unresolved` where the funnel returned without either. The
+distinction exists for the integration verification, which may settle an
+outage terminal only on a fate that says no process survives.
+
 ### Where the program name is resolved
 
 Which file the program *name* is, decided in `run` and nowhere else.

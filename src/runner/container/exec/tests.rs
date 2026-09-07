@@ -313,6 +313,68 @@ impl Fixture {
     }
 }
 
+#[test]
+fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
+    use crate::error::ProcessFate;
+    use crate::runner::container::runtime::RuntimeOp;
+
+    for (case, unreachable, expected, survives) in [
+        (
+            "the runtime cannot create",
+            &[RuntimeOp::Create][..],
+            ProcessFate::NeverStarted,
+            false,
+        ),
+        (
+            "the observation is lost and the release completes",
+            &[RuntimeOp::Observe][..],
+            ProcessFate::Gone,
+            false,
+        ),
+        (
+            "the observation, the stop and the removal are all lost",
+            &[RuntimeOp::Observe, RuntimeOp::Stop, RuntimeOp::Remove][..],
+            ProcessFate::Unresolved,
+            true,
+        ),
+    ] {
+        let fixture = Fixture::new(&format!("fate-{}", unreachable.len()), false);
+        for op in unreachable {
+            fixture.runtime.fake().set_unreachable(*op);
+        }
+        let runner = fixture.runner();
+        let request = gate_request(
+            ShellKind::Sh.spec("exit 0"),
+            fixture.task_a.clone(),
+            Duration::from_secs(10),
+            gate_id(0),
+        );
+        let error = runner.run(&request).expect_err(case);
+        assert_eq!(error.fate, expected, "{case}: {error}");
+        assert!(
+            error.to_string().contains(expected.describe()),
+            "{case}: the error says what was established: {error}"
+        );
+        let names = fixture.runtime.fake().container_names();
+        assert_eq!(
+            !names.is_empty(),
+            survives,
+            "{case}: the containers left behind were {names:?}"
+        );
+        if survives {
+            let state = names
+                .first()
+                .and_then(|name| fixture.runtime.fake().container(name))
+                .map(|container| container.state);
+            assert_eq!(
+                state,
+                Some(Liveness::Running),
+                "{case}: the process the Runner could not resolve is still running"
+            );
+        }
+    }
+}
+
 fn worker_id(ordinal: u32) -> InvocationId {
     InvocationId::attempt(
         TaskKey(0),
@@ -886,16 +948,24 @@ fn a_substituted_reported_image_id_refuses_before_start_in_both_phases() {
         );
         match expected {
             ImageIdMismatch::RefusedBeforeStart => assert!(
-                matches!(refusal, UpstrokeError::Refused { .. }),
+                matches!(*refusal.source, UpstrokeError::Refused { .. }),
                 "{phase}: a pre-flight mismatch must be a refusal before any spend: \
                  {refusal:?}"
             ),
             ImageIdMismatch::SpawnFailureOutage => assert!(
-                matches!(refusal, UpstrokeError::Agent { .. }),
+                matches!(*refusal.source, UpstrokeError::Agent { .. }),
                 "{phase}: a mid-run mismatch reached the caller as the same generic refusal a \
                  pre-flight one does, so the RunnerSpawnFailure outage settlement the \
                  contract requires is unreachable: {refusal:?}"
             ),
+        }
+        assert_eq!(
+            refusal.fate,
+            crate::error::ProcessFate::NeverStarted,
+            "{phase}: a created container that never started and was removed is no process"
+        );
+        match expected {
+            ImageIdMismatch::RefusedBeforeStart | ImageIdMismatch::SpawnFailureOutage => {}
         }
 
         assert!(

@@ -24,7 +24,7 @@ use crate::runner::container::resolve::RunnerPreflight;
 use crate::runner::container::runtime::{ContainerRuntime, ContainerTrace};
 use crate::runner::container::{DisposableDirView, FakeOwnerLiveness, FakeRuntime};
 use crate::runner::policy::runner_policy_sha256;
-use crate::runner::{CommandSpec, Runner, RunnerRequest};
+use crate::runner::{CommandSpec, Runner, RunnerError, RunnerRequest};
 use crate::topology::effects::EventSite;
 use crate::topology::effects::{
     EffectSiteId, HookHarness, HookPhase, Injection, InjectionMode, LockSite, ObjectSite, RefSite,
@@ -662,7 +662,7 @@ impl RecordingRunner {
 }
 
 impl Runner for RecordingRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -2811,7 +2811,7 @@ struct ProbeContainerRunner<'a> {
 }
 
 impl Runner for ProbeContainerRunner<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         use crate::runner::container::intent::{ContainerIntent, ContainerName};
         use crate::runner::container::runtime::CreateSpec;
         use crate::runner::container::{
@@ -2823,7 +2823,8 @@ impl Runner for ProbeContainerRunner<'_> {
             RUN_ID,
             &self.incarnation,
             &request.invocation,
-        )?;
+        )
+        .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
         let intent = ContainerIntent::new(
             RUN_ID.to_owned(),
             &self.run_dir,
@@ -2857,7 +2858,8 @@ impl Runner for ProbeContainerRunner<'_> {
         };
         let mut hooks = ContainerNoHooks;
         let view = DisposableDirView::new(ContainerTrace::off());
-        let launched = launch(&mut hooks, self.runtime, &view, &plan)?;
+        let launched = launch(&mut hooks, self.runtime, &view, &plan)
+            .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
         let code = if request.command.program == self.failing {
             127
         } else {
@@ -2869,7 +2871,8 @@ impl Runner for ProbeContainerRunner<'_> {
             &view,
             &self.private_root,
             &launched,
-        )?;
+        )
+        .map_err(|error| RunnerError::unresolved(&request.invocation, error))?;
         Ok(ProcessOutput {
             code: Some(code),
             stdout: String::new(),
@@ -5948,10 +5951,18 @@ fn resume_with_real_refs_hooked(
     fixture: &Fixture,
     hooks: &mut dyn TopologyHooks,
 ) -> Result<(Recovered, RunHandle), UpstrokeError> {
-    let runtime = runtime_holding_the_record();
+    resume_as(fixture, RESUMER, &runtime_holding_the_record(), hooks)
+}
+
+fn resume_as(
+    fixture: &Fixture,
+    incarnation: &str,
+    runtime: &dyn ContainerRuntime,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<(Recovered, RunHandle), UpstrokeError> {
     let liveness = FakeOwnerLiveness::new();
     let view = DisposableDirView::new(ContainerTrace::default());
-    let incarnation = IncarnationId(RESUMER.to_owned());
+    let incarnation = IncarnationId(incarnation.to_owned());
     let manager = fixture.manager();
     let mut warnings = Vec::new();
     let root = fixture.derive(None)?;
@@ -5964,7 +5975,7 @@ fn resume_with_real_refs_hooked(
             incarnation: &incarnation,
             inputs: fixture.inputs(),
             today: &container_selection(),
-            runtime: &runtime,
+            runtime,
             liveness: &liveness,
             view: &view,
             preflight: &AlwaysCertifies,
@@ -7221,9 +7232,13 @@ fn a_resume_completes_an_already_present_publication_at_the_candidate_commit_and
 
 #[derive(Default)]
 struct DriveSeams {
-    gate_spawn_fails: bool,
+    gate_fails: Option<crate::error::ProcessFate>,
+    gate_times_out: bool,
     input_rejected: bool,
+    input_git_error: bool,
+    review_needs_human: bool,
     review_cost_usd: Option<f64>,
+    run_ceiling_usd: Option<f64>,
     answer: Option<crate::ir::Answer>,
 }
 
@@ -7231,6 +7246,7 @@ struct Driven {
     progress: Vec<Result<crate::engine::topology::run::Progress, UpstrokeError>>,
     implementers: Vec<PassBinding>,
     reviewer_models: Vec<String>,
+    gate_heads: Vec<(crate::runner::InvocationId, Option<String>)>,
     spend_before: f64,
     spend_after: f64,
     invocations_balance: bool,
@@ -7274,6 +7290,7 @@ impl crate::engine::topology::attempt::AttemptPlans for DrivenPlans<'_> {
 }
 
 struct DrivenReviews {
+    needs_human: bool,
     cost_usd: Option<f64>,
     models: Mutex<Vec<String>>,
 }
@@ -7291,10 +7308,14 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
             .push(cx.profile.model.clone());
         Ok(crate::review::ReviewOutcome {
             result: crate::review::ReviewResult::Judged(crate::ir::Verdict {
-                pass: true,
-                reasons: Vec::new(),
+                pass: !self.needs_human,
+                reasons: if self.needs_human {
+                    vec!["a person must decide this integration".to_owned()]
+                } else {
+                    Vec::new()
+                },
                 required_changes: Vec::new(),
-                needs_human: false,
+                needs_human: self.needs_human,
             }),
             cost_usd: self.cost_usd,
             invocations: 1,
@@ -7304,23 +7325,52 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
 }
 
 struct DrivenRunner {
-    fail: bool,
+    fails: Option<crate::error::ProcessFate>,
+    times_out: bool,
+    heads: Mutex<Vec<(crate::runner::InvocationId, Option<String>)>>,
+}
+
+impl DrivenRunner {
+    fn heads(&self) -> Vec<(crate::runner::InvocationId, Option<String>)> {
+        self.heads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl Runner for DrivenRunner {
-    fn run(&self, _request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
-        if self.fail {
-            return Err(UpstrokeError::Io {
-                path: PathBuf::from("missing-gate-executable"),
-                source: std::io::Error::from(std::io::ErrorKind::NotFound),
-            });
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        let head = {
+            let output = crate::workspace_manager::fixture::git_out(
+                &request.workspace,
+                &["rev-parse", "--verify", "--quiet", "HEAD"],
+            );
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        };
+        self.heads
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((request.invocation.clone(), head));
+        if let Some(fate) = self.fails {
+            return Err(RunnerError::new(
+                &request.invocation,
+                fate,
+                UpstrokeError::Io {
+                    path: PathBuf::from("missing-gate-executable"),
+                    source: std::io::Error::from(std::io::ErrorKind::NotFound),
+                },
+            ));
         }
         Ok(ProcessOutput {
-            code: Some(0),
+            code: if self.times_out { None } else { Some(0) },
             stdout: String::new(),
             stderr: String::new(),
             duration: Duration::from_millis(1),
-            timed_out: false,
+            timed_out: self.times_out,
             output_limited: false,
         })
     }
@@ -7328,10 +7378,19 @@ impl Runner for DrivenRunner {
 
 struct DrivenPolicy {
     reject: bool,
+    git_error: bool,
 }
 
 impl crate::engine::topology::attempt::ReviewInputPolicy for DrivenPolicy {
-    fn problem(&self, _worktree: &Path, _tree: &str) -> Result<Option<String>, UpstrokeError> {
+    fn problem(&self, worktree: &Path, tree: &str) -> Result<Option<String>, UpstrokeError> {
+        if self.git_error {
+            crate::workspace_manager::fixture::write_file(
+                &worktree_git_dir(worktree).join("index"),
+                b"a corrupt index",
+            );
+            return crate::workspace::Workspace::open(worktree)?
+                .review_input_problem_for_tree(tree);
+        }
         Ok(self
             .reject
             .then(|| "the proposed tree has opaque review inputs".to_owned()))
@@ -7353,24 +7412,41 @@ impl crate::interaction::AnswerSource for DrivenAnswers {
 }
 
 fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
+    let runner = DrivenRunner {
+        fails: seams.gate_fails,
+        times_out: seams.gate_times_out,
+        heads: Mutex::new(Vec::new()),
+    };
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let mut driven = drive_with(fixture, seams, steps, &runner, &mut hooks);
+    driven.gate_heads = runner.heads();
+    driven
+}
+
+fn drive_with(
+    fixture: &Fixture,
+    seams: &DriveSeams,
+    steps: usize,
+    runner: &dyn Runner,
+    hooks: &mut dyn TopologyHooks,
+) -> Driven {
     use crate::engine::topology::run::{RunSeams, TopologyRun};
 
-    let harness = harness();
     let (_, handle) =
-        resume_with_real_refs(fixture, &harness).expect("the resume settles the planted state");
+        resume_with_real_refs_hooked(fixture, hooks).expect("the resume settles the planted state");
     let mut run = TopologyRun::resumed(
         handle,
         fixture.inputs(),
-        crate::engine::topology::select::Ceiling::unlimited(),
+        crate::engine::topology::select::Ceiling {
+            run_usd: seams.run_ceiling_usd,
+            task_usd: None,
+        },
     );
-    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
     let sleeper = RecordingSleeper::default();
     let manager = fixture.manager();
-    let runner = DrivenRunner {
-        fail: seams.gate_spawn_fails,
-    };
     let input_policy = DrivenPolicy {
         reject: seams.input_rejected,
+        git_error: seams.input_git_error,
     };
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
     let paths = crate::rundir::RunPaths::with_private_root(
@@ -7398,6 +7474,7 @@ fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
         implementers: std::cell::RefCell::new(Vec::new()),
     };
     let reviews = DrivenReviews {
+        needs_human: seams.review_needs_human,
         cost_usd: seams.review_cost_usd,
         models: Mutex::new(Vec::new()),
     };
@@ -7408,7 +7485,7 @@ fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
         manager: &manager,
         clock: &Frozen,
         sleeper: &sleeper,
-        runner: &runner,
+        runner,
         adapters: &adapters,
         paths: &paths,
         plans: &plans,
@@ -7420,7 +7497,7 @@ fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
     };
     let spend_before = run.spend().run_total();
     let progress = (0..steps)
-        .map(|_| run.step(&run_seams, &mut hooks))
+        .map(|_| run.step(&run_seams, &mut *hooks))
         .collect();
     Driven {
         progress,
@@ -7429,6 +7506,7 @@ fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
             .models
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner),
+        gate_heads: Vec::new(),
         spend_before,
         spend_after: run.spend().run_total(),
         invocations_balance: run.invocations_balance(),
@@ -7501,7 +7579,7 @@ fn a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers
     let driven = drive(
         &fixture,
         &DriveSeams {
-            gate_spawn_fails: true,
+            gate_fails: Some(crate::error::ProcessFate::NeverStarted),
             ..DriveSeams::default()
         },
         5,
@@ -7579,6 +7657,241 @@ fn a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers
     assert!(
         driven.invocations_balance && driven.entitlements_held == 0,
         "the failed invocations were cancelled and both entitlements released"
+    );
+}
+
+fn production_container_runner(
+    fixture: &Fixture,
+    fake: &FakeRuntime,
+) -> crate::runner::container::exec::ContainerRunner {
+    crate::runner::container::exec::ContainerRunner::new(
+        fixture.started.runner.clone(),
+        crate::runner::container::exec::RunIdentity {
+            private_root: fixture.private_root.clone(),
+            run_id: RUN_ID.to_owned(),
+            run_dir: fixture.public(),
+            incarnation: RESUMER.to_owned(),
+            repo_key: fixture.repo_key.as_str().to_owned(),
+        },
+        &fixture.repo_root,
+        crate::runner::container::env::ContainerEnvironment::from_image(vec![
+            ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+            ("HOME".to_owned(), "/root".to_owned()),
+        ]),
+        Box::new(fake.clone()),
+    )
+    .expect("the fixture records a container policy")
+    .with_view(Box::new(DisposableDirView::new(ContainerTrace::default())))
+    .with_poll(Duration::ZERO)
+}
+
+const RUNTIME_LOST_MID_GATE: [crate::runner::container::runtime::RuntimeOp; 3] = [
+    crate::runner::container::runtime::RuntimeOp::Observe,
+    crate::runner::container::runtime::RuntimeOp::Stop,
+    crate::runner::container::runtime::RuntimeOp::Remove,
+];
+
+fn last_event_kind(fixture: &Fixture) -> String {
+    TopologyFold::parse_log(&fixture.log_bytes())
+        .expect("the log parses")
+        .last()
+        .map(|event| event.body.kind().to_owned())
+        .expect("the log has events")
+}
+
+fn snapshot_intents(fixture: &Fixture) -> Vec<crate::workspace_manager::Slot> {
+    fixture
+        .manager()
+        .intents()
+        .expect("intents")
+        .into_iter()
+        .filter(|slot| matches!(slot, crate::workspace_manager::Slot::Snapshot { .. }))
+        .collect()
+}
+
+#[test]
+fn a_runner_that_loses_track_of_a_running_gate_refuses_resumably_and_reclaims_nothing() {
+    let fixture = Fixture::two_tasks("lost-gate");
+    plant_stale_verification(&fixture);
+    let fake = runtime_holding_the_record();
+    for op in RUNTIME_LOST_MID_GATE {
+        fake.set_unreachable(op);
+    }
+    let runner = production_container_runner(&fixture, &fake);
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let driven = drive_with(&fixture, &DriveSeams::default(), 1, &runner, &mut hooks);
+
+    let text = message(
+        driven
+            .progress
+            .first()
+            .expect("one step")
+            .as_ref()
+            .expect_err("a gate whose process may still be running ends the command"),
+    );
+    assert!(
+        text.contains("may still be running") && text.contains("gate"),
+        "the refusal says what the Runner could not establish: {text}"
+    );
+    let names = fake.container_names();
+    let survivor = names
+        .first()
+        .and_then(|name| fake.container(name))
+        .expect("the gate's container was created and survives");
+    assert_eq!(names.len(), 1, "exactly the one gate container: {names:?}");
+    assert_eq!(
+        survivor.state,
+        crate::runner::container::runtime::Liveness::Running,
+        "the runtime never confirmed the gate stopped"
+    );
+    assert!(
+        unavailable_terminals(&driven.log).is_empty(),
+        "no terminal authorized cleanup or readmission while the gate may run"
+    );
+    assert_eq!(
+        last_event_kind(&fixture),
+        "merge_verification_started",
+        "the verification stays open for recovery to settle"
+    );
+    assert_eq!(
+        snapshot_intents(&fixture).len(),
+        1,
+        "the gate's snapshot is retained: the container has it mounted"
+    );
+}
+
+#[test]
+fn a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled() {
+    use crate::topology::effects::ContainerSite;
+
+    let fixture = Fixture::two_tasks("lost-gate-reclaimed");
+    plant_stale_verification(&fixture);
+    let fake = runtime_holding_the_record();
+    for op in RUNTIME_LOST_MID_GATE {
+        fake.set_unreachable(op);
+    }
+    let runner = production_container_runner(&fixture, &fake);
+    let driven = drive_with(
+        &fixture,
+        &DriveSeams::default(),
+        1,
+        &runner,
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    assert!(
+        driven.progress.first().is_some_and(Result::is_err),
+        "the command ended resumably: {:?}",
+        driven.progress
+    );
+    let after_loss = fixture.log_bytes();
+    let survivor = fake.container_names();
+    assert_eq!(survivor.len(), 1);
+
+    let refused = message(
+        &resume_as(
+            &fixture,
+            "resumer-2",
+            &fake,
+            &mut HarnessTopologyHooks::new(harness()),
+        )
+        .expect_err("a resume cannot reclaim the container while the runtime is unreachable"),
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        after_loss,
+        "the refusal appended nothing: {refused}"
+    );
+    assert_eq!(
+        fake.container_names(),
+        survivor,
+        "and touched no container: {refused}"
+    );
+
+    for op in RUNTIME_LOST_MID_GATE {
+        fake.set_reachable(op);
+    }
+    let recovery = harness();
+    resume_as(
+        &fixture,
+        "resumer-2",
+        &fake,
+        &mut HarnessTopologyHooks::new(Arc::clone(&recovery)),
+    )
+    .expect("with the runtime back the resume converges");
+    assert!(
+        fake.container_names().is_empty(),
+        "the census reclaimed the earlier incarnation's container"
+    );
+    assert_eq!(
+        interrupted_sequences(&fixture),
+        vec![1, 2],
+        "the lost verification was settled interrupted after the planted one"
+    );
+    let stopped = first_observation(&recovery, EffectSiteId::Container(ContainerSite::Stop))
+        .expect("the container was stopped through its funnel");
+    let appended = first_observation(&recovery, EffectSiteId::Event(EventSite::Append))
+        .expect("the interrupted terminal was appended");
+    assert!(
+        stopped < appended,
+        "the container was reclaimed (at {stopped}) before any recovery event (at {appended})"
+    );
+    assert!(
+        snapshot_intents(&fixture).is_empty(),
+        "the snapshot left after the terminal, once nothing could be running in it"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(3),
+                ..
+            }))
+        ),
+        "the candidate re-verifies and publishes under the next sequence: {:?}",
+        driven.progress
+    );
+}
+
+#[test]
+fn a_gate_whose_runner_lost_it_after_start_and_reclaimed_it_defers_as_an_outage() {
+    let fixture = Fixture::two_tasks("gate-gone");
+    plant_stale_verification(&fixture);
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            gate_fails: Some(crate::error::ProcessFate::Gone),
+            ..DriveSeams::default()
+        },
+        1,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Unavailable { parked: false, .. }))
+        ),
+        "a process the Runner established gone is an observed outage: {:?}",
+        driven.progress
+    );
+    let terminals = unavailable_terminals(&driven.log);
+    let crate::topology::events::UnavailableCause::Infrastructure {
+        kind: crate::topology::events::InfrastructureKind::Other { detail },
+    } = &terminals[0].cause
+    else {
+        panic!(
+            "not a spawn failure, an outage of its own: {:?}",
+            terminals[0].cause
+        );
+    };
+    assert!(
+        detail.contains("gone") && detail.contains("gate"),
+        "the terminal says the Runner lost a started gate: {detail}"
+    );
+    assert!(
+        fixture.manager().intents().expect("intents").is_empty(),
+        "with no process alive the snapshot and staging were reclaimed at the terminal"
     );
 }
 

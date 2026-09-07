@@ -12,10 +12,11 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::agent::ProcessOutput;
+use crate::error::ProcessFate;
 use crate::error::UpstrokeError;
 use crate::rundir::RunPaths;
 use crate::runner::policy::runner_policy_sha256;
-use crate::runner::{AgentId, ExecutionRole, InvocationId, Runner, RunnerRequest};
+use crate::runner::{AgentId, ExecutionRole, InvocationId, Runner, RunnerError, RunnerRequest};
 use crate::topology::events::{RunnerContract, RunnerKind, RunnerPolicy};
 
 use super::env::{BoundaryLayout, ContainerEnvironment, RoleScope, supplies_credential_location};
@@ -23,8 +24,8 @@ use super::intent::{ContainerIntent, ContainerName};
 use super::runtime::{ContainerRuntime, ContainerTrace, CreateSpec, Mount, RuntimeError};
 use super::view::{self, RoleGitView};
 use super::{
-    ContainerHooks, GitView, GitViewRequest, LaunchPlan, Launched, NoHooks, create_container,
-    mount_git_view, start_container, write_intent,
+    CancelResidue, ContainerHooks, GitView, GitViewRequest, LaunchPlan, Launched, NoHooks,
+    create_container, mount_git_view, start_container, write_intent,
 };
 use crate::topology::effects::ContainerSite;
 
@@ -529,7 +530,7 @@ impl ContainerRunner {
         &self,
         hooks: &mut dyn ContainerHooks,
         plan: &LaunchPlan,
-    ) -> Result<Launched, UpstrokeError> {
+    ) -> Result<Launched, RunnerError> {
         let written = match write_intent(
             hooks,
             ContainerSite::WriteIntent,
@@ -625,19 +626,28 @@ impl ContainerRunner {
         plan: &LaunchPlan,
         cause: UpstrokeError,
         reached: Reached,
-    ) -> UpstrokeError {
+    ) -> RunnerError {
         let residue = self.cancel(hooks, &plan.private_root, &plan.name, &reached);
+        let fate = if reached.container && !residue.container_released {
+            ProcessFate::Unresolved
+        } else {
+            ProcessFate::NeverStarted
+        };
         if residue.is_empty() {
-            return cause;
+            return RunnerError::new(&plan.invocation, fate, cause);
         }
-        UpstrokeError::Refused {
-            message: format!(
-                "{cause}. The cancel could not release everything the failed launch created, \
-                 so this run's R19/R26 ledgers do not balance and a census will find the \
-                 residue: {}",
-                residue.join("; ")
-            ),
-        }
+        RunnerError::new(
+            &plan.invocation,
+            fate,
+            UpstrokeError::Refused {
+                message: format!(
+                    "{cause}. The cancel could not release everything the failed launch \
+                     created, so this run's R19/R26 ledgers do not balance and a census will \
+                     find the residue: {}",
+                    residue.messages.join("; ")
+                ),
+            },
+        )
     }
 
     fn cancel(
@@ -646,7 +656,7 @@ impl ContainerRunner {
         private_root: &Path,
         name: &ContainerName,
         reached: &Reached,
-    ) -> Vec<String> {
+    ) -> CancelResidue {
         super::cancel_reached(
             hooks,
             self.runtime.as_ref(),
@@ -663,8 +673,8 @@ impl ContainerRunner {
         hooks: &mut dyn ContainerHooks,
         private_root: &Path,
         launched: &Launched,
-    ) -> Result<(), UpstrokeError> {
-        super::release(
+    ) -> Result<(), super::ReleaseFailure> {
+        super::release_classified(
             hooks,
             self.runtime.as_ref(),
             self.view.as_ref(),
@@ -747,8 +757,9 @@ pub fn view_dir(private_root: &Path, name: &ContainerName) -> PathBuf {
 }
 
 impl Runner for ContainerRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
-        let plan = self.plan(request)?;
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        let never_started = |error| RunnerError::never_started(&request.invocation, error);
+        let plan = self.plan(request).map_err(never_started)?;
         let started = Instant::now();
         let deadline = started + request.timeout;
         let mut hooks = self.hooks.lock().unwrap_or_else(PoisonError::into_inner);
@@ -757,9 +768,27 @@ impl Runner for ContainerRunner {
 
         let outcome = self.finish(&launched, started, deadline);
         let released = self.release(&mut **hooks, &self.identity.private_root, &launched);
-        let output = outcome?;
-        released?;
-        Ok(output)
+        match (outcome, released) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Ok(output), Err(failure)) => {
+                let fate = if output.timed_out || !failure.container_released {
+                    ProcessFate::Unresolved
+                } else {
+                    ProcessFate::Gone
+                };
+                Err(RunnerError::new(&request.invocation, fate, failure.error))
+            }
+            (Err(error), Ok(())) => Err(RunnerError::gone(&request.invocation, error)),
+            (Err(error), Err(failure)) => Err(RunnerError::new(
+                &request.invocation,
+                if failure.container_released {
+                    ProcessFate::Gone
+                } else {
+                    ProcessFate::Unresolved
+                },
+                error.with_cleanup(Err(failure.error)),
+            )),
+        }
     }
 }
 

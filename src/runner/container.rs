@@ -480,10 +480,23 @@ fn cancel_created(
     name: &ContainerName,
     view_path: Option<&Path>,
 ) -> Vec<String> {
-    cancel_reached(hooks, runtime, view, private_root, name, true, view_path)
+    cancel_reached(hooks, runtime, view, private_root, name, true, view_path).messages
 }
 
-fn cancel_reached(
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CancelResidue {
+    pub messages: Vec<String>,
+    pub container_released: bool,
+}
+
+impl CancelResidue {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
+pub fn cancel_reached(
     hooks: &mut dyn ContainerHooks,
     runtime: &dyn ContainerRuntime,
     view: &dyn GitView,
@@ -491,8 +504,9 @@ fn cancel_reached(
     name: &ContainerName,
     container_exists: bool,
     view_path: Option<&Path>,
-) -> Vec<String> {
+) -> CancelResidue {
     let mut residue = Vec::new();
+    let mut container_released = true;
     if container_exists {
         if let Err(error) = stop_container(
             hooks,
@@ -501,9 +515,11 @@ fn cancel_reached(
             name,
             StopMode::Graceful,
         ) {
+            container_released = false;
             residue.push(format!("the container could not be stopped: {error}"));
         }
         if let Err(error) = remove_container(hooks, ContainerSite::Remove, runtime, name) {
+            container_released = false;
             residue.push(format!("the container could not be removed: {error}"));
         }
     }
@@ -520,14 +536,20 @@ fn cancel_reached(
              thing a later census can discover that unpruned R19 view through \
              (decisions.resource_accounting.rows[R19].at_run_end.NoRunFinished)"
         ));
-        return residue;
+        return CancelResidue {
+            messages: residue,
+            container_released,
+        };
     }
     if let Err(error) = remove_intent(hooks, ContainerSite::RemoveIntent, private_root, name) {
         residue.push(format!(
             "the R26 intent record could not be removed: {error}"
         ));
     }
-    residue
+    CancelResidue {
+        messages: residue,
+        container_released,
+    }
 }
 
 fn render_residue(residue: &[String]) -> String {
@@ -549,6 +571,23 @@ pub fn release(
     private_root: &Path,
     launched: &Launched,
 ) -> Result<(), UpstrokeError> {
+    release_classified(hooks, runtime, view, private_root, launched)
+        .map_err(|failure| failure.error)
+}
+
+#[derive(Debug)]
+pub struct ReleaseFailure {
+    pub container_released: bool,
+    pub error: UpstrokeError,
+}
+
+pub fn release_classified(
+    hooks: &mut dyn ContainerHooks,
+    runtime: &dyn ContainerRuntime,
+    view: &dyn GitView,
+    private_root: &Path,
+    launched: &Launched,
+) -> Result<(), ReleaseFailure> {
     let residue = cancel_reached(
         hooks,
         runtime,
@@ -561,13 +600,16 @@ pub fn release(
     if residue.is_empty() {
         return Ok(());
     }
-    Err(UpstrokeError::Refused {
-        message: format!(
-            "the release of `{}` could not complete every step, so this run's R19/R26 ledgers \
-             do not balance and a census will find the residue: {}",
-            launched.name,
-            residue.join("; ")
-        ),
+    Err(ReleaseFailure {
+        container_released: residue.container_released,
+        error: UpstrokeError::Refused {
+            message: format!(
+                "the release of `{}` could not complete every step, so this run's R19/R26 \
+                 ledgers do not balance and a census will find the residue: {}",
+                launched.name,
+                residue.messages.join("; ")
+            ),
+        },
     })
 }
 

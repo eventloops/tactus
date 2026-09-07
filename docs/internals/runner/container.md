@@ -689,11 +689,22 @@ The answer is a list of descriptions rather than a `Result`, because the
 caller must return the refusal it already has: this function's failure is
 never the thing to report *instead of* an integrity violation.
 
-## `fn cancel_reached(`
+## `pub struct CancelResidue {`
+
+What a cancel or a release could not do, and one fact beside the messages:
+whether the container itself was stopped and removed. The messages are
+for the operator; the fact is for `ContainerRunner::run` and `cancelled`,
+which classify the process by it — a container the runtime never confirmed
+released may still be running its process, and that is the one thing an
+outage terminal must not be settled over.
+
+## `pub fn cancel_reached(`
 
 The one exhaustive cleanup in this tree: stop, remove, unmount, remove the
 intent — **attempting every step even after one fails**, and never removing
 the R26 record while it is the only thing that can find the R19 residue.
+Answers a [`CancelResidue`]; `container_released` is false the moment the
+stop or the removal fails.
 
 `ContainerRunner::cancel` and `ContainerRunner::release` delegate here, and
 so does [`cancel_created`]. One definition, deliberately: the view-path
@@ -753,6 +764,17 @@ can find it through.
 ### Errors
 
 [`UpstrokeError::Refused`] naming every step that failed.
+
+## `pub struct ReleaseFailure {`
+
+[`release`]'s error with `container_released` beside it: the runner's
+`run` reads it to say whether the failed release left a process that may
+still be running or only a view or an intent for the census.
+
+## `pub fn release_classified(`
+
+[`release`] keeping that fact; `release` is the same call for a caller that
+has nothing to classify.
 
 ## `pub const TERMINATION_OBSERVATIONS: usize = 8;`
 

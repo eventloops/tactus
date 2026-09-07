@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::error::UpstrokeError;
+use crate::error::{ProcessFate, UpstrokeError};
 use crate::ir::{Answer, Question, QuestionId};
 use crate::review;
 use crate::topology::events::Answer4;
@@ -13,7 +13,7 @@ use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
     AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion, GenerationId,
-    SequenceId, SessionId, TopologyEvent,
+    InfrastructureKind, SequenceId, SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -145,6 +145,49 @@ fn implementer_binding(
 
 impl Verification for IntegrationCx<'_, '_> {
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
+        match self.judge_proposal(request) {
+            Ok(judgement) => {
+                self.spend
+                    .record_reviews(request.candidate.key, &judgement.reviews);
+                Ok(Verified::Judged(judgement))
+            }
+            Err(JudgeError::Runner(error)) => match error.fate {
+                ProcessFate::NeverStarted => Ok(Verified::Unavailable {
+                    kind: InfrastructureKind::RunnerSpawnFailure,
+                    detail: error.to_string(),
+                }),
+                ProcessFate::Gone => Ok(Verified::Unavailable {
+                    kind: InfrastructureKind::Other {
+                        detail: format!(
+                            "the Runner lost `{}` after its process started and has since \
+                             established the process is gone; nothing was judged",
+                            error.invocation
+                        ),
+                    },
+                    detail: error.to_string(),
+                }),
+                ProcessFate::Unresolved => Err(error.into()),
+            },
+            Err(JudgeError::Other(UpstrokeError::Git { message })) => Ok(Verified::Unavailable {
+                kind: InfrastructureKind::Other {
+                    detail: format!(
+                        "foreign Git state observed by the verification of sequence {}: {message}",
+                        request.sequence.0
+                    ),
+                },
+                detail: message,
+            }),
+            Err(JudgeError::Other(error)) => Err(error),
+        }
+    }
+
+    fn ids(&self) -> &dyn super::seams::IdSource {
+        self.seams.ids
+    }
+}
+
+impl IntegrationCx<'_, '_> {
+    fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {
         let key = request.candidate.key;
         let (entry, base, implementer) = {
             let fold = &*self.emitter.state.fold;
@@ -152,8 +195,10 @@ impl Verification for IntegrationCx<'_, '_> {
                 .registry()
                 .and_then(|registry| registry.get(key))
                 .cloned()
-                .ok_or_else(|| UpstrokeError::Refused {
-                    message: format!("task {key} is not in this run's registry"),
+                .ok_or_else(|| {
+                    JudgeError::Other(UpstrokeError::Refused {
+                        message: format!("task {key} is not in this run's registry"),
+                    })
                 })?;
             let base = fold
                 .task(key)
@@ -164,13 +209,20 @@ impl Verification for IntegrationCx<'_, '_> {
                 })
                 .and_then(|generation| generation.candidate.as_ref())
                 .map(|prepared| prepared.base_sha.clone());
-            (entry, base, implementer_binding(fold, key)?)
+            (
+                entry,
+                base,
+                implementer_binding(fold, key).map_err(JudgeError::Other)?,
+            )
         };
 
         let (diff_parent, diff_tree) = if request.already_present {
-            let base = base.ok_or_else(|| UpstrokeError::Refused {
-                message: "an already-present verification needs the candidate's recorded base to                           review its original patch"
-                    .to_owned(),
+            let base = base.ok_or_else(|| {
+                JudgeError::Other(UpstrokeError::Refused {
+                    message: "an already-present verification needs the candidate's recorded \
+                              base to review its original patch"
+                        .to_owned(),
+                })
             })?;
             (base.0, request.candidate.commit_sha.0.clone())
         } else {
@@ -179,47 +231,62 @@ impl Verification for IntegrationCx<'_, '_> {
         let diff = self
             .seams
             .manager
-            .candidate_diff(request.staging, &diff_parent, &diff_tree)?;
+            .candidate_diff(request.staging, &diff_parent, &diff_tree)
+            .map_err(JudgeError::Other)?;
 
-        let plan = self.seams.plans.verification(&VerificationRequest {
-            entry: &entry,
-            implementer,
-        })?;
+        let plan = self
+            .seams
+            .plans
+            .verification(&VerificationRequest {
+                entry: &entry,
+                implementer,
+            })
+            .map_err(JudgeError::Other)?;
 
-        let prior_failure = match crate::engine::classify::diff_failure(
-            &diff,
-            entry.spec.kind,
-            !plan.reviewers.is_empty(),
-        ) {
-            Some(failure) => Some(failure),
-            None => {
-                let tree = self
-                    .seams
-                    .manager
-                    .commit_tree_sha(request.proposed.as_str())?
-                    .ok_or_else(|| UpstrokeError::Git {
-                        message: format!(
-                            "the proposed commit {} has no tree; the review-input policy cannot \
-                             be consulted for it",
-                            request.proposed
-                        ),
-                    })?;
-                let staging = self.seams.manager.slot_path(request.staging);
-                self.seams
-                    .input_policy
-                    .problem(&staging, &tree)?
-                    .map(crate::engine::classify::review_input_failure)
-            }
-        };
+        let prior_failure =
+            match crate::engine::classify::unjudgeable_diff(&diff, !plan.reviewers.is_empty()) {
+                Some(failure) => Some(failure),
+                None => {
+                    let tree = self
+                        .seams
+                        .manager
+                        .commit_tree_sha(request.proposed.as_str())
+                        .map_err(JudgeError::Other)?
+                        .ok_or_else(|| {
+                            JudgeError::Other(UpstrokeError::Git {
+                                message: format!(
+                                    "the proposed commit {} has no tree; the review-input policy \
+                                     cannot be consulted for it",
+                                    request.proposed
+                                ),
+                            })
+                        })?;
+                    let staging = self.seams.manager.slot_path(request.staging);
+                    self.seams
+                        .input_policy
+                        .problem(&staging, &tree)
+                        .map_err(JudgeError::Other)?
+                        .map(crate::engine::classify::review_input_failure)
+                }
+            };
 
-        let inputs = self.seams.plans.inputs(&InputsRequest {
-            entry: &entry,
-            diff,
-        })?;
+        let inputs = self
+            .seams
+            .plans
+            .inputs(&InputsRequest {
+                entry: &entry,
+                diff,
+            })
+            .map_err(JudgeError::Other)?;
 
         let proposed = crate::workspace_manager::ObjectId::new(request.proposed.0.clone())
-            .map_err(|refusal| UpstrokeError::Git {
-                message: format!("the proposed commit is not an object id: {refusal}"),
+            .map_err(|refusal| {
+                JudgeError::Other(UpstrokeError::Refused {
+                    message: format!(
+                        "the recorded proposal of sequence {} is not an object id: {refusal}",
+                        request.sequence.0
+                    ),
+                })
             })?;
         let identities = SequenceIdentities::new(request.sequence);
         let mut judge = Judge {
@@ -232,7 +299,7 @@ impl Verification for IntegrationCx<'_, '_> {
             paths: self.seams.paths,
             reviews: self.seams.reviews,
         };
-        let judged = judge.judge(&Subject {
+        judge.judge(&Subject {
             snapshot: SnapshotOf::Commit(proposed),
             disposal: SnapshotDisposal::AfterTheTerminal,
             names: JudgeNames::Integration {
@@ -248,21 +315,7 @@ impl Verification for IntegrationCx<'_, '_> {
                 pass: identities.review_pass(pass, 0),
                 reask: identities.review_reask(pass, 0),
             },
-        });
-        match judged {
-            Ok(judgement) => {
-                self.spend.record_reviews(key, &judgement.reviews);
-                Ok(Verified::Judged(judgement))
-            }
-            Err(JudgeError::Runner { invocation, error }) => Ok(Verified::RunnerUnavailable {
-                detail: format!("`{invocation}`: {error}"),
-            }),
-            Err(JudgeError::Other(error)) => Err(error),
-        }
-    }
-
-    fn ids(&self) -> &dyn super::seams::IdSource {
-        self.seams.ids
+        })
     }
 }
 

@@ -32,6 +32,27 @@ added when its destination refuses a write.
 Display already includes the original error, so forwarding its
 source avoids repeating it when the CLI renders the error chain.
 
+## `pub enum ProcessFate {`
+
+What a Runner established about an invocation's process when it returned an
+error, made where the evidence is — the host funnel at its spawn, kill and
+reap points, the container runner from its cancel and release results — and
+carried by [`UpstrokeError::Runner`] and `runner::RunnerError`.
+
+`NeverStarted`: no process of the invocation was ever started; the launch
+was refused, or failed and every resource it reached was released. `Gone`:
+a process started and the Runner has since established it is gone — exited
+and reaped, or stopped and removed — without a verdict to report. `Unresolved`:
+the Runner cannot say; a process of the invocation may still be running.
+
+The integration verification routes on it (`engine::topology::run`): the
+first two are observed infrastructure failures with a terminal of their own,
+the third ends the command resumably with nothing appended, because a
+terminal authorizes cleanup and readmission and neither may run beside a
+process whose liveness is unknown (`invariants[INV-15]`; the reviews of
+`916852c9`, regression 1). `describe` is the phrase the error's `Display`
+carries so a park question or a refusal says which.
+
 ## `#[derive(Debug, Error)]`
 
 Library failures classified by the operation or refusal a caller can handle.
@@ -44,6 +65,13 @@ A filesystem operation on a path the engine owns failed. Named for
 the operation, because a removal, a write or a rename that fails did
 not fail to read (§7's operation-context rule); `Io` stays the
 variant for reads.
+
+## ``#[error("the Runner could not complete `{invocation}` ({}): {source}", .fate.describe())]``
+
+A Runner's error, with the [`ProcessFate`] it established. The crate-error
+form of `runner::RunnerError`, so a `?` through the attempt path keeps the
+fate in the message; the `source` is the refusal, spawn error or runtime
+failure the Runner met, boxed as `WithCleanup` boxes its primary.
 
 ## ``#[error("cannot resume run `{run_id}`: {message}")]``
 

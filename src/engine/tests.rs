@@ -8048,7 +8048,7 @@ impl crate::runner::Runner for RecordingRunner {
     fn run(
         &self,
         request: &crate::runner::RunnerRequest,
-    ) -> Result<ProcessOutput, crate::error::UpstrokeError> {
+    ) -> Result<ProcessOutput, crate::runner::RunnerError> {
         self.seen.lock().expect("recorder").push(RoutedProcess {
             role: request.role.clone(),
             program: request.command.program.clone(),

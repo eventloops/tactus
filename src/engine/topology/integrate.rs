@@ -51,7 +51,10 @@ pub trait Verification {
 
 pub enum Verified {
     Judged(Judgement),
-    RunnerUnavailable { detail: String },
+    Unavailable {
+        kind: InfrastructureKind,
+        detail: String,
+    },
 }
 
 pub struct VerifyRequest<'a> {
@@ -574,20 +577,39 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
         already_present,
     })? {
         Verified::Judged(judgement) => judgement,
-        Verified::RunnerUnavailable { detail } => {
+        Verified::Unavailable { kind, detail } => {
             return unavailable(
                 journal,
                 manager,
                 request,
                 staging,
                 pin,
-                UnavailableCause::Infrastructure {
-                    kind: InfrastructureKind::RunnerSpawnFailure,
-                },
+                UnavailableCause::Infrastructure { kind },
                 Some(detail),
             );
         }
     };
+
+    if let Some(verdict) = judgement.timed_out_gate() {
+        let detail = format!(
+            "gate `{}` timed out and produced no verdict; a timeout is not a repair \
+             (decisions.repairs.not_repairs)",
+            verdict.invocation
+        );
+        return unavailable(
+            journal,
+            manager,
+            request,
+            staging,
+            pin,
+            UnavailableCause::Infrastructure {
+                kind: InfrastructureKind::Other {
+                    detail: detail.clone(),
+                },
+            },
+            Some(detail),
+        );
+    }
 
     match judgement.failure.clone() {
         None => {

@@ -424,10 +424,14 @@ Run one review pass through `runner`.
 
 ### Errors
 
-Only what makes the *evidence* unusable — an oversized or opaque diff. A
-reviewer that could not run is [`ReviewResult::Unavailable`], not an error:
-the engine has to tell "the code is wrong" from "the judge was
-unavailable".
+What makes the *evidence* unusable — an oversized or opaque diff — and a
+Runner error whose process fate is `Unresolved`. A reviewer that could not
+run, or that ran and is established gone, is [`ReviewResult::Unavailable`],
+not an error: the engine has to tell "the code is wrong" from "the judge
+was unavailable". A reviewer process the Runner cannot say is gone is
+neither: an unavailable verdict lets the caller settle a terminal that
+reclaims the snapshot the process may still be running in, so the Runner's
+own error is returned as it is (`crate::error::ProcessFate`).
 
 ## `let full_prompt = materialize_prompt(cx)?;`
 

@@ -543,10 +543,11 @@ pub fn run_review(
         );
         let output = match runner.run(&request) {
             Ok(output) => output,
+            Err(error) if error.fate.is_unresolved() => return Err(error.into()),
             Err(error) => {
                 return Ok(unavailable_after_error(
                     "review process failed",
-                    error,
+                    error.into(),
                     cost,
                     invocation - 1,
                     last_path,
@@ -1136,6 +1137,82 @@ mod tests {
         }
     }
 
+    struct FatedRunner(crate::error::ProcessFate);
+
+    impl Runner for FatedRunner {
+        fn run(
+            &self,
+            request: &RunnerRequest,
+        ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
+            Err(crate::runner::RunnerError::new(
+                &request.invocation,
+                self.0,
+                UpstrokeError::Agent {
+                    message: "the container runtime stopped answering".to_owned(),
+                },
+            ))
+        }
+    }
+
+    #[test]
+    fn an_unresolved_runner_error_propagates_instead_of_reporting_the_review_unavailable() {
+        use crate::error::ProcessFate;
+
+        let task = task();
+        let root =
+            std::env::temp_dir().join(format!("upstroke-review-fate-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("review scratch");
+        let adapter = UnavailableAdapter {
+            stage: UnavailableStage::Spawn,
+        };
+        let cx = ReviewCx {
+            adapter: &adapter,
+            profile: profile_for("fate-test", "test-model", "review", Effort::High),
+            lens: Lens::Acceptance,
+            task: ReviewSubject::of(&task),
+            diff: "diff --git a/a.rs b/a.rs\n+++ b/a.rs\n+fn x() {}\n",
+            artifacts: &[],
+            decisions: &[],
+            workspace: &root,
+            settings_dir: &root,
+            reviews_dir: &root,
+            stem: "fate".to_owned(),
+            timeout: Duration::from_secs(60),
+        };
+
+        let error = run_review(&cx, &FatedRunner(ProcessFate::Unresolved), &review_ids())
+            .expect_err(
+                "a reviewer process that may still be running is not an unavailable review",
+            );
+        assert!(
+            matches!(
+                error,
+                UpstrokeError::Runner {
+                    fate: ProcessFate::Unresolved,
+                    ..
+                }
+            ),
+            "the Runner's own claim reaches the caller: {error:?}"
+        );
+
+        for fate in [ProcessFate::NeverStarted, ProcessFate::Gone] {
+            let outcome = run_review(&cx, &FatedRunner(fate), &review_ids())
+                .expect("a process the Runner established absent is an unavailable review");
+            match outcome.result {
+                ReviewResult::Unavailable {
+                    status: OutcomeStatus::AgentError,
+                    detail,
+                } => assert!(
+                    detail.contains("review process failed") && detail.contains(fate.describe()),
+                    "{fate:?}: {detail}"
+                ),
+                other => panic!("{fate:?}: unexpected review result: {other:?}"),
+            }
+            assert_eq!(outcome.invocations, 0, "{fate:?}: nothing was judged");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn parses_a_fenced_verdict() {
         let text = "```json\n{\"pass\": true, \"reasons\": [\"meets the criteria\"], \
@@ -1490,7 +1567,7 @@ mod tests {
         fn run(
             &self,
             request: &RunnerRequest,
-        ) -> Result<crate::agent::ProcessOutput, UpstrokeError> {
+        ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
             self.seen
                 .lock()
                 .expect("recorder")

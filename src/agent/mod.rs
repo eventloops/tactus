@@ -516,7 +516,10 @@ mod built_program_tests {
     }
 
     impl Runner for Boundary {
-        fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+        fn run(
+            &self,
+            request: &RunnerRequest,
+        ) -> Result<ProcessOutput, crate::runner::RunnerError> {
             self.seen
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -533,12 +536,15 @@ mod built_program_tests {
                     output_limited: false,
                 });
             }
-            Err(UpstrokeError::Agent {
-                message: format!(
-                    "`{}` is not present inside this boundary; the agent CLI here is `{}`",
-                    request.command.program, self.installed
-                ),
-            })
+            Err(crate::runner::RunnerError::never_started(
+                &request.invocation,
+                UpstrokeError::Agent {
+                    message: format!(
+                        "`{}` is not present inside this boundary; the agent CLI here is `{}`",
+                        request.command.program, self.installed
+                    ),
+                },
+            ))
         }
     }
 

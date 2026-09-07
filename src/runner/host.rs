@@ -20,7 +20,9 @@ use crate::error::UpstrokeError;
 use crate::gates::ShellKind;
 use crate::runner::invocation::InvocationId;
 use crate::runner::policy::{host_policy, runner_policy_sha256};
-use crate::runner::{AgentId, CommandSpec, ExecutionRole, ProbeTarget, Runner, RunnerRequest};
+use crate::runner::{
+    AgentId, CommandSpec, ExecutionRole, ProbeTarget, Runner, RunnerError, RunnerRequest,
+};
 use crate::topology::effects::ProcessSite;
 use crate::topology::events::RunnerPolicy;
 
@@ -188,19 +190,20 @@ impl HostRunner {
 }
 
 impl Runner for HostRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
-        let composed = self.environment.compose(
-            &request.role,
-            request.agent.as_ref(),
-            &request.command.env,
-        )?;
-        let program = self.program_for(&request.command.program, &composed)?;
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        let composed = self
+            .environment
+            .compose(&request.role, request.agent.as_ref(), &request.command.env)
+            .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
+        let program = self
+            .program_for(&request.command.program, &composed)
+            .map_err(|error| RunnerError::never_started(&request.invocation, error))?;
         let mut command = build_command_at(&request.command, &program);
         command.current_dir(&request.workspace);
         command.env_clear();
         command.envs(composed);
         let mut hooks = self.hooks.lock().unwrap_or_else(PoisonError::into_inner);
-        proc::run_with_timeout_at(
+        proc::run_with_timeout_classified(
             ProcessSite::Spawn,
             ProcessSite::Terminate,
             command,
@@ -208,6 +211,7 @@ impl Runner for HostRunner {
             request.timeout,
             &mut **hooks,
         )
+        .map_err(|failure| RunnerError::new(&request.invocation, failure.fate, failure.error))
     }
 }
 

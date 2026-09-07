@@ -13,7 +13,8 @@ use crate::ladder::AttemptFailure;
 use crate::review;
 use crate::rundir::RunPaths;
 use crate::runner::{
-    AgentId, CommandSpec, InvocationId, Runner, RunnerRequest, gate_request, worker_request,
+    AgentId, CommandSpec, InvocationId, Runner, RunnerError, RunnerRequest, gate_request,
+    worker_request,
 };
 use crate::topology::events::{
     AttemptInterrupted4, AttemptNumber, AttemptStarted4, Materialization, RungBinding, SessionId,
@@ -211,6 +212,11 @@ impl Judgement {
     #[must_use]
     pub fn accepted(&self) -> bool {
         self.failure.is_none()
+    }
+
+    #[must_use]
+    pub fn timed_out_gate(&self) -> Option<&Verdict> {
+        self.gates.iter().find(|verdict| verdict.timed_out)
     }
 }
 
@@ -524,12 +530,8 @@ pub struct Subject<'s> {
 
 #[derive(Debug, thiserror::Error)]
 pub enum JudgeError {
-    #[error("the Runner could not run `{invocation}`: {error}")]
-    Runner {
-        invocation: InvocationId,
-        #[source]
-        error: UpstrokeError,
-    },
+    #[error(transparent)]
+    Runner(RunnerError),
     #[error(transparent)]
     Other(UpstrokeError),
 }
@@ -537,7 +539,8 @@ pub enum JudgeError {
 impl From<JudgeError> for UpstrokeError {
     fn from(error: JudgeError) -> Self {
         match error {
-            JudgeError::Runner { error, .. } | JudgeError::Other(error) => error,
+            JudgeError::Runner(error) => error.into(),
+            JudgeError::Other(error) => error,
         }
     }
 }
@@ -736,10 +739,7 @@ impl Judge<'_> {
                 self.ledger
                     .cancel(&request.invocation)
                     .map_err(JudgeError::Other)?;
-                Err(JudgeError::Runner {
-                    invocation: request.invocation.clone(),
-                    error,
-                })
+                Err(JudgeError::Runner(error))
             }
             Err(error) => {
                 drop(self.ledger.cancel(&request.invocation));
@@ -752,7 +752,7 @@ impl Judge<'_> {
         &mut self,
         request: &RunnerRequest,
         pool: Option<String>,
-    ) -> Result<Result<ProcessOutput, UpstrokeError>, UpstrokeError> {
+    ) -> Result<Result<ProcessOutput, RunnerError>, UpstrokeError> {
         let slotted = is_slotted(&request.invocation);
         if slotted {
             let agent = request

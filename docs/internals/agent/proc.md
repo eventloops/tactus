@@ -164,6 +164,26 @@ refused, a stream whose read failed rather than ended, or a stdin write
 failure other than the child's broken-pipe refusal, or a fault the observer
 injected. Pipe worker panics are supervision failures too.
 
+The typed form is [`run_with_timeout_classified`]; this drops the fate for
+the legacy callers that have nothing to decide.
+
+## `pub struct ProcessFailure {`
+
+A funnel error with the [`ProcessFate`] the funnel established when it
+returned: `NeverStarted` until `spawn` returns, `Unresolved` from then until
+the tree is known gone, and `Gone` once a kill was followed by a successful
+reap, or an observed exit was reaped. The funnel keeps the fate in a cell
+beside the closure and every return path is classified by where it stands,
+so an injected fault at a containment point after the spawn — where nothing
+kills the child — is honestly `Unresolved`, and a `settle_failed_supervision`
+whose `wait` failed does not claim the tree is gone.
+
+## `pub fn run_with_timeout_classified(`
+
+[`run_with_timeout_at`] with the fate attached: what the host Runner runs,
+because its caller settles an outage terminal only on a fate that says no
+process survives.
+
 ## `let mut termination = termination::Supervisor::begin(terminate_site)?;`
 
 Enter before `spawn`: if an interrupt arrives in the narrow interval
