@@ -5915,20 +5915,33 @@ fn the_notes_do_not_claim_the_hooks_guard_spans_the_whole_run() {
     );
 }
 
+/// A scratch tree removed however the scope that owns it ends, so a timed-out
+/// or failed assertion does not leave its fixture behind.
+struct FixtureRoot(PathBuf);
+
+impl Drop for FixtureRoot {
+    fn drop(&mut self) {
+        let removed = std::fs::remove_dir_all(&self.0);
+        if !std::thread::panicking() {
+            removed.expect("remove the hooks-interval fixture");
+        }
+    }
+}
+
 #[test]
 fn run_takes_the_hooks_guard_after_it_has_resolved_the_program() {
-    let root = scratch("hooks-interval");
-    let workspace = root.join("workspace");
+    let root = FixtureRoot(scratch("hooks-interval"));
+    let workspace = root.0.join("workspace");
     std::fs::create_dir_all(&workspace).expect("create the workspace");
     let runner = Arc::new(
         HostRunner::new()
-            .with_environment(environment_on_path(&[&root.join("nothing-here")], None)),
+            .with_environment(environment_on_path(&[&root.0.join("nothing-here")], None)),
     );
 
     // The disputed interleaving, forced rather than raced: this thread owns
     // `hooks` for the whole of the worker's `run`. A `run` that took `hooks` on
-    // entry could not reach the resolution that refuses it, and the worker
-    // would still be blocked when the receive below times out.
+    // entry could not reach the resolution that refuses it, and the receive
+    // below would time out with the worker still blocked on the guard.
     let held = runner.hooks.lock().unwrap_or_else(PoisonError::into_inner);
 
     let (report, refusals) = std::sync::mpsc::channel();
@@ -5946,16 +5959,19 @@ fn run_takes_the_hooks_guard_after_it_has_resolved_the_program() {
         })
     };
 
-    let refused = refusals
-        .recv_timeout(Duration::from_secs(60))
-        .expect("`run` refuses an unresolvable program while another caller holds `hooks`");
+    // Nothing is asserted while the worker could still be blocked. Releasing
+    // the guard unblocks it on the timing-out path too, so the handle is joined
+    // and a worker panic observed however this test ends (§10).
+    let received = refusals.recv_timeout(Duration::from_secs(60));
     drop(held);
-    worker.join().expect("the worker thread");
+    let joined = worker.join();
 
+    let refused =
+        received.expect("`run` refuses an unresolvable program while another caller holds `hooks`");
+    joined.expect("the worker thread");
     let message = refused.expect_err("nothing of that name is on the composed PATH");
     assert!(
         message.contains("upstroke-no-such-program"),
         "the refusal did not come from program resolution: {message}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
