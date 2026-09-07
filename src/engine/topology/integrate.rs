@@ -560,6 +560,32 @@ pub fn prune_pin(
     )
 }
 
+/// Delete a prepared pin expected-old at whatever it names, if it is present.
+///
+/// The interrupt path does not carry the proposal sha, and a pin present at
+/// resume is the one a stale verification left; deleting it expected-old at its
+/// own target is the expected-old delete R12 asks for, tolerant of an absent
+/// pin a prior resume already pruned.
+///
+/// # Errors
+///
+/// A Git error.
+pub fn prune_pin_if_present(
+    manager: &WorkspaceManager,
+    hooks: &mut dyn TopologyHooks,
+    pin: &GitRef,
+) -> Result<(), UpstrokeError> {
+    let Some(target) = manager.direct_ref_target(pin.as_str())? else {
+        return Ok(());
+    };
+    manager.delete_ref_expected_old(
+        hooks.effects(),
+        RefSite::DeletePreparedPin,
+        pin.as_str(),
+        &target,
+    )
+}
+
 /// One integration, from the decision to its terminal.
 ///
 /// The reservation is the caller's: taken before this is entered and

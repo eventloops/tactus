@@ -1367,11 +1367,10 @@ them checkable rather than asserted in prose:
 * **(c)** the repository is touched only once the recorded Runner has been
   rebuilt and its probes have answered, so a resume that cannot run leaves
   the object store as it found it;
-* **(f)** an unresolved promotion — and, by the same clause, an unresolved
-  integration transaction — is a prefix whose integration ref may be
-  mid-move, and "present == base continue" would adopt one under a
-  transaction this build cannot resolve. This case is also the first
-  coverage [`refuse_unimplemented_terminals`] has had.
+* **(f)** an unresolved integration transaction is a prefix whose
+  integration ref may be mid-move, so the P7/P8 step is skipped when the
+  proven prefix carries one and [`finish_integration`] owns the ref; an
+  unresolved promotion is completed by [`finish_promotions`], not refused.
 
 The fourth bound, "**before (d)**", is not here: it is asserted positively by
 [`kill_after_run_started_creates_integration_ref`], which reads the log at

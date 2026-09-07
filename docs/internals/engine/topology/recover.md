@@ -89,8 +89,10 @@ record `RootDerived` resolved and `RecordsVerified` authenticated —
 `run_started(4).integration_ref` and `run_started(4).base_sha` — never from
 today's configuration.
 
-Its position is between step (f)'s [`refuse_unimplemented_terminals`] and
-step (d)'s first append, and every bound on it is a separate clause:
+It is skipped entirely when the proven prefix carries an integration
+transaction — [`finish_integration`] at step (f) owns the ref then — and
+otherwise its position is before step (d)'s first append, and every bound on
+it is a separate clause:
 
 * **After (a1).** It is a durable effect on a repository ref. O18 puts the
   stable-prefix barrier before the census's fold-derived reclaim, before any
@@ -102,33 +104,30 @@ step (d)'s first append, and every bound on it is a separate clause:
 * **After (c).** The repository is touched only once the recorded Runner has
   been rebuilt by inspection and its probes have answered, so a resume that
   cannot run at all leaves the object store exactly as it found it.
-* **After (f).** This is the bound that is not merely tidy.
-  [`refuse_unimplemented_terminals`] refuses a proven prefix that leaves an
-  integration transaction unresolved, and an unresolved integration
-  transaction is precisely the state in which the integration ref may be
-  mid-move. The ref of such a run can still be *at* the recorded base — the
-  CAS has not run yet — and "present == base continue" would then silently
-  adopt a ref under a transaction this build cannot resolve. That case is
-  the one the step's own refusals do not catch, so the checkpoint refusal
-  runs first.
+* **Skipped under an open transaction.** This is the bound that is not
+  merely tidy. A run with an integration transaction is past P8: the
+  integration ref is the transaction's to move, and [`finish_integration`]
+  at step (f) moves it. The ref of such a run can still be *at* the recorded
+  base — the CAS has not run yet — and "present == base continue" would then
+  adopt, expected-old, a ref that `finish_integration` is about to compare
+  against and swap. That is the case the step's own refusals do not catch, so
+  the recovery skips the step when `fold.transaction()` is `Some`, and
+  `finish_integration` is the single writer of the ref.
 * **Before (d).** The step can refuse: a ref at another SHA, a symbolic ref,
   a ref checked out in a worktree. A refusal after `attempt_interrupted`,
   `generation_closed` and `run_resumed` is a resume half-performed — the
   epoch incremented and the generations closed for a command that then
   failed — and the next resume would append the same set again before
-  refusing again. [`refuse_unimplemented_terminals`] gives the identical
-  reason for its own position: a refusal after two appends is not "before
-  any append".
+  refusing again: a refusal after two appends is not "before any append".
 
 O15 is "run_started before integration ref", and on a resume it is satisfied
 by construction rather than by placement: `run_started(4)` is the committed
 first line (a0) read before this order began. Nothing here can put the ref
 first.
 
-It is **not** a recovery event. It appends nothing, so
-[`refuse_unimplemented_terminals`] does not gate it as an operation whose
-terminal is missing, and it needs no terminal of its own — the effect either
-happened or did not, and the next resume decides which by looking at the ref.
+It is **not** a recovery event. It appends nothing and needs no terminal of
+its own — the effect either happened or did not, and the next resume decides
+which by looking at the ref.
 
 ### Nothing here is a production path
 
@@ -1211,12 +1210,27 @@ the fold is poisoned and the next resume repeats from (a0).
 
 (c) the recorded Runner by inspection, then its probes.
 
-## `refuse_unimplemented_terminals(&certified)?;`
+## `reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
 
-(f) the terminals this build does not implement, refused before any
-append — which is why it precedes (d) and (e) rather than sitting in its
-own numbered position: a refusal after two appends is not "before any
-append".
+`T-PROPOSAL`'s residue reclaim, before the namespace check that would
+otherwise refuse it. A cherry-pick killed before or after it wrote its
+objects leaves a `merge/s<seq>` staging worktree and can leave an orphan
+`prepared/<seq>` pin, neither belonging to a live transaction. This removes
+both — the staging worktree with force, the pin expected-old at what it names
+— skipping the staging and pin a live transaction still owns, so
+[`finish_integration`] resolves those. It precedes `refuse_unexpected_refs`
+because an orphan pin *is* an unexpected ref until it is reclaimed.
+
+## `finish_integration(&mut certified, seams.manager, &mut context)?;`
+
+(f) the integration half: resolve the one transaction the proven prefix
+leaves open. A `Prepared` transaction is completed through the same
+`integrate::publish` the live path uses — the compare-and-swap issued only
+now the barrier of (a1) has proven the `merge_prepared` line durable; a
+`VerificationStarted` one is settled `merge_verification_interrupted`, its
+pin pruned and its staging reclaimed, and the candidate re-verifies under a
+new sequence. It runs at (F) beside [`finish_promotions`]: both complete what
+the run authorized, after (d) and (e).
 
 ## `{`
 
@@ -1329,57 +1343,56 @@ Parked and BudgetExceeded are resumable outcomes: the fold's own
 guard lets `run_resumed` through for exactly these two, which is what
 makes "raise the ceiling and resume" the response to a budget stop.
 
-## `pub fn refuse_unimplemented_terminals(certified: &PreflightCertified) -> Result<(), UpstrokeError> {`
+## `pub fn finish_integration(`
 
-Step (f)'s checkpoint refusal.
+Step (f)'s integration half: resolve the one integration transaction the
+proven prefix leaves open. It replaced `refuse_unimplemented_terminals`, the
+PR7 checkpoint that refused this state — PR8 implements the terminals, so it
+completes rather than refuses.
 
-`checkpoint_refusals`: "an intermediate build refuses, **before any
-append**, any operation whose terminals it does not implement (PR7:
-integration and run end beyond refusal)".
+`transaction_fault_matrix` rows `T-FAST`, `T-PREPARED` and `T-VERIFY`, and
+INV-09's "an authorized publication is always completed (recovery or run-end
+closure), never abandoned".
 
-**The refusal here is the *integration* transaction's, and only that.** This
-sentence read "completing it means `task_candidate_created` or a CAS, and
-PR7 implements neither terminal", which was true when the step was written
-and false by the time the driver existed: `finish_promotions` calls
-`candidate::append_candidate_created`, so PR7 implements that terminal and
-step (f) hands unresolved promotions to it rather than refusing them. What
-this refuses is the integration half — completing one means a
-compare-and-swap on the integration ref, which is PR8's. The 2026-08-26
-re-review of `c2c0294` found the stale half, finding C.
+* A **`Prepared`** transaction is completed through
+  [`super::integrate::publish`] on the [`super::integrate::Authorized`] the
+  fold reads back — the *same* publish the live path runs, so a resume and a
+  live completion converge by construction. The compare-and-swap it issues is
+  safe only because the stable-prefix barrier of step (a1) has already proven
+  the `merge_prepared` line durable: a CAS is never issued on a merely
+  replay-visible authorization. A ref already at the proposal records the
+  `task_merged` without a second swap; a third SHA refuses rather than
+  clobbering.
+* A **`VerificationStarted`** transaction is settled
+  `merge_verification_interrupted`, its `prepared/<seq>` pin deleted
+  expected-old and its staging worktree reclaimed, and the candidate
+  re-verifies under a new sequence. `Authorized::from_fold` returns `None` for
+  it — this build no longer refuses that `None`, it interrupts.
 
-Takes `&PreflightCertified` because it is a step-(f) emitter's predicate and
-every recovery emitter takes one — the refusal has to be reachable from the
-same place the append would have been, or it is refusing somewhere else.
+Takes `&mut PreflightCertified` and the run's `WorkspaceManager`, because it
+is a step-(f) emitter and a writer of the integration ref, reachable from the
+same place the live append would have been.
 
 ### Errors
 
-[`UpstrokeError::Refused`] naming the unresolved integration transaction.
+A refusal (a third SHA on the CAS, a symbolic or checked-out ref), the
+append-error protocol's report, or a Git error.
 
-**It named a second thing until 2026-08-27**: a task whose generation was
-`Promoting` with its candidate pin gone. That refusal guarded erratum E6's
-convergence, which rebuilt a candidate identity from the pin; with
-`candidate_prepared` as the sole successful settlement there is no such
-reconstruction and no such window, so one refusal is left and this takes no
-`WorkspaceManager` — it is now a predicate over the fold alone.
+## `fn reclaim_stale_residue(`
 
-## `pub fn refuse_unimplemented_terminals(certified: &PreflightCertified) -> Result<(), UpstrokeError> {` › `Ok(())`
+`T-PROPOSAL`'s residue reclaim. Every `merge/s<seq>` staging worktree and
+every `prepared/<seq>` pin that no live transaction owns is removed — the
+worktree with force, the pin expected-old at what it names — leaving the
+proposal objects for Git. The staging and pin a live transaction still holds
+are skipped: [`finish_integration`] resolves those. It runs before the
+namespace check because an orphan pin is an unexpected ref until reclaimed.
 
-**A `Promoting` generation whose pin is gone used to be refused here**,
-because E6's convergence rebuilt the candidate identity *from* that pin
-and had nothing to rebuild from without it.
+## `fn live_prepared_pin(`
 
-Both are gone. Since the 2026-08-27 CONFORM ruling `candidate_prepared`
-is the sole successful settlement and the only thing that sets
-`Promoting`, in the same block that records the candidate — so a
-promoting generation carries its own identity and needs no pin to
-reconstruct one. A pin already pruned is `T-CAND-REF`'s ordinary
-late-crash prefix, which `finish_promotions` completes; a pin with no
-candidate record is orphan residue, which `candidate::recovery_for`
-prunes while settling the attempt interrupted.
-
-What still refuses before any append is the integration transaction
-above, which is PR8's terminal and one of the two `checkpoint_refusals`
-authorises.
+The `prepared/<seq>` pin a live stale verification holds, if the open
+transaction is a stale-clean one. The namespace check adds it to the expected
+set — it keeps the proposal reachable while the transaction resolves — and
+[`reclaim_stale_residue`] skips it for the same reason.
 
 ## `pub fn finish_promotions(`
 
@@ -1412,9 +1425,10 @@ which a resumed run never reaches, and `select` has no branch that advances a
 `task.open().is_none()`. `Promoting` holds a pipeline entitlement, so at
 `max_parallel = 1` the stall took every other task with it.
 
-It was also a **regression against a refusal**: before E6,
-[`refuse_unimplemented_terminals`] refused any `Promoting` generation before
-any append. Narrowing that refusal without implementing the continuation
+It was also a **regression against a refusal**: before E6, the step-(f)
+checkpoint (then `refuse_unimplemented_terminals`, since replaced by
+[`finish_integration`]) refused any `Promoting` generation before any append.
+Narrowing that refusal without implementing the continuation
 traded a clean pre-append refusal for a silent permanent stall, which is the
 worse of the two by the project's own ordering — a refusal is a resumable
 end, and this was not an end at all.
@@ -1512,9 +1526,9 @@ not from a `Workspace`, and not from the fold's current view of the run: a
 resume that recomputed either would be able to publish a ref the run was
 never started against.
 
-Takes `&PreflightCertified` for the same reason
-[`refuse_unimplemented_terminals`] does — it is what makes "after (c)"
-unstateable as anything else — and returns `()` rather than a witness because
+Takes `&PreflightCertified` for the same reason every step-(f) emitter does
+— it is what makes "after (c)" unstateable as anything else — and returns
+`()` rather than a witness because
 nothing downstream may depend on it having run: it is a repair of a prefix,
 not a link in the order.
 
