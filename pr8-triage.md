@@ -346,3 +346,29 @@ file restored from `HEAD`:
 | `reclaim_staging` reading the pin's current target (the old body) | `a_rejected_or_unavailable_terminal_refuses_to_delete_a_pin_another_writer_substituted` (`Rejected` returned as success) |
 | every start failure recorded as attempted | the cell "the funnel refuses before `docker start` is attempted and the cancel cannot reach the runtime" (fate "may still be running") |
 | the reviewer's: integration reviewers' `ReviewCx.workspace` pointed into staging, snapshots kept | `stale_candidate_takes_staging_path_and_publishes_pinned_proposal`, `terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay`, `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal` |
+
+## 8. Round five — the final cover review of `716cf89a` (the whole slice against master)
+
+One frontier review at `ultra` effort over the whole slice against master
+(`review-pr247-716cf89-final.md`, the lens `lens-final.md`), returning `CHANGES_REQUIRED` with
+six findings: two P1, three P2, one P3. Two of the six are in code that predates this slice
+(finding 1's macOS scanner, finding 5's legacy pin sites). The reviewer cleared the structural
+core again: no stable-prefix or CAS ordering defect, no undeclared Class C, the three approved
+Class B descriptions matching the code, and neither deferred finding reopened.
+
+The surviving witnesses are `final-evidence/keep/`: `paid-review-witness.{patch,log}` (finding 2,
+reproduced through the loop), `proposal-read-results.md` (finding 3, the index-hash evidence and
+its control), and `macos-enumeration-witness.rs` (finding 1, a portable scanner reproduction, not
+a native macOS one).
+
+### 8.1 The plan of this round (recorded first, so a replaced session inherits it)
+
+| # | Mechanism decided | Where |
+|---|---|---|
+| 1 | The macOS enumeration says *unknown* where Apple's wrapper cannot distinguish empty from failed: `errno` is cleared before `proc_listpids` and read after, and a zero-byte answer with a non-zero `errno` is `None`. The decision is a portable function (`listed_pid_bytes`) compiled and tested on every platform, called by the macOS scanner, so the box that reasons about the syscall contract is not the only box that checks the reasoning. | `agent/proc.rs` (`termination`) |
+| 2 | A completed review's cost is charged the moment it completes, not when the judgement returns: `Judge` takes a `ReviewAccount` and reports each pass to it; the integration's account is the run's live `Spend`. `verify` no longer charges from the returned judgement, so every exit from `judge` — including the Git-error branch that settles unavailable — leaves the account complete. The legacy attempt path and the scaffold pass `NoReviewAccount`, which is the v0.1 behaviour unchanged. | `topology/attempt.rs`, `topology/run.rs`, `topology/select.rs`, `topology/scaffold.rs` |
+| 3 | The proposal classifier's unmerged-entry query becomes the plumbing `git diff-files`, which `diff.autoRefreshIndex`'s own documentation excludes from the porcelain refresh; and the class the finding names is swept — `read_only_git` passes `--no-optional-locks` for every read it makes, which is what `PR5-CONF-002` established at one site and never applied to the rest. | `workspace_manager.rs` |
+| 4 | A reviewer whose process never started is a spawn failure, not a reviewer's answer: `run_review`'s unavailable outcome records that the process never started, `review_failure` carries it on the failure, and the integration's `infrastructure` mapping answers `RunnerSpawnFailure` for it, which is what INV-23 names for a mid-run image mismatch including reviewers and re-asks. No new `FailureKind` and no new `InfrastructureKind`: both vocabularies are frozen and both already have what this needs. | `review.rs`, `ladder.rs`, `engine/attempt.rs`, `topology/integrate.rs` |
+| 5 | §7.4's domain is restated as what it actually has to cover — every production ref deletion, ref move, worktree removal and snapshot removal in **both** the schema-4 `WorkspaceManager` layer and the legacy `Workspace` layer — and re-derived by grep over that domain. Each newly listed site gets its authority. | `pr8-triage.md` §7.4 |
+| 6 | The Summary's "the v0.1 path is unchanged" and the rollback paragraph's "without touching the v0.1 path or any released behaviour" are qualified against the Risk section's own declared exception. | `pr8-body.md` |
+

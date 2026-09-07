@@ -3795,23 +3795,56 @@ mod termination {
         Some(count)
     }
 
+    /// How many bytes of pids `proc_listpids` listed, or `None` when its
+    /// answer is not an enumeration at all.
+    ///
+    /// **Apple's wrapper returns zero on failure.** `proc_listpids` calls
+    /// `__proc_info` and reports its `-1` as `0` with `errno` left set, and a
+    /// type outside the range it accepts sets `EINVAL` and returns `0` as well
+    /// (`libsyscall/wrappers/libproc/libproc.c`). So "no process is in that
+    /// group" and "this call could not enumerate the group" are the same
+    /// return value, and `errno` — cleared immediately before the call, so
+    /// nothing older can be read as this call's failure — is the only thing
+    /// that separates them. A buffer filled to its last byte may have been
+    /// truncated and is not an enumeration either.
+    ///
+    /// The rule is a function rather than three lines inside the scanner
+    /// because the scanner compiles only on macOS. This is compiled and
+    /// exercised on every platform, so the reasoning about Apple's contract is
+    /// checked on the box the reasoning is done on and not only on the one it
+    /// runs on.
+    #[cfg(any(target_os = "macos", test))]
+    fn listed_pid_bytes(returned: i32, errno: i32, buffer_bytes: usize) -> Option<usize> {
+        let listed = usize::try_from(returned).ok()?;
+        if listed == 0 && errno != 0 {
+            return None;
+        }
+        (listed < buffer_bytes).then_some(listed)
+    }
+
     #[cfg(target_os = "macos")]
     fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {
         const PROC_PGRP_ONLY: u32 = 2;
         const MAX_PIDS: usize = 16_384;
         let mut pids = [0_i32; MAX_PIDS];
-        let bytes = unsafe {
+        let buffer_bytes = std::mem::size_of_val(&pids);
+        // SAFETY: `__error` is Darwin's per-thread `errno` location. It is
+        // cleared here and read below with no intervening call, because a zero
+        // return from `proc_listpids` is only readable as an empty group when
+        // this call is the one that left `errno` where it is.
+        unsafe { *libc::__error() = 0 };
+        let returned = unsafe {
             libc::proc_listpids(
                 PROC_PGRP_ONLY,
                 pgid as u32,
                 pids.as_mut_ptr().cast(),
-                std::mem::size_of_val(&pids) as libc::c_int,
+                buffer_bytes as libc::c_int,
             )
         };
-        if bytes < 0 || bytes as usize == std::mem::size_of_val(&pids) {
-            return None;
-        }
-        let count = bytes as usize / std::mem::size_of::<libc::pid_t>();
+        // SAFETY: as above; nothing between the two calls touches `errno`.
+        let errno = unsafe { *libc::__error() };
+        let bytes = listed_pid_bytes(returned, errno, buffer_bytes)?;
+        let count = bytes / std::mem::size_of::<libc::pid_t>();
         for pid in &pids[..count] {
             if *pid <= 0 {
                 continue;
@@ -4372,6 +4405,53 @@ mod termination {
         use std::time::Instant;
 
         static REAPED_CHILD_STOP: AtomicBool = AtomicBool::new(false);
+
+        // Apple's `proc_listpids` answers 0 for a group with no members and 0
+        // for a call that failed, so the scanner that reads 0 as an
+        // enumeration acknowledges a cleanup it never observed: `finish`
+        // succeeds, the termination is reported, the snapshot is removed and
+        // the cleanup lease released, beside a descendant that has not
+        // terminated. The rule this asserts is the one the macOS scanner
+        // reads; the platform it runs on cannot reach the syscall, which is
+        // why the rule is a function.
+        #[test]
+        fn a_pid_enumeration_that_failed_is_not_an_empty_process_group() {
+            const BUFFER: usize = 65_536;
+
+            // Apple's failure answers: `__proc_info` reported -1 with errno
+            // set, and the wrapper's own out-of-range refusal.
+            assert_eq!(listed_pid_bytes(0, libc::ENOMEM, BUFFER), None);
+            assert_eq!(listed_pid_bytes(0, libc::EINVAL, BUFFER), None);
+            assert_eq!(listed_pid_bytes(0, libc::ESRCH, BUFFER), None);
+
+            // A group that really has no members answers 0 with the errno this
+            // call left alone, and that is an enumeration of nothing.
+            assert_eq!(listed_pid_bytes(0, 0, BUFFER), Some(0));
+
+            // An ordinary listing; a stale errno cannot make one unknown,
+            // because a non-zero return is the syscall's own success.
+            assert_eq!(listed_pid_bytes(8, 0, BUFFER), Some(8));
+            assert_eq!(
+                listed_pid_bytes(
+                    i32::try_from(BUFFER - 4).expect("the buffer fits an i32"),
+                    libc::ENOMEM,
+                    BUFFER
+                ),
+                Some(BUFFER - 4)
+            );
+
+            // A buffer filled to its last byte may have been truncated, and a
+            // negative return is undocumented: neither is an enumeration.
+            assert_eq!(
+                listed_pid_bytes(
+                    i32::try_from(BUFFER).expect("the buffer fits an i32"),
+                    0,
+                    BUFFER
+                ),
+                None
+            );
+            assert_eq!(listed_pid_bytes(-1, 0, BUFFER), None);
+        }
 
         #[test]
         fn the_reapers_cleanup_hold_is_shared_between_overlapping_invocations() {
