@@ -54,8 +54,20 @@ struct ProcessTree {
     job: windows_job::Job,
 }
 
+#[derive(Debug)]
+struct SpawnFailure {
+    error: std::io::Error,
+    fate: ProcessFate,
+}
+
+impl std::fmt::Display for SpawnFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.error, self.fate.describe())
+    }
+}
+
 impl ProcessTree {
-    fn spawn(command: &mut Command, hooks: &mut dyn SpawnHooks) -> std::io::Result<Self> {
+    fn spawn(command: &mut Command, hooks: &mut dyn SpawnHooks) -> Result<Self, SpawnFailure> {
         #[cfg(windows)]
         {
             let (child, job) = windows_job::spawn_suspended_in_job(command, hooks)?;
@@ -63,7 +75,10 @@ impl ProcessTree {
         }
         #[cfg(not(windows))]
         {
-            let child = command.spawn()?;
+            let child = command.spawn().map_err(|error| SpawnFailure {
+                error,
+                fate: ProcessFate::NeverStarted,
+            })?;
             hooks.child_created(child.id());
             Ok(Self { child })
         }
@@ -191,13 +206,16 @@ fn run_with_timeout_and_limit(
         termination.prepare(&mut command);
 
         let started = Instant::now();
-        let mut child =
-            ProcessTree::spawn(&mut command, hooks).map_err(|e| UpstrokeError::Agent {
+        let mut child = ProcessTree::spawn(&mut command, hooks).map_err(|failure| {
+            fate.set(failure.fate);
+            UpstrokeError::Agent {
                 message: format!(
-                    "failed to spawn `{}`: {e}",
-                    command.get_program().to_string_lossy()
+                    "failed to spawn `{}`: {}",
+                    command.get_program().to_string_lossy(),
+                    failure.error
                 ),
-            })?;
+            }
+        })?;
         fate.set(ProcessFate::Unresolved);
         drop(command);
         #[cfg(unix)]
@@ -250,9 +268,11 @@ fn run_with_timeout_and_limit(
             Err(error) => {
                 #[cfg(unix)]
                 {
+                    let group = termination.finish();
+                    let group_established = group.is_ok();
                     return Err(settle_failed_supervision(
-                        error,
-                        termination.finish(),
+                        error.with_cleanup(group),
+                        group_established,
                         &mut child,
                         &fate,
                     ));
@@ -275,7 +295,7 @@ fn run_with_timeout_and_limit(
             match child_exited_unreaped(&child) {
                 Ok(true) => {
                     if let Err(error) = termination.finish() {
-                        return Err(settle_failed_supervision(error, Ok(()), &mut child, &fate));
+                        return Err(settle_failed_supervision(error, false, &mut child, &fate));
                     }
                     fate.set(ProcessFate::Gone);
                     let status = child.wait().map_err(|e| UpstrokeError::Agent {
@@ -287,32 +307,20 @@ fn run_with_timeout_and_limit(
                     if drain_limit_exceeded(&stdout_drain, &stderr_drain) {
                         output_limited = true;
                         if let Err(error) = termination.finish() {
-                            return Err(settle_failed_supervision(
-                                error,
-                                Ok(()),
-                                &mut child,
-                                &fate,
-                            ));
+                            return Err(settle_failed_supervision(error, false, &mut child, &fate));
                         }
+                        fate.set(ProcessFate::Gone);
                         let _ = child.kill();
-                        if child.wait().is_ok() {
-                            fate.set(ProcessFate::Gone);
-                        }
+                        let _ = child.wait();
                         break None;
                     } else if started.elapsed() >= timeout {
                         timed_out = true;
                         if let Err(error) = termination.finish() {
-                            return Err(settle_failed_supervision(
-                                error,
-                                Ok(()),
-                                &mut child,
-                                &fate,
-                            ));
+                            return Err(settle_failed_supervision(error, false, &mut child, &fate));
                         }
+                        fate.set(ProcessFate::Gone);
                         let _ = child.kill();
-                        if child.wait().is_ok() {
-                            fate.set(ProcessFate::Gone);
-                        }
+                        let _ = child.wait();
                         break None;
                     }
                     thread::sleep(Duration::from_millis(50));
@@ -321,9 +329,11 @@ fn run_with_timeout_and_limit(
                     let primary = UpstrokeError::Agent {
                         message: format!("waiting on agent process: {e}"),
                     };
+                    let group = termination.finish();
+                    let group_established = group.is_ok();
                     return Err(settle_failed_supervision(
-                        primary,
-                        termination.finish(),
+                        primary.with_cleanup(group),
+                        group_established,
                         &mut child,
                         &fate,
                     ));
@@ -334,8 +344,8 @@ fn run_with_timeout_and_limit(
         let code = loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    fate.set(ProcessFate::Gone);
                     child.finish_direct_exit()?;
+                    fate.set(ProcessFate::Gone);
                     break status.code();
                 }
                 Ok(None) => {
@@ -432,14 +442,13 @@ fn finish_pipe_reports<T>(
 #[cfg(unix)]
 fn settle_failed_supervision(
     primary: UpstrokeError,
-    cleanup: Result<(), UpstrokeError>,
+    group_established: bool,
     child: &mut ProcessTree,
     fate: &std::cell::Cell<ProcessFate>,
 ) -> UpstrokeError {
-    let primary = primary.with_cleanup(cleanup);
     let kill = child.kill();
     let wait = child.wait().map(|_| ());
-    if wait.is_ok() {
+    if group_established {
         fate.set(ProcessFate::Gone);
     }
     finish_failed_supervision_cleanup(primary, kill, wait)
@@ -486,14 +495,44 @@ fn kill_tree(terminate_site: ProcessSite, child: &mut ProcessTree) -> Result<(),
     #[cfg(not(windows))]
     {
         #[cfg(unix)]
-        if let Ok(pid) = i32::try_from(child.id()) {
-            // SAFETY: `run_with_timeout` put this child in a new process group
-            // whose id is the child's pid. A negative pid targets that group only.
-            let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
-        }
+        let signalled = match i32::try_from(child.id()) {
+            Ok(pid) => {
+                // SAFETY: `run_with_timeout` put this child in a new process group
+                // whose id is the child's pid. A negative pid targets that group only.
+                if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
+                    Ok(())
+                } else {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() == Some(libc::ESRCH) {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+            Err(_) => Err(std::io::Error::from_raw_os_error(libc::EINVAL)),
+        };
+        #[cfg(not(unix))]
+        let signalled: std::io::Result<()> = Ok(());
         let _ = child.kill();
-        let _ = child.wait();
-        Ok(())
+        let reaped = child.wait().map(|_| ());
+        match (signalled, reaped) {
+            (Ok(()), Ok(())) => Ok(()),
+            (signalled, reaped) => Err(UpstrokeError::Agent {
+                message: format!(
+                    "terminating the agent process group did not establish it gone: the group \
+                     signal {}, the direct child's reap {}",
+                    signalled.map_or_else(
+                        |error| format!("failed ({error})"),
+                        |()| "was delivered".to_owned()
+                    ),
+                    reaped.map_or_else(
+                        |error| format!("failed ({error})"),
+                        |()| "succeeded".to_owned()
+                    ),
+                ),
+            }),
+        }
     }
 }
 
@@ -744,7 +783,7 @@ mod windows_job {
         WaitForSingleObject,
     };
 
-    use super::{SpawnHooks, SubEffectPoint, apply_io};
+    use super::{ProcessFate, SpawnFailure, SpawnHooks, SubEffectPoint, apply_io};
 
     const CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -883,7 +922,7 @@ mod windows_job {
     pub(super) fn spawn_suspended_in_job(
         command: &mut Command,
         hooks: &mut dyn SpawnHooks,
-    ) -> io::Result<(Child, Job)> {
+    ) -> Result<(Child, Job), SpawnFailure> {
         spawn_suspended_in_job_with(command, hooks, real_assign_to_job, resume_only_thread)
     }
 
@@ -910,51 +949,70 @@ mod windows_job {
         hooks: &mut dyn SpawnHooks,
         assign: impl FnOnce(HANDLE, HANDLE) -> i32,
         resume: impl FnOnce(u32) -> io::Result<()>,
-    ) -> io::Result<(Child, Job)> {
-        let job = Job::create()?;
+    ) -> Result<(Child, Job), SpawnFailure> {
+        let never_started = |error| SpawnFailure {
+            error,
+            fate: ProcessFate::NeverStarted,
+        };
+        let job = Job::create().map_err(never_started)?;
         command.creation_flags(CREATE_SUSPENDED);
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(never_started)?;
         hooks.child_created(child.id());
         if let Err(error) = apply_io(
             hooks.point(SubEffectPoint::CreatedSuspended),
             SubEffectPoint::CreatedSuspended,
         ) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+            return Err(settle_suspended(error, &mut child, None));
         }
         let assigned = assign(job.handle, child.as_raw_handle() as HANDLE);
         if assigned == 0 {
             let error = io::Error::last_os_error();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+            return Err(settle_suspended(error, &mut child, None));
         }
         if let Err(error) = apply_io(
             hooks.point(SubEffectPoint::PrivateJobAssigned),
             SubEffectPoint::PrivateJobAssigned,
         ) {
-            let _ = job.terminate_and_wait();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+            return Err(settle_suspended(error, &mut child, Some(&job)));
         }
         if let Err(error) = resume(child.id()) {
-            let _ = job.terminate_and_wait();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+            return Err(settle_resumed(error, &mut child, &job));
         }
         if let Err(error) = apply_io(
             hooks.point(SubEffectPoint::Resumed),
             SubEffectPoint::Resumed,
         ) {
-            let _ = job.terminate_and_wait();
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(error);
+            return Err(settle_resumed(error, &mut child, &job));
         }
         Ok((child, job))
+    }
+
+    fn settle_suspended(error: io::Error, child: &mut Child, job: Option<&Job>) -> SpawnFailure {
+        let job_empty = job.is_some_and(|job| job.terminate_and_wait().is_ok());
+        let _ = child.kill();
+        let reaped = child.wait().is_ok();
+        SpawnFailure {
+            error,
+            fate: if job_empty || reaped {
+                ProcessFate::Gone
+            } else {
+                ProcessFate::Unresolved
+            },
+        }
+    }
+
+    fn settle_resumed(error: io::Error, child: &mut Child, job: &Job) -> SpawnFailure {
+        let job_empty = job.terminate_and_wait().is_ok();
+        let _ = child.kill();
+        let _ = child.wait();
+        SpawnFailure {
+            error,
+            fate: if job_empty {
+                ProcessFate::Gone
+            } else {
+                ProcessFate::Unresolved
+            },
+        }
     }
 
     static AMBIENT: OnceLock<Result<AmbientJob, String>> = OnceLock::new();

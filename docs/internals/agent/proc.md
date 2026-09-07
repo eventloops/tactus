@@ -138,11 +138,26 @@ A direct child plus the platform primitive that owns its ordinary
 descendants. Keeping ownership beside `Child` prevents a successful wait
 from accidentally bypassing tree settlement.
 
+## `struct SpawnFailure {`
+
+A spawn that failed, with the [`ProcessFate`] the boundary established.
+On Unix a `Command::spawn` that fails created nothing (a pre-exec failure
+is reaped inside `spawn`), so it is `NeverStarted`. On Windows the spawn
+is four steps after `CreateProcess`, and a failure at any of them has a
+process behind it: the review of `79ddbffb` found those cleanups
+discarded behind an outer `NeverStarted` (`PR8-R3-HOST-GROUP-GONE`), so
+[`windows_job::spawn_suspended_in_job_with`] now says what its own
+cleanup established and the funnel stores it.
+
 ## `impl ProcessTree` › `fn finish_direct_exit(&mut self) -> Result<(), UpstrokeError> {`
 
 The direct child has already exited. Windows descendants remain job
 members, so terminate and observe the job empty before returning its
-status. Unix process-group settlement is owned by `termination`.
+status. Unix process-group settlement is owned by `termination`. The
+funnel stores `Gone` only after this returns `Ok`: `TerminateProcess` is
+asynchronous and dropping the job handle is not a wait, so a cleanup that
+failed or timed out leaves the fate `Unresolved` with the exit status
+unreturned.
 
 ## `pub fn run_with_timeout_at(`
 
@@ -170,13 +185,23 @@ the legacy callers that have nothing to decide.
 ## `pub struct ProcessFailure {`
 
 A funnel error with the [`ProcessFate`] the funnel established when it
-returned: `NeverStarted` until `spawn` returns, `Unresolved` from then until
-the tree is known gone, and `Gone` once a kill was followed by a successful
-reap, or an observed exit was reaped. The funnel keeps the fate in a cell
-beside the closure and every return path is classified by where it stands,
-so an injected fault at a containment point after the spawn — where nothing
-kills the child — is honestly `Unresolved`, and a `settle_failed_supervision`
-whose `wait` failed does not claim the tree is gone.
+returned: `NeverStarted` until `spawn` returns (or, on Windows, when the
+spawn boundary's own cleanup established nothing was left), `Unresolved`
+from then until the **tree** is established gone, and `Gone` only from
+tree-level evidence — on Unix the Supervisor's `finish` establishing the
+process group has no non-zombie member, on Windows the job observed
+empty. The direct child's own kill and reap are never that evidence: a
+reaped leader says nothing about a same-group descendant, which is what
+the review of `79ddbffb` reproduced (`PR8-R3-HOST-GROUP-GONE`) — the
+leader killed and reaped, a `sleep` in its group alive, the fate `Gone`.
+The funnel keeps the fate in a cell beside the closure and every return
+path is classified by where it stands, so an injected fault at a
+containment point after the spawn — where the funnel itself kills nothing
+and observes nothing, whatever the Supervisor's `Drop` later does — is
+honestly `Unresolved`, a timeout or output-limit kill is `Gone` once the
+group is settled whatever the leader's reap then returns, and a
+[`settle_failed_supervision`] whose group was not established leaves
+`Unresolved` however cleanly the leader reaped.
 
 ## `pub fn run_with_timeout_classified(`
 
@@ -278,6 +303,28 @@ exactly as they were when they were private items of this file.
 Kill the whole process tree. Killing only the direct child is not enough
 when it is a `cmd.exe` shim: the real agent process would survive, keep
 running, and keep the pipes open.
+
+`Ok` is evidence, not a courtesy: on Windows the job was observed empty
+(`terminate_and_wait`), and on Unix the group signal was delivered
+(`kill(-pgid, SIGKILL)` returned 0, or `ESRCH` because no member was
+left) and the leader was reaped. The Unix answer is weaker than the
+reaper's — it does not wait for a member in uninterruptible sleep — but
+after a delivered `SIGKILL` no member can run user code or complete a
+`fork`, and this path is only the register-error fallback, unreachable
+for a pid the kernel issued. The review of `79ddbffb` found it answering
+an unconditional `Ok` with every result discarded.
+
+## `fn settle_failed_supervision(`
+
+Tidy the direct child after a supervision failure and store the fate.
+`group_established` is the Supervisor's `finish` result as a fact — the
+group has no non-zombie member — and it, alone, sets `Gone`; the kill and
+the reap of the leader are attempted whatever it says and their failures
+are reported through [`finish_failed_supervision_cleanup`], never read as
+evidence. The previous shape took a cleanup `Result` and set `Gone` on a
+successful `wait`, and its `Ok(true)` caller handed it `Ok(())` while
+reporting the reaper's failure as the primary error, so a lost reaper
+produced `Gone` from a reaped leader (`PR8-R3-HOST-GROUP-GONE`).
 
 ## `pub(crate) fn child_leads_its_own_group(pid: u32) -> bool {`
 
@@ -502,6 +549,15 @@ it — are unreachable in every real test, and R22's "created as an
 ambient-job member, so a coordinator death at any spawn sub-step incl.
 the create-suspended prefix terminates it" was asserted for the ambient
 job and not for the spawn path's own recovery.
+
+Every failure after `CreateProcess` answers a [`SpawnFailure`] carrying
+what its cleanup established, because the process exists. Before the
+thread was resumed (`settle_suspended`) the child has run no
+instruction and so has no descendant: the job observed empty, or the
+suspended child itself reaped, is `Gone`. Once `resume` has been called
+(`settle_resumed`) only the job observed empty is `Gone`, the leader's
+reap proving nothing about what it may have created. Anything less is
+`Unresolved`; a failure before `CreateProcess` is `NeverStarted`.
 
 `assign` is also what makes the `PrivateJobAssigned` coordinate
 checkable: it hands a test the private job's handle at the instant the
@@ -2113,7 +2169,11 @@ the tree; dropping successful workers releases them too.
 
 Leave the exited leader as a zombie until cleanup completes:
 its PID pins the PGID, so no unrelated group can reuse the
-numeric id between observation and the final signal.
+numeric id between observation and the final signal. A `finish` that
+fails here leaves the fate `Unresolved`: the leader has exited, but
+the group it led was never established empty, and the fail-closed
+`SIGTERM` the reaper arms is asynchronous, not a proof that the cleanup
+completed before the caller acts on the error.
 
 ## `run_with_timeout_and_limit` › `if let Some(feeder) = stdin_feeder {`
 
