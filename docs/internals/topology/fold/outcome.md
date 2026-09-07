@@ -106,11 +106,13 @@ outstanding lineage question or candidate for this task";
 `check_question_raised` refuses the question-after-dispatch order
 through `check_question_can_park_lineage`, which will not park a lineage
 while any member still holds an open generation. A task with no lineage
-is the same pair of refusals, `lineage_root(key)` being `key` itself.
-The clause is kept because the answer it gives is the right one and a
-selector that agreed with those two checks only by their say-so is a
-place for the three to drift apart in silence. The state has to be built
-by hand to be observed at all, which is what
+of its own meets the same pair of refusals: `lineage_root(key)` is then
+`key` itself.
+
+The clause is kept rather than dropped. `None` is the right answer in
+the state it names, and a selector that left the rule to those two
+checks alone would give the three somewhere to drift apart in silence.
+The state has to be built by hand to be observed at all, which is what
 `lineage_with_a_dispatched_repair` in `src/topology/fold/tests.rs` does:
 it asserts the refusal first and then reaches past it through
 `RunState::open_question`, so the unreachability is executed rather than
