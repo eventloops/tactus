@@ -9,8 +9,10 @@ goes to `pr8-body.md`), then `START-PR8-FIX.md` of 2026-09-07 for the repair rou
 three reviews of `3414dc58`, then `START-PR8-FIX2.md` of the same day for the second repair round
 after the three reviews of the repair range `3414dc58..916852c9` (`pr8-triage.md` §5), then
 `START-PR8-FIX3.md` of the same day for the third repair round — the Runner seam only — after the
-single review of the repair range `916852c9..79ddbffb` (`pr8-triage.md` §6).
-Implementation model: Claude Fable 5.1 at max effort, the implementation and all three repair
+single review of the repair range `916852c9..79ddbffb` (`pr8-triage.md` §6), then
+`START-PR8-FIX4.md` of the same day for the fourth repair round after the cover review of the whole
+slice at `8a5f59e8` (`pr8-triage.md` §7).
+Implementation model: Claude Fable 5.1 at max effort, the implementation and all four repair
 rounds.
 
 This file is the standing plan and the record of every reading taken where the packet was
@@ -337,6 +339,46 @@ offer, the entry now says so and cites the passage that settles it.
   round's version of this reading classified the host by the leader's reap and the container by
   whether both cleanup operations completed; the review of `79ddbffb` found defect A and defect B
   both reachable through it, `pr8-triage.md` §6.)
+  *Corrected in the fourth repair round* (`pr8-triage.md` §7): the third round's version said a
+  stop or a forced removal that "succeeded" established the process gone, and read the daemon's
+  "removal of container … is already in progress" — normalized to a bare `Ok(())` so racing
+  reclaimers converge — as such a success. It is not: `containerRm` sets that flag before
+  `cleanupContainer` kills, so the loser of a removal race learns only that the winner holds the
+  flag. The runtime now answers what a stop or a removal established (`Settled::ProcessGone` for a
+  completed `docker stop`, `docker kill` or `docker rm --force`, each of which returns after the
+  exit is seen, and for the daemon's absent and not-running answers; `Settled::RemovalInProgress`
+  for the in-progress answer), and only `ProcessGone` is evidence: an in-progress answer retains
+  the view and the intent and leaves the fate `Unresolved`. The same round found the third round
+  recording every `start_container` failure as an attempted start: a refusal at the funnel's
+  `Before` phase never issues `docker start`, and the funnel now says on which side of the
+  primitive it failed, so such a launch stays `Created` and its fate is `NeverStarted`. The rule
+  above is otherwise unchanged; the sweep of every site that concludes a process gone is
+  `pr8-triage.md` §7.3.
+- **R29. One rule for the authorized integration head.** The live exact-base decision and the
+  resume's startup check read the same rule: the log's latest `task_merged.merged_sha`, or the
+  recorded base before any publication (`integrate::authorized_head`). `decide` requires the head
+  it reads to be that value before choosing fast or stale — a head the log did not put there is
+  the foreign ref `decisions.coordinator_integration.integration_sequence` says refuses at this
+  read — and `ensure_recorded_integration_ref` requires the same value at resume (R23). The live
+  engine derives it from the event list `RunHandle` carries, which the one `emit` funnel extends
+  on every successful append for the loop and for recovery alike; the fold is not asked to retain
+  a publication, so no new Class B change is made. (The first implementation compared the head
+  only with the candidate's base: an external writer resetting the ref from a publication back to
+  the base made the next candidate exact-base and the engine published it fast over the lost
+  publication; the cover review of `8a5f59e8`, `pr8-triage.md` §7.)
+- **R30. The cleanup scope is entered wherever the run spawns host processes under its lock.** A
+  Unix reaper takes its cleanup-lease paths only from the thread-local scope active at its spawn,
+  and R28's shared `cleanup.lock` hold — what the next coordinator's exclusive probe observes and
+  refuses on while a surviving reaper still settles its groups — exists only through that scope.
+  The v0.1 coordinator and resume enter it beside their lock; the topology path acquired its lock
+  and entered nothing. Now `run_recovery_order` enters it from the lock take to its end (the
+  probes at (c)), creation's P4 enters it for the probes, and `TopologyRun::step` enters it for
+  each step, on the thread that drives the step. The scope is owned rather than borrowed from the
+  lock, because the lock lives inside the handle the loop drives and cannot be borrowed across the
+  `&mut self` a step needs; each site drops its scope before it returns, so no scope outlives the
+  hold it names. (Found by the cover review of `8a5f59e8` with a real reaper observed holding no
+  lease at `ReaperStarted`; the omission predates PR8's attempt path and this branch is what
+  routes integration verification through it.)
 - **R26. Foreign Git state at integration.** `decisions.repairs.not_repairs` lists "foreign Git
   state" among the failures that at integration terminate `merge_verification_unavailable{Deferred
   | Parked}`. A `UpstrokeError::Git` observed anywhere in the verification — the review diff, the
@@ -433,6 +475,24 @@ between them:
 | `fix(agent): the host funnel claims Gone only from group evidence, and the Windows spawn boundary carries its fate` | finding 1 (`PR8-R3-HOST-GROUP-GONE`); the host fate tests that kill M3 |
 | `test(engine): repeated pre-start container outages consume defers, and an unresolved verification keeps its entitlements with the open transaction` | finding 2's loop witness through the production `ContainerRunner`; finding 5's pin (`PR8-R3-RECORD-ENTITLEMENTS`, a record defect) |
 | `docs(pr8): the record after the third repair round` | this file, `pr8-body.md`, `pr8-triage.md` |
+
+### The fourth repair round (2026-09-07)
+
+The cover review of the whole slice at `8a5f59e8` and its triage are `pr8-triage.md` §7. One
+commit per finding, each with a test that fails without its repair (the mutations of §5 below),
+the records kept current between them; the two class sweeps the brief asked for are §7.3 and
+§7.4 of the triage:
+
+| Commit | Findings |
+|---|---|
+| `docs(pr8): the plan of the fourth repair round, recorded before its first repair` | the mechanism decided per finding |
+| `fix(engine): a rejected or unavailable terminal prunes the pin at the proposal the record names, never at what the ref says` | finding 4 (`PR8-R4-SUBSTITUTED-PIN-LIVE`) |
+| `fix(engine): the live decision reads the head the log authorizes through the rule the resume check uses, and refuses a foreign one before any append` | finding 1 (`PR8-R4-LIVE-HEAD`); R29 |
+| `fix(runner): a stop or a removal says what it established, and another reclaimer's removal in progress establishes nothing` | finding 2 (`PR8-R4-REMOVAL-IN-PROGRESS`); R25 corrected |
+| `fix(runner): a start refused before docker start was attempted leaves the launch created, so its fate is never started` | finding 5 (`PR8-R4-START-NOT-ATTEMPTED`) |
+| `fix(engine): the topology run enters its lock's cleanup scope wherever it spawns host processes, so its reapers hold the run's lease` | finding 3 (`PR8-R4-CLEANUP-LEASE`); R30 |
+| `test(engine): the review doubles run a process in the workspace they are handed, and the isolation oracles observe each reviewer's checkout` | finding 6 (`PR8-R4-REVIEW-ORACLE`) |
+| `docs(pr8): the record after the fourth repair round` | this file, `pr8-body.md`, `pr8-triage.md` |
 
 ## 3. `src/topology/**` changes: Class A / B / C
 
@@ -596,3 +656,25 @@ recorded — a field on `merge_verification_unavailable`, or an erratum on
   winguest. The fix-up that followed the replay (`287563f0`, the Unix group signal of `kill_tree`
   moved into a positively gated helper because the platform census refuses a body no CI runner
   compiles) changes that helper's shape only; no witness exercises it.
+
+- **The fourth repair round's witnesses** (`pr8-triage.md` §7.5), each applied by an asserted
+  replacement against the repaired tree, the named tests run, and the file restored from `HEAD`;
+  each fails exactly the tests named: `decide`'s comparison with the authorized head disabled
+  fails `a_foreign_reset_of_the_integration_ref_refuses_before_any_append_and_keeps_the_merged_task`
+  with beta published over alpha's lost change; `cancel_reached` reading `RemovalInProgress` as
+  `container_gone` fails the two in-progress cells of
+  `the_runner_reports_what_it_established_about_the_process_when_it_fails` and
+  `a_removal_another_reclaimer_holds_is_not_proof_the_gate_is_gone` (a `Deferred` terminal over
+  the running gate), and `removal_answer` normalizing the in-progress answer to `ProcessGone`
+  fails those and `a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not`;
+  the step's cleanup scope removed fails `a_host_integration_reaper_holds_the_runs_cleanup_lease`
+  with the observation `[false]`; `reclaim_staging` reading the pin's current target fails
+  `a_rejected_or_unavailable_terminal_refuses_to_delete_a_pin_another_writer_substituted` with
+  `Rejected` returned as success; every start failure recorded as attempted fails the matrix cell
+  "the funnel refuses before `docker start` is attempted and the cancel cannot reach the runtime";
+  and the reviewer's own mutation — the integration reviewers' `ReviewCx.workspace` pointed into
+  the staging worktree with snapshot creation and cleanup kept, which had passed all 366
+  engine-topology tests — fails `stale_candidate_takes_staging_path_and_publishes_pinned_proposal`,
+  `terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay` and
+  `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal`.
+
