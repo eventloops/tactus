@@ -4,12 +4,12 @@ Extended notes for [`src/error.rs`](../../src/error.rs).
 
 These notes preserve the module comments after the annotation repairs. Item headings quote source lines for navigation.
 
-## `#[derive(Debug)]`
+## `pub struct ValidationErrors(pub Vec<String>);`
 
 Structural problems found in a parsed plan, collected so a single run
 surfaces every issue at once instead of failing on the first.
 
-## `#[derive(Debug)]`
+## `pub struct WarnedError {`
 
 An operation's refusal together with warnings gathered before it failed.
 The original typed error remains available for callers that classify it.

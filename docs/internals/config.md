@@ -166,7 +166,7 @@ task-kind entries below so a misplaced timeout is never ignored.
 §11.2 review, for plans where a frontier judgement per task costs more
 than the work it is judging.
 
-## `#[derive(Debug, Default, Deserialize)]`
+## `struct RawPools {`
 
 `[pools.*]`, with each entry's byte offset kept.
 
@@ -179,7 +179,7 @@ substituted an alphabet for that choice. The span is the offset of the
 entry's value in the source, so re-sorting by it restores exactly what was
 written, with no new dependency.
 
-## `#[derive(Debug, Default, Deserialize)]`
+## `struct RawPool {`
 
 One `[pools.<name>]` entry, before validation. Every field is optional here
 so a shape mistake reports as a named problem rather than a serde error
@@ -1039,7 +1039,7 @@ A pool named only by the transient file must not reach the config.
 The name is what an attempt is attributed to; blank is
 indistinguishable from "no pool" by the time it reaches the ledger.
 
-## `#[test]`
+## `fn an_absent_runner_section_is_the_unconfigured_host_runner() {`
 
 -----------------------------------------------------------------------
 `[runner]` (DESIGN.md:612)
@@ -1053,7 +1053,7 @@ one has no config to differ. The two halves are asserted separately
 because a default that set `from_config: true` would be invisible in the
 `kind` alone.
 
-## `#[test]`
+## `fn the_runner_section_parses_kind_image_volumes_and_mounts() {`
 
 The section parses every key DESIGN.md:612 names, and a mount is
 read-only unless the operator said otherwise.

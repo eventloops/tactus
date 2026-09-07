@@ -263,7 +263,7 @@ about. The third is the first append inside `drain()`, which is where
 the two startup appends really did land, so if this number ever stops being
 the right one it fails loudly instead of passing for the wrong reason.
 
-## `#[test]`
+## `fn a_returned_legacy_append_error_stops_the_run() {`
 
 A returned append error **stops the run** — it is not swallowed and carried
 on from (`PR5-CONF-010`).
@@ -284,7 +284,7 @@ but not that the error ever gets to it. What varies here is the log: it is
 the live run's own, reached through `engine::run_with`, and the assertion is
 on the value the *caller* receives.
 
-## `#[test]`
+## `fn a_returned_legacy_append_error_still_leaves_the_partial_report() {`
 
 …and the partial report is written beside the log on the way out
 (`PR5-CONF-011`).
@@ -2348,7 +2348,7 @@ No ids: the seam exists so this test spawns nothing. What
 is under test is the containment step, which happens
 before any spawn or not at all.
 
-## `#[test]`
+## `fn a_facade_run_refuses_before_any_effect_when_containment_fails() {`
 
 Containment comes **before** the coordinator, and a failure to establish it
 refuses the run before any effect.
@@ -2367,7 +2367,7 @@ The seam is not a hole — `Contained`'s field is private to
 `crate::runner::host::proof`, a module with no descendants, so a closure that
 returns one has established containment.
 
-## `#[test]`
+## `fn a_facade_resume_refuses_before_any_effect_when_containment_fails() {`
 
 The same ordering, for the other coordinator. A resume is a write command:
 `startup_census` enumerates them "(run, resume)".

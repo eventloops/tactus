@@ -53,13 +53,13 @@ Fresh runs therefore say `3` in `run_started`; when this binary resumes an
 older run it appends `run_schema_upgraded` before another attempt, so older
 binaries refuse the changed verification standard rather than misread it.
 
-## `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
+## Envelope
 
 ---------------------------------------------------------------------------
 Envelope
 ---------------------------------------------------------------------------
 
-## `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
+## `pub struct Event {`
 
 One line of `events.jsonl`, in §15's shape:
 `{ts, event, task?, attempt?, rung?, profile?, data}`.
@@ -183,13 +183,13 @@ is written around.
 
 The `event` tag as it appears in the log — for status rendering.
 
-## `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
+## Payloads
 
 ---------------------------------------------------------------------------
 Payloads
 ---------------------------------------------------------------------------
 
-## `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`
+## `pub struct RunStarted {`
 
 Everything `resume` needs to decide whether continuing is still safe, plus
 enough context that the log explains itself without the repo beside it.
@@ -294,12 +294,12 @@ The exact binding each rung resolved to at pre-flight, aligned with
 schema-2 resume re-derives once, warns, and records the result on
 [`RunResumed::chains`]. `Some([])` is a real empty chain list.
 
-## `#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]`
+## `pub struct BindingSummary {`
 
 One rung's execution identity. `pinned` remains explicit so the event log
 preserves why the binding was fixed as well as which adapter/model ran it.
 
-## `#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]`
+## `pub struct GateSummary {`
 
 One effective gate as it stood when the run started — everything needed to
 run it again, because a resume does exactly that.
@@ -584,12 +584,12 @@ the whole attempt to one pool that did not pay for all of it.
 What this pass concluded. A later pass only exists because every earlier
 one approved, so at most the last entry is ever anything else.
 
-## `#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]`
+## `pub enum SelectionOrigin {`
 
 Where the worker binding came from. The latter two variants are reserved
 for future selectors and deliberately have no producer yet.
 
-## `#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]`
+## `pub enum ReviewPassOutcome {`
 
 How one review pass ended.
 
@@ -746,13 +746,13 @@ judged it, and nothing was spent on it.
 means something different afterwards — raise the ceiling and continue —
 and CI needs to tell "your budget stopped it" from "a task failed".
 
-## `#[derive(Debug, Clone, PartialEq, Eq)]`
+## Derived state
 
 ---------------------------------------------------------------------------
 Derived state
 ---------------------------------------------------------------------------
 
-## `#[derive(Debug, Clone, PartialEq, Eq)]`
+## `pub enum TaskState {`
 
 Scheduler state for one task. Readiness is derived (deps all `Done`), not
 stored, so it can never drift from the graph.
@@ -779,12 +779,12 @@ because an answered question has to make these runnable again.
 
 Settlement only: the run stopped before this task got its turn.
 
-## `#[derive(Debug, Clone, PartialEq, Eq)]`
+## `pub struct InFlight {`
 
 An attempt that started and never reported back — the shape a killed
 process leaves in the log.
 
-## `#[derive(Debug, Clone, PartialEq, Eq)]`
+## `pub struct InterruptedAttempt {`
 
 A dangling attempt, with the task it belongs to.
 

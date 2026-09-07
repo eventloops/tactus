@@ -118,7 +118,19 @@ four Bash gates) and holds the two trees to each other in both directions:
   that loses its marker is caught from the notes side;
 - every notes file opens with the Markdown backlink shown above, optionally
   following an H1 and blank lines, and its relative target resolves to its module;
-- a module carries at most one marker, above its first line of code.
+- a module carries at most one marker, above its first line of code;
+- every section says something: a heading with neither body nor subsection is
+  what regenerating a note leaves behind, not a section;
+- no two adjacent sections share a heading that is a bare attribute.
+  `#[must_use]` and `#[serde(default)]` decorate an item without naming one, so
+  a run of them renders as a column of identical headings and the reader cannot
+  tell which item a contract belongs to. Name the item instead.
+
+The last two exist because PR #166 regenerated four notes files and produced
+exactly those two shapes — six `#[must_use]` headings in `util.md`, twenty-odd
+`#[serde(default)]` headings in `events/mod.md`, and eight empty duplicate
+sections across `status.md`, `engine/report.md` and `events/mod.md` — while
+every check above it stayed green.
 
 An absent `docs/internals/` is a failure, never "nothing to check": with markers in `src/` it is a
 deleted notes tree, and with none it is a gate measuring nothing. Each check has been broken on
@@ -127,8 +139,13 @@ purpose and watched fail.
 The gate checks that opening format rather than parsing arbitrary Markdown.
 Hidden links, plain paths, code examples, and images do not satisfy it. Its
 isolated fixtures exercise valid depths and CRLF, malformed backlinks, missing
-files, and misplaced or duplicate markers.
+files, misplaced or duplicate markers, and both heading shapes above — headings
+inside a fenced example are not sections, and a heading whose body is its
+subsections is not empty.
 
-The gate does not check section headings, arbitrary source prose, or whether a
-note remains true. Those are review duties under §13, including its site-required
-exceptions. §4's rule that a stale comment is a defect also applies to notes.
+What the gate holds about a heading is that it navigates, not that it is right:
+it does not check that a heading names the item it sits above, and a bare
+attribute standing alone rather than beside its twin is left to review. Nor does
+it check arbitrary source prose, or whether a note remains true. Those are review
+duties under §13, including its site-required exceptions. §4's rule that a stale
+comment is a defect also applies to notes.

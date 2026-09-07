@@ -336,11 +336,11 @@ The last value of each attribute, in first-seen order.
 `<!-->` and `<!--->` are openers whose hyphens must not be read as
 the start of their own closer.
 
-## `#[test]`
+## Spans and stripping
 
 --- spans and stripping ---------------------------------------------------
 
-## `#[test]`
+## Reassembly through the parser
 
 --- reassembly through the parser ------------------------------------------
 

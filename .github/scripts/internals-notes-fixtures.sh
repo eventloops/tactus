@@ -145,4 +145,67 @@ fixture capacity
 rm "$tree/$notes"
 check 1 empty_notes_tree_is_rejected
 
+# --- N5 + N6: the two shapes a whole-note regeneration leaves behind ---------
+#
+# Both are taken from PR #166's regeneration, which headed sections on the bare
+# attribute above them and left empty duplicate headings behind. `head` is the
+# opening the earlier cases already prove valid, so each case below varies the
+# section headings and nothing else.
+head_of() { printf '# `%s`\n\nExtended notes for [`%s`](%s).\n' "$module" "$module" "$link"; }
+
+fixture capacity
+{ head_of
+  printf '\n## `impl Ledger` › `pub fn off() -> Self {`\n\nA ledger that records nothing.\n'
+  printf '\n## `impl Ledger` › `pub fn recording() -> Self {`\n\nA ledger that records.\n'
+} > "$tree/$notes"
+check 0 item_scoped_headings_are_accepted
+
+fixture capacity
+{ head_of
+  printf '\n## `#[must_use]`\n\nA ledger that records nothing.\n'
+  printf '\n## `#[must_use]`\n\nA ledger that records.\n'
+} > "$tree/$notes"
+check 1 adjacent_sections_headed_by_one_bare_attribute_are_rejected
+
+fixture capacity
+{ head_of
+  printf '\n## `#[serde(default)]`\n\nThe effort standard.\n'
+  printf '\n## `#[serde(default, skip_serializing_if = "Option::is_none")]`\n\nThe gates.\n'
+  printf '\n## `#[serde(default)]`\n\nThe reviews.\n'
+} > "$tree/$notes"
+check 0 bare_attribute_headings_that_do_not_adjoin_a_twin_are_left_to_review
+
+fixture capacity
+{ head_of
+  printf '\n## `let interrupted = if running {`\n\n\n'
+  printf '\n## `let interrupted = if running {`\n\nAnd only for a run nothing is driving.\n'
+} > "$tree/$notes"
+check 1 an_empty_duplicate_section_is_rejected
+
+fixture capacity
+{ head_of
+  printf '\n## `pub fn run(&self) -> Result<()> {`\n'
+} > "$tree/$notes"
+check 1 a_trailing_heading_with_no_body_is_rejected
+
+fixture capacity
+{ head_of
+  printf '\n## `impl Runner for HostRunner` — `run`\n'
+  printf '\n### Where the program name is resolved\n\nDecided in `run` and nowhere else.\n'
+} > "$tree/$notes"
+check 0 a_heading_whose_body_is_its_subsections_is_accepted
+
+fixture capacity
+{ head_of
+  printf '\n## `pub fn run(&self) -> Result<()> {`\n\n```rust\nrun()?;\n```\n'
+} > "$tree/$notes"
+check 0 a_section_bodied_only_by_a_code_block_is_accepted
+
+fixture capacity
+{ head_of
+  printf '\n## `pub fn run(&self) -> Result<()> {`\n\nWhat it does.\n'
+  printf '\n```markdown\n## `#[must_use]`\n\n## `#[must_use]`\n```\n'
+} > "$tree/$notes"
+check 0 headings_inside_a_fenced_example_are_not_sections
+
 echo "internals notes fixtures: $cases cases passed"

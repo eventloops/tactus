@@ -12,6 +12,19 @@
 #   N3  Every notes file links back to its module, and the link resolves from
 #       the notes file's own directory to the repository root, at any depth.
 #   N4  A module carries at most one marker, and it sits above the first code.
+#   N5  Every section of a notes file says something: a heading with neither
+#       body nor subsection is an artefact of regenerating the notes, not a
+#       section. PR #166's regeneration left eight of them behind.
+#   N6  No two adjacent sections share a heading that is a bare attribute.
+#       `#[must_use]` and `#[serde(default)]` decorate an item; they do not
+#       name one, so a run of them renders as a column of identical headings
+#       and a reader cannot tell which item a contract belongs to. The
+#       enclosing item is what distinguishes repeated lines
+#       (docs/internals/README.md).
+#
+# N5 and N6 are navigation, not spelling: they hold the two shapes a whole-note
+# regeneration produces. Neither judges whether a heading names the *right*
+# item -- that stays a review duty under §13.
 #
 # An absent docs/internals/ is a failure, never "nothing to check": with
 # markers in src/ it is a deleted notes tree, and with none it is a gate
@@ -84,6 +97,34 @@ notes_count=0
 while IFS= read -r notes; do
   [[ "$notes" == "$notes_root/README.md" ]] && continue
   notes_count=$((notes_count + 1))
+
+  # N5 + N6. The headings navigate: every section says something, and no two
+  # adjacent sections are headed by the same bare attribute. Run before the
+  # module checks below so a notes file whose module is missing is still held
+  # to its own shape.
+  while IFS= read -r problem; do
+    [[ -n "$problem" ]] && error "$notes:$problem"
+  done < <(awk '
+    function close_section() {
+      if (hline && hbody == 0 && hchild == 0)
+        printf "%d: %s heads a section with neither body nor subsection\n", hline, htext
+    }
+    { sub(/\r$/, "") }
+    /^(```|~~~)/ { fence = !fence; next }
+    !fence && match($0, /^#{1,6} /) {
+      level = RLENGTH - 1
+      text = substr($0, RLENGTH + 1)
+      if (hline && level > hlevel) hchild = 1
+      close_section()
+      if (level == prev_level && text == prev_text && text ~ /^`+#\[.*\]`+$/)
+        printf "%d: %s heads two adjacent sections; an attribute decorates an item without naming one, so name the item\n", NR, text
+      prev_level = level; prev_text = text
+      hline = NR; hlevel = level; htext = text; hbody = 0; hchild = 0
+      next
+    }
+    { if (hline && NF) hbody++ }
+    END { close_section() }
+  ' "$notes")
 
   module="src/${notes#"$notes_root/"}"
   module="${module%.md}.rs"

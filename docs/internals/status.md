@@ -234,7 +234,7 @@ both wire shapes with the same failure policy and reason.
 Public describe can receive either parking shape; its
 transition must retain reason B beside attempt reason A.
 
-## `#[test]`
+## `fn an_attempt_is_described_as_passed_only_where_the_record_is_successful() {`
 
 "Passed" follows `AttemptRecord::is_successful`, not `failure.is_none()`:
 the grid below is every combination of the two facts that predicate
@@ -242,7 +242,7 @@ reads, and the line says "passed" exactly where the predicate says so.
 The pre-repair code answered "passed" for a record with no failure and
 a review that rejected it.
 
-## `#[test]`
+## `fn a_parked_attempt_renders_every_transition_recorded_beside_the_parking() {`
 
 The transition and the parking are two halves of one settlement, and
 the line renders each on its own. The pre-repair code rendered a parked

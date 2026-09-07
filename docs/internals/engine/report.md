@@ -116,21 +116,21 @@ Task id the run halted at, if any.
 
 Every question raised, with its answer where one arrived (§12).
 
-## `#[serde(default)]`
+## `pub budget_stop: Option<events::BudgetExceeded>,`
 
 The §13 ceiling that stopped the run, if one did.
 
-## `#[serde(default)]`
+## `pub pool_drain: Vec<PoolDrainRow>,`
 
 What each pool drained, folded from this run's own attempts (§13).
 
-## `#[serde(default)]`
+## `pub running: bool,`
 
 Whether an engine is driving this run right now. A live run must not be
 rendered as a finished one: its in-flight attempt has not failed, and
 the tasks queued behind it have not been skipped.
 
-## `#[serde(default)]`
+## `pub interrupted: bool,`
 
 Whether this run stopped without ever recording that it finished — the
 signature of a kill, a power loss, or an aborting error.

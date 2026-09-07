@@ -346,7 +346,7 @@ way through it is the Win32 call std does not expose.
 [`std::io::Error`] from the open or from the flush, verbatim, so a caller can
 still tell a missing directory from a refused barrier.
 
-## `#[cfg(windows)]`
+## `const WINDOWS_DIRECTORY_ACCESS: u32 =`
 
 The access mask [`fsync_dir`] opens a directory with on Windows.
 
@@ -357,7 +357,7 @@ Named rather than inlined so that
 [`the_directory_barrier_needs_exactly_the_access_it_asks_for`] can drive the
 same code path with a mask that is *not* enough and show which half refuses.
 
-## `#[cfg(windows)]`
+## `fn windows_fsync_dir(dir: &Path, access: u32) -> std::io::Result<()> {`
 
 [`fsync_dir`]'s Windows body, over any access mask.
 
@@ -461,7 +461,7 @@ a file that exists in a scratch dir under its bare name.
 
 find_program must not consult any directory-less candidate.
 
-## `#[test]`
+## `fn same_path_compares_directories_rather_than_spellings() {`
 
 Two spellings of one directory are one directory, and two directories
 are not.
@@ -474,7 +474,7 @@ this helper exists for cannot be built on demand anywhere else. It is
 the same mechanism either way: `canonicalize` resolves the path to the
 object, and the object is what the assertion means.
 
-## `#[test]`
+## `fn the_directory_barrier_runs_on_this_platform() {`
 
 The directory barrier runs, and runs on **this** platform
 (`PR5-CONF-013`).
