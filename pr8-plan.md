@@ -5,10 +5,14 @@ Branch `feat/pr8-integration-transactions`, cut from `master` at `44a33caa`. Con
 `2026-08-25-g2-pass-errata.md` (the errata win on conflict; none of E1–E6 touches PR8's own
 sentences, so the JSON text of the slice contract is the text implemented). Brief:
 `START-PR8.md` as amended on 2026-09-06 (no pull request, no review, no findings lane; the body
-goes to `pr8-body.md`). Implementation model: Claude Fable 5.1 at max effort.
+goes to `pr8-body.md`), then `START-PR8-FIX.md` of 2026-09-07 for the repair round after the
+three reviews of `3414dc58` (`pr8-triage.md`). Implementation model: Claude Fable 5.1 at max
+effort, both rounds.
 
 This file is the standing plan and the record of every reading taken where the packet was
-ambiguous. Each reading is a decision, not a question. It is updated as commits land.
+ambiguous. Each reading is a decision, not a question. It is updated as commits land. Where the
+conformance review of `3414dc58` found that a "reading" claimed a discretion the contract did not
+offer, the entry now says so and cites the passage that settles it.
 
 ## 1. Reading report
 
@@ -58,35 +62,42 @@ ambiguous. Each reading is a decision, not a question. It is updated as commits 
    clean → `prepared/<seq>` pin zero-old at the proposal → `merge_verification_started
    {StaleClean{prepared_ref}, expected_head: H, proposed_sha: proposal}`; empty → `merge_
    verification_started{AlreadyPresent, expected_head: H, proposed_sha: H}`; conflict →
-   `merge_rejected{Conflict{paths}}` with the complete frozen repair. Verification runs every
-   recorded gate on one fresh exact snapshot of the proposal (or head) commit and every review
-   pass on its own fresh snapshot, through the Runner, with `InvocationId::sequence(seq, role,
-   ordinal)` identities; the staging worktree runs nothing.
+   `merge_rejected{Conflict{paths}}` with the complete frozen repair. Verification first classifies
+   its input (a review diff too large or opaque, or a tree the review-input policy refuses, is a
+   `HumanRequired` park before any process runs), then runs every recorded gate on one fresh exact
+   snapshot of the proposal (or head) commit and every review pass on its own fresh snapshot,
+   through the Runner, with `InvocationId::sequence(seq, role, ordinal)` identities, the review
+   passes selected against the binding the candidate ran under; the staging worktree runs
+   nothing.
 5. **Terminals** of `merge_verification_started`, each implemented: `merge_prepared(stale_clean |
    already_present)` carrying the passing verification record → CAS → `task_merged`;
    `merge_rejected{CodeRejected{verification}}` with the frozen repair; `merge_verification_
    unavailable{HumanRequired{verdict}, Parked{question}}`; `merge_verification_unavailable
-   {Infrastructure{kind}, Deferred{defers} | Parked{question}}`; `merge_verification_interrupted`
-   appended by resume for a dangling start.
+   {Infrastructure{kind}, Deferred{defers} | Parked{question}}` — a reviewer outage as the review
+   result reports it, and a Runner that cannot run a gate as `RunnerSpawnFailure`;
+   `merge_verification_interrupted` appended by resume for a dangling start.
 6. **Repair registration** inside `merge_rejected`: complete `FrozenSpawn` (key = registry.len(),
    display id `merge-fix-<index>-<root>`, origin MergeRepair, kind Fix, evidence in the spec,
    original acceptance plus preserve-merged-behaviour, path hints widened by the candidate's
    actual paths and the conflict paths, `min_tier = mid` intersected with the root's frozen
-   floor/pin/ceiling, root's deps, root's reviews, probed agents, lineage {root, parent, index}),
+   floor/pin/ceiling, root's deps, root's reviews, allowed agents, lineage {root, parent, index}),
    admission Runnable | HumanRequired{limit} (over the frozen `max_merge_repairs`) |
    HumanBinding{options} (empty intersection), and the lease effect (CreatesLineage from an
    ordinary candidate, WidensLineage for a member).
-7. **Cleanup after the terminal**: snapshots removed as each role finishes; the staging worktree
-   and its intent removed with force after the terminal; the prepared pin deleted expected-old
-   at Deferred/Parked/interrupted terminals and, for a prepared publication, after `task_merged`.
+7. **Cleanup after the terminal**: the verification's snapshots left in place by the judge and
+   removed with force once the terminal is durable (`merge_prepared`, `merge_rejected`, or
+   `merge_verification_unavailable`); the staging worktree and its intent removed with force after
+   the terminal; the prepared pin deleted expected-old at the proposal the record names at
+   Deferred/Parked/interrupted terminals and, for a prepared publication, after `task_merged`.
 8. **Recovery** rows T-FAST, T-PROPOSAL, T-VERIFY, T-PREPARED, T-REJECT(registration): every
    CAS or promotion only after the barrier of step (a1); a `Prepared` transaction resolves by
    ref == expected → CAS then `task_merged`, ref == proposed → `task_merged`, anything else
    refuses (third SHA), symbolic or checked out refuses through `assert_publishable`; a
    `VerificationStarted` transaction settles `merge_verification_interrupted`, deletes its pin
-   expected-old, and the candidate is re-verified under a new sequence; staging and snapshot
-   residue is reclaimed with force from intents; the exact orphan `prepared/<next_seq>` is
-   reclaimed expected-old and a prepared pin outside the sequences the log pinned refuses.
+   expected-old at the recorded proposal, and the candidate is re-verified under a new sequence;
+   staging residue is reclaimed with force from intents, snapshot residue after every terminal a
+   snapshot could belong to; pins are handled by their records (R15); with no publication pending
+   the integration ref must name the last recorded publication, or the base before any (R23).
 9. **Checkpoint refusals** (part of the slice): dispatch of a Repair-origin task and
    repair-admission answers are refused before any append, with the citation pattern of
    `run.rs`/`recover.rs`. Run-end closure stays refused (PR10).
@@ -103,90 +114,163 @@ ambiguous. Each reading is a decision, not a question. It is updated as commits 
   site `Ref.DeletePreparedPin` is `After(task_merged)`. Reading: delete the pin expected-old
   right after `task_merged` (the object stays reachable from the integration ref); a pin that
   survives a kill between `task_merged` and its deletion is pruned by the next resume at its
-  recorded proposal sha. PR10's finalization stays free to prune whatever is left.
-- **R2. `already_present`'s "validation-only no-op CAS".** Reading: issue the real expected-old
-  update `update-ref --no-deref <ref> H H` through `Ref.CompareAndSwapIntegration`, so the
-  expected head is validated atomically by Git and the site is observed; nothing moves.
+  recorded proposal sha — and refused at any other. PR10's finalization stays free to prune
+  whatever is left.
+- **R2. `already_present`'s "validation-only no-op CAS".** *Settled by the contract, not a
+  reading*: `transaction_fault_matrix[T-PREPARED].resume_action` names the validation-only no-op
+  and `C.side_effect_vs_event_ordering` puts the CAS before `task_merged`. Implementation note:
+  the real expected-old update `update-ref --no-deref <ref> H H` is issued through
+  `Ref.CompareAndSwapIntegration`, so the expected head is validated atomically by Git and the site
+  is observed (`an_already_present_candidate_settles_without_an_empty_commit` counts it); nothing
+  moves.
 - **R3. Empty cherry-pick detection.** Git reports an already-present change as a failed
   cherry-pick (exit 1, `CHERRY_PICK_HEAD` left, index equal to HEAD, no unmerged paths). Reading:
   the funnel `proposal_cherry_pick` is unchanged; a read-only inspection `proposal_state`
   classifies the staging worktree after a failed pick into Conflict{unmerged paths} or Empty,
   and any other failed state is the Git error it was. The residue a failed pick leaves in the
   staging git dir leaves with the forced removal after the terminal.
-- **R4. Which failures are infrastructure at integration.** Reviewer `Unavailable` with
-  RateLimited → `Infrastructure{RateLimited}`; reviewer `Timeout` → `ReviewerTimeout`; any other
-  reviewer unavailability → `ReviewUnavailable`; a Runner error spawning a gate or reviewer →
-  `RunnerSpawnFailure`. A gate that exits non-zero or times out is code-attributed
-  (`GatesFailed`); a reviewer verdict that rejects is `Rejected`; a reviewer that asks for a
-  human is `HumanRequired{verdict: reasons}`; a review input that cannot be judged (too large or
-  opaque) is `HumanRequired` too — a Fix task cannot be asked to edit code without code evidence
-  and waiting cannot make the same diff fit.
-- **R5. Defer arithmetic.** `Deferred{defers}` with `defers = queued.defers + 1` while that is
+- **R4. Which failures are infrastructure at integration.** Only partly a reading: the
+  settlement of an infrastructure failure is mandated by T-VERIFY and INV-23; what is chosen is
+  the mapping of each result. Reviewer `Unavailable` with RateLimited →
+  `Infrastructure{RateLimited}`; reviewer `Timeout` → `ReviewerTimeout`; any other reviewer
+  unavailability (a review process that could not run reaches the judgement this way through
+  `run_review`) → `ReviewUnavailable`; a Runner error running a gate → `RunnerSpawnFailure`
+  (typed by the judge as `JudgeError::Runner`, never propagated as an error of the sequence); any
+  other verification error — a containment refusal, a Git error inspecting the repository — is a
+  defect of the run, not an outage, and ends the command resumably (R24). A gate that exits
+  non-zero or times out is code-attributed (`GatesFailed`); a reviewer verdict that rejects is
+  `Rejected`; a reviewer that asks for a human is `HumanRequired{verdict: reasons}`; a review
+  input that cannot be judged — the diff too large or opaque, or the review-input policy refusing
+  the proposed tree — is classified before any process runs, as the attempt path classifies it,
+  and is `HumanRequired` too: a Fix task cannot be asked to edit code without code evidence and
+  waiting cannot make the same diff fit.
+- **R5. Defer arithmetic.** *Settled by the contract*: `C.expected_failures_refusals[5]` forbids
+  Deferred at the limit and non-consecutive counts, and `check_defer_allowance` is the fold's
+  statement of it. `Deferred{defers}` with `defers = queued.defers + 1` while that is
   `< max_defers`; at `>= max_defers` the outage parks (so `max_defers = 0` parks the first outage).
-  This is exactly what `check_defer_allowance` accepts.
 - **R6. `merge_rejected` lease paths.** Conflict → the conflict paths; code rejection → the
   candidate's actual paths (the region the rejected code touched). Both are unioned with the
   candidate's held region by the fold.
 - **R7. Over-limit and empty-intersection at once.** The fold refuses a `HumanRequired`
   admission on a `HumanBinding` entry, so one admission must win: the empty intersection wins
   (`HumanBinding`), because without a binding nothing can run whatever the limit says.
-- **R8. Counting automatic repairs.** INV-11 says the fold counts automatic rejections per root;
-  the fold today only checks the recorded limit value. Reading: the registered lineage members
-  of a root are its automatic rejections (each `merge_rejected` registers exactly one); a
-  Runnable or HumanBinding admission is refused once `members >= max_merge_repairs`, and a
-  HumanRequired admission is refused below it. Enforced in the fold (Class B, below) and derived
-  identically by the driver.
+- **R8. Counting automatic repairs.** Counting is mandatory (`invariants[INV-11].enforced_by`:
+  "fold counts automatic rejections per root"); what is chosen is the count. Reading: the
+  registered lineage members of a root are its automatic rejections (each `merge_rejected`
+  registers exactly one). What the fold then does — the Class B change the owner approves — is:
+  a `Runnable` admission is refused once `members >= max_merge_repairs`, a `HumanRequired`
+  admission is refused below it, and a `HumanBinding` admission is accepted on either side of the
+  limit, because the empty intersection wins (R7) and `decisions.repairs.limits` registers
+  over-limit *and* empty-intersection repairs "with human admission" — refusing `HumanBinding` at
+  the limit would leave an over-limit empty-intersection rejection with no admissible shape at
+  all. (The first version of this reading and of `pr8-body.md` said an over-limit `HumanBinding`
+  was refused; the code never did that, the contract does not ask it, and the description was
+  wrong — corrected in the repair round.) Enforced in the fold and derived identically by the
+  driver.
 - **R9. Repair path hints.** Original hints ∪ candidate actual paths ∪ conflict paths, as
   strings; a `RepoWide` region contributes nothing (an absent-or-unreadable region widens by
   nothing, and the lease already holds repo-wide).
 - **R10. Repair ladder.** Tiers of the root's frozen ladder at or above `max(Mid, root floor)`
   and at or below its ceiling, with the root's rungs for exactly those tiers; `floor` recorded
-  as that maximum, `ceiling` as the highest surviving tier (`None` when none survives);
-  `attempts_per`, effort and reviews copied from the root. Empty survivors → `rungs: []`,
-  `Admission::HumanBinding{options: probed_agents}`.
+  as that maximum, `ceiling` as the highest surviving tier; `attempts_per`, effort and reviews
+  copied from the root. Empty survivors → `tiers: []`, `rungs: []`, `ceiling: None`, the raised
+  floor, and `Admission::HumanBinding{options: the entry's allowed agents}` — the run's probed
+  agents, which `check_spawn` binds `allowed_agents` to — never the sub-floor rungs the
+  intersection excluded. `check_ladder` accepts the shape (an absent ceiling is the maximum of no
+  tier: `an_empty_intersection_ladder_records_no_tier_no_ceiling_and_the_raised_floor`). The
+  first implementation kept the root's tiers, floor and ceiling and offered the excluded rungs;
+  the code was changed to this reading in the repair round.
 - **R11. Repair deps.** The root's authoritative deps (`repairs.lineage`), all Merged by
   construction; display deps copied alongside.
 - **R12. Verification-park question.** `FrozenQuestion{id: ids.question_id(), key: candidate.key,
   kind: Clarify for a reviewer's needs-human, Unblock for an unjudgeable input or an outage at
-  max_defers, context from the coordinator's question builder with the verification failure,
-  options from `question_options(kind)`}`. Questions carry no attribution and no `DesignDefect`
-  is emitted.
+  max_defers, context from the coordinator's question builder with the verification failure (an
+  outage's context carries what the infrastructure reported), options from
+  `question_options(kind)`}`. Questions carry no attribution and no `DesignDefect` is emitted.
 - **R13. When answers are ingested.** `AnswerSource::resolve` may block (terminal or file source
   with a wait budget), so answers are read where the legacy engine reads them: at the hard
   block, when nothing else is runnable. A verification-park answer appends
   `question_answered{Answered{option_index, binding_override: None}}` (the chosen option's
   index, or 0 for free text) or `{Declined{decline_halts_run}}`; a repair-admission answer is
   refused before any append (PR9). `decline_halts_run` follows the run's `on_task_failure`
-  policy, carried into `RunSeams` beside `halts_run`.
-- **R14. Residue reclaim at resume.** No PR7 step reclaims snapshot or staging intents (task
-  worktrees are verified or recreated by (g)). Reading: a residue-reclaim step after the census
-  and before the runner is rebuilt removes, with force, every `snapshots/*` and `merge/*` intent
-  and its worktree; orphan pins stay in step (f) with the candidate orphan pins because they are
-  ref work, which the existing order performs only after the Runner is rebuilt.
-- **R15. Expected refs at resume.** Prepared pins expected under the run namespace are exactly:
-  `prepared/<seq>` for every sequence whose `merge_verification_started` has a StaleClean basis
-  (derived from the proven prefix's events), plus `prepared/<next_seq>` (the possible
-  provisional orphan). A pin of a resolved sequence is pruned expected-old at its recorded
-  proposal sha and refused at any other sha; a pin at any other sequence is refused by
-  `refuse_unexpected_refs` ("orphan pin outside next sequence").
+  policy, carried into `RunSeams` beside `halts_run`. Driven end to end in
+  `a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append`.
+- **R14. Residue reclaim at resume.** Cleanup is mandatory and its order constrained
+  (`C.side_effect_vs_event_ordering`: removal after the terminal; `C.cancellation`: snapshots
+  reclaimed). Reading, corrected in the repair round: staging worktrees no live transaction owns
+  are reclaimed with force before the namespace check (T-PROPOSAL a', a); snapshots are reclaimed
+  only after every terminal a snapshot could belong to — the attempts settled at (d) and the
+  integration transaction resolved at (f) — so an interrupted verification's snapshots leave
+  after `merge_verification_interrupted`, never before it; orphan pins stay in step (f) with the
+  candidate orphan pins because they are ref work, which the existing order performs only after
+  the Runner is rebuilt. (The first version proposed removing every snapshot before the Runner
+  was rebuilt, which would have removed an unresolved verification's resources before its
+  terminal, and then delivered no snapshot cleanup at all.)
+- **R15. Expected refs at resume.** *Settled by the contract* (T-PROPOSAL's resume action and
+  refusal, T-VERIFY's "pin SHA differs from record", INV-17), and now implemented as written:
+  prepared pins expected under the run namespace are exactly `prepared/<seq>` for every sequence
+  whose `merge_verification_started` has a StaleClean basis (derived from the proven prefix's
+  events), plus `prepared/<next_seq>` (the possible provisional orphan, reclaimed expected-old at
+  what it names only when no transaction is open). The open transaction's pin — verifying or
+  prepared — must name its recorded proposal and is kept; a pin of a resolved sequence is pruned
+  expected-old at its recorded proposal sha and refused at any other sha; a pin at any other
+  sequence is refused by `refuse_unexpected_refs`, untouched. (The first implementation deleted
+  every pin it did not recognise; see `pr8-triage.md` C2.)
 - **R16. Expected head after `merge_prepared`.** CAS recovery needs the authorized
   `expected_head`; the fold's `TransactionClass::Prepared` did not retain it. Reading: retain it
-  in the fold (Class B) rather than re-derive it from the event list a second time.
+  in the fold (Class B) rather than re-derive it from the event list a second time. Extended in
+  the repair round: the `Prepared` transaction also retains the `disposition` and the
+  `prepared_ref` the record named, because the SHAs alone cannot say what a publication left
+  behind — an already-present publication at the candidate's own commit has
+  `proposed_sha == candidate.commit_sha` exactly as a fast one does while still owning a staging
+  worktree (`pr8-triage.md`, crash 5).
 - **R17. Snapshot names for integration reviewers.** `SnapshotName::integration(seq)` is the
   gate snapshot; a new `SnapshotName::integration_review(seq, pass)` names one fresh snapshot
   per reviewer (`workspace_manager/naming.rs`, not a frozen path).
-- **R18. Implementer binding for `passes_for`.** The candidate's `AttemptRecord` records tier
-  and model; the agent is the root entry's rung at that tier (the run froze one agent per tier).
-- **R19. The two-crash proof's "unsynced merge_prepared".** Constructed with the event funnel's
-  `Written` kill in `Complete` shape (a whole line reached the file, no fsync), the durability
-  ledger recording what was synced; "power loss" is a truncation of the log to the length the
-  ledger proves durable. The barrier's own fsync at the next open is what makes the line
-  survive, and the test measures that through the ledger rather than assuming it.
-- **R20. Kill sampling of the cherry-pick child.** The residue class is already proven at the
-  funnel by PR5's sampler; PR8 adds the engine-level recovery: synthetic residue (unreferenced
-  object, `CHERRY_PICK_HEAD`, `index.lock`) in a staging git dir converges under the resume's
-  forced reclaim, and a sampled run of `git cherry-pick` children killed at uncontrolled points
-  in a staging worktree classifies every sample and converges the same way.
+- **R18. Implementer binding for `passes_for`.** The binding the candidate ran under: the task's
+  validated override when one exists (E2 binds every later attempt to it), else the frozen rung at
+  the fold-derived rung position — the fold moves a task's rung only at an escalation settlement,
+  and a task at `AwaitingMerge` settles no further attempt, so that position is the producing
+  attempt's. (The first implementation passed the ladder's last rung, which a candidate produced
+  lower down never ran under; `pr8-triage.md` C6.)
+- **R19. The two-crash proof's "unsynced merge_prepared".** *Settled by the contract*:
+  `C.proof_tests[3]` spells the sequence out. Implementation note on the construction: the first
+  crash is an append whose flush is made to fail after the full line was written (`WrittenFull`
+  error-return — the in-process shape of "kill at Written after the full line"), so the line is
+  complete and unsynced and the durability ledger shows the write as the last step; the restart is
+  a process of its own, whose barrier reports its sync of the log file, and which is killed at the
+  `task_merged` write; the second power loss truncates the log to the length the barrier proved
+  durable. (The first version deleted the line before the only resume; `pr8-triage.md` C5.)
+- **R20. Kill sampling of the cherry-pick child.** *Settled by the contract*: `C.proof_tests[2]`
+  and `[T-PROPOSAL].test` name both proofs. Delivered in the repair round at the engine level:
+  synthetic residue (unreferenced objects, `CHERRY_PICK_HEAD`, `MERGE_MSG`, `index.lock`,
+  sequencer state) in a staging git dir, classified by the workspace manager's classifier and
+  reclaimed through the resume with the objects left to Git; and real `git cherry-pick` children
+  killed on the funnel's own kill ladder, each classified and each recovered through the resume,
+  the candidate integrating afterwards under a fresh pick. (The first version cited the `effects`
+  census self-test, which samples constants; that claim, R21, is withdrawn.)
+- **R21 (withdrawn).** The claim that the `effects` census framework covered PR8's per-site kill
+  and residue obligations was wrong: it is a self-test of the framework. The recovery tests of R20
+  carry those obligations.
+- **R22. Spend on replay.** An integration's judged reviews are charged to the candidate's task
+  and to the run at the verification, before the terminal, and `Spend::replay` reads them back off
+  `merge_prepared` and `merge_rejected{CodeRejected}`. The unavailable terminals carry no review
+  record in their frozen vocabulary, so a review that ended in a `HumanRequired` park or an
+  infrastructure outage is charged live and not on replay; the live total is never below the
+  replayed one, so the ceiling is checked against the larger of the two. Closing the gap is a
+  Class C vocabulary change and is not made here.
+- **R23. The authorized head with no publication pending.** The latest `task_merged.merged_sha` in
+  the proven prefix; before any publication, the recorded base (the P7/P8 create-at-base path is
+  unchanged). A ref elsewhere, or absent after a publication, is foreign integration state
+  (`[T-RESUME].refusal_condition`; DESIGN §26's "`task_merged` exists but the ref disagrees —
+  refuse") and refuses before any append; it is never moved or recreated. The check is skipped
+  only under a `Prepared` transaction, whose ref `finish_integration` owns; it runs under a
+  verifying transaction, whose interrupted settlement moves no ref. (The first implementation
+  compared against the base whenever no transaction was open, so a run that had published anything
+  refused every later resume; `pr8-triage.md` C1.)
+- **R24. Which verification errors are outages.** See R4: only a Runner's own error running a
+  gate is an outage of the sequence; every other error ends the command resumably, because
+  deferral is applied to nothing the contract does not classify as infrastructure.
 
 ## 2. Staged implementation plan (one commit per shape)
 
@@ -198,17 +282,37 @@ ten-command baseline runs before every push.
 | 0 | `docs(pr8): plan` | this file | — | — |
 | 1 | `feat(topology): fold readers and the retained expected head` | `predicates.rs`: `next_sequence`, `satisfies_closure`, `lineage_members`; `TransactionClass::Prepared.expected_head`; INV-11 count in `check_merge_rejected` | fold tests: readers agree with the checks; over-limit admission refused both ways, live and on replay | none (state only) |
 | 2 | `feat(engine): fast integration` | `integrate.rs`: selection → reservation → `assert_publishable` + head read → fast `merge_prepared` → CAS → `task_merged`; loop branch `Integration` performed; `checkpoint` admits `Integrate`, refuses Repair-origin dispatch; `expected_refs` gains pins | `fast_path_publishes_exact_candidate_without_staging_or_proposal_object` (real repo; harness fast sequence; fsck count; no intent), `merge_prepared_fast_with_moved_head_or_wrong_proposed_or_pin_refused_live_and_on_replay`, `third_sha_refused`, symbolic/checked-out refusals, `fast_dual_holding_released_once` (ST-13), repair-origin dispatch refused before append, replay twice equal | reservation before the head read; `merge_prepared` before CAS; CAS before `task_merged`; no staging site observed in the sequence |
-| 3 | `feat(engine): stale_clean and already_present verification` | staging intent → add → cherry-pick → `proposal_state`; pin; `merge_verification_started`; verification on commit snapshots (gates + reviewers with sequence identities, `AttemptPlans::verification`); `merge_prepared(stale_clean/already_present)` → CAS → `task_merged` → pin delete; forced staging removal | `stale_candidate_takes_staging_path_and_publishes_pinned_proposal`, `already_present_recovery_no_empty_commit` (no commit manufactured; CAS new == old), `merge_prepared_stale_clean_with_unpinned_proposed_refused`, verification isolation (snapshots of the proposal commit, no new object, nothing runs in staging), ST-04 sequence aliasing (second start refused; occupied staging path refused) | staging intent before add; proposal objects before the pin; pin before `merge_verification_started`; snapshot intents before snapshot add; `merge_prepared` before CAS; removal after the terminal |
-| 4 | `feat(engine): merge_rejected with atomic repair registration` | `repair.rs`: the frozen spawn, admission, lease effect; conflict and code-rejected terminals | conflict → lineage created, repair Pending, parent AwaitingRepair, lease transferred; code rejection (gate failure, review rejection); member rejection widens; over-limit → HumanRequired; empty intersection → HumanBinding; `kill_after_merge_rejected_neither_loses_nor_duplicates_repair`; replay twice equal | `merge_rejected` before any repair effect (no dispatch, no worktree); reservation released at the terminal |
+| 3 | `feat(engine): stale_clean and already_present verification` | staging intent → add → cherry-pick → `proposal_state`; pin; `merge_verification_started`; verification on commit snapshots (gates + reviewers with sequence identities, `AttemptPlans::verification`); `merge_prepared(stale_clean/already_present)` → CAS → `task_merged` → pin delete; forced staging removal | `stale_candidate_takes_staging_path_and_publishes_pinned_proposal`, `an_already_present_candidate_settles_without_an_empty_commit` (no commit manufactured; CAS new == old, counted), `merge_prepared_stale_clean_with_unpinned_proposed_refused`, verification isolation (snapshots of the proposal commit, no new object, nothing runs in staging, the gate's workspace HEAD is the recorded proposal), ST-04 sequence aliasing (second start refused; occupied staging path refused) | staging intent before add; proposal objects before the pin; pin before `merge_verification_started`; snapshot intents before snapshot add; `merge_prepared` before CAS; removal after the terminal |
+| 4 | `feat(engine): merge_rejected with atomic repair registration` | `repair.rs`: the frozen spawn, admission, lease effect; conflict and code-rejected terminals | conflict → lineage created, repair Pending, parent AwaitingRepair, lease transferred; code rejection (gate failure, review rejection); member rejection widens; over-limit → HumanRequired; empty intersection → HumanBinding; `kill_after_merge_rejected_neither_loses_nor_duplicates_repair`; replay twice equal | `merge_rejected` before any repair effect (no dispatch, no task worktree intent or add); reservation released at the terminal |
 | 5 | `feat(engine): unavailable terminals` | Deferred/Parked for Infrastructure and HumanRequired; pin deletion and staging removal at the terminal; defer wake through the existing backoff branch | `human_required_verdict_parks_task`, `infrastructure_failure_defers_then_parks_at_max_defers`, `defer_wait_elapsed_reenables_deferred_candidate`, non-eligible start refused for deferred and parked candidates, Deferred at max / non-consecutive / Parked without question / HumanRequired without Parked refused live and on replay | terminal before pin deletion and staging removal; both entitlements released at the terminal |
 | 6 | `feat(engine): verification-park answers and decline` | hard-block ingestion of verification-park answers; refusal of repair-admission answers; `decline_halts_run` seam | park/answer/decline tests; `declined_parked_verification_fails_task_consumes_queue_position_releases_lease_and_halts_per_policy`; repair-admission answer refused before append | answer append before any re-verification; decline before any release |
-| 7 | `feat(engine): integration recovery` | recovery step (f): `merge_verification_interrupted`, CAS recovery after the barrier, orphan and resolved pins, residue reclaim of staging and snapshot intents; `refuse_unimplemented_terminals` narrowed to what PR8 still refuses | `kill_between_prepared_and_cas`, `kill_between_cas_and_merged`, `kill_during_merge_verification_settles_interrupted_and_reverifies`, `kill_after_proposal_commit_before_pin_reclaims_staging_and_leaves_object_to_git`, `orphan_prepared_pin_reclaimed_only_at_next_sequence`, `staging_residue_reclaimed`, synthetic cherry-pick residue converges, sampled cherry-pick child kills classified and recovered, both `Object.ProposalCherryPick` hook phases, Event points (kill and error) at the new appends, `prepared_publication_completed_at_run_end` for the resume path | barrier before any CAS; `merge_verification_interrupted` before pin deletion; no CAS on a replay-visible-only `merge_prepared` |
+| 7 | `feat(engine): integration recovery` | recovery step (f): `merge_verification_interrupted`, CAS recovery after the barrier, orphan and resolved pins, residue reclaim of staging and snapshot intents; `refuse_unimplemented_terminals` narrowed to what PR8 still refuses | `kill_between_prepared_and_cas`, `kill_between_cas_and_merged`, `kill_during_merge_verification_settles_interrupted_and_reverifies`, `kill_after_proposal_commit_before_pin_reclaims_staging_and_leaves_object_to_git`, `orphan_prepared_pin_reclaimed_only_at_next_sequence`, `staging_residue_reclaimed`, synthetic cherry-pick residue converges, sampled cherry-pick child kills classified and recovered, `prepared_publication_completed_at_run_end` for the resume path | barrier before any CAS; `merge_verification_interrupted` before pin deletion and snapshot removal; no CAS on a replay-visible-only `merge_prepared` |
 | 8 | `test(engine): the two-crash proof` | — | `unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing`, `barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss` | barrier (sync, stable reread, checked replay) before the CAS |
 | 9 | `test(engine): terminal-shape coverage table and ST-13` | — | the eight-row table driven end to end; ST-13 sequential subset incl. the fast no-staging assertion; replay-twice-equal over every shape | — |
 | 10 | `docs(pr8): body, design notes, internals` | `pr8-body.md`; DESIGN §26 additions only if a sentence the code enforces is missing; `docs/internals` notes for new modules if the gate requires them | gates | — |
 
 Commits may be split further; none is merged with another. The order of commits 2–5 is by
 terminal shape as the brief asks; 7 and 8 close the recovery rows the earlier commits opened.
+
+### The repair round (2026-09-07)
+
+The three reviews of `3414dc58` and their triage are `pr8-triage.md`. The repairs landed as one
+commit per finding or closely related group, each with a test that fails at `3414dc58` (or a
+mutation witness replayed against the repaired tree) and passes at the repair:
+
+| Commit | Findings |
+|---|---|
+| `docs(pr8): triage of the three reviews at 3414dc58` | the dispositions |
+| `fix(engine): recovery accepts the head the log's latest publication put there` | C1 (crash 1, conformance F2) |
+| `fix(engine): recovery keeps, prunes, and refuses prepared pins by their records` | C2 (crash 3, conformance F5/F6, tests 12), crash 5, tests 10 (worktree) |
+| `fix(engine): verification snapshots are removed after the terminal and reclaimed by resume` | conformance F4, C4 (crash 4, conformance F3) |
+| `fix(engine): the integration verification runs under the candidate's binding, classifies its input, settles runner outages, and charges its reviews` | C6 (tests 1, conformance F7), C3 (conformance F1, tests 4), tests 2, tests 3, R13 coverage |
+| `fix(engine): an empty tier intersection freezes the raised floor, no ceiling, and the allowed agents` | audit R10, tests 13, tests 8 (m01) |
+| `test(engine): the integration tests observe the verified commit, the no-op swap, and the absence of repair effects` | tests 5 (m03), 6 (m02), 7 (m05) |
+| `test(engine): the two-crash proof performs the two-crash sequence` | C5 (conformance F8, crash 6, tests 9) |
+| `test(engine): cherry-pick residue converges through integration recovery, and the stale fixtures move the head by a publication` | conformance F9, tests 11; crash 2 pinned as deferred; R23's check under a verifying transaction |
+| `test(engine): the recover tests satisfy the crate's effect lints` | clippy on the new tests; internals notes |
+| `docs(pr8): the record after the repair round` | this file, `pr8-body.md`, `pr8-triage.md` |
 
 ## 3. `src/topology/**` changes: Class A / B / C
 
@@ -222,69 +326,96 @@ read either way it is listed as B.
 |---|---|---|
 | `TopologyFold::next_sequence()`, `satisfies_closure(key)`, `lineage_members(root)` readers | `src/topology/fold/predicates.rs` | A |
 | `TransactionClass::Prepared` retains `expected_head` (set in `apply_merge_prepared`; read by CAS recovery) | `src/topology/fold.rs`, `src/topology/fold/apply.rs` | B |
-| `check_merge_rejected` counts a lineage's registered repairs against `max_merge_repairs` and refuses the wrong admission (INV-11) | `src/topology/fold/check_integration.rs` | B |
-| Fold tests for the above | `src/topology/fold/tests.rs` | A (tests only) |
+| `TransactionClass::Prepared` retains `disposition` and `prepared_ref` (set in `apply_merge_prepared`; read by `Authorized::from_fold`, so recovery reads what the publication left behind instead of inferring it from the SHAs — R16) | `src/topology/fold.rs`, `src/topology/fold/apply.rs` | B (added in the repair round) |
+| `check_merge_rejected` counts a lineage's registered repairs against `max_merge_repairs`: a `Runnable` admission refused at or over the limit, a `HumanRequired` admission refused below it, a `HumanBinding` admission accepted on either side (INV-11, R8) | `src/topology/fold/check_integration.rs` | B |
+| Fold tests for the above, incl. `a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_repair` and `an_empty_intersection_ladder_records_no_tier_no_ceiling_and_the_raised_floor` | `src/topology/fold/tests.rs` | A (tests only) |
+| Test-only fixture adaptations: the admission fixtures at `max_merge_repairs = 0` and the repair-continuation selection as `RepairDispatch`; a `TransactionClass::Prepared` pattern | `src/topology/fold/tests/questions.rs`, `src/topology/census.rs` | A (tests only) |
 
-No other frozen path is expected to change. If the implementation forces one, it is added to
-this table and to `pr8-body.md` before the commit that needs it lands.
+No other frozen path changed. `check_integration.rs`'s additional `..` pattern is consequential
+adaptation to the retained fields, not another behaviour change.
 
 ## 4. Blocking items
 
-None recorded yet.
+None. One owner decision is owed and recorded rather than blocking: `PR8-CRASH-002` in
+`pr8-body.md` (a lock file left by a coordinator killed inside `git update-ref`; no `Ref.*` site
+registers a residue class in the frozen inventory, so reclaiming it is a Class C vocabulary
+change for a slice of its own).
 
 ## 5. Coverage notes recorded during implementation
 
 - **R13 (driver ingest).** The verification-park answer/decline transitions are proven at the
   fold layer (`an_outage_that_needs_a_person_parks_with_a_question_that_can_be_answered`,
-  `declined_parked_verification_fails_task_consumes_queue_position_releases_lease_and_halts_per_policy`)
-  and the terminals that open a park at the integrate layer (`a_human_required_verdict_parks_the_task`,
-  `infrastructure_failure_defers_then_parks_at_max_defers`). `TopologyRun::hard_block` ingests a
-  verification-park answer and refuses a repair-admission one; that branching is typed and small,
-  and the fold it appends through does the substantive work. An end-to-end `step()`→hard_block
-  ingestion test needs a resumed log carrying a park, whose hand-construction the recover harness
-  does not yet make cheap; it is left to the acceptance harness rather than duplicated here.
+  `declined_parked_verification_fails_task_consumes_queue_position_releases_lease_and_halts_per_policy`),
+  the terminals that open a park at the integrate layer (`a_human_required_verdict_parks_the_task`,
+  `infrastructure_failure_defers_then_parks_at_max_defers`), and — since the repair round — the
+  ingestion itself end to end: `recover::tests` drives `TopologyRun::step` over a resumed log
+  carrying a verification park (Answered returns the candidate to the queue and the next step
+  integrates it) and one carrying a repair-admission park (the answer is refused before any
+  append).
 
-- **Commit 7 (integration recovery) — landed.** `recover::finish_integration` resolves the open
-  transaction at step (f): a `Prepared` one through the live `integrate::publish` (barrier-proven
-  CAS, third-sha refusal, record-only when the ref already names the proposal), a
-  `VerificationStarted` one through `merge_verification_interrupted` with the pin pruned and the
-  staging reclaimed. `reclaim_stale_residue` clears T-PROPOSAL orphan staging and orphan pins
-  before the namespace check; the run's own integration ref and a live stale verification's pin
-  are added to the check's expected set. The P7/P8 ref repair is skipped under an open
-  transaction, so `finish_integration` is the single writer of the ref. Tests in
-  `recover/tests.rs`: `a_resume_completes_a_prepared_fast_transaction_through_the_barrier_and_cas`,
+- **Commit 7 (integration recovery) — landed, repaired.** `recover::finish_integration` resolves
+  the open transaction at step (f): a `Prepared` one through the live `integrate::publish`
+  (barrier-proven CAS, third-sha refusal, record-only when the ref already names the proposal,
+  the staging and pin the retained disposition names), a `VerificationStarted` one through
+  `merge_verification_interrupted` with the pin pruned at its recorded proposal and the staging
+  reclaimed, and every snapshot intent reclaimed afterwards. `reclaim_stale_residue` reclaims
+  T-PROPOSAL staging residue and exactly the orphan `prepared/<next_seq>`, prunes resolved pins at
+  their recorded proposals, checks the open transaction's pin against its record, and hands that
+  pin to the namespace check; every other pin refuses there. `ensure_recorded_integration_ref`
+  requires the ref at the last publication (R23) and is skipped only under a `Prepared`
+  transaction. Tests in `recover/tests.rs`:
+  `a_resume_completes_a_prepared_fast_transaction_through_the_barrier_and_cas`,
   `a_resume_completes_a_prepared_transaction_whose_cas_already_ran_by_recording_the_merge`,
   `a_resume_of_a_prepared_transaction_whose_ref_moved_elsewhere_refuses_a_third_sha`,
-  `a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue`,
-  `a_resume_reclaims_orphan_staging_and_an_orphan_prepared_pin_with_no_transaction`.
+  `a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue` (the staging
+  worktree removed, then the candidate re-verified and published under the next sequence),
+  `a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it`,
+  `a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging`,
+  `a_resume_refuses_a_prepared_pin_outside_the_sequences_the_log_pinned`,
+  `a_resume_refuses_a_substituted_verification_pin_before_settling_it`,
+  `a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses`,
+  `a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses_it_elsewhere`,
+  `a_resume_completes_an_already_present_publication_at_the_candidate_commit_and_reclaims_its_staging`,
+  `a_resume_after_a_completed_publication_accepts_its_own_head`,
+  `a_resume_after_a_publication_refuses_a_ref_that_disagrees_with_the_log`,
+  `synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges`,
+  `sampled_cherry_pick_child_kills_every_residue_classified_and_recovered`, and the deferred
+  `a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed`.
 
-- **R21 (effect-site kill coverage reused).** The per-site kill/residue coverage the plan's
-  commit-7 row lists (both `Object.ProposalCherryPick` phases, the new appends' Event points,
-  sampled cherry-pick child kills classified and recovered) is owned by the `effects` census
-  framework (`src/topology/effects/tests.rs`), which enumerates every site including the PR8 ones
-  and was extended in commits 2–3. Recovery adds the resume-path resolution of what those sites
-  leave, not a second copy of the site census.
+- **The stale fixtures.** The recover tests' stale-verification fixtures first moved the
+  integration head by hand. Only a publication moves a run's head, and a head past the base with no
+  recorded publication is the foreign state R23 refuses, so every such fixture now publishes a
+  second task fast at sequence 0 and plants the stale sequence as 1. The driver harness
+  (`drive`) and every publication test resume through the real `WorkspaceManager` as both ref
+  interfaces; the `RecordingRefs` double, which answers "absent" whatever the repository holds,
+  is kept for the run-start tests it was written for.
 
-- **Commit 8 (two-crash proof) — landed.** `recover::tests::unsynced_merge_prepared_lost_to_power_failure_keeps_log_and_ref_agreeing`
-  proves the ref never runs ahead of an unsynced, lost `merge_prepared`;
-  `integrate::tests::an_append_failure_at_merge_prepared_issues_no_cas_and_leaves_the_integration_ref`
-  proves a failed append (a barrier sync failure among them) issues no CAS. The barrier's own
-  convergence is `events::log::unsynced_line_lost_before_barrier_converges_to_before_append_order`.
+- **Commit 8 (two-crash proof) — landed, replaced.** The proof is now the sequence the contract
+  spells out (R19): `unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing`
+  and `barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss`, both in
+  `recover::tests`, with the two-crash restart in a child process killed at the `task_merged`
+  write. The earlier `unsynced_merge_prepared_lost_to_power_failure_keeps_log_and_ref_agreeing`
+  is gone: it deleted the line before the only resume and could not fail when the barrier's sync
+  was removed. `integrate::tests::an_append_failure_at_merge_prepared_issues_no_cas_and_leaves_the_integration_ref`
+  remains as the live-path append-failure case; the barrier's own convergence of an unsynced tail
+  stays `events::log::unsynced_line_lost_before_barrier_converges_to_before_append_order`.
 
-- **Commit 9 (terminal-shape coverage) — landed as a table plus the per-shape tests.**
+- **Commit 9 (terminal-shape coverage) — landed, hardened.**
   `integrate::tests::terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay`
   drives the seven integrate-path shapes (fast, stale_clean, already_present, conflict,
   code_rejected, deferred, parked) end to end in one table, each asserted at its terminal and
-  replayed twice for equality; it cites the two shapes that are not integrate terminals —
-  Declined-after-park (`fold`) and Interrupted (`recover`) — which live in their own harnesses.
-  The detailed per-shape tests remain: Fast
-  (`fast_path_publishes_exact_candidate_without_staging_or_proposal_object`), StaleClean and
-  AlreadyPresent (`stale_candidate_takes_staging_path_and_publishes_pinned_proposal`,
-  `an_already_present_candidate_settles_without_an_empty_commit` — each also composing two
-  sequential sequences in one run, dense 0 then 1, the ST-13 sequential subset), Conflict and
-  CodeRejected (`a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect`,
-  `a_code_rejected_candidate_registers_a_repair`), HumanRequired and Infrastructure→Defer→Park
-  (`a_human_required_verdict_parks_the_task`, `infrastructure_failure_defers_then_parks_at_max_defers`).
-  ST-13's fast no-staging assertion is in the fast-path test; the dual-hold release is
-  `fast_dual_holding_released_once`. A consolidated table would duplicate these without adding a
-  reachable shape, so it is not written.
+  replayed twice for equality, every verifying shape now running a gate whose workspace HEAD is
+  asserted to be the recorded `proposed_sha` and never the candidate commit; it cites the two
+  shapes that are not integrate terminals — Declined-after-park (`fold`) and Interrupted
+  (`recover`) — which live in their own harnesses. The detailed per-shape tests remain, and
+  `verification_snapshots_are_removed_only_after_the_terminal` fixes the removal order for the
+  three verifying terminals. ST-13's fast no-staging assertion is in the fast-path test; the
+  dual-hold release is `fast_dual_holding_released_once`.
+
+- **Mutation witnesses replayed against the repaired tree** (each killed by the test named in
+  `pr8-triage.md`): the reviewer's m01, m02, m03, m05 and m06; the crash reviewer's removal of
+  the barrier's `sync_log_file`; and one mutation per repair of this round — the base compared
+  after a publication, the SHA-inferred staging, the delete-everything pin loop, the skipped
+  substituted-pin check, snapshot removal as each role finishes, the skipped snapshot reclaim,
+  the last-rung implementer, the propagated Runner error, the skipped input classification, the
+  uncharged review, and the removed staging reclaim.
