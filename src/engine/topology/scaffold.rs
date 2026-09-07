@@ -688,10 +688,31 @@ struct ScaffoldReviews {
 impl super::attempt::ReviewPasses for ScaffoldReviews {
     fn run(
         &self,
-        _cx: &crate::review::ReviewCx<'_>,
-        _runner: &dyn Runner,
-        _invocations: &crate::review::ReviewInvocations,
+        cx: &crate::review::ReviewCx<'_>,
+        runner: &dyn Runner,
+        invocations: &crate::review::ReviewInvocations,
     ) -> Result<crate::review::ReviewOutcome, UpstrokeError> {
+        let request = crate::runner::review_request(
+            CommandSpec::new(cx.adapter.id()).arg("--review"),
+            cx.workspace.to_path_buf(),
+            AgentId::new(cx.adapter.id()),
+            cx.timeout,
+            invocations.pass.clone(),
+        );
+        if let Err(error) = runner.run(&request) {
+            if error.fate.is_unresolved() {
+                return Err(error.into());
+            }
+            return Ok(crate::review::ReviewOutcome {
+                result: crate::review::ReviewResult::Unavailable {
+                    status: crate::ir::OutcomeStatus::AgentError,
+                    detail: format!("review process failed: {error}"),
+                },
+                cost_usd: None,
+                invocations: 0,
+                transcript: PathBuf::new(),
+            });
+        }
         let result = match &self.outcome {
             VerifyReview::Passed => crate::review::ReviewResult::Judged(crate::ir::Verdict {
                 pass: true,

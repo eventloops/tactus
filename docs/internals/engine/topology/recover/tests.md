@@ -3168,7 +3168,29 @@ The model each review pass actually ran as.
 
 One driver owns this record; `RefCell` lets the read-only seam write it.
 
+## `struct Driven {` › `runs: Vec<DrivenRun>,`
+
+Every process the driven runner was asked to run — gates and reviewers
+alike — with its role, the workspace it was pointed at and that
+workspace's HEAD at spawn. The verifier oracle reads the reviewers' entries
+to prove each reviewer judged the recorded proposal in its own snapshot
+slot and never in staging (`PR8-R4-REVIEW-ORACLE`).
+
+## `impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews` › `fn run(`
+
+The driven review double runs a process through the Runner in the
+workspace it was handed before answering its scripted verdict, for the
+reason the scaffold's does (`scaffold.md`): a double that reads only the
+profile cannot see where the production judge pointed it, and the cover
+review of `8a5f59e8` moved that pointer into staging past every test.
+
+## `struct DrivenRun {`
+
+One process the driven runner ran: identity, role, workspace and the
+workspace's HEAD at spawn.
+
 ## `fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {`
+
 
 Resume the fixture, then step the run's loop `steps` times under `seams`.
 

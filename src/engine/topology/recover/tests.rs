@@ -7271,6 +7271,7 @@ struct Driven {
     implementers: Vec<PassBinding>,
     reviewer_models: Vec<String>,
     gate_heads: Vec<(crate::runner::InvocationId, Option<String>)>,
+    runs: Vec<DrivenRun>,
     spend_before: f64,
     spend_after: f64,
     invocations_balance: bool,
@@ -7326,13 +7327,34 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
     fn run(
         &self,
         cx: &crate::review::ReviewCx<'_>,
-        _runner: &dyn Runner,
-        _invocations: &crate::review::ReviewInvocations,
+        runner: &dyn Runner,
+        invocations: &crate::review::ReviewInvocations,
     ) -> Result<crate::review::ReviewOutcome, UpstrokeError> {
         self.models
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(cx.profile.model.clone());
+        let request = crate::runner::review_request(
+            CommandSpec::new(cx.adapter.id()).arg("--review"),
+            cx.workspace.to_path_buf(),
+            crate::runner::AgentId::new(cx.adapter.id()),
+            cx.timeout,
+            invocations.pass.clone(),
+        );
+        if let Err(error) = runner.run(&request) {
+            if error.fate.is_unresolved() {
+                return Err(error.into());
+            }
+            return Ok(crate::review::ReviewOutcome {
+                result: crate::review::ReviewResult::Unavailable {
+                    status: crate::ir::OutcomeStatus::AgentError,
+                    detail: format!("review process failed: {error}"),
+                },
+                cost_usd: None,
+                invocations: 0,
+                transcript: PathBuf::from("driven-review"),
+            });
+        }
         Ok(crate::review::ReviewOutcome {
             result: crate::review::ReviewResult::Judged(crate::ir::Verdict {
                 pass: !self.needs_human,
@@ -7351,16 +7373,24 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DrivenRun {
+    invocation: crate::runner::InvocationId,
+    role: crate::runner::ExecutionRole,
+    workspace: PathBuf,
+    head: Option<String>,
+}
+
 struct DrivenRunner {
     fails: Option<crate::error::ProcessFate>,
     times_out: bool,
     exit_code: i32,
-    heads: Mutex<Vec<(crate::runner::InvocationId, Option<String>)>>,
+    runs: Mutex<Vec<DrivenRun>>,
 }
 
 impl DrivenRunner {
-    fn heads(&self) -> Vec<(crate::runner::InvocationId, Option<String>)> {
-        self.heads
+    fn runs(&self) -> Vec<DrivenRun> {
+        self.runs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -7379,10 +7409,15 @@ impl Runner for DrivenRunner {
                 .success()
                 .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         };
-        self.heads
+        self.runs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .push((request.invocation.clone(), head));
+            .push(DrivenRun {
+                invocation: request.invocation.clone(),
+                role: request.role.clone(),
+                workspace: request.workspace.clone(),
+                head,
+            });
         if let Some(fate) = self.fails {
             return Err(RunnerError::new(
                 &request.invocation,
@@ -7458,10 +7493,16 @@ fn drive_hooked(
         fails: seams.gate_fails,
         times_out: seams.gate_times_out,
         exit_code: seams.gate_exit_code.unwrap_or(0),
-        heads: Mutex::new(Vec::new()),
+        runs: Mutex::new(Vec::new()),
     };
     let mut driven = drive_with(fixture, seams, steps, &runner, hooks);
-    driven.gate_heads = runner.heads();
+    let runs = runner.runs();
+    driven.gate_heads = runs
+        .iter()
+        .filter(|run| run.role == crate::runner::ExecutionRole::Gate)
+        .map(|run| (run.invocation.clone(), run.head.clone()))
+        .collect();
+    driven.runs = runs;
     driven
 }
 
@@ -7621,6 +7662,7 @@ fn drive_as(
             .into_inner()
             .unwrap_or_else(PoisonError::into_inner),
         gate_heads: Vec::new(),
+        runs: Vec::new(),
         spend_before,
         spend_after: run.spend().run_total(),
         invocations_balance: run.invocations_balance(),
@@ -8647,12 +8689,72 @@ fn the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshot
             candidate.commit_sha
         );
 
+        let reviews: Vec<&DrivenRun> = driven
+            .runs
+            .iter()
+            .filter(|run| run.role == crate::runner::ExecutionRole::Review)
+            .collect();
+        let gate_workspace = driven
+            .runs
+            .iter()
+            .find(|run| run.role == crate::runner::ExecutionRole::Gate)
+            .map(|run| run.workspace.clone())
+            .expect("the gate ran");
+        let staging =
+            fixture
+                .manager()
+                .slot_path(&crate::engine::topology::integrate::staging_slot(
+                    crate::topology::events::SequenceId(2),
+                ));
+        if label == "rejected" {
+            assert!(
+                reviews.is_empty(),
+                "{label}: no reviewer runs after a failed gate"
+            );
+        } else {
+            assert_eq!(
+                reviews.len(),
+                1,
+                "{label}: one reviewer ran: {:?}",
+                driven.runs
+            );
+            let review = reviews[0];
+            assert_eq!(
+                review.head.as_deref(),
+                Some(proposed.as_str()),
+                "{label}: the reviewer judged a checkout whose HEAD is the recorded proposal"
+            );
+            assert_ne!(
+                review.workspace, staging,
+                "{label}: the reviewer ran in the staging worktree"
+            );
+            assert_ne!(
+                review.workspace, gate_workspace,
+                "{label}: the reviewer shared the gate's snapshot"
+            );
+            assert_eq!(
+                review.workspace,
+                fixture
+                    .manager()
+                    .slot_path(&crate::workspace_manager::Slot::Snapshot {
+                        name: crate::workspace_manager::SnapshotName::integration_review(2, 0),
+                    }),
+                "{label}: the reviewer's checkout is its own exact snapshot of the proposal"
+            );
+        }
+        assert!(
+            driven.runs.iter().all(|run| run.workspace != staging),
+            "{label}: a process ran in the staging worktree: {:?}",
+            driven.runs
+        );
+
         let removals = &hooks.effects.last_event_at_removal;
         assert_eq!(
             removals.len(),
             if label == "rejected" { 1 } else { 2 },
             "{label}: every snapshot of the sequence was removed once: {removals:?}"
         );
+
         assert!(
             removals.iter().all(|last| last == terminal),
             "{label}: a snapshot removal began while the log ended in {removals:?} rather than \

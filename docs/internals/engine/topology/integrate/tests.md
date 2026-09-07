@@ -142,7 +142,26 @@ First outage: deferred, inside the allowance.
 
 Wake it, then the second outage parks at max_defers.
 
+## `fn review_runs(run: &Run) -> Vec<crate::engine::topology::scaffold::Ran> {`
+
+Every reviewer process the recording runner ran, with the workspace it
+was pointed at and that workspace's HEAD at spawn. The scaffold's review
+double spawns through the runner in the workspace it is handed, so these
+are observations of where the production judge sent each reviewer, not of
+what the double was told.
+
+## `fn review_snapshot_path(run: &Run, sequence: u64, pass: u32) -> std::path::PathBuf {`
+
+Where the judge's fresh per-reviewer snapshot lives
+(`SnapshotName::integration_review`). The isolation tests require each
+reviewer's workspace to be exactly this — never the staging worktree,
+never the gate's snapshot — because `verification_isolation` says "one for
+the gate set and one fresh per reviewer", and the cover review of
+`8a5f59e8` showed the reviewers' workspace could be pointed into staging
+with every test green (`PR8-R4-REVIEW-ORACLE`).
+
 ## `fn gate_heads(run: &Run) -> Vec<String> {`
+
 
 The commits the recording runner's gate processes looked at: the HEAD of
 each gate's workspace at spawn, in spawn order.

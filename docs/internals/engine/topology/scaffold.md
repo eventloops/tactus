@@ -676,7 +676,24 @@ The commit the workspace's HEAD named when the process was spawned —
 what a gate or reviewer actually looked at — or `None` when the
 workspace is not a checkout.
 
+## `impl super::attempt::ReviewPasses for ScaffoldReviews` › `fn run(`
+
+**The double cannot ignore the workspace it was handed.** It runs a
+process through the Runner in `cx.workspace` — as `run_review` runs the
+adapter's CLI there — before returning its scripted verdict, so the
+recording runner sees each reviewer's checkout, its HEAD at spawn and its
+path, and the isolation oracles can assert them. The cover review of
+`8a5f59e8` pointed the integration reviewers' `ReviewCx.workspace` into
+the staging worktree, kept snapshot creation and cleanup, and passed every
+engine-topology test while `verification_isolation` was violated, because
+this double and the driven loop's both read only the profile
+(`PR8-R4-REVIEW-ORACLE`), the third time a review double ignoring its
+workspace had hidden a defect on that branch. A Runner error is answered
+the way `run_review` answers it: an unresolved fate propagates, anything
+else is an unavailable review.
+
 ## `pub(super) enum VerifyReview {`
+
 
 What the scaffold's integration verification decides, so a test drives a
 stale_clean pass, a code rejection, a human-required park, or an outage

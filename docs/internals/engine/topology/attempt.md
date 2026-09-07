@@ -1269,7 +1269,18 @@ on the proposal or head commit, and everything else — the snapshot per
 role, the invocation ledger, the slot pair, the review records — is the
 same protocol run once.
 
+## `impl Judge<'_> {` › `workspace: snapshot.path(),`
+
+Each reviewer runs in the fresh snapshot taken for its pass and nowhere
+else (`verification_isolation`: "one for the gate set and one fresh per
+reviewer"). This line is held by tests that observe the reviewer's actual
+checkout — `integrate::tests` through the scaffold's spawning review
+double, `recover::tests` through the driven loop's — after the cover
+review of `8a5f59e8` pointed it into the staging worktree for integration
+reviewers and passed all 366 engine-topology tests (`PR8-R4-REVIEW-ORACLE`).
+
 ## `impl Judge<'_> {` › `pub fn judge(&mut self, subject: &Subject<'_>) -> Result<Judgement, JudgeError> {`
+
 
 Run every gate on one snapshot, then every reviewer on its own, and
 say what they decided.

@@ -615,6 +615,25 @@ fn stale_candidate_takes_staging_path_and_publishes_pinned_proposal() {
         "the gate ran on a snapshot whose HEAD is the proposal"
     );
     assert_ne!(proposal, second.commit_sha.0);
+    let reviews = review_runs(&run);
+    assert_eq!(
+        reviews
+            .iter()
+            .map(|ran| ran.head_at_spawn.clone())
+            .collect::<Vec<_>>(),
+        vec![Some(proposal.clone())],
+        "the reviewer ran on a snapshot whose HEAD is the proposal"
+    );
+    assert_eq!(
+        reviews[0].workspace,
+        review_snapshot_path(&run, 1, 0),
+        "the reviewer's checkout is its own exact snapshot of the proposal"
+    );
+    assert_ne!(
+        reviews[0].workspace,
+        gate_workspace(&run),
+        "the reviewer shared the gate's snapshot"
+    );
     let staging_path = run.fixture.manager.slot_path(&staging_slot(SequenceId(1)));
     assert!(
         run.runner
@@ -868,6 +887,31 @@ fn terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay
             assert_ne!(
                 started.proposed_sha, started.candidate.commit_sha,
                 "{shape:?}: a verified sequence never proposes the candidate commit itself"
+            );
+            let reviews = review_runs(&run);
+            assert_eq!(reviews.len(), 1, "{shape:?}: one reviewer ran");
+            assert_eq!(
+                reviews[0].head_at_spawn.as_deref(),
+                Some(started.proposed_sha.as_str()),
+                "{shape:?}: the reviewer judged the recorded proposal"
+            );
+            assert_eq!(
+                reviews[0].workspace,
+                review_snapshot_path(&run, 1, 0),
+                "{shape:?}: the reviewer's checkout is its own exact snapshot"
+            );
+            assert_ne!(
+                reviews[0].workspace,
+                gate_workspace(&run),
+                "{shape:?}: the reviewer shared the gate's snapshot"
+            );
+            let staging_path = run.fixture.manager.slot_path(&staging_slot(SequenceId(1)));
+            assert!(
+                run.runner
+                    .ran()
+                    .iter()
+                    .all(|ran| ran.workspace != staging_path),
+                "{shape:?}: a process ran in the staging worktree"
             );
         }
         run.replay_twice_equal();
@@ -1157,6 +1201,31 @@ fn infrastructure_failure_defers_then_parks_at_max_defers() {
     ));
     assert_eq!(run.task_state(BETA), TaskState::AwaitingInput);
     run.replay_twice_equal();
+}
+
+fn review_runs(run: &Run) -> Vec<crate::engine::topology::scaffold::Ran> {
+    run.runner
+        .ran()
+        .into_iter()
+        .filter(|ran| ran.role == crate::runner::ExecutionRole::Review)
+        .collect()
+}
+
+fn gate_workspace(run: &Run) -> std::path::PathBuf {
+    run.runner
+        .ran()
+        .into_iter()
+        .find(|ran| ran.role == crate::runner::ExecutionRole::Gate)
+        .map(|ran| ran.workspace)
+        .expect("the gate ran")
+}
+
+fn review_snapshot_path(run: &Run, sequence: u64, pass: u32) -> std::path::PathBuf {
+    run.fixture
+        .manager
+        .slot_path(&crate::workspace_manager::Slot::Snapshot {
+            name: crate::workspace_manager::SnapshotName::integration_review(sequence, pass),
+        })
 }
 
 fn gate_heads(run: &Run) -> Vec<String> {
