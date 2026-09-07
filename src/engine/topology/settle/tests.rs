@@ -1745,7 +1745,12 @@ fn a_root_a_second_run_adopts_replays_as_already_started() {
 
     let error = TopologyFold::replay(inputs(), &events)
         .expect_err("a log with two beginnings does not replay");
-    assert_eq!(error, FoldError::AlreadyStarted);
+    assert_eq!(
+        error,
+        FoldError::AlreadyStarted,
+        "the adopted root produced a different refusal, so this is not the fingerprint \
+         PR160-WINDOWS-SETTLE-ALREADYSTARTED and its recurrence recorded"
+    );
 }
 
 fn run_starteds(events: &[TopologyEvent]) -> usize {
