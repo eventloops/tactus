@@ -231,9 +231,10 @@ because a name that reaches this boundary and resolves to nothing is a pre-fligh
 name, not a `NotFound` from a spawn.
 
 **And once per boundary, not once per spawn** (`PR6-LANED-001`). `HostRunner::program_for` searches
-the first time and remembers the answer for this runner, so a run's pre-flight and its attempts
-execute the same file even if the filesystem moves under them — DESIGN.md:612, which running the
-probe through the runner is necessary but not sufficient for.
+the first time and remembers the answer for this runner — the answer, and only when there is one:
+a `stat` it could not decide is not an answer and is not kept. So a run's pre-flight and its
+attempts execute the same file even if the filesystem moves under them — DESIGN.md:612, which
+running the probe through the runner is necessary but not sufficient for.
 
 ### Why the composed environment is the whole environment
 

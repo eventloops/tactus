@@ -2677,8 +2677,8 @@ permission mutation or the tree behind — §6's rule that a guard beats a
 `start`/`finish` pair whose second half can be skipped, and §12's unique
 temporary directory with RAII cleanup. A cleanup failure is reported only
 when the thread is not already panicking, so tidying up can never replace
-the failure the test was reporting with one of its own; [`HeldFork`] takes
-the same shape for the same reason.
+the failure the test was reporting with one of its own; `Scratch` and
+[`HeldFork`] in `inherited_writer` take the same shape for the same reason.
 
 `own` reads the mode instead of assuming `0o755`, and it is called before
 anything perturbs it, so what the restore puts back is what was there.
