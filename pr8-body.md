@@ -34,10 +34,13 @@ pending, the integration ref must name the log's latest publication — and the 
 decision reads the same rule, so a head the log did not put there refuses before any append.
 
 This slice is inert by default: the schema-4 topology engages only by explicit schema choice, and
-the v0.1 path is unchanged **but for one declared exception** — an unresolved host reviewer now
+the v0.1 path is unchanged **but for two declared exceptions**. An unresolved host reviewer now
 propagates the Runner's error through the legacy attempt instead of producing an unavailable-review
-result. That change, and the type changes around it, are stated in Risk and rollback below; it is
-the only behaviour of the released path this branch alters.
+result. And the process-group scanner both engines share reads a **macOS** enumeration that failed
+as unknown rather than as an empty group, so a legacy worker or gate whose cleanup meets that
+failure keeps killing instead of settling — fail-closed where it was fail-open, on that one
+platform. Both, and the type changes around them, are stated in Risk and rollback below; they are
+the only behaviours of the released path this branch alters.
 
 ## Scope
 
@@ -49,19 +52,13 @@ frozen-repair builder), the integration recovery in `src/engine/topology/recover
 (the verification context, the implementer binding, the review-input classification, the charged
 reviews), the judge's typed Runner error and snapshot disposal in `attempt.rs`, the verification
 harness in `scaffold.rs`, and the supporting `workspace_manager` reads (`proposal_state`) and
-names (`SnapshotName::integration_review`). The five repair rounds change the same seams and add no new ones. `pr8-plan.md` §2 carries each
-round's commit table and its file list; in outline: rounds two and three are the Runner's typed
-error and what each of the two Runners may claim about a process (`src/runner/**`,
-`src/agent/proc.rs`, `src/review.rs`, `src/engine/classify.rs`, `src/engine/topology/preflight.rs`,
-`create.rs`, and every Runner double); round four is the shared head rule and the emit funnel's
-event mirror (`integrate.rs`, `recover.rs`, `emit.rs`, `run.rs`), the typed outcome of a container
-stop or removal (`src/runner/container/**`), the owned cleanup scope (`src/rundir.rs` and the three
-sites that spawn under the lock), and review doubles that run a process in the workspace they are
-handed (`scaffold.rs`, `recover/tests.rs`); round five is the review account each completed pass is
-charged to (`attempt.rs`, `run.rs`, `select.rs`, `scaffold.rs`), the fact of a process that never
-started carried to the durable outage attribution (`src/review.rs`, `src/ladder.rs`,
-`src/engine/attempt.rs`, `integrate.rs`), the macOS scanner's distinction between a failed
-enumeration and an empty group (`src/agent/proc.rs`), and two Git reads made read-only
+names (`SnapshotName::integration_review`). The six repair rounds change the same seams and add no new ones;
+**`pr8-plan.md` §2 carries each round's commit table and file list**. Beyond the files above they
+reach the Runner's typed error and what each Runner may claim about a process (`src/runner/**`,
+`src/agent/proc.rs`, `src/review.rs`, `src/engine/classify.rs`, `preflight.rs`, `create.rs`, and
+every Runner double), the emit funnel's event mirror (`recover.rs`, `emit.rs`), the owned cleanup
+scope (`src/rundir.rs` and the three sites that spawn under the lock), the review account and the
+never-started fact (`src/ladder.rs`, `src/engine/attempt.rs`), and two Git reads made read-only
 (`src/workspace_manager.rs`).
 
 Out of scope, and neither built nor stubbed: repair **execution** (PR9), the production writer, the
@@ -155,13 +152,13 @@ already settled are marked as such):
 ## Validation
 
 All ten gates green locally, from the repository root, on the last code commit of this branch,
-`243cf617f5ed8070cdd0951e56db4d560c0eb699`; the commits that follow it change the three record
+`926d2989424d65f6e3b3b504debe2697f46de93d`; the commits that follow it change the three record
 files and no code, and the ten gates were rerun on the pushed head before the push:
 
 ```
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features            # 2367 lib tests passed, 0 failed, 43 ignored (Linux)
+cargo test --all-targets --all-features            # 2373 lib tests passed, 0 failed, 43 ignored (Linux)
 cargo +1.85.0 check --locked --all-targets --all-features
 bash .github/scripts/test-release-record.sh
 bash .github/scripts/test-pr-policy.sh
@@ -171,21 +168,21 @@ bash .github/scripts/test-internals-notes.sh
 bash .github/scripts/test-pr-ready-audit.sh
 ```
 
-Two sightings of the residue sampler, in a module this branch does not touch, are recorded here
-because the standing findings ask for a count before anything is called a flake. At the third
-round's head `287563f0`, the first full run had one red:
-`workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered` refused
-one `Worktree.Add` sample with "worktree list record 1 names a HEAD but neither a branch nor a
-detached checkout" — the standing P3 `PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`
-(`reviews/findings/`); it passed alone and the full test gate rerun passed clean. At `cdcea656`,
-the first full run had one red in the same test with the other filed fingerprint: `recover_sample`'s
-forced removal failed `DirectoryNotEmpty` (os error 39) on `tasks/kalpha-g4` — exactly the
-standing P2 `PR136-SAMPLER-FORCED-REMOVAL-DOES-NOT-CONVERGE` (`reviews/findings/`), whose file
-records that fingerprint verbatim; the full test gate rerun at the same head passed clean (2362
-passed, 0 failed, 43 ignored), and the ten gates named above are green on that rerun. The fifth
-repair round saw neither fingerprint: its three full test runs, at
-`85bdb8c7`, `fe7966da` and `243cf617`, each passed clean at the first attempt, so the sampler is
-not counted against this round.
+The residue sampler, in a module this branch does not touch, was red twice across the branch's
+runs — once at `287563f0` and once at `cdcea656` — each time with one of its two filed
+fingerprints (`PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD` and
+`PR136-SAMPLER-FORCED-REMOVAL-DOES-NOT-CONVERGE`, both in `reviews/findings/`), each time passing
+alone and on a full rerun at the same head, with the ten gates green on that rerun. The fifth and
+sixth rounds saw neither fingerprint: every full test run of both passed clean at the first
+attempt, so the sampler is counted against neither. The sightings in full, which the standing
+findings ask for before anything is called a flake, are `pr8-plan.md` §5.
+
+Two of the Docker-gated tests are the sixth round's and both **ran** here rather than skipping,
+against a live daemon (docker 29.7.2): the reviewer's local-CLI failure reproduced natively
+through the CLI's global TLS flags, and the listing the settlement observation reads, its state
+vocabulary and its name collision measured on the daemon. Where no daemon answers they skip, as
+every `real_docker_*` test does, and the rules they measure are pinned on every platform by the
+unit tests beside them.
 
 Two platform checks the box can make and the local gates do not. The macOS repair changes code no
 Linux gate compiles, so the branch is also `cargo clippy --target x86_64-apple-darwin --all-targets
@@ -198,7 +195,11 @@ Proof obligations from the contract, and where each is met: the enumeration, one
 obligation with the tests that discharge it, is **`pr8-plan.md` §6**, tracked at this head. It
 moved there in the fifth repair round because the body reached GitHub's 65,536-character limit for
 a pull-request description and the ledger below, which the policy gate greps from the published
-body, cannot move. Nothing was dropped: the twenty-two obligations are real-repository CAS, orphan
+body, cannot move. The sixth round moved two more passages the same way and for the same reason —
+the residue sampler's sightings in full, to `pr8-plan.md` §5, and the round-by-round review
+narrative for the first three rounds, to `pr8-triage.md` §§2–6 — each leaving its claim, its
+identifiers and a pointer here. The published body is 63393 characters, so a seventh round has
+about two thousand to spend before it has to move something of its own. Nothing was dropped: the twenty-two obligations are real-repository CAS, orphan
 and third-SHA publication; fast with no staging; the three fast mismatches live and on replay; the
 stale path; the two-crash proof; completed publications resuming; the terminal-shape coverage
 table; kill and residue for the cherry-pick class; outages, parks and answers driven through the
@@ -220,64 +221,27 @@ own size mitigation asks. Both repair rounds below were Claude Fable 5.1 at max 
 fresh autonomous session. (An earlier version of this paragraph named Opus 4.8 at high effort;
 the plan named the correct model and the body was wrong.)
 
-Three independent frontier reviews were then run by the owner against the exact head `3414dc58`,
-each by `gpt-6-astra` at `max` effort, each with a different lens and each returning
-`CHANGES_REQUIRED`:
-
-- **conformance to the frozen design** — the only reviewer given the design contract: findings
-  F1–F9, an audit of the twenty recorded readings, and a freeze-classification audit;
-- **crash consistency and recovery** — six findings, three of them P1, each with a reproduction
-  the reviewer ran;
-- **test adequacy and code quality** — thirteen findings from a 24-mutation audit.
-
-Every finding was triaged in `pr8-triage.md` (Claude Fable 5.1 at max effort, one continuous
-autonomous session, 2026-09-07) and every one was confirmed; none was rejected. Every confirmed
-finding was repaired on this branch at `916852c9`, one finding or closely related group per
-commit, each with a test that fails at `3414dc58` or a mutation witness replayed against the
-repair, except one that is beyond this slice's reach and is deferred with a ledger row and an
-owner decision owed (`PR8-CRASH-002`). The two documentation defects the owner was being asked to
-approve on — the over-limit `HumanBinding` description and the empty-intersection ladder — are
-corrected: the description to what the fold does, and the code to what R10 recorded.
-
-After that push, CI's macOS leg failed once in the residue sampler: a killed `git cherry-pick`
-left `packed-refs.lock` in the common git dir — the Ref-lock residue class `PR8-CRASH-002`
-defers — and the sampler now removes git's ref-lock residue after each kill as an operator
-would. The prose this pull request had put into source files then moved to the modules' notes
-under `docs/internals/` (CODING_STANDARDS §13), with notes files created for `integrate.rs`,
-`repair.rs` and their test modules; that commit changes no code.
-
-Three more independent frontier reviews were then run by the owner against the exact head
-`916852c9`, over the repair range `3414dc58..916852c9` only, each by `gpt-6-astra` at `max`
-effort, three lenses — repair adequacy (four issues), regression (two issues, the first the most
-serious finding of the round), record honesty (four numbered findings and the record
-discrepancies) — and each returning `CHANGES_REQUIRED`. They confirmed the two-crash proof sound,
-the three Class B descriptions accurate, the freeze classification complete and the non-goal
-boundary held, and found the round's outage handling had made something worse: every Runner error
-was settled as a spawn failure, so a gate whose container Docker had lost was released, its
-snapshot reclaimed and the next sequence admitted beside it. Every finding was triaged in
-`pr8-triage.md` §5 (Claude Fable 5.1 at max effort, a fresh autonomous session, 2026-09-07) and
-confirmed; none was rejected. Every confirmed finding was repaired on this branch with a test that
-fails without the repair, except the spend replay gap, which the contract settles against the
-frozen vocabulary and which is deferred with a ledger row and an owner decision owed
-(`PR8-R2-SPEND-REPLAY`); R22, which had called it a permitted reading, is withdrawn.
-
-A single frontier review was then run by the owner against the exact head `79ddbffb`, over the
-repair range `916852c9..79ddbffb` only — the change to the `Runner` trait's error type, the one
-thing in the round no reviewer had seen — by `gpt-6-astra` at `max` effort, returning
-`CHANGES_REQUIRED` with five findings, three P1: the host claimed `Gone` from a reaped leader while
-a same-group descendant lived, a container outage before `docker create` was `Unresolved` and
-consumed no defer while a committed start was `NeverStarted`, an `Unresolved` release still pruned
-the Git view the live container had mounted, positive evidence of exit and removal was discarded,
-and the unresolved return was said to release both entitlements; two mutations had survived the
-whole suite. Every finding was triaged in `pr8-triage.md` §6 (Claude Fable 5.1 at max effort, a
-fresh autonomous session, 2026-09-07). Four were confirmed and repaired on this branch, each with
-a test that fails without the repair, and both surviving mutations are killed. The fifth is
-rejected as a code defect — a probe at the reviewed head shows the reservation converted at the
-start append and the cancellation not reached, the entitlements being the open transaction's — and
-confirmed as a record defect: the sentence that misled the reviewer was this branch's own triage,
-now corrected, and the accounting is pinned by a test. The reviewer confirmed the rest of the seam
-sound (the adapters, `gates.rs`, the v0.1 worker, `run_review`, no accidental catch-all), and
-none of that was touched.
+Three independent frontier reviews (conformance, crash consistency, test adequacy) were then run
+by the owner against the exact head `3414dc58`, each by `gpt-6-astra` at `max` effort, returning
+`CHANGES_REQUIRED` with F1–F9, six crash findings and thirteen from a 24-mutation audit. Three more
+followed at `916852c9` over the repair range only (repair adequacy, regression, record honesty),
+and one at `79ddbffb` over the `Runner` trait's new error type, the one thing in the round no
+reviewer had seen — five findings, three P1, with two mutations that had survived the whole suite.
+Every finding of all seven reviews was triaged in `pr8-triage.md` §§2–6 (Claude Fable 5.1 at max
+effort, a fresh autonomous session per round, 2026-09-07); all were confirmed and repaired with a
+test that fails without the repair, except one rejected as a code defect and confirmed as a record
+defect — the sentence that misled the reviewer was this branch's own triage — and the two gaps
+deferred with a ledger row and an owner decision (`PR8-CRASH-002`, `PR8-R2-SPEND-REPLAY`; R22,
+which had called the second a permitted reading, is withdrawn). The narrative of those rounds, and
+what each reviewer cleared, is `pr8-triage.md` §§2–6 and `pr8-plan.md` §2; three things from it
+belong here. The second round's outage handling made something worse before it made it better —
+every Runner error settled as a spawn failure, so a gate whose container Docker had lost was
+released and the next sequence admitted beside it. CI's macOS leg failed once in the residue
+sampler on a killed `git cherry-pick`'s `packed-refs.lock`, the Ref-lock residue class
+`PR8-CRASH-002` defers, and the sampler now removes git's ref-lock residue after each kill as an
+operator would. And the two documentation defects the owner was being asked to approve on — the
+over-limit `HumanBinding` description and the empty-intersection ladder — are corrected, the
+description to what the fold does and the code to what R10 recorded.
 
 A cover review of the whole slice against master was then run by the owner against the exact
 head `8a5f59e8` — the branch merged up to master, ten gates green locally and the full CI matrix
@@ -296,31 +260,44 @@ gone and every cleanup that takes an expected-old value, each listed with where 
 comes from (§7.3, §7.4). What the reviewer cleared is undisturbed, no new Class B change was
 needed, and neither deferred finding was reopened.
 
-A final cover review of the whole slice against master was then run by the owner against the exact
-head `716cf89a` — the branch merged up to master, ten gates green locally and all eleven CI checks
-green across the ubuntu, macOS and Windows matrix — by a frontier reviewer at `ultra` effort (the
-review record the owner supplied names the effort and not the model), returning `CHANGES_REQUIRED`
-with six findings: two P1, three P2, one P3, and two of the six in code that predates this slice.
-It cleared the structural core again — no stable-prefix or CAS ordering defect, no undeclared
-Class C, the three approved Class B descriptions matching the code — and what it found was edges:
+A cover review of the whole slice against master was then run by the owner against the exact head
+`716cf89a` — ten gates green locally, all eleven CI checks green across the matrix — at `ultra`
+effort, returning `CHANGES_REQUIRED` with six findings: two P1, three P2, one P3, two of them in
+code that predates this slice. It cleared the structural core again and what it found was edges:
 macOS process-enumeration failures read as an empty process group, because Apple's `proc_listpids`
 answers a failed call with the same zero it answers an empty group with; completed review costs
-discarded live when a later snapshot failed, so the loop admitted another sequence in the same
-incarnation against a total that was missing them; the read-only proposal classifier writing the
-index outside every effect hook; a reviewer's image mismatch attributed as `ReviewUnavailable`
-where INV-23 names `RunnerSpawnFailure`; the §7.4 cleanup census not exhaustive though it claimed
-to be; and the body's unchanged-v0.1 and rollback claims contradicting its own Risk section. Every
-finding was triaged in `pr8-triage.md` §8 (Claude Fable 5.1 at max effort, a fresh autonomous
-session, 2026-09-07) and confirmed; the four code findings were repaired on this branch with a test
-that fails without the repair, and the two record findings were corrected in the record. A seventh
-row was raised by this round rather than the reviewer, sweeping the class finding 3 named:
+discarded live when a later snapshot failed, so the loop admitted another sequence against a total
+that was missing them; the read-only proposal classifier writing the index outside every effect
+hook; a reviewer's image mismatch attributed as `ReviewUnavailable` where INV-23 names
+`RunnerSpawnFailure`; the §7.4 census not exhaustive though it claimed to be; and the body's
+unchanged-v0.1 claims contradicting its own Risk section. All six were triaged in `pr8-triage.md`
+§8 (Claude Fable 5.1 at max effort, a fresh autonomous session, 2026-09-07) and confirmed, the
+four code findings repaired with a test that fails without the repair. Neither deferred finding
+was reopened: finding 2 is **adjacent to `PR8-R2-SPEND-REPLAY` and distinct from it**, §8.2
+records why, and the two are not to be folded together later. A seventh row was raised by the
+round rather than the reviewer, sweeping the class finding 3 named:
 `PR5-CONF-002` had established that Git's porcelain writes the index it is only asked to read and
 applied `--no-optional-locks` at one call site, and the rest of the manager's reads never got it.
-§7.3 is corrected for the macOS row and re-examined end to end for the species of error behind it —
-an observation whose failure mode is indistinguishable from its success value — and §7.4's domain
-is restated and completed across both the schema-4 and the legacy layer. Neither deferred finding
-is reopened; finding 2 is adjacent to `PR8-R2-SPEND-REPLAY` and distinct from it, and §8.2 records
-why, so the two are not folded together later.
+
+A further cover review of the whole slice against master was then run by the owner against the
+exact head `9ee9784e` — ten gates green locally and all eleven CI checks green across the ubuntu,
+macOS and Windows matrix — returning `CHANGES_REQUIRED` with the smallest count yet: one P1, one
+P2, two P3. It cleared the structural core again, including the Windows `BOOL` guard's ordering
+and the legacy orphan-pin justification, and what it found was that a container runtime could be
+told a container was gone by text the environment wrote: the absence and termination normalizers
+searched the whole of a failed `docker` command's stderr, and with TLS material missing under a
+directory named `no such container` the CLI fails **before contacting the daemon** and quotes that
+path back. The reviewer reproduced the three production methods natively, with controls. The
+second finding is the frozen repair losing the failing gate's output and the reviewer's required
+changes — **and the test written to catch that could not**, because it inserted its evidence
+downstream of the conversion that was losing it. Both were triaged in `pr8-triage.md` §9 (Claude
+Fable 5.1 at max effort, a fresh autonomous session, 2026-09-07), confirmed and repaired with
+tests that fail without the repair; the two P3s are record findings and are corrected in the
+record. A fifth row was raised by this round rather than the reviewer, sweeping the same class in
+the direction the container census depends on. §7.3's normalization clearance is **withdrawn as
+false** and the whole table re-read for the species behind it — an observation derived from text
+rather than from a typed answer — and §7.4's derivation is widened past `update-ref` to the other
+ways Git moves a ref. Neither deferred finding is reopened.
 
 The repaired head has not been reviewed. The frontier review of it is **owed and is the owner's
 to run**; it is not part of this branch. The ledger below carries the canonical header and one
@@ -358,7 +335,9 @@ coordinator and resume hold a borrowed one for their whole command (those two si
 in behaviour); and mirrors every successful append into the event list the run carries, in the one
 emit funnel, so the live head rule reads what recovery appended.
 
-The fifth repair round touches the v0.1 path in type only. `review_failure` takes a second
+The fifth repair round touches the v0.1 path in type only **but for the shared macOS scanner**,
+which is the second declared exception and is described at the end of this paragraph.
+`review_failure` takes a second
 argument, and `ReviewOutcome` and `AttemptFailure` each gain one in-memory field recording whether
 the Runner established that the process never started; nothing serializes any of it and the legacy
 ladder reads none of it, so every legacy path answers exactly what it answered before. The round's
@@ -373,6 +352,14 @@ path becomes fail-closed where it was fail-open. **It executes for the first tim
 leg**; this box is Linux and the platform-independent half of the rule is what the test covers.
 
 
+The sixth repair round adds no v0.1 surface at all. It changes what `DockerCli` accepts as
+evidence that a container is gone — a phrase in a failed command's stderr no longer settles
+anything; a settlement is established against a `docker ps` listing that had to succeed — and the
+container runtime has no production constructor outside `src/runner/container/**`, with `run` and
+`resume` building a `HostRunner`. Its other change writes the failing gate's output and the
+reviewer's required changes into the `merge_rejected` payload's existing `detail`, which is
+schema-4 only. No trait signature, no serialized vocabulary and no effect site moves.
+
 Two known gaps were deferred by the owner on 2026-09-07, each with a standing finding filed in
 `reviews/findings/`. `PR8-CRASH-002`: a lock file left by a coordinator
 killed inside `git update-ref`; the refusal it causes is resumable and loses nothing, and the
@@ -383,9 +370,10 @@ previous incarnation's total would have refused; recording it needs a review rec
 unavailable terminal, which the frozen vocabulary lacks.
 
 Rollback is clean: the schema-4 topology is inert unless a plan selects it, so reverting the branch
-removes the machinery and restores the released path exactly — including the one behaviour of it
-this branch changes, the unresolved host reviewer declared above, which reverts with everything
-else. Nothing else in the v0.1 path differs, so a revert has no other released behaviour to undo.
+removes the machinery and restores the released path exactly — including the two behaviours of it
+this branch changes, the unresolved host reviewer and the macOS scanner's refusal to read a failed
+enumeration as an empty group, both declared above and both reverting with everything else.
+Nothing else in the v0.1 path differs, so a revert has no other released behaviour to undo.
 No data migration, no on-disk format change outside the run-scoped
 `refs/upstroke/runs/<run>/…` namespace this slice owns.
 
@@ -444,3 +432,8 @@ No data migration, no on-disk format change outside the run-scoped
 | PR8-R5-REVIEWER-SPAWN-FAILURE | P2 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / src/review.rs:547 | a reviewer's container reports an image id that is not the recorded one -> the runner refuses before docker start and answers NeverStarted -> run_review contains it as Unavailable{AgentError} so the pass defers instead of ending the command -> review_failure maps it to ReviewUnavailable -> integration persists Infrastructure{ReviewUnavailable} where INV-23 requires RunnerSpawnFailure for a mid-run image mismatch, reviewers and re-asks included | introduced_by_feature | docs-contract | 2d1b4c72 | `a_reviewer_whose_process_never_started_is_a_runner_spawn_failure`, with a Gone control; `review_infrastructure_failures_become_unavailable_outcomes` pins the production run_review carrying the fate | fixed |
 | PR8-R5-CENSUS-DOMAIN | P2 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / pr8-triage.md:298 | the cleanup census is derived by grepping the schema-4 manager's primitive names -> the legacy Workspace reaches Git through git update-ref and git worktree remove --force directly -> no legacy site can appear -> the section claims every production site and states that only two orphan prunes read their expected-old from the ref, while workspace.rs:1157 is a third | introduced_by_feature | docs-contract | 1e2a0733 | the domain is restated as every ref deletion, ref move, worktree removal and snapshot removal in both layers, the grep that derives it is named, a legacy table is added with each site's authority, and the count is corrected to three; no runtime defect was established in the omitted operations, by the reviewer or here | fixed |
 | PR8-R5-V01-CLAIM | P3 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / pr8-body.md:37 | the Risk section declares that an unresolved host reviewer now propagates an error through the legacy attempt -> the Summary says the v0.1 path is unchanged and the rollback paragraph says a revert touches no released behaviour -> the body contradicts itself about the one released behaviour this branch changes | introduced_by_feature | docs-contract | cd4610f6 | both sentences are qualified against the declared exception and the Risk section carries the fifth round's own v0.1 surface; `validate-pr-body.sh` holds the sections | fixed |
+| PR8-R6-DOCKER-TEXT-SETTLEMENT | P1 | 9ee9784ed25a58c8139f1a7dcffc03a32d5a53b0 / src/runner/container.rs:1166 | a gate runs in a container under valid TLS material -> the material disappears under a directory named for a phrase the normalizers search for -> every later docker command exits 1 before contacting the daemon and quotes that path back -> is_absent and stop_answer match the quoted path -> observe answers Gone, stop and remove answer ProcessGone -> the mounted R19 view and the R26 intent are deleted, the Runner result is Gone, and verification settles and reclaims its snapshots beside the running container | pre_existing | correctness | the phrase tables as first written; PR8-R4-CONTAINER-SETTLED made the answers typed and left them derived from arbitrary stderr | `a_diagnostic_that_is_not_the_daemon_answering_about_this_container_settles_nothing` (three shapes, each refused by a different half of the mechanism), `a_listing_answers_for_exactly_the_container_it_was_asked_about`, the contradiction arms added to the two settlement tests, and the live-CLI measurements `real_docker_fails_locally_without_ever_saying_a_container_is_gone` and `real_docker_lists_the_state_the_settlement_observation_reads` | fixed |
+| PR8-R6-UNREACHABLE-SWEEP | P1 | 9ee9784ed25a58c8139f1a7dcffc03a32d5a53b0 / src/runner/container.rs:1151 | the census asks the runtime to list a dead owner's labeled containers -> the daemon answers a failure quoting an engine-supplied label value or mount path that contains a connection phrase -> is_unreachable_diagnostic reads the quoted text and calls the answered failure unreachable -> census::proceeds_without becomes true -> with no intent under the private root the write command proceeds with no container evidence over a runtime that answered and would not list | pre_existing | correctness | the same phrase-over-arbitrary-text mechanism as PR8-R6-DOCKER-TEXT-SETTLEMENT, read in the direction the census depends on | the two quoted-text cases added to `the_two_docker_diagnostic_tables_never_claim_one_message`, each asserting the quoted text still matches the phrase table on its own so the daemon-line guard is what refuses it | fixed |
+| PR8-R6-REPAIR-EVIDENCE | P2 | 9ee9784ed25a58c8139f1a7dcffc03a32d5a53b0 / src/engine/topology/integrate.rs:896 | an integration gate fails or a reviewer rejects -> classification puts the gate's log tail or the reviewer's required_changes in AttemptFailure::feedback and the summary in reason -> code_record passes only reason to the frozen VerificationRecord -> merge_rejected freezes a repair whose body says gate failed: exit 1 and nothing about what failed -> PR9 dispatches from that spec and never sees the AttemptFailure | introduced_by_feature | correctness | 2d1b4c72 | `a_failing_gates_own_output_reaches_the_frozen_repair_spec` and `a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec` drive the loop to a durable rejection and read both the record and the frozen spec; `the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas` now builds its evidence through `gate_failure` and `review_failure` and carries it through `code_record`, rather than inserting a detail downstream of the conversion | fixed |
+| PR8-R6-V01-CLAIM-2 | P3 | 9ee9784ed25a58c8139f1a7dcffc03a32d5a53b0 / pr8-body.md:38 | the fifth round makes the shared macOS scanner treat a failed enumeration as unknown and keep killing -> that reaches legacy workers and gates -> the Risk section says so -> the Summary still promises one behavioural exception and the rollback paragraph still says the one behaviour | introduced_by_feature | docs-contract | PR8-R5-V01-CLAIM, whose repair qualified the first exception and not the second | both passages now name two declared exceptions, the fifth round's in-type-only sentence is qualified against the scanner its own paragraph describes, and the sixth round's empty v0.1 surface is stated with them; `validate-pr-body.sh` holds the sections | fixed |
+| PR8-R6-CENSUS-DOMAIN-2 | P3 | 9ee9784ed25a58c8139f1a7dcffc03a32d5a53b0 / pr8-triage.md:343 | the cleanup census claims every production ref move outside test regions -> its derivation greps for update-ref and the six manager primitives -> git moves a ref by other names -> Workspace::commit moves the checked-out branch through git commit and does not appear, nor do create_branch, switch_branch or the manager's two cherry-picks | introduced_by_feature | docs-contract | PR8-R5-CENSUS-DOMAIN, which restated the domain and left the derivation narrower than the claim | the derivation is widened to commit, switch, branch, merge, cherry-pick and reset as literal argv strings, the hits read rather than counted, and the five production sites it adds are listed with their authority; `Workspace::commit` carries the status the reviewer established, compiled with only test callers and no runtime defect, and none of the five takes an expected-old value | fixed |

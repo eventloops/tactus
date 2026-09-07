@@ -222,6 +222,9 @@ this round beside them.
 - R25 in `pr8-plan.md` is rewritten to the evidence rule at both Runners; §2 gains the third
   round's commits and §5 its witnesses.
 - The §5 sentence on the entitlements is corrected in place (finding 5).
+- What the reviewer cleared, recorded here because the body now points at this section for it: the
+  rest of the seam is sound — the adapters, `gates.rs`, the v0.1 worker and `run_review`, with no
+  accidental catch-all — and none of it was touched by the round.
 
 ## 7. Round four — the cover review of `8a5f59e8` (the whole slice against master)
 
@@ -283,8 +286,8 @@ the test modules excluded (the `Boundary` double in `agent/mod.rs` and `Scripted
 | `ContainerRunner::cancelled` (`exec.rs`) | `NeverStarted` for `NotCreated` and `Created`; `Gone` for `Started` only with `container_gone` | Whether `docker start` was issued, now reported by the funnel itself (finding 5); a created, never-started container holds no process. |
 | `cancel_reached` (`container.rs`) | `container_gone` | The caller observed the exit (`ObservedExited`: the supervisor's `observe` answered `Exited` or `Gone`), or a stop or a removal answered `Settled::ProcessGone`. `RemovalInProgress` and every failure are named in the residue and count for nothing (finding 2). |
 | `ContainerRunner::run` (`exec.rs`) | `Gone` when the release returned `Ok` or `container_gone` | As `cancel_reached`; an observed exit is passed in as `ObservedExited`. |
-| `settle_stop`, `settle_remove`, `stop_answer`, `removal_answer` (`DockerCli`) | `Settled::ProcessGone` | Success: `docker stop`, `docker kill` and `docker rm --force` return after the daemon has seen the exit. "No such container/object": the daemon deletes a record only after its process is reaped. "is not running": the daemon's own state. "removal … is already in progress" is `RemovalInProgress`: the flag precedes the kill. |
-| `DockerCli::observe` | `Liveness::Gone` on "no such container"; `Exited` on a non-running state; `Running` for `running`, `restarting`, `paused` and `removing` | `docker container inspect`; a container being removed is treated as running until the record is gone. |
+| `settle`, `settle_stop`, `settle_remove`, `stop_answer`, `removal_answer` (`DockerCli`) | `Settled::ProcessGone` | **Success settles alone**: `docker stop`, `docker kill` and `docker rm --force` return after the daemon has seen the exit. **A failure settles nothing by itself** (round six, finding 1). Its text may only *propose*, and only from a line the daemon spoke — the CLI opens such a line with `Error response from daemon:` and nothing to its left — that also names the container asked about; `settle` then puts a proposal about the process to `observe`, and a container the runtime still lists running returns the failure it was. Behind that gate the phrases mean what they meant: "No such container/object", the daemon deletes a record only after its process is reaped; "is not running", the daemon's own state. "removal … is already in progress" is `RemovalInProgress`, which claims nothing about the process, so it is returned without an observation. |
+| `DockerCli::observe` | `Liveness::Gone` when the daemon's listing does not hold the container; `Exited` on a non-running state; `Running` for `running`, `restarting`, `paused` and `removing` | `docker ps --all --filter name=<name> --format {{.Names}}\u{1f}{{.State}}`, which fails when the CLI cannot reach the daemon, so a listing that *succeeded* is the daemon speaking and the container's presence is a value in it rather than a phrase in a diagnostic (round six, finding 1; it read a failed `container inspect`'s stderr before). The filter is a regular expression and matches every longer name containing this one, so the exact name comparison decides. A container being removed is treated as running until the record is gone. |
 | `reclaim` (the census, `container.rs`) | proceeds to `rm`, the view and the intent | `observe_terminated`: up to eight observations answering `Exited` or `Gone`; the kill's and the removal's answers let a racing reclaimer continue and are not read as evidence. |
 | `Registering::run` (`preflight.rs`) | `RunnerError::gone` when only the ledger or slot bookkeeping failed after the inner runner returned `Ok` | Inherits the inner runner's `Ok`, which the host funnel returns only after `finish` established the group empty and the container runner only after its release established the container gone. |
 | `IntegrationCx::verify` (`run.rs`); `run_review` (`review.rs`) | consume a fate | `NeverStarted` settles `RunnerSpawnFailure`, `Gone` settles `Infrastructure{Other}`, `Unresolved` ends the command resumably (R25). `run_review` propagates `Unresolved` and reports the other two as unavailable — **carrying which of the two it was**, because the durable attribution differs by it: a reviewer's process the Runner established was never started settles `RunnerSpawnFailure`, as `invariants[22]` (INV-23) requires for reviewers and re-asks, and only a started process the Runner has since lost settles `ReviewUnavailable` (round five, finding 4). Round four's version of this row stopped at "reports the other two as unavailable", which is what let the two fates settle alike. |
@@ -311,11 +314,18 @@ from the value that means gone? — and this is what each answered:
   struct is never read as an answer, and `windows_job::tests` already pins that ("a zero BOOL from
   `QueryInformationJobObject` is a failure"). `terminate_and_wait` turns a query error into `Err`,
   and the caller's `is_ok()` then reads `Unresolved`.
-- **`settle_stop`, `settle_remove`, `stop_answer`, `removal_answer`.** A failure the normalizers do
-  not recognise is returned as the failure, never as a settlement: `removal_answer` answers `None`
-  and `settle_*` reconstructs the original `RuntimeError`. `is_absent` and the in-progress phrase
-  are the only two strings that become an answer, and `DockerCli::inspect` maps only `is_absent` to
-  an absent object, so a daemon that cannot be reached is an error and not a gone container.
+- **`settle_stop`, `settle_remove`, `stop_answer`, `removal_answer` — this clearance was false and
+  round six disproved it.** What round five wrote here was: "A failure the normalizers do not
+  recognise is returned as the failure, never as a settlement … so a daemon that cannot be reached
+  is an error and not a gone container." Every clause of that is about *recognising*, and the
+  premise underneath — that what the normalizers recognise is what the daemon said — was never
+  checked. They searched the whole of a failed command's stderr for a phrase, and stderr quotes the
+  environment: with TLS material missing under a directory named `no such container`, the CLI exits
+  1 **before contacting the daemon**, quotes the path back, and `observe`, `stop` and `remove` all
+  settled (round six, finding 1). The corrected claim is in the two rows above, and it is a
+  different shape rather than a longer phrase table: a failure's text may only propose, a proposal
+  about a process is established against a listing that had to succeed, and `observe` reads no
+  diagnostic at all.
 - **`DockerCli::observe`'s fallthrough is the remaining weak arm in the class, and it is not a
   defect today.** `running`, `restarting`, `paused` and `removing` are `Running` and *everything
   else* is `Exited`, so an answer the arm does not enumerate lands on the terminated side, which is
@@ -327,6 +337,46 @@ from the value that means gone? — and this is what each answered:
   an unenumerated state instead of assuming it is terminated is the conforming shape; it is a
   behaviour change to PR6 code with no reproduction behind it, so it is recorded here rather than
   made, and nothing in this slice reaches it that did not before.
+
+**Re-examined in round six for a second species.** Round five asked where each row's failure mode
+lands. Round six asks a narrower question, the one finding 1 turned out to be an instance of: **does
+anything this row concludes rest on reading a string, and can the environment shape that string?**
+A typed answer — an `Err`, a `Settled`, a `Liveness`, an integer the kernel wrote, a byte the
+reaper sent — is a fact about the call. A phrase found in a diagnostic is a fact about a message,
+and a diagnostic quotes paths, hosts, label values and container names that the environment
+supplies. This is what each row answered:
+
+- **No string is read at all.** The pre-spawn `NeverStarted` rows, `ProcessTree::spawn` and the
+  Windows spawn boundary, both loops' `Gone` (`Supervisor::finish`'s `Ok`, `TerminateJobObject`
+  plus a zeroed active-process count), the Unix register-error fallback (`kill_tree`'s `Ok`),
+  `ContainerRunner::cancelled` and `ContainerRunner::run` and `cancel_reached` (typed `Settled` and
+  `Liveness`), `Registering::run`, and the two fate consumers. Nothing here has a string in its
+  evidence path.
+- **The reaper's protocol looks textual and is not.** `CLEANUP` and `OK` are byte tags
+  (`REAPER_CLEANUP: u8 = 0x83`, `REAPER_OK`) on a private socketpair between our own two processes,
+  and `transact_raw` returns `Option<u8>` compared with `== Some(REAPER_OK)`. No parse, nothing an
+  external tool writes, and a truncated or absent answer is `None`, which arms the fail-closed
+  `SIGTERM`.
+- **`parse_ps_output` is a parse with a refusal, not a search.** It requires exactly one field per
+  name and **errors** when the count differs, which is what stops a label value carrying the
+  separator from shifting the columns. It concludes nothing about a process; it produces the
+  listing the census then classifies through intents.
+- **The two repaired sites** are the rows above: the normalizers and `observe`.
+- **`is_unreachable_diagnostic` is the same species and was swept with them (finding 1b).** It
+  concludes "the daemon was not reached" from a phrase table over arbitrary stderr, and
+  `census::proceeds_without` is that conclusion: an *answered* failure read as unreachable lets a
+  write command proceed with no container evidence when no intent exists. The dangerous direction
+  needed a daemon message quoting an unreachable phrase — a label value or a mount path is enough,
+  and both are engine-supplied paths. A diagnostic carrying a line the daemon spoke is now never
+  unreachable, because such a line is itself proof the CLI reached the daemon; the phrase table is
+  unchanged and still decides for everything else.
+- **`DockerCli::inspect`'s `is_absent` still reads text, for images, volumes and two container
+  reads, and that is admitted rather than overlooked.** It now requires the same daemon line naming
+  the same target, so the finding's input no longer reaches it — and, more to the point, it
+  concludes nothing about a process on any path: an absent image or volume *refuses* (a create with
+  an absent named volume is refused before any effect), and the two container reads that remain,
+  `collect` and `create`'s read-back, turn an absent container into an **error**. No `Gone`, no
+  `ProcessGone`, no release. It is in this class's domain and outside its rule.
 
 ### 7.4 Class 2 — every cleanup that takes an expected-old value or removes a resource, and where its authority comes from
 
@@ -347,6 +397,21 @@ excluded — which is what drops `runner/container/view.rs`'s `update-ref`, a fi
 module. The two tables below are that domain. Round five found no runtime defect in the sites round
 four had omitted, and the reviewer that named them established none either; each is listed with its
 authority so the claim can be checked rather than taken.
+
+**The derivation was still narrower than the claim, and round six widened it (finding 4).** Round
+five's grep finds a ref move only where the code spells `update-ref`, and Git moves a ref by other
+names: `git commit` moves the checked-out branch, `git switch --create` creates one and moves HEAD,
+`git switch` moves HEAD alone, and a `cherry-pick` without `--no-commit` commits onto the HEAD it
+is on. The derivation is now that grep **plus** `commit`, `switch`, `branch`, `merge`,
+`cherry-pick` and `reset` as literal argv strings over `src/`, `#[cfg(test)]` regions excluded, and
+the hits are *read* rather than counted: `"merge"` matches the staging namespace's path segment in
+`workspace_manager.rs` and `naming.rs`, `"commit"` matches `SnapshotObject`'s object-type names in
+`snapshot_ref.rs` and a `cat-file commit` read in `workspace.rs`, and every hit in
+`runner/container/view.rs` and `topology/registry.rs` is inside a test module. What the wider grep
+adds is five production sites, all listed below; none of them takes an expected-old value, so the
+closing sentence about the three orphan prunes is unchanged, and **no runtime defect was
+established in any of them** — the reviewer that named `Workspace::commit` established none either
+and said so.
 
 #### The schema-4 sites
 
@@ -374,11 +439,15 @@ authority so the claim can be checked rather than taken.
 | `attempt::Judge::judge` (`AsEachRoleFinishes`) | the judge's own gate and reviewer snapshots | Created by this judgement; the attempt path's PR7 order. |
 | `candidate::reclaim_after_creation`, the worktree | the task worktree | `task_candidate_created` durable (`decisions.workspace_candidates.cleanup`). |
 | `WorkspaceManager::reclaim_intents` | every intent | No production caller in this tree. |
+| `WorkspaceManager::proposal_cherry_pick` (`workspace_manager.rs:2549`) | the **detached** HEAD of one staging worktree | Round six's addition. It commits, so it moves that worktree's HEAD; it names no branch and writes no `refs/…`. The slot is the sequence's own staging, the pick is inside `Object(ObjectSite::ProposalCherryPick)` with `revalidate_acted_through`, and the resulting object leaves this site only as the SHA `rev-parse HEAD` returns, which the CAS then publishes under the authorized transaction's expected-old. Not a cleanup. |
+| `WorkspaceManager::repair_materialize` (`workspace_manager.rs:2692`) | nothing | Round six's addition, listed to say so: the pick is `--no-commit`, so it creates no commit and moves no ref. It is in `Object(ObjectSite::RepairMaterialize)` for the index and working tree it does write. |
 | `cancel_reached`, the view and the intent | the R19 view and the R26 intent | Removed only when `container_gone` (class 1); retained otherwise, with the residue naming them. |
 | `reclaim` (the census) | the container, its view and its intent | The intent record the census discovered and classified (a dead owner by the run-lock probe, or an earlier incarnation of this run), after `observe_terminated`. |
 
 No other production site calls `delete_ref_expected_old`, `compare_and_swap_ref`, `prune_pin`,
-`prune_orphan_pin`, `remove_worktree` or `remove_snapshot`.
+`prune_orphan_pin`, `remove_worktree` or `remove_snapshot`. The last two rows call none of them
+either: they are here because round six's wider derivation reached them, and they are listed for
+what they move rather than for a primitive they use.
 
 #### The legacy sites (`src/workspace.rs`, schema 1–3)
 
@@ -394,9 +463,13 @@ Round four's omission. None of these is reached by a schema-4 run: the legacy co
 | `cleanup_gate_workspace` from `reclaim_snapshot_intents` (`workspace.rs:737`) | a gate worktree, its hooks directory and its intent file | The durable snapshot intent file the reclaim just listed — the record that authorized the worktree. The name is validated (`valid_snapshot_name`) before it is used as a path, and an unexpected file in the intent directory refuses rather than being deleted. A worktree removal takes no expected-old; what would make this site wrong is deriving *which* worktree from the filesystem rather than from the intent, and it does not. |
 | `cleanup_gate_workspace` from `PendingGateWorkspace::drop` (`workspace.rs:1388`) | the same three | The creating process removing what it created and did not hand over: the guard is armed at creation and disarmed by `finish`. |
 | `cleanup_gate_workspace` from `GateWorkspace::drop` (`workspace.rs:1607`) | the same three | The same process removing the workspace it owns for the duration of the gate run. |
+| `Workspace::create_branch` (`workspace.rs:420`) | creates `refs/heads/<run branch>` and moves HEAD onto it | Round six's addition. Not a cleanup and it takes no expected-old: `git switch --create` refuses if the branch exists, which is the whole of its atomicity. The name is the run's own branch from `coordinator.rs:146`, and two read-only refusals precede it — `refuse_worktree_filters_before` and `refuse_unsafe_checkout_tree` on HEAD's tree. |
+| `Workspace::switch_branch` (`workspace.rs:429`) | HEAD | Round six's addition. Moves no branch. The name is `started.branch` from the durable `RunStarted` the resume is replaying (`resume.rs:405`) — the record, not the repository's current state — behind the same two refusals. |
+| `Workspace::commit` (`workspace.rs:1004`) | the checked-out branch, through `git commit` | Round six's addition and the site the fifth round's derivation could not find, because it spells no `update-ref`. **It compiles with only test callers today** — every caller is inside `workspace.rs`'s own `#[cfg(test)] mod tests` — so it authorizes nothing at runtime and no runtime defect was established in it; the v0.1 publication path moves the branch through `advance_prepared_commit`'s expected-old `update-ref` above, not through this. It is listed with that status rather than omitted, because a census that silently drops a compiled production method is the shape round five's finding was. `refuse_worktree_filters_before` precedes it. |
 | `Workspace::discard_uncommitted` (`workspace.rs:1221`) | uncommitted working-tree content | Not an accounted resource and not a ref, listed because it removes something. Its authority is the refusal that precedes it in `engine/resume.rs`: the branch head must equal the run's recorded head, or the resume refuses rather than discarding, so what is uncommitted is the interrupted run's own. The paths are summarised into the resume warnings before they are discarded. `refuse_unsafe_checkout_tree` refuses the reset itself if HEAD's tree is not what it expects. |
 
-So the class has **three** sites whose expected-old is read from the ref — `recover::reclaim_stale_residue`'s
+None of round six's five additions takes an expected-old value at all, so the count below is
+unchanged by them. So the class has **three** sites whose expected-old is read from the ref — `recover::reclaim_stale_residue`'s
 orphan `prepared/<next_seq>`, `candidate::prune_orphan_pin`, and `Workspace::remove_orphan_prepared_pin` —
 and all three are the same construction: a pin created before the record that would name it, whose
 authority is that record's absence at exactly that name. Every other expected-old in either table is
@@ -499,3 +572,63 @@ the index it is writing, so the refresh had nothing it was allowed to write back
 measurement read clean for a reason unrelated to the repair. The input was changed to age the file
 into the past, a different second per call, and only then did the mutations kill the tests.
 
+## 9. Round six — the cover review of `9ee9784e` (the whole slice against master)
+
+One frontier review over the whole slice against master (`review-pr247-9ee9784-r5cover.md`, the
+lens `lens-r5.md`), returning `CHANGES_REQUIRED` with the smallest count yet: **one P1, one P2,
+two P3**. All eleven CI checks were green on the reviewed head, across the full
+ubuntu/macOS/Windows matrix, and the ten gates passed locally; the P1 survived every one of them.
+The reviewer cleared the structural core again — no stable-prefix or CAS ordering defect, no
+accounting regression, no undeclared Class C, the three approved Class B descriptions matching the
+code, the Windows `BOOL` guard correctly ordered, the legacy orphan-pin justification holding —
+and neither deferred finding is reopened.
+
+The reviewer's witnesses are `r5-evidence/`: `native-and-production-results.json` (finding 1, the
+native Docker CLI reproduction with its two controls) and `repair-evidence-witness.patch` with
+`repair-evidence-baseline.log` and `repair-evidence-control.log` (finding 2). This round's own
+measurement of the Docker CLI is `r6-evidence/docker-transcription.md`.
+
+### 9.1 The plan of this round (recorded first, so a replaced session inherits it)
+
+| # | Mechanism decided | Where |
+|---|---|---|
+| 1 | A settlement stops being derived from a substring of arbitrary stderr. Two things gate a *proposal*: the line must be one the daemon spoke (the CLI opens such a line with `Error response from daemon:` and nothing to its left) and it must name the container asked about. A proposal about the process is then **established** against `observe`, which itself stops reading diagnostics and reads a `docker ps` listing that had to succeed to answer at all — the CLI fails when it cannot reach the daemon, so a successful listing is the daemon speaking and the container's presence is a value in it. The status vocabulary and the fallthrough stay PR6's. Measured against the live CLI before the grammar was written. | `runner/container.rs` (`daemon_answer_about`, `is_absent`, `stop_answer`, `removal_answer`, `settle`, `observe`) |
+| 1b | Sweeping finding 1's class in the direction that matters for the census: a diagnostic carrying a line the daemon spoke is never `Unreachable`, because such a line is proof the CLI reached the daemon. | `runner/container.rs` (`is_unreachable_diagnostic`) |
+| 2 | The frozen rejection record carries the evidence beside the summary: `code_record` composes `failure.reason` with `failure.feedback`, which is where the production classification puts the gate's output and the reviewer's `required_changes`. The reason leads and stays whole; the feedback is bounded by `gates::FEEDBACK_TAIL_BYTES`, the bound the gate path already applies. And the test that could not catch this is repaired first: it builds its evidence through `classify::gate_failure` and `attempt::review_failure` and drives it through `code_record`, instead of handing `code_rejection_record` a `detail` of its own. | `engine/topology/integrate.rs`, `engine/topology/repair/tests.rs`, `engine/topology/integrate/tests.rs` |
+| 3 | The Summary and the rollback paragraph say **two** declared exceptions rather than one, and the Risk section's "in type only" is qualified against the shared macOS scanner the same paragraph goes on to describe. | `pr8-body.md` |
+| 4 | §7.4's derivation is widened to the ways Git moves a ref without spelling `update-ref` — `commit`, `switch`, `branch`, `merge`, `cherry-pick`, `reset` — and every production site that finds is listed with its authority or its status, `Workspace::commit` among them with "compiled, only test callers, no runtime defect established". | `pr8-triage.md` §7.4 |
+
+### 9.2 The findings
+
+| # | Finding | Disposition | Evidence and repair |
+|---|---|---|---|
+| 1 (P1) [`PR8-R6-DOCKER-TEXT-SETTLEMENT`] | Local Docker failures could establish that a container is gone. The absence and termination normalizers searched the whole of a failed command's stderr for a phrase, and stderr quotes the environment: with TLS material missing under a directory named `no such container`, the CLI exits 1 **before contacting the daemon** and quotes the path back, and `observe` answered `Gone` while `stop` and `remove` answered `ProcessGone`. A path containing `worker is not running` did it to `stop` on its own. The sequence: a gate starts under valid TLS material, the material disappears, subsequent Docker commands fail locally, and the false settlement permits deleting the mounted R19 Git view and the R26 intent, a `Gone` Runner result, and verification settlement with snapshot reclamation **beside the surviving container**. Class 1 for the third time, at a site two earlier rounds had cleared. | **confirmed** | The reviewer reproduced the three production methods natively (`r5-evidence/native-and-production-results.json`) with two controls: an ordinary missing-certificate path returns errors, and only the path containing the phrase settles. The live-container sequence behind it was not executed, by them or here. `invariants[14]` (INV-15), `invariants[17].recovery` (INV-18), the slice's cancellation and resource-release obligations. Repair: **the mechanism, not the phrases**. A phrase is consulted only inside a line the daemon spoke and only when that line names the target, and even then it merely proposes: `settle` establishes a proposal about the process against `observe`, and a proposal the runtime contradicts is returned as the failure it was, leaving the intent retained. `observe` reads a `docker ps --all --filter name=…` listing whose *success* is the evidence the daemon answered — absence is then the absence of the name among the listing's values, and the `name=` filter being a regular expression is why the exact comparison decides. Measured first (`r6-evidence/docker-transcription.md`, docker 29.7.2): every typed subcommand relays with that marker and names the target, the listing exits 0 and prints nothing for an absent container, and the local failure never produces the marker. Tests: `a_diagnostic_that_is_not_the_daemon_answering_about_this_container_settles_nothing` (three shapes, each refused by a different half — a local failure quoting the phrase, one quoting the phrase *and* the container's name, and the daemon answering about another container), `a_listing_answers_for_exactly_the_container_it_was_asked_about` (the parse, the liveness map and the establishment rule, on every platform), the contradiction arms added to the two settlement tests, and two Docker-gated tests that measure the live CLI — `real_docker_fails_locally_without_ever_saying_a_container_is_gone` reproduces the reviewer's witness natively through the CLI's global TLS flags, so it needs no process-wide environment mutation, and `real_docker_lists_the_state_the_settlement_observation_reads` transcribes the listing and its name collision. |
+| 1b (P1) [`PR8-R6-UNREACHABLE-SWEEP`] | **Raised here, sweeping finding 1's class.** `is_unreachable_diagnostic` concludes "the daemon was not reached" from a phrase table over arbitrary stderr, and `census::proceeds_without` *is* that conclusion. The direction that matters is the reverse of finding 1's: an **answered** failure read as unreachable lets a write command proceed with no container evidence when no intent exists, over a runtime that answered and would not list a dead owner's containers. The daemon's phrases are its own, but the label values and mount paths it quotes back are engine-supplied. Predates this slice. | **confirmed (hardening)** | No reproduction: this is finding 1's mechanism read in the other direction, and no runtime sequence was established for it. Repair: a diagnostic carrying a line the daemon spoke is never unreachable, because such a line is proof the CLI reached the daemon; the phrase table is unchanged and still decides for everything else, and the refusing direction (a real unreachable diagnostic read as answered) makes the census refuse rather than proceed. Test: two cases added to `the_two_docker_diagnostic_tables_never_claim_one_message`, each asserting that the quoted text still matches the phrase table on its own — which is what makes the daemon line load-bearing rather than decorative. Mutation: the guard dropped, the test fails. |
+| 2 (P2) [`PR8-R6-REPAIR-EVIDENCE`] | Frozen repairs lost gate diagnostics and reviewers' required changes. `code_record` kept `failure.reason` — the summary, `gate \`clippy\` failed: exit 1` — and dropped `failure.feedback`, which is where the production classification puts the gate's output (`classify::gate_failure`, from `log_tail`) and the reviewer's `required_changes` (`attempt::review_failure`, rendered one per `- ` line). PR9 dispatches from the frozen spec and never sees the `AttemptFailure`, so the evidence was gone for the repair that follows. | **confirmed** | Two integration witnesses from the reviewer (`r5-evidence/repair-evidence-*`), failing on this head and passing when the feedback is carried; written properly here rather than pasted. `decisions.repairs.merge_rejected`, `design/26_design_merge_queue_protocol.md:254`. Repair: `rejection_detail` composes the reason with the feedback, the reason whole and leading because a bound applied to the pair would cut the summary off first, the feedback bounded by `gates::FEEDBACK_TAIL_BYTES`. **The test defect is the more important half and was repaired with it.** `the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas` inserted its evidence straight into `detail`, downstream of the conversion, so it proved the spec carries what it was handed; it now builds a `GateFailure` and a rejecting `Verdict`, runs them through the production classifiers, and carries them through `code_record`. Two new integration witnesses drive the loop end to end: `a_failing_gates_own_output_reaches_the_frozen_repair_spec` and `a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec`, each reading both the durable `VerificationRecord` and the frozen repair spec's body, each asserting the summary is still there beside the evidence, and each replay-twice-equal. |
+| 3 (P3) [`PR8-R6-V01-CLAIM-2`] | The body's v0.1 behaviour claims were still false after round five's macOS repair. The Summary promised a single behavioural exception and the rollback paragraph "the one behaviour of it this branch changes"; the shared macOS scanner now treats a failed enumeration as unknown and keeps killing instead of acknowledging an empty group, and that reaches legacy workers and gates too — which the Risk section already said, four paragraphs below the Summary that contradicted it. | **confirmed (record)** | The reviewer read the body against itself; nothing to reproduce. Both passages now name **two** declared exceptions and the rollback paragraph reverts both; the Risk section's "the fifth repair round touches the v0.1 path in type only" is qualified against the scanner the same paragraph goes on to describe, which is where the sentence and its own text had parted. Round six's own v0.1 surface is stated with them and it is empty: the container runtime has no production constructor outside `src/runner/container/**` and the v0.1 entry points build a `HostRunner`, and `integrate.rs` is schema-4 only. |
+| 4 (P3) [`PR8-R6-CENSUS-DOMAIN-2`] | §7.4 claimed every production ref move outside test regions and omitted `Workspace::commit` (`workspace.rs:1004`), which moves the checked-out branch through `git commit`. The method compiles with only test callers and **no runtime defect was established** in it, by the reviewer or here. | **confirmed (record)** | The cause is in the derivation, not the reading: round five's grep finds a ref move only where the code spells `update-ref`, and Git moves refs by other names. The derivation is widened to `commit`, `switch`, `branch`, `merge`, `cherry-pick` and `reset` as literal argv strings, the hits read rather than counted — `"merge"` is the staging namespace's path segment, `"commit"` is `SnapshotObject`'s object-type name and a `cat-file` read — and the five production sites it adds are listed with their authority: `Workspace::create_branch`, `Workspace::switch_branch`, `Workspace::commit` with its "only test callers" status, and the manager's two cherry-picks, one of which commits onto a detached staging HEAD and one of which is `--no-commit` and moves nothing. None of the five takes an expected-old value, so the count of three sites reading the ref is unchanged. |
+
+Neither deferred finding is reopened, repaired or narrowed. Finding 2 touches the frozen
+`merge_rejected` payload's **existing** `detail` field and adds no field, no variant and no
+vocabulary, so it is not adjacent to `PR8-R2-SPEND-REPLAY`, which needs a review record the
+vocabulary cannot carry.
+
+No new Class B change and no Class C. Finding 1 changes the wire commands `DockerCli` runs and the
+private functions around them; the `ContainerRuntime` trait's signatures, the frozen fold, the
+frozen event vocabulary, the effect-site inventory and `src/topology/**` are untouched. Finding 2
+writes a longer string into a field that already exists.
+
+### 9.3 The mutations replayed this round
+
+Each applied by an asserted replacement against the repaired tree, the named tests run, and the file
+restored from the commit that carries the repair — never by `git checkout` over an uncommitted one,
+which is how the first attempt at the last of these silently discarded the repair it was measuring:
+
+| Mutation | Fails |
+|---|---|
+| the daemon-line requirement dropped from `daemon_answer_about`, leaving the target check | `a_diagnostic_that_is_not_the_daemon_answering_about_this_container_settles_nothing` (the local failure whose path names the container *and* the phrase settles); `real_docker_fails_locally_without_ever_saying_a_container_is_gone` |
+| the target requirement dropped, leaving the daemon-line check | `a_diagnostic_that_is_not_the_daemon_answering_about_this_container_settles_nothing` (the daemon's answer about another container settles) |
+| `establishes` returning `true` unconditionally — the confirmation removed | `a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not` and `a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not` (both contradiction arms); `a_listing_answers_for_exactly_the_container_it_was_asked_about` |
+| `listed_state`'s exact comparison relaxed to `contains` | `a_listing_answers_for_exactly_the_container_it_was_asked_about`; `real_docker_lists_the_state_the_settlement_observation_reads` (the live collision) |
+| the daemon-line guard dropped from `is_unreachable_diagnostic` | `the_two_docker_diagnostic_tables_never_claim_one_message` |
+| `rejection_detail` returning `failure.reason` again | `a_failing_gates_own_output_reaches_the_frozen_repair_spec`, `a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec`, **and** `the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas` — which is the point of repairing that test: under the same mutation its old form passed, and the head it passed on is this branch's, green on eleven CI checks |

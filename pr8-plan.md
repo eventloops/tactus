@@ -363,6 +363,14 @@ offer, the entry now says so and cites the passage that settles it.
   primitive it failed, so such a launch stays `Created` and its fate is `NeverStarted`. The rule
   above is otherwise unchanged; the sweep of every site that concludes a process gone is
   `pr8-triage.md` §7.3.
+  *Corrected again in the sixth repair round* (`pr8-triage.md` §9, finding 1): "the daemon's absent
+  and not-running answers" was the right rule and the code was not reading the daemon's answers. It
+  searched the whole of a failed command's stderr, so a local CLI failure quoting a path named for
+  a phrase settled `ProcessGone` — and `observe` settled `Gone` — beside a running container. A
+  phrase now counts only inside a line the daemon spoke that names the container asked about, and
+  even then it only proposes: the settlement is established against a `docker ps` listing that had
+  to succeed to answer, which is also what `observe` now reads. What `ProcessGone` means and what
+  it is worth are unchanged.
 - **R29. One rule for the authorized integration head.** The live exact-base decision and the
   resume's startup check read the same rule: the log's latest `task_merged.merged_sha`, or the
   recorded base before any publication (`integrate::authorized_head`). `decide` requires the head
@@ -544,6 +552,50 @@ Two readings this round records, because both were choices and not deductions:
   is serialized into `events.jsonl` through the schema-3 records, so a new variant is a Class C
   wire change. `InfrastructureKind::RunnerSpawnFailure` already exists and is exactly what INV-23
   names, so what was missing was never a vocabulary entry but the fact that reaches it.
+
+### The sixth repair round (2026-09-07)
+
+The cover review of the whole slice at `9ee9784e` and its triage are `pr8-triage.md` §9. Four
+findings — one P1, one P2, two P3 — of which two are code and two are the record; a fifth row was
+raised by this round rather than the reviewer, sweeping the class finding 1 named, in the direction
+the census reads. The reviewed head was green on all eleven CI checks across the full
+ubuntu/macOS/Windows matrix and on the ten gates locally, and the P1 survived every one of them:
+
+| Commit | Findings |
+|---|---|
+| `fix(runner): a container is gone when the daemon says so, not when stderr spells it` | finding 1 (`PR8-R6-DOCKER-TEXT-SETTLEMENT`) |
+| `fix(engine): a frozen repair carries the gate output and the required changes` | finding 2 (`PR8-R6-REPAIR-EVIDENCE`), the conversion and the test that could not catch it |
+| `fix(runner): a daemon that answered was reached, whatever its message quotes` | the class sweep (`PR8-R6-UNREACHABLE-SWEEP`) |
+| `docs(pr8): the plan and findings of the sixth repair round` | this file, `pr8-triage.md`: §7.3's normalization clearance corrected and the table re-read for text-derived observations, §7.4's derivation widened past `update-ref` (finding 4, `PR8-R6-CENSUS-DOMAIN-2`), and `pr8-body.md`'s Summary and rollback paragraphs qualified (finding 3, `PR8-R6-V01-CLAIM-2`) |
+
+Nothing in the round is Class B or Class C. Finding 1 changes the wire commands `DockerCli` issues
+and the private functions around them, not the `ContainerRuntime` trait's signatures; finding 2
+writes a longer string into a `VerificationRecord::detail` that already exists. The frozen fold,
+the frozen event vocabulary, the effect-site inventory and `src/topology/**` are untouched, and the
+three approved Class B changes and their descriptions are unchanged. The round adds no v0.1
+surface: the container runtime has no production constructor outside `src/runner/container/**` —
+`run` and `resume` build a `HostRunner` — and `integrate.rs` is schema-4 only.
+
+Three readings this round records, because each was a choice and not a deduction:
+
+- **The grammar was measured before it was enforced.** The repair refuses on a shape — a line the
+  daemon spoke — and a refusal written before the producer is enumerated refuses the wrong things.
+  Every message the CLI prints for the commands this code runs was transcribed from docker 29.7.2
+  first (`r6-evidence/docker-transcription.md`), which is what established that the typed
+  subcommands all relay with one marker and all name the target, and that `docker image inspect`
+  does not use the generic `docker inspect`'s `Error: No such object:` wording — the one shape that
+  would have made a marker requirement break image resolution on a live daemon.
+- **The marker is not trusted on its own, and neither is the name.** Text cannot be evidence about
+  a process, whatever its shape: a directory can be named for a phrase, and it can be named for a
+  container. So the shape only earns the right to *propose*, and the settlement is established
+  against a command whose **success** is the daemon answering. That is why the repair is not a
+  longer phrase table and why `observe` changed too — it was the one place a settlement could still
+  be read out of a diagnostic.
+- **`observe`'s status vocabulary and its fallthrough are left exactly as PR6 wrote them.** §7.3
+  records that the fallthrough is the class's remaining weak arm and that refusing an unenumerated
+  state is the conforming shape but a behaviour change to PR6 code with no reproduction behind it.
+  That ruling still holds; this round changes where the *absence* answer comes from and nothing
+  about how a state that is present is classified.
 
 ## 3. `src/topology/**` changes: Class A / B / C
 
@@ -754,6 +806,30 @@ recorded — a field on `merge_verification_unavailable`, or an erratum on
   reproduction of the same linked-worktree shape — porcelain `diff` moves the index, `diff-files`,
   `diff --cached` and `--no-optional-locks status` do not — before the tests were rerun.
 
+### The residue sampler's sightings on this branch
+
+Moved here from `pr8-body.md` in the sixth repair round, when the body reached GitHub's
+65,536-character limit; the body keeps the count, both finding ids and this pointer. The standing
+findings ask for a count before anything is called a flake, and this is it.
+
+Two sightings, in a module this branch does not touch. At the third
+round's head `287563f0`, the first full run had one red:
+`workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered` refused
+one `Worktree.Add` sample with "worktree list record 1 names a HEAD but neither a branch nor a
+detached checkout" — the standing P3 `PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`
+(`reviews/findings/`); it passed alone and the full test gate rerun passed clean. At `cdcea656`,
+the first full run had one red in the same test with the other filed fingerprint: `recover_sample`'s
+forced removal failed `DirectoryNotEmpty` (os error 39) on `tasks/kalpha-g4` — exactly the
+standing P2 `PR136-SAMPLER-FORCED-REMOVAL-DOES-NOT-CONVERGE` (`reviews/findings/`), whose file
+records that fingerprint verbatim; the full test gate rerun at the same head passed clean (2362
+passed, 0 failed, 43 ignored), and the ten gates named above are green on that rerun. The fifth
+repair round saw neither fingerprint: its three full test runs, at
+`85bdb8c7`, `fe7966da` and `243cf617`, each passed clean at the first attempt, so the sampler is
+not counted against this round.
+
+The sixth repair round saw neither fingerprint either: its full test runs at the round's repaired
+tree passed clean at the first attempt.
+
 ## 6. Proof obligations from the contract, and where each is met
 
 Moved here from `pr8-body.md` in the fifth repair round: the pull-request body reached GitHub's
@@ -860,7 +936,12 @@ from a tracked file. The body keeps the claim and the list of obligation names, 
   sequence's terminal as the last durable event.
 - **The frozen repair spec.** `repair::tests::the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas`:
   a conflict's paths, a code rejection's verdict, gates, review passes and detail, the rejected
-  candidate's commit and ref, and the rejecting head, all in the registered spec's body.
+  candidate's commit and ref, and the rejecting head, all in the registered spec's body — with the
+  code rejection's evidence built by the production classifiers and carried through
+  `integrate::code_record` since the sixth round, because the version that inserted its own
+  `detail` sat downstream of the conversion that was losing it. What the loop actually freezes is
+  proven end to end by `integrate::tests::a_failing_gates_own_output_reaches_the_frozen_repair_spec`
+  and `a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec`.
 - **Refusals proven, not merely coded.** Third SHA / symbolic / checked-out
   (`integrate::tests`, `recover::tests`); orphan pin outside the next sequence (`recover::tests`)
   and a second unresolved transaction (`fold::tests`); non-eligible starts, the three fast
