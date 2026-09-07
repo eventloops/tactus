@@ -1762,6 +1762,73 @@ fn a_deferral_count_is_derived_by_replay_and_not_by_a_process_local_tally() {
 }
 
 #[test]
+fn a_halted_run_is_attributed_to_the_first_halting_settlement_live_and_by_replay() {
+    let base = sha("base");
+    let mut live = started();
+    let mut trace = vec![run_started_event()];
+
+    for key in [ZETA, ALPHA] {
+        let dispatched = dispatch(key, 0, &base);
+        apply(&mut live, &dispatched);
+        trace.push(dispatched);
+        let start = attempt_started(&live, key, 0, 1, 0);
+        apply(&mut live, &start);
+        trace.push(start);
+    }
+    assert_eq!(
+        live.pipeline_held(),
+        2,
+        "both attempts have to be in flight before either settles, or the \
+             second halt is not a second attempt racing the first but a \
+             dispatch the run's ending already forbids"
+    );
+    assert!(!live.run_is_ending(), "and neither has halted yet");
+
+    for (key, reason) in [
+        (ZETA, "  the halt policy fired  "),
+        (ALPHA, "  a second halt policy fired  "),
+    ] {
+        let settlement = settle(
+            key,
+            0,
+            1,
+            AttemptSettlement::Closed {
+                transition: SettlementTransition::Failed {
+                    halts_run: true,
+                    reason: reason.to_owned(),
+                },
+                lease: LeaseDisposition::PredictedReleased,
+            },
+        );
+        apply(&mut live, &settlement);
+        trace.push(settlement);
+    }
+
+    assert_eq!(
+        live.halted_at(),
+        Some(ZETA),
+        "the halt is first-in-wins, and the settlement that arrived second \
+             moved the attribution"
+    );
+
+    let parsed = TopologyFold::parse_log(&wire(&trace)).expect("the log parses");
+    let replayed = TopologyFold::replay(inputs(), &parsed).expect("the log replays");
+    assert_eq!(
+        replayed.halted_at(),
+        live.halted_at(),
+        "the attribution did not survive the process that wrote it, and \
+             `check_run_finished` refuses a `run_finished` whose `halted_at` \
+             differs from the fold's, so the resumed run could not end at all"
+    );
+    assert_ne!(
+        replayed.halted_at(),
+        Some(ALPHA),
+        "a last-in-wins fold names the settlement serialized last, which is \
+             the reading this trace exists to refuse"
+    );
+}
+
+#[test]
 fn the_statement_accessors_report_the_run_rather_than_authorising_anything() {
     let unstarted = TopologyFold::new(inputs());
     assert!(
@@ -1856,30 +1923,6 @@ fn the_statement_accessors_report_the_run_rather_than_authorising_anything() {
     );
     assert_eq!(halted.halted_at(), Some(ZETA));
     assert!(halted.run_is_ending());
-
-    apply(&mut halted, &dispatch(ALPHA, 0, &sha("base")));
-    let second_start = attempt_started(&halted, ALPHA, 0, 1, 0);
-    apply(&mut halted, &second_start);
-    apply(
-        &mut halted,
-        &settle(
-            ALPHA,
-            0,
-            1,
-            AttemptSettlement::Closed {
-                transition: SettlementTransition::Failed {
-                    halts_run: true,
-                    reason: "  a second halt policy fired  ".to_owned(),
-                },
-                lease: LeaseDisposition::PredictedReleased,
-            },
-        ),
-    );
-    assert_eq!(
-        halted.halted_at(),
-        Some(ZETA),
-        "the run's halt is first-in-wins, not last-in-wins"
-    );
 
     halted.poison();
     assert!(halted.run_is_ending(), "poisoning unsaid a halt");
