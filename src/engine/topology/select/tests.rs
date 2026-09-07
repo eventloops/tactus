@@ -229,6 +229,87 @@ fn selection_takes_the_first_eligible_candidate_and_not_the_head() {
 }
 
 #[test]
+fn reported_spend_replays_integration_verification_records() {
+    // An integration's reviews are charged to the candidate's task at the
+    // verification, and the terminal's record — merge_prepared's or a code
+    // rejection's — carries them, so a replay charges the same total.
+    let verification = |cost: f64| crate::topology::events::VerificationRecord {
+        verdict: crate::topology::events::VerificationVerdict::Passed,
+        gates_passed: true,
+        reviews: vec![review_costing(Some(cost)), review_costing(None)],
+        detail: "judged".to_owned(),
+    };
+    let prepared = ev(TopologyEventBody::MergePrepared {
+        data: Box::new(crate::topology::events::MergePrepared {
+            sequence: crate::topology::events::SequenceId(1),
+            disposition: crate::topology::events::PreparedDisposition::StaleClean,
+            expected_head: sha("head"),
+            proposed_sha: sha("proposal"),
+            key: ALEPH,
+            generation: GenerationId(0),
+            candidate_sha: candidate_of(ALEPH, 0).commit_sha,
+            candidate_ref: candidate_of(ALEPH, 0).candidate_ref,
+            prepared_ref: Some(GitRef("refs/upstroke/select/prepared/1".to_owned())),
+            verification_source: crate::topology::events::VerificationSource::Verification {
+                sequence: crate::topology::events::SequenceId(1),
+            },
+            verification: Some(verification(2.5)),
+            satisfies: vec![ALEPH],
+        }),
+    });
+    let mut rejected = verification(1.0);
+    rejected.verdict = crate::topology::events::VerificationVerdict::Rejected;
+    // Any registered entry will do: `Spend::replay` reads the record's
+    // reviews and never the spawn it registers.
+    let repair_entry = {
+        let fold = started();
+        let mut entry = fold
+            .registry()
+            .expect("started")
+            .get(ALEPH)
+            .expect("aleph is registered")
+            .clone();
+        entry.key = GIMEL;
+        entry
+    };
+    let rejection = ev(TopologyEventBody::MergeRejected {
+        data: Box::new(crate::topology::events::MergeRejected {
+            sequence: crate::topology::events::SequenceId(2),
+            candidate: candidate_of(BET, 0),
+            rejecting_head: sha("head"),
+            disposition: crate::topology::events::RejectionDisposition::CodeRejected {
+                verification: rejected,
+            },
+            repair: crate::topology::events::FrozenSpawn {
+                key: GIMEL,
+                entry: repair_entry,
+                admission: crate::topology::events::SpawnAdmission::Runnable,
+            },
+            lease_effect: crate::topology::events::RejectionLeaseEffect::CreatesLineage {
+                root: BET,
+                paths: region(BET),
+            },
+        }),
+    });
+    let spend = Spend::replay(&[prepared, rejection]);
+    assert!(
+        (spend.run_usd() - 3.5).abs() < f64::EPSILON,
+        "the prepared and the rejected verification's reviews: {}",
+        spend.run_usd()
+    );
+    assert!((spend.task_usd(ALEPH) - 2.5).abs() < f64::EPSILON);
+    assert!((spend.task_usd(BET) - 1.0).abs() < f64::EPSILON);
+    assert!(spend.task_usd(GIMEL).abs() < f64::EPSILON);
+
+    let mut live = Spend::new();
+    live.record_reviews(ALEPH, &[review_costing(Some(2.5)), review_costing(None)]);
+    assert!(
+        (live.run_usd() - 2.5).abs() < f64::EPSILON,
+        "the live charge is the same sum"
+    );
+}
+
+#[test]
 fn reported_spend_replays_both_record_carrying_events() {
     let mut fold = started();
     let mut log = Vec::new();

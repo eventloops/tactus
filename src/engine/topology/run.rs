@@ -21,8 +21,8 @@ use crate::workspace_manager::WorkspaceManager;
 
 use super::attempt::{
     Assessment, AttemptContext, AttemptPlan, AttemptPlans, AttemptSite, Capture, InputsRequest,
-    Judge, JudgeIdentities, JudgeNames, Judgement, Judging, PlanRequest, ReviewInputPolicy,
-    ReviewPasses, SnapshotDisposal, SnapshotOf, Subject, VerificationRequest,
+    Judge, JudgeError, JudgeIdentities, JudgeNames, Judgement, Judging, PlanRequest,
+    ReviewInputPolicy, ReviewPasses, SnapshotDisposal, SnapshotOf, Subject, VerificationRequest,
 };
 use super::candidate::{
     CandidateJournal, JudgedTree, append_candidate_created, append_candidate_prepared,
@@ -37,7 +37,7 @@ use super::identity::{
     InvocationLedger, ReservationKind, Reservations, SequenceIdentities, SlotAssertion,
 };
 use super::integrate::{
-    self, IntegrationJournal, IntegrationRequest, Terminal, Verification, VerifyRequest,
+    self, IntegrationJournal, IntegrationRequest, Terminal, Verification, Verified, VerifyRequest,
 };
 use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
@@ -90,6 +90,7 @@ struct IntegrationCx<'a, 'h> {
     hooks: &'h mut dyn TopologyHooks,
     invocations: &'h mut InvocationLedger,
     slots: &'h mut SlotAssertion,
+    spend: &'h mut Spend,
     seams: &'h RunSeams<'a>,
 }
 
@@ -116,22 +117,59 @@ impl IntegrationJournal for IntegrationCx<'_, '_> {
     }
 }
 
+/// The binding the candidate of `key` ran under, for `passes_for`'s
+/// self-review rule: the task's validated override when one exists (E2 binds
+/// every later attempt to it), else the frozen rung at the fold-derived rung
+/// position. The fold moves a task's rung only at an escalation settlement
+/// and a task at `AwaitingMerge` settles no further attempt, so that position
+/// is the producing attempt's. `DESIGN.md` §26 verdict item 4 reruns "all
+/// recorded gates and review passes", and the recorded passes were selected
+/// against this binding — never against the ladder's last rung, which a
+/// candidate produced lower down never ran under.
+fn implementer_binding(
+    fold: &TopologyFold,
+    key: TaskKey,
+) -> Result<crate::review::PassBinding, UpstrokeError> {
+    if let Some(binding) = fold.binding_override(key) {
+        return Ok(crate::review::PassBinding::new(
+            &binding.agent,
+            &binding.model,
+        ));
+    }
+    let rung = fold
+        .task(key)
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!("task {key} is not in this run's fold"),
+        })?
+        .rung;
+    let binding = fold
+        .frozen_rung_binding(key, rung)
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "task {key}'s candidate was produced at rung {rung} and its frozen ladder has no \
+                 such rung, so there is no implementer to select its reviewers against"
+            ),
+        })?;
+    Ok(crate::review::PassBinding::new(
+        &binding.agent,
+        &binding.model,
+    ))
+}
+
 impl Verification for IntegrationCx<'_, '_> {
-    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, UpstrokeError> {
-        let (entry, base) = {
+    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
+        let key = request.candidate.key;
+        let (entry, base, implementer) = {
             let fold = &*self.emitter.state.fold;
             let entry = fold
                 .registry()
-                .and_then(|registry| registry.get(request.candidate.key))
+                .and_then(|registry| registry.get(key))
                 .cloned()
                 .ok_or_else(|| UpstrokeError::Refused {
-                    message: format!(
-                        "task {} is not in this run's registry",
-                        request.candidate.key
-                    ),
+                    message: format!("task {key} is not in this run's registry"),
                 })?;
             let base = fold
-                .task(request.candidate.key)
+                .task(key)
                 .and_then(|task| {
                     task.generations
                         .iter()
@@ -139,7 +177,7 @@ impl Verification for IntegrationCx<'_, '_> {
                 })
                 .and_then(|generation| generation.candidate.as_ref())
                 .map(|prepared| prepared.base_sha.clone());
-            (entry, base)
+            (entry, base, implementer_binding(fold, key)?)
         };
 
         // The review diff: the proposal against the head for a stale
@@ -159,19 +197,47 @@ impl Verification for IntegrationCx<'_, '_> {
             .manager
             .candidate_diff(request.staging, &diff_parent, &diff_tree)?;
 
-        let inputs = self.seams.plans.inputs(&InputsRequest {
-            entry: &entry,
-            diff,
-        })?;
-        let implementer = entry
-            .ladder
-            .rungs
-            .last()
-            .map(|rung| crate::review::PassBinding::new(&rung.agent, &rung.model))
-            .unwrap_or_else(|| crate::review::PassBinding::new("", ""));
         let plan = self.seams.plans.verification(&VerificationRequest {
             entry: &entry,
             implementer,
+        })?;
+
+        // What the attempt path decides before it judges (`assess`): a diff
+        // no reviewer can judge — too large, or opaque — and the review-input
+        // policy's answer for the proposed tree, read in the staging worktree.
+        // Either stands in for the gates and reviewers as the prior failure,
+        // and the sequence parks the candidate for a person (R4): a Fix task
+        // cannot be asked to edit code without code evidence, and waiting
+        // cannot make the same diff fit.
+        let prior_failure = match crate::engine::classify::diff_failure(
+            &diff,
+            entry.spec.kind,
+            !plan.reviewers.is_empty(),
+        ) {
+            Some(failure) => Some(failure),
+            None => {
+                let tree = self
+                    .seams
+                    .manager
+                    .commit_tree_sha(request.proposed.as_str())?
+                    .ok_or_else(|| UpstrokeError::Git {
+                        message: format!(
+                            "the proposed commit {} has no tree; the review-input policy cannot \
+                             be consulted for it",
+                            request.proposed
+                        ),
+                    })?;
+                let staging = self.seams.manager.slot_path(request.staging);
+                self.seams
+                    .input_policy
+                    .problem(&staging, &tree)?
+                    .map(crate::engine::classify::review_input_failure)
+            }
+        };
+
+        let inputs = self.seams.plans.inputs(&InputsRequest {
+            entry: &entry,
+            diff,
         })?;
 
         let proposed = crate::workspace_manager::ObjectId::new(request.proposed.0.clone())
@@ -189,7 +255,7 @@ impl Verification for IntegrationCx<'_, '_> {
             paths: self.seams.paths,
             reviews: self.seams.reviews,
         };
-        judge.judge(&Subject {
+        let judged = judge.judge(&Subject {
             snapshot: SnapshotOf::Commit(proposed),
             disposal: SnapshotDisposal::AfterTheTerminal,
             names: JudgeNames::Integration {
@@ -200,12 +266,25 @@ impl Verification for IntegrationCx<'_, '_> {
             gates: &plan.gates,
             reviewers: &plan.reviewers,
             inputs: &inputs,
-            prior_failure: None,
+            prior_failure,
             invocations: &move |pass| review::ReviewInvocations {
                 pass: identities.review_pass(pass, 0),
                 reask: identities.review_reask(pass, 0),
             },
-        })
+        });
+        match judged {
+            Ok(judgement) => {
+                // The ceiling's ledger, charged before the terminal is
+                // appended, as an attempt's reviews are charged in `settle`:
+                // `Spend::replay` rebuilds it from the terminal's record.
+                self.spend.record_reviews(key, &judgement.reviews);
+                Ok(Verified::Judged(judgement))
+            }
+            Err(JudgeError::Runner { invocation, error }) => Ok(Verified::RunnerUnavailable {
+                detail: format!("`{invocation}`: {error}"),
+            }),
+            Err(JudgeError::Other(error)) => Err(error),
+        }
     }
 
     fn ids(&self) -> &dyn super::seams::IdSource {
@@ -669,6 +748,7 @@ impl TopologyRun {
                 hooks,
                 invocations: &mut self.invocations,
                 slots: &mut self.slots,
+                spend: &mut self.spend,
                 seams,
             };
             integrate::integrate(&mut cx, seams.manager, &request)

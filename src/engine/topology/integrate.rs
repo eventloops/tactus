@@ -96,17 +96,31 @@ pub trait IntegrationJournal {
 pub trait Verification {
     /// Run every recorded gate on one fresh exact snapshot of the proposed
     /// commit and every review pass on its own, reviewing it against the head,
-    /// and say what they decided. `staging` is read only for the review diff;
-    /// no gate or reviewer runs in it.
+    /// and say what they decided. `staging` is read only for the review diff
+    /// and the review-input policy; no gate or reviewer runs in it.
     ///
     /// # Errors
     ///
-    /// A snapshot funnel refusal, a Runner error, or a plan the run cannot
-    /// assemble.
-    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, UpstrokeError>;
+    /// A snapshot funnel refusal, or a plan the run cannot assemble. A Runner
+    /// that could not run a gate is not an error but
+    /// [`Verified::RunnerUnavailable`]: an observed infrastructure failure
+    /// with a terminal of its own.
+    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError>;
 
     /// The id source a park question's identity comes from.
     fn ids(&self) -> &dyn IdSource;
+}
+
+/// What a verification came back with.
+pub enum Verified {
+    /// The gates and reviewers ran, or a prior failure stood in for them.
+    Judged(Judgement),
+    /// The Runner could not run a gate process: `invariants[INV-23]`'s
+    /// mid-run `RunnerSpawnFailure`, an observed infrastructure failure the
+    /// sequence terminates `merge_verification_unavailable{Infrastructure}`,
+    /// deferred inside the frozen allowance and parked at it
+    /// (`transaction_fault_matrix[T-VERIFY].resume_action`).
+    RunnerUnavailable { detail: String },
 }
 
 /// One integration verification to run.
@@ -752,14 +766,29 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
     journal.converted(candidate.key)?;
 
     let already_present = disposition == PreparedDisposition::AlreadyPresent;
-    let judgement = journal.verify(&VerifyRequest {
+    let judgement = match journal.verify(&VerifyRequest {
         candidate,
         sequence: request.sequence,
         staging,
         head,
         proposed,
         already_present,
-    })?;
+    })? {
+        Verified::Judged(judgement) => judgement,
+        Verified::RunnerUnavailable { detail } => {
+            return unavailable(
+                journal,
+                manager,
+                request,
+                staging,
+                pin,
+                UnavailableCause::Infrastructure {
+                    kind: InfrastructureKind::RunnerSpawnFailure,
+                },
+                Some(detail),
+            );
+        }
+    };
 
     match judgement.failure.clone() {
         None => {
@@ -778,6 +807,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             staging,
             pin,
             infrastructure(&failure),
+            Some(failure.reason.clone()),
         ),
         Some(failure) if needs_human(&failure) => unavailable(
             journal,
@@ -788,6 +818,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             UnavailableCause::HumanRequired {
                 verdict: failure.reason.clone(),
             },
+            None,
         ),
         Some(failure) => {
             let record = code_record(&judgement, &failure);
@@ -858,8 +889,11 @@ fn prepare_verified(
 }
 
 /// A verification outage: `merge_verification_unavailable`, deferred while the
-/// candidate is inside its frozen allowance and parked at it, then the staging
-/// worktree and the pin reclaimed.
+/// candidate is inside its frozen allowance and parked at it, then the
+/// snapshots, the staging worktree and the pin reclaimed. `detail` is what
+/// the infrastructure reported, carried into the park question's context so
+/// a person sees why the outage exhausted its deferrals.
+#[allow(clippy::too_many_arguments)]
 fn unavailable<J: IntegrationJournal + Verification>(
     journal: &mut J,
     manager: &WorkspaceManager,
@@ -867,6 +901,7 @@ fn unavailable<J: IntegrationJournal + Verification>(
     staging: &Slot,
     pin: Option<GitRef>,
     cause: UnavailableCause,
+    detail: Option<String>,
 ) -> Result<Terminal, UpstrokeError> {
     let candidate = &request.candidate;
     let taken = candidate_defers(journal.fold(), candidate);
@@ -883,7 +918,7 @@ fn unavailable<J: IntegrationJournal + Verification>(
         }
     } else {
         UnavailableOutcome::Parked {
-            question: park_question(journal, candidate.key, &cause),
+            question: park_question(journal, candidate.key, &cause, detail.as_deref()),
         }
     };
     let parked = matches!(outcome, UnavailableOutcome::Parked { .. });
@@ -906,6 +941,7 @@ fn park_question<J: Verification>(
     journal: &J,
     key: TaskKey,
     cause: &UnavailableCause,
+    detail: Option<&str>,
 ) -> FrozenQuestion {
     let (kind, context) = match cause {
         UnavailableCause::HumanRequired { verdict } => (
@@ -915,8 +951,11 @@ fn park_question<J: Verification>(
         UnavailableCause::Infrastructure { kind } => (
             crate::ir::QuestionKind::Unblock,
             format!(
-                "integration verification kept failing on infrastructure ({kind:?}) and has \
-                 exhausted its deferrals; retry it or decline the task"
+                "integration verification kept failing on infrastructure ({kind:?}{}) and has \
+                 exhausted its deferrals; retry it or decline the task",
+                detail
+                    .map(|detail| format!(": {detail}"))
+                    .unwrap_or_default()
             ),
         ),
     };

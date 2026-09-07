@@ -395,7 +395,7 @@ impl AttemptContext<'_> {
             prior_failure: assessed.failure.clone(),
             invocations,
         };
-        self.judge_core().judge(&subject)
+        Ok(self.judge_core().judge(&subject)?)
     }
 
     pub fn settle_interrupted(
@@ -563,6 +563,44 @@ pub struct Subject<'s> {
     pub invocations: &'s dyn Fn(u32) -> review::ReviewInvocations,
 }
 
+/// Why a judgement could not be completed.
+///
+/// A Runner that could not run a gate process is told apart from every other
+/// error, because the two have different terminals at integration:
+/// `invariants[INV-23]` classifies a mid-run spawn failure as a
+/// `RunnerSpawnFailure` outage settlement, and
+/// `transaction_fault_matrix[T-VERIFY].resume_action` requires an observed
+/// infrastructure failure to terminate `merge_verification_unavailable`
+/// deferred or parked — never to escape as an error that leaves the
+/// verification open and the defer count untouched. A reviewer's process
+/// failure already reaches the judgement as `ReviewResult::Unavailable`
+/// through `review::run_review`; this covers the gate path through
+/// [`Judge::execute`]. The attempt path converts it back into the plain
+/// error it always was ([`From`]), so nothing there changes.
+#[derive(Debug, thiserror::Error)]
+pub enum JudgeError {
+    /// The Runner returned an error for `invocation` instead of a process
+    /// output: the process could not be spawned or supervised.
+    #[error("the Runner could not run `{invocation}`: {error}")]
+    Runner {
+        invocation: InvocationId,
+        #[source]
+        error: UpstrokeError,
+    },
+    /// Anything else: a snapshot funnel refusal, a ledger refusal, an adapter
+    /// no pass answers to, or a review pass that could not be run.
+    #[error(transparent)]
+    Other(UpstrokeError),
+}
+
+impl From<JudgeError> for UpstrokeError {
+    fn from(error: JudgeError) -> Self {
+        match error {
+            JudgeError::Runner { error, .. } | JudgeError::Other(error) => error,
+        }
+    }
+}
+
 /// The gate set and the reviewers, run on fresh exact snapshots.
 ///
 /// The one implementation of "gates on a fresh exact snapshot, each reviewer
@@ -588,13 +626,16 @@ impl Judge<'_> {
     ///
     /// # Errors
     ///
-    /// A snapshot funnel refusal, a Runner error spawning a process, an
-    /// adapter no pass answers to, or a review pass that could not be run.
-    pub fn judge(&mut self, subject: &Subject<'_>) -> Result<Judgement, UpstrokeError> {
+    /// [`JudgeError::Runner`] when the Runner could not run a gate process;
+    /// [`JudgeError::Other`] for a snapshot funnel refusal, an adapter no pass
+    /// answers to, or a review pass that could not be run.
+    pub fn judge(&mut self, subject: &Subject<'_>) -> Result<Judgement, JudgeError> {
         let mut failure = subject.prior_failure.clone();
         let mut gates = Vec::with_capacity(subject.gates.len());
         if !subject.gates.is_empty() && failure.is_none() {
-            let snapshot = self.snapshot(subject.names.gates(), &subject.snapshot)?;
+            let snapshot = self
+                .snapshot(subject.names.gates(), &subject.snapshot)
+                .map_err(JudgeError::Other)?;
             for (index, gate) in subject.gates.iter().enumerate() {
                 let invocation = subject
                     .identities
@@ -639,7 +680,8 @@ impl Judge<'_> {
             }
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
                 self.manager
-                    .remove_snapshot(self.hooks.effects(), &snapshot)?;
+                    .remove_snapshot(self.hooks.effects(), &snapshot)
+                    .map_err(JudgeError::Other)?;
             }
         }
 
@@ -649,40 +691,45 @@ impl Judge<'_> {
                 break;
             }
             let pass = u32::try_from(index).unwrap_or(u32::MAX);
-            let snapshot = self.snapshot(subject.names.review(pass), &subject.snapshot)?;
+            let snapshot = self
+                .snapshot(subject.names.review(pass), &subject.snapshot)
+                .map_err(JudgeError::Other)?;
             let adapter = self.adapters.get(reviewer.agent.as_str()).ok_or_else(|| {
-                UpstrokeError::Refused {
+                JudgeError::Other(UpstrokeError::Refused {
                     message: format!(
                         "review pass {pass} is bound to agent `{}` and no adapter answers to that \
                          name; pre-flight probed the agents this run recorded and this is not one \
                          of them",
                         reviewer.agent.as_str()
                     ),
-                }
+                })
             })?;
             let inputs = subject.inputs;
-            let outcome = self.reviews.run(
-                &review::ReviewCx {
-                    adapter,
-                    profile: reviewer.profile.clone(),
-                    lens: reviewer.lens,
-                    task: review::ReviewSubject {
-                        title: &inputs.title,
-                        body: &inputs.body,
-                        acceptance: &inputs.acceptance,
+            let outcome = self
+                .reviews
+                .run(
+                    &review::ReviewCx {
+                        adapter,
+                        profile: reviewer.profile.clone(),
+                        lens: reviewer.lens,
+                        task: review::ReviewSubject {
+                            title: &inputs.title,
+                            body: &inputs.body,
+                            acceptance: &inputs.acceptance,
+                        },
+                        diff: &inputs.diff,
+                        artifacts: &inputs.artifacts,
+                        decisions: &inputs.decisions,
+                        workspace: snapshot.path(),
+                        settings_dir: &self.paths.settings(),
+                        reviews_dir: &self.paths.reviews(),
+                        stem: subject.stem.clone(),
+                        timeout: reviewer.timeout,
                     },
-                    diff: &inputs.diff,
-                    artifacts: &inputs.artifacts,
-                    decisions: &inputs.decisions,
-                    workspace: snapshot.path(),
-                    settings_dir: &self.paths.settings(),
-                    reviews_dir: &self.paths.reviews(),
-                    stem: subject.stem.clone(),
-                    timeout: reviewer.timeout,
-                },
-                self.runner,
-                &(subject.invocations)(pass),
-            )?;
+                    self.runner,
+                    &(subject.invocations)(pass),
+                )
+                .map_err(JudgeError::Other)?;
 
             let ids = (subject.invocations)(pass);
             for ordinal in 0..outcome.invocations {
@@ -691,8 +738,8 @@ impl Judge<'_> {
                 } else {
                     subject.identities.review_reask(pass, ordinal - 1)
                 };
-                self.ledger.register(&id)?;
-                self.ledger.complete(&id)?;
+                self.ledger.register(&id).map_err(JudgeError::Other)?;
+                self.ledger.complete(&id).map_err(JudgeError::Other)?;
             }
 
             let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
@@ -715,7 +762,8 @@ impl Judge<'_> {
             );
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
                 self.manager
-                    .remove_snapshot(self.hooks.effects(), &snapshot)?;
+                    .remove_snapshot(self.hooks.effects(), &snapshot)
+                    .map_err(JudgeError::Other)?;
             }
         }
 
@@ -741,19 +789,39 @@ impl Judge<'_> {
         request: &RunnerRequest,
         pool: Option<String>,
     ) -> Result<ProcessOutput, UpstrokeError> {
-        self.ledger.register(&request.invocation)?;
+        self.execute_typed(request, pool).map_err(Into::into)
+    }
+
+    /// [`Self::execute`], telling a Runner error apart from a ledger or slot
+    /// refusal: the Runner's own `Err` is [`JudgeError::Runner`], settled in
+    /// the ledger as a cancellation exactly as before.
+    fn execute_typed(
+        &mut self,
+        request: &RunnerRequest,
+        pool: Option<String>,
+    ) -> Result<ProcessOutput, JudgeError> {
+        self.ledger
+            .register(&request.invocation)
+            .map_err(JudgeError::Other)?;
         match self.run_registered(request, pool) {
-            Ok(output) => {
-                if output.is_ok() {
-                    self.ledger.complete(&request.invocation)?;
-                } else {
-                    self.ledger.cancel(&request.invocation)?;
-                }
-                output
+            Ok(Ok(output)) => {
+                self.ledger
+                    .complete(&request.invocation)
+                    .map_err(JudgeError::Other)?;
+                Ok(output)
+            }
+            Ok(Err(error)) => {
+                self.ledger
+                    .cancel(&request.invocation)
+                    .map_err(JudgeError::Other)?;
+                Err(JudgeError::Runner {
+                    invocation: request.invocation.clone(),
+                    error,
+                })
             }
             Err(error) => {
                 drop(self.ledger.cancel(&request.invocation));
-                Err(error)
+                Err(JudgeError::Other(error))
             }
         }
     }
@@ -794,8 +862,8 @@ impl Judge<'_> {
         &mut self,
         request: &RunnerRequest,
         pool: Option<String>,
-    ) -> Result<Verdict, UpstrokeError> {
-        let output = self.execute(request, pool)?;
+    ) -> Result<Verdict, JudgeError> {
+        let output = self.execute_typed(request, pool)?;
         Ok(Verdict {
             output_limited: output.output_limited,
             timed_out: output.timed_out,

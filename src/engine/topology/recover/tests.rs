@@ -46,6 +46,7 @@ use crate::workspace_manager::Refusal;
 
 use crate::engine::topology::identity::{InvocationLedger, ReservationKind, Reservations};
 use crate::engine::topology::preflight::RunPreflight;
+use crate::engine::topology::run::Progress;
 use crate::engine::topology::seams::{HarnessTopologyHooks, TimeSource, TopologyHooks};
 use crate::engine::topology::startup::{FailedStep, RunDirOutcome};
 
@@ -106,6 +107,12 @@ struct Damage {
     two_tasks: bool,
     two_tier: bool,
     deep_ladder: bool,
+    /// The review plan names an alternative reviewer, so a candidate whose
+    /// implementer is the primary reviewer is reviewed by someone else.
+    alternative_reviewer: bool,
+    /// `max_merge_repairs = 0`: the first rejection registers its repair with
+    /// human admission.
+    no_automatic_repairs: bool,
 }
 
 impl Fixture {
@@ -168,6 +175,8 @@ impl Fixture {
             damage.two_tier,
             damage.deep_ladder,
             damage.two_tasks,
+            damage.alternative_reviewer,
+            damage.no_automatic_repairs,
         );
 
         let marker = CreatingMarker {
@@ -524,6 +533,8 @@ fn run_started(
     two_tier: bool,
     deep_ladder: bool,
     two_tasks: bool,
+    alternative_reviewer: bool,
+    no_automatic_repairs: bool,
 ) -> RunStarted4 {
     let unauthenticated = RunStarted4 {
         schema: TOPOLOGY_SCHEMA,
@@ -550,7 +561,7 @@ fn run_started(
         limits: TopologyLimits {
             max_parallel: 1,
             max_defers: 3,
-            max_merge_repairs: 1,
+            max_merge_repairs: u32::from(!no_automatic_repairs),
         },
         gates: vec!["clippy".to_owned()],
         gates_from_config: true,
@@ -588,6 +599,10 @@ fn run_started(
             let mut reviews = review_plan();
             if two_tasks {
                 reviews.second_opinion.push(None);
+            }
+            if alternative_reviewer {
+                reviews.alternative = Some(PassBinding::new(AGENT, "claude-fable-5"));
+                reviews.alternative_available = Some(true);
             }
             reviews
         },
@@ -6594,6 +6609,28 @@ fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue()
         fold.transaction().is_none(),
         "the interrupt released the transaction so the candidate can re-verify under a new sequence"
     );
+
+    // And it does: the next incarnation's loop takes the requeued candidate
+    // through a fresh stale sequence — cherry-pick, pin, verification,
+    // publication — under sequence 1.
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(1),
+                ..
+            }))
+        ),
+        "the candidate re-verified and published under the next sequence: {:?}",
+        driven.progress
+    );
+    assert_eq!(merged_sequences(&fixture), vec![1]);
+    assert!(
+        driven.invocations_balance && driven.entitlements_held == 0,
+        "the re-verification's invocations settled and its holdings were released"
+    );
 }
 
 #[test]
@@ -7057,6 +7094,619 @@ fn a_resume_completes_an_already_present_publication_at_the_candidate_commit_and
             .any(|slot| matches!(slot, crate::workspace_manager::Slot::Staging { .. }))
             && !staging.exists(),
         "recovery read the disposition rather than inferring fast, and reclaimed the staging"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Driving the loop after a resume: the run's own `TopologyRun::step` over a
+// resumed handle, with recording stand-ins for the seams a test varies.
+// ---------------------------------------------------------------------------
+
+/// The seams a driven step varies. Everything not named here is the run's
+/// production assembly: `FrozenPlans` over the fixture's recorded gates and
+/// review plan, the scaffold adapters, and a Runner that answers exit 0.
+#[derive(Default)]
+struct DriveSeams {
+    /// The Runner returns an error for every process instead of an output.
+    gate_spawn_fails: bool,
+    /// The review-input policy refuses the proposed tree.
+    input_rejected: bool,
+    /// What each review pass reports as its cost.
+    review_cost_usd: Option<f64>,
+    /// What the answer source answers every question with; `None` answers
+    /// nothing.
+    answer: Option<crate::ir::Answer>,
+}
+
+/// What a driven run observed.
+struct Driven {
+    progress: Vec<Result<crate::engine::topology::run::Progress, UpstrokeError>>,
+    /// The implementer each verification plan was requested against.
+    implementers: Vec<PassBinding>,
+    /// The model each review pass actually ran as.
+    reviewer_models: Vec<String>,
+    spend_before: f64,
+    spend_after: f64,
+    invocations_balance: bool,
+    entitlements_held: u32,
+    log: Vec<TopologyEvent>,
+}
+
+struct DrivenPlans<'a> {
+    frozen: crate::engine::assembly::FrozenPlans<'a>,
+    // One driver owns this record; `RefCell` lets the read-only seam write it.
+    implementers: std::cell::RefCell<Vec<PassBinding>>,
+}
+
+impl crate::engine::topology::attempt::AttemptPlans for DrivenPlans<'_> {
+    fn inputs(
+        &self,
+        request: &crate::engine::topology::attempt::InputsRequest<'_>,
+    ) -> Result<crate::engine::topology::attempt::ReviewInputs, UpstrokeError> {
+        self.frozen.inputs(request)
+    }
+
+    fn pool_for(&self, agent: &str) -> Option<String> {
+        self.frozen.pool_for(agent)
+    }
+
+    fn plan(
+        &self,
+        request: &crate::engine::topology::attempt::PlanRequest<'_>,
+    ) -> Result<crate::engine::topology::attempt::AttemptPlan, UpstrokeError> {
+        self.frozen.plan(request)
+    }
+
+    fn verification(
+        &self,
+        request: &crate::engine::topology::attempt::VerificationRequest<'_>,
+    ) -> Result<crate::engine::topology::attempt::VerificationPlan, UpstrokeError> {
+        self.implementers
+            .borrow_mut()
+            .push(request.implementer.clone());
+        self.frozen.verification(request)
+    }
+}
+
+struct DrivenReviews {
+    cost_usd: Option<f64>,
+    models: Mutex<Vec<String>>,
+}
+
+impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
+    fn run(
+        &self,
+        cx: &crate::review::ReviewCx<'_>,
+        _runner: &dyn Runner,
+        _invocations: &crate::review::ReviewInvocations,
+    ) -> Result<crate::review::ReviewOutcome, UpstrokeError> {
+        self.models
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(cx.profile.model.clone());
+        Ok(crate::review::ReviewOutcome {
+            result: crate::review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: true,
+                reasons: Vec::new(),
+                required_changes: Vec::new(),
+                needs_human: false,
+            }),
+            cost_usd: self.cost_usd,
+            invocations: 1,
+            transcript: PathBuf::from("driven-review"),
+        })
+    }
+}
+
+struct DrivenRunner {
+    fail: bool,
+}
+
+impl Runner for DrivenRunner {
+    fn run(&self, _request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+        if self.fail {
+            return Err(UpstrokeError::Io {
+                path: PathBuf::from("missing-gate-executable"),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            });
+        }
+        Ok(ProcessOutput {
+            code: Some(0),
+            stdout: String::new(),
+            stderr: String::new(),
+            duration: Duration::from_millis(1),
+            timed_out: false,
+            output_limited: false,
+        })
+    }
+}
+
+struct DrivenPolicy {
+    reject: bool,
+}
+
+impl crate::engine::topology::attempt::ReviewInputPolicy for DrivenPolicy {
+    fn problem(&self, _worktree: &Path, _tree: &str) -> Result<Option<String>, UpstrokeError> {
+        Ok(self
+            .reject
+            .then(|| "the proposed tree has opaque review inputs".to_owned()))
+    }
+}
+
+struct DrivenAnswers {
+    answer: Option<crate::ir::Answer>,
+}
+
+impl crate::interaction::AnswerSource for DrivenAnswers {
+    fn id(&self) -> &'static str {
+        "driven"
+    }
+
+    fn resolve(&self, _question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        Ok(self.answer.clone().unwrap_or(crate::ir::Answer::Unanswered))
+    }
+}
+
+/// Resume the fixture, then step the run's loop `steps` times under `seams`.
+fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
+    use crate::engine::topology::run::{RunSeams, TopologyRun};
+
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(fixture, &runtime, &certifies);
+    let (outcome, _) = resume_holding(fixture, &harness, &given);
+    let (_, handle) = outcome.expect("the resume settles the planted state");
+    let mut run = TopologyRun::resumed(
+        handle,
+        fixture.inputs(),
+        crate::engine::topology::select::Ceiling::unlimited(),
+    );
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+    let sleeper = RecordingSleeper::default();
+    let manager = fixture.manager();
+    let runner = DrivenRunner {
+        fail: seams.gate_spawn_fails,
+    };
+    let input_policy = DrivenPolicy {
+        reject: seams.input_rejected,
+    };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let gates: Vec<crate::gates::ShellGate> = fixture
+        .started
+        .gate_cmds
+        .iter()
+        .map(crate::gates::ShellGate::from_record)
+        .collect();
+    let plans = DrivenPlans {
+        frozen: crate::engine::assembly::FrozenPlans {
+            adapters: &adapters,
+            paths: &paths,
+            gates: &gates,
+            pools: &[],
+            caps: &[],
+            worker_timeout: Duration::from_secs(300),
+            decisions: &[],
+        },
+        implementers: std::cell::RefCell::new(Vec::new()),
+    };
+    let reviews = DrivenReviews {
+        cost_usd: seams.review_cost_usd,
+        models: Mutex::new(Vec::new()),
+    };
+    let answers = DrivenAnswers {
+        answer: seams.answer.clone(),
+    };
+    let run_seams = RunSeams {
+        manager: &manager,
+        clock: &Frozen,
+        sleeper: &sleeper,
+        runner: &runner,
+        adapters: &adapters,
+        paths: &paths,
+        plans: &plans,
+        reviews: &reviews,
+        input_policy: &input_policy,
+        answers: &answers,
+        ids: &FixedIds,
+        halts_run: false,
+    };
+    let spend_before = run.spend().run_total();
+    let progress = (0..steps)
+        .map(|_| run.step(&run_seams, &mut hooks))
+        .collect();
+    Driven {
+        progress,
+        implementers: plans.implementers.into_inner(),
+        reviewer_models: reviews
+            .models
+            .into_inner()
+            .unwrap_or_else(PoisonError::into_inner),
+        spend_before,
+        spend_after: run.spend().run_total(),
+        invocations_balance: run.invocations_balance(),
+        entitlements_held: run.entitlements_held(),
+        log: TopologyFold::parse_log(&fixture.log_bytes()).expect("the result log parses"),
+    }
+}
+
+fn unavailable_terminals(
+    log: &[TopologyEvent],
+) -> Vec<crate::topology::events::MergeVerificationUnavailable> {
+    log.iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::MergeVerificationUnavailable { data } => Some(data.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn an_integration_review_is_selected_against_the_candidates_recorded_implementer() {
+    // The candidate was produced at rung 0 (mid, claude-opus-5) of a two-rung
+    // ladder whose last rung is claude-fable-5, and the review plan's primary
+    // is claude-opus-5 with claude-fable-5 as the alternative. Selecting
+    // reviewers against the last rung would find primary != implementer and
+    // hand the candidate back to its own author; against the recorded binding
+    // the alternative reviews it.
+    let fixture = Fixture::build(
+        "recorded-implementer",
+        Damage {
+            two_tier: true,
+            alternative_reviewer: true,
+            ..Damage::default()
+        },
+    );
+    plant_stale_verification(&fixture);
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    driven
+        .progress
+        .first()
+        .expect("one step")
+        .as_ref()
+        .expect("the re-verification publishes");
+    assert_eq!(
+        driven.implementers,
+        vec![PassBinding::new(AGENT, "claude-opus-5")],
+        "the verification plan was requested against the binding the candidate ran under"
+    );
+    assert_eq!(
+        driven.reviewer_models,
+        vec!["claude-fable-5".to_owned()],
+        "the alternative reviewed the candidate; its own model did not"
+    );
+    let recorded: Vec<String> = driven
+        .log
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::MergePrepared { data } => data.verification.clone(),
+            _ => None,
+        })
+        .flat_map(|verification| verification.reviews)
+        .map(|review| review.model)
+        .collect();
+    assert_eq!(
+        recorded,
+        vec!["claude-fable-5".to_owned()],
+        "and the durable merge_prepared records that reviewer"
+    );
+}
+
+#[test]
+fn a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers() {
+    // `transaction_fault_matrix[T-VERIFY].resume_action`: an observed
+    // infrastructure failure terminates merge_verification_unavailable
+    // {Infrastructure, Deferred} inside the frozen allowance and Parked at it;
+    // `invariants[INV-23]`: a Runner that cannot run the process is a
+    // RunnerSpawnFailure outage. The fixture allows three deferrals.
+    let fixture = Fixture::healthy("gate-spawn-outage");
+    plant_stale_verification(&fixture);
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            gate_spawn_fails: true,
+            ..DriveSeams::default()
+        },
+        5,
+    );
+    let shapes: Vec<String> = driven
+        .progress
+        .iter()
+        .map(|step| match step {
+            Ok(Progress::Unavailable {
+                parked, sequence, ..
+            }) => {
+                format!("unavailable(s{}, parked={parked})", sequence.0)
+            }
+            Ok(Progress::Waited { .. }) => "waited".to_owned(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "unavailable(s1, parked=false)",
+            "waited",
+            "unavailable(s2, parked=false)",
+            "waited",
+            "unavailable(s3, parked=true)",
+        ],
+        "each outage deferred inside the allowance and the third parked at it"
+    );
+    let terminals = unavailable_terminals(&driven.log);
+    assert_eq!(terminals.len(), 3);
+    for (index, terminal) in terminals.iter().enumerate() {
+        assert!(
+            matches!(
+                terminal.cause,
+                crate::topology::events::UnavailableCause::Infrastructure {
+                    kind: crate::topology::events::InfrastructureKind::RunnerSpawnFailure
+                }
+            ),
+            "terminal {index} names the runner: {:?}",
+            terminal.cause
+        );
+    }
+    assert!(matches!(
+        terminals[0].outcome,
+        crate::topology::events::UnavailableOutcome::Deferred { defers: 1 }
+    ));
+    assert!(matches!(
+        terminals[1].outcome,
+        crate::topology::events::UnavailableOutcome::Deferred { defers: 2 }
+    ));
+    let crate::topology::events::UnavailableOutcome::Parked { question } = &terminals[2].outcome
+    else {
+        panic!("the third outage parks: {:?}", terminals[2].outcome);
+    };
+    assert!(
+        question.context.contains("missing-gate-executable"),
+        "the park question carries what the Runner reported: {}",
+        question.context
+    );
+    assert!(
+        fixture.manager().intents().expect("intents").is_empty(),
+        "every sequence's staging and snapshots were reclaimed at its terminal"
+    );
+    assert!(
+        fixture
+            .manager()
+            .refs_under(&format!(
+                "{}/{RUN_ID}/prepared/",
+                crate::engine::topology::candidate::RUN_REF_ROOT
+            ))
+            .expect("refs")
+            .is_empty(),
+        "every sequence's pin was deleted at its terminal"
+    );
+    assert!(
+        driven.invocations_balance && driven.entitlements_held == 0,
+        "the failed invocations were cancelled and both entitlements released"
+    );
+}
+
+#[test]
+fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {
+    // R4: a review input that cannot be judged is HumanRequired, not a code
+    // rejection and not a publication. The review-input policy refuses the
+    // proposed tree before any reviewer runs.
+    let fixture = Fixture::healthy("input-rejected");
+    plant_stale_verification(&fixture);
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            input_rejected: true,
+            ..DriveSeams::default()
+        },
+        1,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Unavailable { parked: true, .. }))
+        ),
+        "the policy's refusal parks the candidate: {:?}",
+        driven.progress
+    );
+    let terminals = unavailable_terminals(&driven.log);
+    let crate::topology::events::UnavailableCause::HumanRequired { verdict } = &terminals[0].cause
+    else {
+        panic!("a person is required: {:?}", terminals[0].cause);
+    };
+    assert!(
+        verdict.contains("opaque review inputs"),
+        "the terminal carries the policy's problem: {verdict}"
+    );
+    assert!(
+        driven.reviewer_models.is_empty(),
+        "no reviewer was invoked on an input the policy refused"
+    );
+    assert!(merged_sequences(&fixture).is_empty());
+}
+
+#[test]
+fn an_integration_reviews_cost_reaches_the_run_spend() {
+    // The ceiling is checked against `Spend`, so a review an integration ran
+    // must be charged there, live and on replay of the terminal's record.
+    let fixture = Fixture::healthy("integration-spend");
+    plant_stale_verification(&fixture);
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            review_cost_usd: Some(2.5),
+            ..DriveSeams::default()
+        },
+        1,
+    );
+    driven
+        .progress
+        .first()
+        .expect("one step")
+        .as_ref()
+        .expect("the re-verification publishes");
+    assert!(
+        (driven.spend_after - (driven.spend_before + 2.5)).abs() < 1e-9,
+        "the integration review charged 2.5 and spend went {} -> {}",
+        driven.spend_before,
+        driven.spend_after
+    );
+    let replayed = crate::engine::topology::select::Spend::replay(&driven.log).run_total();
+    assert!(
+        (replayed - driven.spend_after).abs() < 1e-9,
+        "a replay of the log charges what the live run charged: {replayed} vs {}",
+        driven.spend_after
+    );
+}
+
+#[test]
+fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append()
+ {
+    // R13: the loop ingests an answer to a verification-park question at the
+    // hard block — Answered returns the candidate to the queue, and the next
+    // step integrates it — and refuses an answer to a repair-admission
+    // question before any append, which is PR9's.
+    let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);
+    let fixture = Fixture::healthy("park-answered");
+    plant_stale_verification(&fixture);
+    append_events(
+        &fixture,
+        &[TopologyEventBody::MergeVerificationUnavailable {
+            data: crate::topology::events::MergeVerificationUnavailable {
+                sequence: crate::topology::events::SequenceId(0),
+                cause: crate::topology::events::UnavailableCause::HumanRequired {
+                    verdict: "a person must decide this integration".to_owned(),
+                },
+                outcome: crate::topology::events::UnavailableOutcome::Parked {
+                    question: crate::topology::events::FrozenQuestion {
+                        id: crate::ir::QuestionId("q-park-planted".to_owned()),
+                        key: ALPHA,
+                        kind: crate::ir::QuestionKind::Clarify,
+                        context: "integration verification needs a person".to_owned(),
+                        options: options.clone(),
+                    },
+                },
+            },
+        }],
+    );
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(crate::ir::Answer::Answered {
+                text: options[0].clone(),
+            }),
+            ..DriveSeams::default()
+        },
+        2,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key: ALPHA,
+                declined: false,
+                ..
+            }))
+        ),
+        "the verification-park answer was ingested: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(1),
+                ..
+            }))
+        ),
+        "an answered park returns the candidate to the queue and it re-verifies: {:?}",
+        driven.progress
+    );
+
+    let fixture = Fixture::build(
+        "repair-admission-answer",
+        Damage {
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (candidate, head, _pin) = plant_stale_verification(&fixture);
+    let rejection = {
+        let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+        let fold = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
+        crate::engine::topology::repair::merge_rejected(
+            &fold,
+            &FixedIds,
+            &candidate,
+            head,
+            crate::topology::events::SequenceId(0),
+            crate::topology::events::RejectionDisposition::CodeRejected {
+                verification: crate::engine::topology::repair::code_rejection_record(
+                    true,
+                    Vec::new(),
+                    "the reviewer rejected the proposal".to_owned(),
+                ),
+            },
+            PathSet::Prefixes {
+                paths: vec![GitPath("candidate.txt".to_owned())],
+            },
+        )
+        .expect("the rejection registers a repair with human admission")
+    };
+    assert!(
+        matches!(
+            rejection.repair.admission,
+            crate::topology::events::SpawnAdmission::HumanRequired { limit: 0, .. }
+        ),
+        "with no automatic repairs the first repair asks a person"
+    );
+    let question_options = rejection
+        .repair
+        .admission
+        .question()
+        .expect("a human admission carries its question")
+        .options
+        .clone();
+    append_events(
+        &fixture,
+        &[TopologyEventBody::MergeRejected {
+            data: Box::new(rejection),
+        }],
+    );
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(crate::ir::Answer::Answered {
+                text: question_options[0].clone(),
+            }),
+            ..DriveSeams::default()
+        },
+        1,
+    );
+    let text = message(
+        driven
+            .progress
+            .first()
+            .expect("one step")
+            .as_ref()
+            .expect_err("a repair-admission answer is refused before any append"),
+    );
+    assert!(
+        text.contains("repair-admission") && text.contains("Refused before any append"),
+        "{text}"
+    );
+    assert!(
+        driven
+            .log
+            .iter()
+            .all(|event| !matches!(event.body, TopologyEventBody::QuestionAnswered { .. })),
+        "nothing was appended for the refused answer"
     );
 }
 

@@ -720,7 +720,7 @@ impl super::integrate::Verification for Run {
     fn verify(
         &mut self,
         request: &super::integrate::VerifyRequest<'_>,
-    ) -> Result<super::attempt::Judgement, UpstrokeError> {
+    ) -> Result<super::integrate::Verified, UpstrokeError> {
         use super::attempt::{
             Judge, JudgeIdentities, JudgeNames, SnapshotDisposal, SnapshotOf, Subject,
         };
@@ -764,7 +764,9 @@ impl super::integrate::Verification for Run {
             paths: &self.paths,
             reviews: &reviews,
         };
-        judge.judge(&Subject {
+        // The same mapping production makes (`run.rs`): a Runner that could
+        // not run a gate is an outage with a terminal, not an error.
+        match judge.judge(&Subject {
             snapshot: SnapshotOf::Commit(proposed),
             disposal: SnapshotDisposal::AfterTheTerminal,
             names: JudgeNames::Integration {
@@ -780,7 +782,15 @@ impl super::integrate::Verification for Run {
                 pass: identities.review_pass(pass, 0),
                 reask: identities.review_reask(pass, 0),
             },
-        })
+        }) {
+            Ok(judgement) => Ok(super::integrate::Verified::Judged(judgement)),
+            Err(super::attempt::JudgeError::Runner { invocation, error }) => {
+                Ok(super::integrate::Verified::RunnerUnavailable {
+                    detail: format!("`{invocation}`: {error}"),
+                })
+            }
+            Err(super::attempt::JudgeError::Other(error)) => Err(error),
+        }
     }
 
     fn ids(&self) -> &dyn super::seams::IdSource {
