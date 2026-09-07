@@ -38,6 +38,14 @@
 #   MUT-QUEUE-READ-FAIL-OPEN     an unreadable queue state was taken as a confirmed entry
 #   MUT-ENQUEUE-REFUSED-DEQUEUES a refused enqueue withdrew a pull request someone else queued
 #   MUT-NODE-ID-UNREAD           a pull request was queued with no id to withdraw it by
+#   MUT-ENQUEUE-LEFT-NO-ENTRY    a call that agreed and queued nothing was taken as an enqueue
+#   MUT-ENQUEUE-EXIT-IS-EVIDENCE a nonzero exit from the enqueue read as "the mutation was refused"
+#   MUT-ENQUEUE-FAIL-LABEL-STANDS a failed enqueue left the ready label on a moved identity
+#   MUT-ENQUEUE-FAIL-STATE-UNREAD an unreadable state on the failure path passed as nothing queued
+#   MUT-PRE-QUEUE-UNREAD         the queue was not read before the attempt, so nothing afterwards
+#                                could be told from another run's entry
+#   MUT-ENQUEUE-OVER-AUTOMATION  the enqueue was attempted over, or withdrew, an entry or a
+#                                pending auto-merge this run did not create
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -198,15 +206,22 @@ expect MUT-DRIFT-STATE-DEFAULT-OK "$(drift_state "")" UNCONFIRMED
 #   pr view --json headRefOid,baseRefName  the next line of $GH_IDENTITY, the last repeating
 #   pr view --json id                      a fixed node id
 #   api .../timeline                       $GH_TIMELINE, or exit 1 when $GH_TIMELINE_FAIL is 1
-#   api graphql enqueuePullRequest         records "queued no-auto $GH_ENQUEUE_HEAD" in $GH_QUEUE,
-#                                          or exit 1 when $GH_ENQUEUE_FAIL is 1
+#   api graphql enqueuePullRequest         records "queued no-auto $GH_ENQUEUE_HEAD" in $GH_QUEUE;
+#                                          exit 1 without recording when $GH_ENQUEUE_FAIL is 1,
+#                                          exit 1 having recorded when $GH_ENQUEUE_LOST is 1 -- the
+#                                          mutation GitHub accepted and whose answer never arrived
+#                                          --, and exit 0 without recording when $GH_ENQUEUE_SILENT
+#                                          is 1: a call that agreed and left nothing behind
 #   api graphql dequeuePullRequest         clears $GH_QUEUE, unless $GH_DEQUEUE_NOOP is 1, when it
 #                                          exits 0 having removed nothing -- which is what the real
 #                                          CLI's --disable-auto does to a queued pull request
-#   api graphql isInMergeQueue             $GH_QUEUE, or exit 1 when $GH_QUEUE_READ_FAIL is 1
+#   api graphql isInMergeQueue             $GH_QUEUE, or exit 1 from the $GH_QUEUE_READ_FAIL_FROM'th
+#                                          such read on (0 never fails), so a run can read the queue
+#                                          before the attempt and fail to read it after
 #   pr merge --disable-auto                logged, and deliberately no effect on $GH_QUEUE
-# It is stateful on purpose: the defect this catches is a withdrawal reported from an exit status
-# while the entry is still in the queue, and no stateless fake can tell the two apart.
+# It is stateful on purpose: the defects this catches are a withdrawal reported from an exit status
+# while the entry is still in the queue, and a failed enqueue call whose mutation landed anyway,
+# and no stateless fake can tell either from its opposite.
 mkdir -p "$tmp/bin"
 cat > "$tmp/bin/gh" <<'GH'
 #!/usr/bin/env bash
@@ -227,11 +242,15 @@ case "$1 ${2:-}" in
   "api graphql")
     if [[ "$*" == *enqueuePullRequest* ]]; then
       [[ "${GH_ENQUEUE_FAIL:-0}" == 1 ]] && exit 1
-      printf 'queued no-auto %s' "${GH_ENQUEUE_HEAD:-head1}" > "$GH_QUEUE"
+      [[ "${GH_ENQUEUE_SILENT:-0}" == 1 ]] \
+        || printf 'queued no-auto %s' "${GH_ENQUEUE_HEAD:-head1}" > "$GH_QUEUE"
+      [[ "${GH_ENQUEUE_LOST:-0}" == 1 ]] && exit 1
     elif [[ "$*" == *dequeuePullRequest* ]]; then
       [[ "${GH_DEQUEUE_NOOP:-0}" == 1 ]] || printf 'not-queued no-auto -' > "$GH_QUEUE"
     elif [[ "$*" == *isInMergeQueue* ]]; then
-      [[ "${GH_QUEUE_READ_FAIL:-0}" == 1 ]] && exit 1
+      n="$(grep -c 'isInMergeQueue' "$GH_LOG")"
+      from="${GH_QUEUE_READ_FAIL_FROM:-0}"
+      ((from > 0 && n >= from)) && exit 1
       cat "$GH_QUEUE"
     fi ;;
   "api "*) [[ "${GH_TIMELINE_FAIL:-0}" == 1 ]] && exit 1; cat "$GH_TIMELINE" ;;
@@ -244,16 +263,18 @@ repo="o/r"
 ready_label="ready-to-merge"
 review_at="2026-09-06T10:00:00Z"
 export GH_LOG="$tmp/gh.log" GH_IDENTITY="$tmp/identity" GH_TIMELINE="$tmp/timeline" GH_QUEUE="$tmp/queue"
-export GH_IDENTITY_FAIL=0 GH_NODE_FAIL=0 GH_TIMELINE_FAIL=0 GH_QUEUE_READ_FAIL=0
-export GH_ENQUEUE_FAIL=0 GH_DEQUEUE_NOOP=0 GH_ENQUEUE_HEAD=head1
+export GH_IDENTITY_FAIL=0 GH_NODE_FAIL=0 GH_TIMELINE_FAIL=0 GH_QUEUE_READ_FAIL_FROM=0
+export GH_ENQUEUE_FAIL=0 GH_ENQUEUE_LOST=0 GH_ENQUEUE_SILENT=0 GH_DEQUEUE_NOOP=0 GH_ENQUEUE_HEAD=head1
 
-# writes IDENTITY TIMELINE STATE LABELS ENQUEUE: runs the sequence and prints its gh calls, one
-# per line, with the constant parts of each call dropped. What it said lands in $tmp/said.
+# writes IDENTITY TIMELINE STATE LABELS ENQUEUE [QUEUE]: runs the sequence and prints its gh calls,
+# one per line, with the constant parts of each call dropped. QUEUE is the queue state the pull
+# request starts in, "not-queued no-auto -" unless a case says otherwise. What it said lands in
+# $tmp/said.
 writes() {
   : > "$GH_LOG"
   printf '%s\n' "$1" > "$GH_IDENTITY"
   printf '%s' "$2" > "$GH_TIMELINE"
-  printf 'not-queued no-auto -' > "$GH_QUEUE"
+  printf '%s' "${6:-not-queued no-auto -}" > "$GH_QUEUE"
   enqueue="$5"
   PATH="$tmp/bin:$PATH" maintain_labels_and_enqueue 9 findings-p1p2 head1 master "$3" "$4" "$review_at" > "$tmp/said" 2>&1
   sed -e 's/^pr view .*headRefOid.*/view/' -e 's/^pr view .*--json id.*/node/' \
@@ -265,8 +286,14 @@ writes() {
 }
 said() { tr '\n' ' ' < "$tmp/said"; }
 reset_fakes() {
-  GH_IDENTITY_FAIL=0; GH_NODE_FAIL=0; GH_TIMELINE_FAIL=0; GH_QUEUE_READ_FAIL=0
-  GH_ENQUEUE_FAIL=0; GH_DEQUEUE_NOOP=0; GH_ENQUEUE_HEAD=head1
+  GH_IDENTITY_FAIL=0; GH_NODE_FAIL=0; GH_TIMELINE_FAIL=0; GH_QUEUE_READ_FAIL_FROM=0
+  GH_ENQUEUE_FAIL=0; GH_ENQUEUE_LOST=0; GH_ENQUEUE_SILENT=0; GH_DEQUEUE_NOOP=0; GH_ENQUEUE_HEAD=head1
+}
+# no_label_removal CASE: the ready label this run wrote is still standing when the run ends.
+no_label_removal() {
+  grep -q -- '--remove-label ready-to-merge' "$GH_LOG" \
+    && error "$1: the ready label was taken back on a run that confirmed its identity"
+  return 0
 }
 
 steady='head1 master'
@@ -276,11 +303,11 @@ $steady
 $steady"
 
 # The whole sequence on a pull request nothing touches: lane label, identity, ready label,
-# identity, node id, identity and timeline before the enqueue, the enqueue, identity and timeline
-# after it, and the queue entry read back.
+# identity, node id, the queue as this run found it, identity and timeline before the enqueue, the
+# enqueue, identity and timeline after it, and the queue entry read back.
 got="$(writes "$four" "" READY "" 1)"
 expect MUT-ENQUEUE-BASE-UNBOUND "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view timeline enqueue view timeline queue-state "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view timeline queue-state "
 # The enqueue is enqueue-only. `gh pr merge --merge --auto` merges a mergeable pull request whose
 # base carries no queue, so its absence from the log is the property, not an incidental spelling.
 expect MUT-ENQUEUE-CAN-MERGE "$(grep -c -e '--merge' -e '--auto' "$GH_LOG" || true)" 0
@@ -296,29 +323,29 @@ got="$(writes "$steady
 $steady
 head1 release" "" READY "" 1)"
 expect MUT-LABEL-NOT-RECONCILED "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view --remove-label ready-to-merge "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view --remove-label ready-to-merge "
 
 # A retarget recorded after the review, with the ref name unchanged: read off the timeline before
 # the enqueue, so nothing is queued.
 got="$(writes "$four" "2026-09-06T11:00:00Z" READY "" 1)"
 expect MUT-RETARGET-BEFORE-ENQUEUE "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view timeline --remove-label ready-to-merge "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline --remove-label ready-to-merge "
 
 # A timeline that could not be read is not a timeline without a retarget: nothing is enqueued.
 GH_TIMELINE_FAIL=1
 got="$(writes "$four" "" READY "" 1)"
 expect MUT-TIMELINE-FAIL-OPEN "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view timeline --remove-label ready-to-merge "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline --remove-label ready-to-merge "
 reset_fakes
 
-# The base moved after the enqueue: the entry is withdrawn with dequeuePullRequest, the withdrawal
-# is read back, and the label goes with it.
+# The base moved after the enqueue: the entry is read back, withdrawn with dequeuePullRequest, the
+# withdrawal is read back, and the label goes with it.
 got="$(writes "$steady
 $steady
 $steady
 head1 release" "" READY "" 1)"
 expect MUT-ENQUEUE-NOT-WITHDRAWN "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view timeline enqueue view dequeue --disable-auto queue-state --remove-label ready-to-merge "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view queue-state dequeue --disable-auto queue-state --remove-label ready-to-merge "
 case "$(said)" in *"withdrawn, and the withdrawal read back"*) ;;
   *) error "MUT-ENQUEUE-NOT-WITHDRAWN: a confirmed withdrawal was not reported: [$(said)]" ;; esac
 
@@ -330,7 +357,7 @@ $steady
 $steady
 head1 release" "" READY "" 1)"
 expect MUT-DEQUEUE-UNVERIFIED "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view timeline enqueue view dequeue --disable-auto queue-state --remove-label ready-to-merge "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view queue-state dequeue --disable-auto queue-state --remove-label ready-to-merge "
 case "$(said)" in *"withdrawal could NOT be confirmed"*) ;;
   *) error "MUT-DEQUEUE-UNVERIFIED: an unverified removal was reported as a withdrawal: [$(said)]" ;; esac
 case "$(said)" in *"withdrawn, and the withdrawal read back"*)
@@ -341,24 +368,109 @@ reset_fakes
 GH_ENQUEUE_HEAD=head9
 got="$(writes "$four" "" READY "" 1)"
 expect MUT-QUEUE-ENTRY-UNCHECKED "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view timeline enqueue view timeline queue-state dequeue --disable-auto queue-state --remove-label ready-to-merge "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view timeline queue-state dequeue --disable-auto queue-state --remove-label ready-to-merge "
 reset_fakes
 
-# The queue state could not be read: an unread entry is not a confirmed one.
-GH_QUEUE_READ_FAIL=1
+# The queue state could not be read after the enqueue: an unread entry is not a confirmed one.
+# The read before the attempt still succeeds, so the run knows the entry is its own to withdraw.
+GH_QUEUE_READ_FAIL_FROM=2
 got="$(writes "$four" "" READY "" 1)"
 expect MUT-QUEUE-READ-FAIL-OPEN "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view timeline enqueue view timeline queue-state dequeue --disable-auto queue-state --remove-label ready-to-merge "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view timeline queue-state dequeue --disable-auto queue-state --remove-label ready-to-merge "
 case "$(said)" in *"withdrawal could NOT be confirmed"*) ;;
   *) error "MUT-QUEUE-READ-FAIL-OPEN: an unreadable queue state did not fail closed: [$(said)]" ;; esac
 reset_fakes
 
-# A refused enqueue withdraws nothing and reports the state it read.
+# A refused enqueue is still reconciled: the identity, the timeline and the queue are read after
+# it exactly as they are after a call that succeeded. Here they confirm the refusal -- nothing is
+# queued and nothing moved -- so nothing is withdrawn and the ready label stands.
 GH_ENQUEUE_FAIL=1
 got="$(writes "$four" "" READY "" 1)"
 expect MUT-ENQUEUE-REFUSED-DEQUEUES "$got" \
-  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node view timeline enqueue queue-state "
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view timeline queue-state "
+case "$(said)" in *"the enqueue was refused, and nothing is queued"*) ;;
+  *) error "MUT-ENQUEUE-EXIT-IS-EVIDENCE: a confirmed refusal was not reported as one: [$(said)]" ;; esac
+no_label_removal MUT-ENQUEUE-EXIT-IS-EVIDENCE
 reset_fakes
+
+# The enqueue client agrees and leaves nothing in the queue: evidence that disagrees with itself,
+# and not an enqueue. Nothing is queued, so nothing is withdrawn, but the run does not end READY.
+GH_ENQUEUE_SILENT=1
+got="$(writes "$four" "" READY "" 1)"
+expect MUT-ENQUEUE-LEFT-NO-ENTRY "$got"   "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view timeline queue-state --remove-label ready-to-merge "
+case "$(said)" in *"unconfirmed:enqueue-left-no-entry"*"nothing is queued"*) ;;
+  *) error "MUT-ENQUEUE-LEFT-NO-ENTRY: an enqueue that left no entry was not reported: [$(said)]" ;; esac
+reset_fakes
+
+# The enqueue client exits nonzero having queued the pull request all the same: GitHub accepted the
+# mutation and the answer was lost. The exit status is not evidence, so the entry is read back like
+# any other, found at the audited head on an unmoved base, and kept.
+GH_ENQUEUE_LOST=1
+got="$(writes "$four" "" READY "" 1)"
+expect MUT-ENQUEUE-EXIT-IS-EVIDENCE "$got" \
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view timeline queue-state "
+case "$(said)" in *"the enqueue client failed, and the entry it left was read back"*) ;;
+  *) error "MUT-ENQUEUE-EXIT-IS-EVIDENCE: a lost response was reported as a refusal: [$(said)]" ;; esac
+no_label_removal MUT-ENQUEUE-EXIT-IS-EVIDENCE
+reset_fakes
+
+# The same lost response, with the base retargeted in the same breath: the review pass that found
+# this branch open reproduced exactly this. The entry the failed call left must be withdrawn and
+# the ready label taken back, not left standing on a base the audit never judged.
+GH_ENQUEUE_LOST=1
+got="$(writes "$steady
+$steady
+$steady
+head1 release" "" READY "" 1)"
+expect MUT-ENQUEUE-EXIT-IS-EVIDENCE "$got" \
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view queue-state dequeue --disable-auto queue-state --remove-label ready-to-merge "
+case "$(said)" in *"base-moved:release"*"withdrawn, and the withdrawal read back"*) ;;
+  *) error "MUT-ENQUEUE-EXIT-IS-EVIDENCE: a queued entry on a moved base was not withdrawn: [$(said)]" ;; esac
+reset_fakes
+
+# A head that moved past expectedHeadOid: the mutation really is refused, nothing is queued -- and
+# the label the run wrote names a head that no longer exists, so it goes.
+GH_ENQUEUE_FAIL=1
+got="$(writes "$steady
+$steady
+$steady
+head2xxxxxxx master" "" READY "" 1)"
+expect MUT-ENQUEUE-FAIL-LABEL-STANDS "$got" \
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view queue-state --remove-label ready-to-merge "
+case "$(said)" in *"head-moved:head2xx"*"nothing is queued"*) ;;
+  *) error "MUT-ENQUEUE-FAIL-LABEL-STANDS: a refused enqueue on a moved head was not reconciled: [$(said)]" ;; esac
+reset_fakes
+
+# A failed call and an unreadable queue after it: whether the mutation landed cannot be told, so it
+# is not assumed not to have. Nothing was queued before the attempt, so anything there is this
+# run's, and the withdrawal is attempted and must be confirmed -- here it cannot be.
+GH_ENQUEUE_FAIL=1
+GH_QUEUE_READ_FAIL_FROM=2
+got="$(writes "$four" "" READY "" 1)"
+expect MUT-ENQUEUE-FAIL-STATE-UNREAD "$got" \
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state view timeline enqueue view timeline queue-state dequeue --disable-auto queue-state --remove-label ready-to-merge "
+case "$(said)" in *"unconfirmed:queue-state-unreadable"*"withdrawal could NOT be confirmed"*) ;;
+  *) error "MUT-ENQUEUE-FAIL-STATE-UNREAD: an unreadable state on the failure path passed as nothing queued: [$(said)]" ;; esac
+reset_fakes
+
+# The queue could not be read BEFORE the attempt: an entry found afterwards could not then be told
+# from one another run put there, so nothing is attempted at all.
+GH_QUEUE_READ_FAIL_FROM=1
+got="$(writes "$four" "" READY "" 1)"
+expect MUT-PRE-QUEUE-UNREAD "$got" \
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state --remove-label ready-to-merge "
+reset_fakes
+
+# Already in the queue, and not by this run: it is neither enqueued over nor withdrawn.
+got="$(writes "$four" "" READY "" 1 "queued no-auto head7")"
+expect MUT-ENQUEUE-OVER-AUTOMATION "$got" \
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state "
+no_label_removal MUT-ENQUEUE-OVER-AUTOMATION
+
+# The same for an auto-merge someone else left pending: it is not this run's to take away.
+got="$(writes "$four" "" READY "" 1 "not-queued auto -")"
+expect MUT-ENQUEUE-OVER-AUTOMATION "$got" \
+  "--add-label lane:findings-p1p2 view --add-label ready-to-merge view node queue-state "
 
 # A re-read of the identity that fails is drift, not agreement.
 GH_IDENTITY_FAIL=1

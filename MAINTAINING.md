@@ -215,7 +215,12 @@ carries no queue — `gh pr merge --merge --auto` would instead merge a mergeabl
 outright there — and `expectedHeadOid` binds it to the audited head. The base is bound by the
 audit: the base ref and the retarget timeline are confirmed immediately before the call and again
 after it, the queue entry is read back and must hold the audited head, and anything that fails is
-withdrawn with `dequeuePullRequest` and the withdrawal confirmed by reading the state back.
+withdrawn with `dequeuePullRequest` and the withdrawal confirmed by reading the state back. Those
+reads follow the call whichever way it exited, because a nonzero exit says the answer was lost and
+not that the mutation was refused: only the queue can tell an enqueue that never happened from one
+whose response did not arrive. The queue is read before the call as well, so that merge automation
+the audit did not create is neither enqueued over nor taken away, and so that what is found
+afterwards is known to be the audit's own.
 Evidence that cannot be read is never agreement. What no client can close is the interval between
 that final confirmation and the queue's own merge; a retarget landing there is a base change
 recorded after the review, which the next audit reports. The

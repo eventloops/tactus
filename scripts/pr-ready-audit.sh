@@ -24,17 +24,22 @@
 # back afterwards and must hold the audited head, and the base and timeline are confirmed once
 # more. Anything that fails is withdrawn with `dequeuePullRequest`, and the withdrawal is
 # confirmed by reading the state back -- `gh pr merge --disable-auto` exits successfully on a
-# queued pull request having removed nothing, so no exit status is evidence here. Evidence that
-# cannot be read is UNCONFIRMED, never agreement.
+# queued pull request having removed nothing, so no exit status is evidence here. That holds for
+# the enqueue's own exit status too: a nonzero exit means the answer was lost, not that the
+# mutation was refused, so the same reads follow a failed call and only they can say whether it
+# was refused (nothing queued) or landed anyway (an entry to reconcile or withdraw). The queue is
+# read before the call as well, so that merge automation this run did not create is never
+# attempted over and never taken away. Evidence that cannot be read is UNCONFIRMED, never
+# agreement.
 #
 # What is left is the interval between that final confirmation and the queue's own merge, which no
 # client can close; a retarget landing there is a `base_ref_changed` event after the review, which
 # the next audit reports as `retargeted-after-review`.
 #
 # --apply maintains the lane:* and ready label on each pull request. --enqueue adds every READY
-# pull request to the merge queue (`gh pr merge --merge --auto`) in the order the arguments give,
-# so the caller states the priority; with no arguments it walks the open pull requests in the
-# API's order, which is not a priority. It implies --apply.
+# pull request that carries no merge automation of its own to the merge queue, in the order the
+# arguments give, so the caller states the priority; with no arguments it walks the open pull
+# requests in the API's order, which is not a priority. It implies --apply.
 #
 # --ready-label NAME uses an existing label of that name as it is (the audit adds and removes it
 # on pull requests and never recolours or redescribes it) and creates it only when absent.
@@ -409,10 +414,16 @@ base_drift() {
 # The enqueue is `enqueuePullRequest`, which can only queue, bound to the head by
 # `expectedHeadOid`; the base is bound by confirming it immediately before the call, by reading
 # the queue entry back afterwards and requiring it to hold this head, and by confirming the base
-# and the retarget timeline again after the call. A queue entry that fails any of those is
-# withdrawn with `dequeuePullRequest` and the withdrawal is CONFIRMED by reading the state back:
-# no exit status is taken as evidence of anything. Evidence that cannot be read is UNCONFIRMED
-# everywhere, never agreement.
+# and the retarget timeline again after the call. Those reads happen whichever way the enqueue
+# client exits, because a nonzero exit says the answer did not arrive and not that the mutation
+# was refused: an accepted enqueue whose response is lost must not read as one that never
+# happened. What separates a confirmed refusal from an indeterminate outcome is the queue itself,
+# read before the call as well as after it -- before, so that automation this run did not create
+# is left alone and not attempted over; after, so that whatever this run did create is held to
+# the head, base and timeline the audit judged. A queue entry that fails any of that is withdrawn
+# with `dequeuePullRequest` and the withdrawal is CONFIRMED by reading the state back: no exit
+# status is taken as evidence of anything. Evidence that cannot be read is UNCONFIRMED everywhere,
+# never agreement.
 #
 # The residue is the interval between that final confirmation and the queue's own merge, which no
 # client can close; a retarget landing there is a base change recorded after the review, which the
@@ -460,9 +471,28 @@ maintain_labels_and_enqueue() {
     fi
   fi
 
+  # The queue as this run finds it, read before anything is attempted, because it is what makes
+  # the reconciliation afterwards mean anything: merge automation standing here already was put
+  # here by someone, taking it away is not this run's business, and an entry found afterwards
+  # could not then be told from one this run created. So the enqueue is attempted only on a pull
+  # request carrying none, and an unreadable state -- which cannot tell the two apart either --
+  # stops it as well. Everything found after the attempt is therefore this run's to account for.
+  local queueable=0 b_state b_auto b_head
+  if [[ "$state" == READY ]] && ((enqueue)); then
+    read -r b_state b_auto b_head <<< "$(pr_queue_state "$pr")"
+    if [[ "$b_state $b_auto" == "not-queued no-auto" ]]; then
+      queueable=1
+    elif [[ "$b_state" == unknown ]]; then
+      echo "      #$pr's queue state could not be read: not enqueued"
+      state=UNCONFIRMED
+    else
+      echo "      #$pr already carries merge automation ($b_state, auto-merge $b_auto, entry ${b_head:0:7}): not enqueued, and nothing another run put there is touched"
+    fi
+  fi
+
   # Before the enqueue: the timeline as well as the ref name, since a retarget away and back
   # leaves the name it started with, and an unreadable timeline is not an absent retarget.
-  if [[ "$state" == READY ]] && ((enqueue)); then
+  if [[ "$state" == READY ]] && ((queueable)); then
     drift="$(base_drift "$pr" "$head" "$base" "$review_at")"
     if [[ -n "$drift" ]]; then
       echo "      $drift since the audit read ${head:0:7} on $base: not enqueued"
@@ -470,38 +500,53 @@ maintain_labels_and_enqueue() {
     fi
   fi
 
-  if [[ "$state" == READY ]] && ((enqueue)); then
-    if enqueue_pr "$pr" "$node" "$head"; then
-      # What was queued is read back, not assumed: the entry must exist and must hold this head,
-      # and the base and the timeline must still be what the audit judged.
-      local q_state q_auto q_head
-      drift="$(base_drift "$pr" "$head" "$base" "$review_at")"
-      if [[ -z "$drift" ]]; then
-        read -r q_state q_auto q_head <<< "$(pr_queue_state "$pr")"
-        case "$q_state" in
-          queued) [[ "$q_head" == "$head" ]] || drift="head-moved:${q_head:0:7}" ;;
-          not-queued) drift="unconfirmed:enqueue-left-no-entry" ;;
-          *) drift="unconfirmed:queue-state-unreadable" ;;
-        esac
-      fi
-      if [[ -z "$drift" ]]; then
-        echo "      enqueued #$pr at ${head:0:7} on $base"
-      elif dequeue_pr "$pr" "$node"; then
-        echo "      $drift after enqueuing ${head:0:7}: withdrawn, and the withdrawal read back"
+  if [[ "$state" == READY ]] && ((queueable)); then
+    # The enqueue client's exit status is not evidence and is never read as one. A nonzero exit
+    # says the answer did not arrive, not that the mutation was refused: GitHub can accept the
+    # enqueue and the response be lost, and a branch that assumed refusal there would leave an
+    # entry queued on a base the review never saw with the ready label still standing. So the
+    # identity, the timeline and the queue are read back whichever way the call exited, and those
+    # reads -- not the status -- say what happened.
+    local accepted=0 q_state q_auto q_head
+    if enqueue_pr "$pr" "$node" "$head"; then accepted=1; fi
+    drift="$(base_drift "$pr" "$head" "$base" "$review_at")"
+    read -r q_state q_auto q_head <<< "$(pr_queue_state "$pr")"
+
+    if [[ "$q_state $q_auto" == "not-queued no-auto" ]]; then
+      # Nothing is queued and nothing is pending: this run queued nothing and has nothing to
+      # withdraw. That is a confirmed refusal when the call also failed -- the base carries no
+      # queue, or the head moved past expectedHeadOid -- and it contradicts itself when the call
+      # reported success, which is not agreement either.
+      if ((accepted)) && [[ -z "$drift" ]]; then drift=unconfirmed:enqueue-left-no-entry; fi
+      if [[ -n "$drift" ]]; then
+        echo "      $drift at the enqueue of ${head:0:7}: nothing is queued"
         state="$(drift_state "$drift")"
       else
-        echo "      $drift after enqueuing ${head:0:7}: the withdrawal could NOT be confirmed; #$pr may still be queued"
-        state="$(drift_state "$drift")"
+        echo "      #$pr was not enqueued at ${head:0:7} on $base: the enqueue was refused, and nothing is queued"
       fi
     else
-      # A refused enqueue is not a claim about anything: the mutation refuses an already-queued
-      # pull request, a head that has moved past expectedHeadOid, and a base with no merge queue
-      # alike. The state is read so the line says which, and nothing is withdrawn here -- a pull
-      # request already in the queue was put there by someone, and taking it out is not this
-      # branch's business.
-      local r_state r_auto r_head
-      read -r r_state r_auto r_head <<< "$(pr_queue_state "$pr")"
-      echo "      could not enqueue #$pr at ${head:0:7} on $base (it is $r_state, auto-merge $r_auto, entry ${r_head:0:7})"
+      # Something is here, or the state could not be read, which is not evidence that nothing was
+      # queued. Either way it is this run's, since nothing was here before, so it is held to what
+      # the audit judged: the audited head, no automation this run did not create, and a base and
+      # timeline still unmoved. Anything else is withdrawn, and the withdrawal is confirmed by
+      # reading the state back.
+      case "$q_state $q_auto" in
+        "queued no-auto") [[ "$q_head" == "$head" ]] || drift="${drift:-head-moved:${q_head:0:7}}" ;;
+        unknown*) drift="${drift:-unconfirmed:queue-state-unreadable}" ;;
+        *) drift="${drift:-unconfirmed:auto-merge-pending}" ;;
+      esac
+      if [[ -n "$drift" ]]; then
+        if dequeue_pr "$pr" "$node"; then
+          echo "      $drift after enqueuing ${head:0:7}: withdrawn, and the withdrawal read back"
+        else
+          echo "      $drift after enqueuing ${head:0:7}: the withdrawal could NOT be confirmed; #$pr may still be queued"
+        fi
+        state="$(drift_state "$drift")"
+      elif ((accepted)); then
+        echo "      enqueued #$pr at ${head:0:7} on $base"
+      else
+        echo "      enqueued #$pr at ${head:0:7} on $base: the enqueue client failed, and the entry it left was read back"
+      fi
     fi
   fi
 
