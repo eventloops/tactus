@@ -5042,41 +5042,102 @@ fn the_publication_relations_hold_over_the_crossed_disposition_grid() {
     };
     accepts(&stale, &stale_publication(None));
 
-    let stale_cases: [(&str, BreakPublication); 7] = [
-        ("a head the verification did not read", |prepared| {
-            prepared.expected_head = sha("moved-head");
-        }),
-        ("a proposal the verification did not judge", |prepared| {
-            prepared.proposed_sha = sha("another-proposal");
-        }),
-        ("no proposal pin", |prepared| prepared.prepared_ref = None),
-        ("another pin than the one it verified", |prepared| {
-            prepared.prepared_ref = Some(git_ref("prepared/9"));
-        }),
-        ("no verification record", |prepared| {
-            prepared.verification = None;
-        }),
-        ("a verification that did not pass", |prepared| {
-            prepared.verification = Some(VerificationRecord {
-                verdict: Verdict::Rejected,
-                gates_passed: true,
-                reviews: Vec::new(),
-                detail: "  rejected  ".to_owned(),
-            });
-        }),
-        ("the candidate's own record as its source", |prepared| {
-            prepared.verification_source = VerificationSource::CandidatePrepared {
-                key: MID,
-                generation: GenerationId(0),
-            };
-        }),
+    let stale_cases: [(&str, BreakPublication, FoldError); 7] = [
+        (
+            "a head the verification did not read",
+            |prepared| {
+                prepared.expected_head = sha("moved-head");
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: format!(
+                    "it expects head {} and the verification recorded head {head}",
+                    sha("moved-head")
+                ),
+            },
+        ),
+        (
+            "a proposal the verification did not judge",
+            |prepared| {
+                prepared.proposed_sha = sha("another-proposal");
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: format!(
+                    "it publishes {} and the verification judged {proposal}",
+                    sha("another-proposal")
+                ),
+            },
+        ),
+        (
+            "no proposal pin",
+            |prepared| prepared.prepared_ref = None,
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: "a stale publication without the pin keeping its proposal reachable"
+                    .to_owned(),
+            },
+        ),
+        (
+            "another pin than the one it verified",
+            |prepared| {
+                prepared.prepared_ref = Some(git_ref("prepared/9"));
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: format!(
+                    "it pins the proposal at {:?} and the verification pinned it at `{}`",
+                    Some(git_ref("prepared/9").as_str()),
+                    git_ref("prepared/0")
+                ),
+            },
+        ),
+        (
+            "no verification record",
+            |prepared| {
+                prepared.verification = None;
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: "a verified publication without a terminal verification record".to_owned(),
+            },
+        ),
+        (
+            "a verification that did not pass",
+            |prepared| {
+                prepared.verification = Some(VerificationRecord {
+                    verdict: Verdict::Rejected,
+                    gates_passed: true,
+                    reviews: Vec::new(),
+                    detail: "  rejected  ".to_owned(),
+                });
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: "a publication whose verification did not pass".to_owned(),
+            },
+        ),
+        (
+            "the candidate's own record as its source",
+            |prepared| {
+                prepared.verification_source = VerificationSource::CandidatePrepared {
+                    key: MID,
+                    generation: GenerationId(0),
+                };
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: "a verified publication citing the candidate record rather than the \
+                         verification that judged what is being published"
+                    .to_owned(),
+            },
+        ),
     ];
-    for (label, break_it) in stale_cases {
-        assert!(
-            stale
-                .plan_transition(&stale_publication(Some(break_it)))
-                .is_err(),
-            "a stale-clean publication with {label} was authorized"
+    for (label, break_it, expected) in stale_cases {
+        assert_eq!(
+            stale.plan_transition(&stale_publication(Some(break_it))),
+            Err(expected),
+            "a stale-clean publication with {label} was not refused for the reason it names"
         );
     }
 
@@ -5111,24 +5172,49 @@ fn the_publication_relations_hold_over_the_crossed_disposition_grid() {
         })
     };
     accepts(&present, &present_publication(None));
-    let present_cases: [(&str, BreakPublication); 3] = [
-        ("a proposal that is not the head", |prepared| {
-            prepared.proposed_sha = sha("another-proposal");
-        }),
-        ("a head the verification did not read", |prepared| {
-            prepared.expected_head = sha("moved-head");
-            prepared.proposed_sha = sha("moved-head");
-        }),
-        ("a verification that did not pass", |prepared| {
-            prepared.verification = Some(verification_record(Verdict::GatesFailed));
-        }),
+    let present_cases: [(&str, BreakPublication, FoldError); 3] = [
+        (
+            "a proposal that is not the head",
+            |prepared| {
+                prepared.proposed_sha = sha("another-proposal");
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: "an already-present publication proposing a commit other than the head \
+                         it claims already contains the change"
+                    .to_owned(),
+            },
+        ),
+        (
+            "a head the verification did not read",
+            |prepared| {
+                prepared.expected_head = sha("moved-head");
+                prepared.proposed_sha = sha("moved-head");
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: format!(
+                    "it expects head {} and the verification recorded head {head}",
+                    sha("moved-head")
+                ),
+            },
+        ),
+        (
+            "a verification that did not pass",
+            |prepared| {
+                prepared.verification = Some(verification_record(Verdict::GatesFailed));
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_prepared",
+                detail: "a publication whose verification did not pass".to_owned(),
+            },
+        ),
     ];
-    for (label, break_it) in present_cases {
-        assert!(
-            present
-                .plan_transition(&present_publication(Some(break_it)))
-                .is_err(),
-            "an already-present publication with {label} was authorized"
+    for (label, break_it, expected) in present_cases {
+        assert_eq!(
+            present.plan_transition(&present_publication(Some(break_it))),
+            Err(expected),
+            "an already-present publication with {label} was not refused for the reason it names"
         );
     }
 
@@ -6115,53 +6201,107 @@ fn a_rejection_creates_or_widens_exactly_one_lineage_and_registers_its_repair() 
     );
     accepts(&ready, &rejection(1, None));
 
-    let cases: [(&str, BreakRejection); 6] = [
-        ("a head the verification did not read", |rejected| {
-            rejected.rejecting_head = sha("moved-head");
-        }),
-        ("a verification that passed", |rejected| {
-            rejected.disposition = RejectionDisposition::CodeRejected {
-                verification: VerificationRecord {
-                    verdict: Verdict::Passed,
-                    gates_passed: true,
-                    reviews: Vec::new(),
-                    detail: "  passed  ".to_owned(),
-                },
-            };
-        }),
-        ("a lineage rooted elsewhere", |rejected| {
-            rejected.lease_effect = RejectionLeaseEffect::CreatesLineage {
-                root: ZETA,
-                paths: region(MID),
-            };
-        }),
-        ("a widening of a lineage that does not exist", |rejected| {
-            rejected.lease_effect = RejectionLeaseEffect::WidensLineage {
-                root: MID,
-                paths: region(MID),
-            };
-        }),
-        ("a repair parented on another task", |rejected| {
-            rejected.repair.entry.lineage = Some(Lineage {
-                root: MID,
-                parent: ALPHA,
-                index: 0,
-            });
-        }),
-        ("a repair numbered as another member", |rejected| {
-            rejected.repair.entry.lineage = Some(Lineage {
-                root: MID,
-                parent: MID,
-                index: 3,
-            });
-        }),
+    let cases: [(&str, BreakRejection, FoldError); 6] = [
+        (
+            "a head the verification did not read",
+            |rejected| {
+                rejected.rejecting_head = sha("moved-head");
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_rejected",
+                detail: format!(
+                    "it was judged against head {} and the verification recorded head {head}",
+                    sha("moved-head")
+                ),
+            },
+        ),
+        (
+            "a verification that passed",
+            |rejected| {
+                rejected.disposition = RejectionDisposition::CodeRejected {
+                    verification: VerificationRecord {
+                        verdict: Verdict::Passed,
+                        gates_passed: true,
+                        reviews: Vec::new(),
+                        detail: "  passed  ".to_owned(),
+                    },
+                };
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_rejected",
+                detail: "a code rejection carries the verification that rejected it, and this \
+                         one passed"
+                    .to_owned(),
+            },
+        ),
+        (
+            "a lineage rooted elsewhere",
+            |rejected| {
+                rejected.lease_effect = RejectionLeaseEffect::CreatesLineage {
+                    root: ZETA,
+                    paths: region(MID),
+                };
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_rejected",
+                detail: format!(
+                    "it creates lineage {ZETA} from the rejection of task {}",
+                    MID.0
+                ),
+            },
+        ),
+        (
+            "a widening of a lineage that does not exist",
+            |rejected| {
+                rejected.lease_effect = RejectionLeaseEffect::WidensLineage {
+                    root: MID,
+                    paths: region(MID),
+                };
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_rejected",
+                detail: "a rejection creates a lineage from an ordinary candidate and widens the \
+                         lineage of a member; this does the other one"
+                    .to_owned(),
+            },
+        ),
+        (
+            "a repair parented on another task",
+            |rejected| {
+                rejected.repair.entry.lineage = Some(Lineage {
+                    root: MID,
+                    parent: ALPHA,
+                    index: 0,
+                });
+            },
+            FoldError::MalformedEntry {
+                kind: "merge_rejected",
+                key: 3,
+                detail: format!(
+                    "parent {ALPHA} belongs to lineage {ALPHA}, not recorded root {MID}"
+                ),
+            },
+        ),
+        (
+            "a repair numbered as another member",
+            |rejected| {
+                rejected.repair.entry.lineage = Some(Lineage {
+                    root: MID,
+                    parent: MID,
+                    index: 3,
+                });
+            },
+            FoldError::InconsistentRecord {
+                kind: "merge_rejected",
+                detail: format!("the repair is the #0 member of lineage {MID} and records index 3"),
+            },
+        ),
     ];
-    for (label, break_it) in cases {
-        assert!(
-            ready
-                .plan_transition(&rejection(1, Some(break_it)))
-                .is_err(),
-            "a rejection with {label} was folded"
+    for (label, break_it, expected) in cases {
+        assert_eq!(
+            ready.plan_transition(&rejection(1, Some(break_it))),
+            Err(expected),
+            "a rejection with {label} was not refused for the reason it names"
         );
     }
 
