@@ -140,7 +140,16 @@ offer, the entry now says so and cites the passage that settles it.
   the mapping of each result. Reviewer `Unavailable` with RateLimited →
   `Infrastructure{RateLimited}`; reviewer `Timeout` → `ReviewerTimeout`; any other reviewer
   unavailability (a review process that could not run reaches the judgement this way through
-  `run_review`) → `ReviewUnavailable`; a Runner error running a gate whose process fate is
+  `run_review`) → `ReviewUnavailable`, **except a reviewer whose process the Runner established
+  was never started, which is `RunnerSpawnFailure`** — `invariants[22]` (INV-23) requires that
+  settlement for a mid-run image mismatch and says the rule covers "every probe, worker, gate,
+  review, and re-ask process of the run", so the generic reviewer mapping this reading chose does
+  not answer for it; the first version of this clause said every reviewer unavailability was
+  `ReviewUnavailable`, which made the invariant's named case unreachable for reviewers and re-asks
+  (corrected in the fifth repair round, `pr8-triage.md` §8.2 finding 4). Deferral and containment
+  are the same either way: `run_review` still contains the failure so the pass defers rather than
+  ending the command, and only the durable attribution differs. A Runner error running a gate whose
+  process fate is
   `NeverStarted` → `RunnerSpawnFailure` (R25; typed by the judge as `JudgeError::Runner`, never
   propagated as an error of the sequence), one whose fate is `Gone` → `Other` (a started process
   the Runner has established gone), and one whose fate is `Unresolved` → no terminal at all: the

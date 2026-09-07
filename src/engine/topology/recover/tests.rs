@@ -9732,12 +9732,13 @@ impl crate::workspace_manager::EffectHooks for BlockNthSnapshotAdd {
         {
             self.adds += 1;
             if self.adds == self.at {
-                std::fs::create_dir_all(&self.blocked).expect("create the obstructing directory");
-                std::fs::write(
-                    self.blocked.join("occupied"),
+                // `write_file` creates the parents, so this leaves the
+                // reviewer's slot occupied by a foreign non-empty directory
+                // and `git worktree add` fails on it.
+                crate::workspace_manager::fixture::write_file(
+                    &self.blocked.join("occupied"),
                     b"a foreign non-empty directory",
-                )
-                .expect("make the worktree add fail");
+                );
             }
         }
         Injection::Proceed
