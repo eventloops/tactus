@@ -936,8 +936,13 @@ fn the_packets_group_level_row_statements_hold_over_whole_groups() {
 }
 
 #[test]
-fn every_external_and_process_local_row_has_at_least_one_claimed_site() {
-    // `outputs`: "every such row has at least one Topology/Shared site".
+fn every_row_a_run_can_act_on_has_at_least_one_claimed_site() {
+    // `outputs`: "every such row has at least one Topology/Shared site" —
+    // stated over `ResourceRow::ALL`, the fifteen rows a run can act on.
+    // R20, the external-physical credential-volume row, is
+    // `operator_owned` and never created or pruned by a run
+    // (`src/runner/container.rs:299`), so it has no effect site and is
+    // excluded from the enum rather than from this loop.
     let claimed: BTreeSet<ResourceRow> = EffectSiteId::claimed()
         .into_iter()
         .map(|s| s.row())
@@ -6165,6 +6170,50 @@ fn the_bijection_fails_on_every_missing_link() {
 }
 
 #[test]
+fn residue_element_failures_display_the_wire_spelling_not_the_debug_one() {
+    // `SWEEP-RESIDUE-AUTHORITY-001`: these three failures used to write
+    // `{element:?}`, the derive's `IndexLock` spelling, while every document
+    // the registry serialises spells the same element `index_lock`
+    // (`ResidueElement::wire_name`). A reader comparing the two would not
+    // know they name one element. Each failure's rendered text has to
+    // contain the wire spelling and not the Debug one.
+    let element = ResidueElement::IndexLock;
+    let site = EffectSiteId::Event(EventSite::AppendFirst);
+    let phase = EntryPhase::Before;
+
+    let not_constructed = BijectionFailure::ResidueElementNotConstructed {
+        site,
+        phase,
+        element,
+    };
+    let not_recovered = BijectionFailure::ResidueElementNotRecovered {
+        site,
+        phase,
+        element,
+    };
+    let misclassified = BijectionFailure::ResidueElementMisclassified {
+        site,
+        phase,
+        element,
+        classified: ObjectResidue::After,
+        expected: ObjectResidue::Internal,
+    };
+
+    for failure in [not_constructed, not_recovered, misclassified] {
+        let text = failure.to_string();
+        assert!(
+            text.contains(element.wire_name()),
+            "`{text}` does not contain the wire spelling `{}`",
+            element.wire_name()
+        );
+        assert!(
+            !text.contains("IndexLock"),
+            "`{text}` still carries the Debug spelling"
+        );
+    }
+}
+
+#[test]
 fn a_phase_bound_to_the_before_action_reports_the_before_entry_it_has_none_to_bind_to() {
     // `check_bijection` states the resumes-as-before relation between two
     // entries, and its third arm — there is no before-phase entry to bind to
@@ -6637,7 +6686,6 @@ fn there_is_no_host_on_which_a_containment_point_is_unrequired() {
         },
         "the default host is the one this build actually runs on"
     );
-    assert_eq!(Host::current().other(), Host::current().other());
     assert_ne!(Host::current().other(), Host::current());
     assert_eq!(
         Host::current().platform(),

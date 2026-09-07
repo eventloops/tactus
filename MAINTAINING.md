@@ -12,7 +12,7 @@ source, documentation, workflows, release machinery and this file.
    Review evidence, Risk and rollback, Review finding ledger — and
    `.github/scripts/validate-pr-body.sh` rejects anything else. Run it against your body before
    pushing.
-3. **Run the nine-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
+3. **Run the ten-command baseline** (`CODING_STANDARDS.md` §2) before every push, then wait for
    the two required contexts: `upstroke-ci` (formatting, Clippy on three platforms, the Linux and macOS
    test matrix, the Windows suite on its self-hosted ephemeral runner `test (winguest)`, the
    MSRV matrix, the six Bash gates) and `upstroke-pr-policy` (title, body sections, ledger). A
@@ -173,10 +173,12 @@ at that commit, and every backticked regression or guard identifier must occur i
 Bind rows to the first integrated commit, never to a lane commit that was later cherry-picked.
 Change a validator and its fixtures in the same pull request as any schema change.
 
-Slices of a long-running design land as pull requests into their integration branch (today
-`codex/parallelism-design`) under the same steps; the integration branch's own pull request into
-`master` is reviewed once more, on the head that merges. Merge commits only, everywhere: a rewrite
-orphans every ledger row bound to a replaced SHA.
+Slices of a long-running design land as pull requests into their integration branch under the same
+steps; the integration branch's own pull request into `master` is reviewed once more, on the head
+that merges. There is no integration branch today: the parallel-execution design's
+`codex/parallelism-design` was deleted once its slices had landed, so standing another one up means
+adding its name to both workflows' branch lists and to the gate that pins them in one change.
+Merge commits only, everywhere: a rewrite orphans every ledger row bound to a replaced SHA.
 
 ## Repository rules
 
@@ -197,10 +199,12 @@ green; auto-merge is enabled on the repository in the same change as the queue r
 with no bypass. Required-check names are API: to rename one, land the replacement, observe it on a
 pull request, update the ruleset, then remove the old requirement. The workflow trigger contract
 is fixed too: `ci.yml` runs on `push`, `pull_request` and `merge_group`, and `pr-policy.yml` on
-`pull_request` and `merge_group`, each with the branch list exactly `[master,
-codex/parallelism-design]` and nothing else, so slice pull requests into the integration branch
-and queue entries for either base get both contexts; `test-docs-consistency.sh` pins that
-contract, and changing it is a change to this file first.
+`pull_request` and `merge_group`, each with the branch list exactly `[master]` and nothing else. A
+branch list is matched against the base a pull request targets, so both contexts reach every pull
+request and every queue entry whose base is `master`, and a pull request targeting any other branch
+receives neither and, if they are required there, waits on checks that never arrive.
+`test-docs-consistency.sh` pins the two workflows against its own copy of that list; it does not
+read this file, so changing the contract is a change to this file and to the gate together.
 
 Readiness to enqueue is the lane rule of 2026-09-06, audited by `scripts/pr-ready-audit.sh`,
 which decides a pull request's lane from its branch prefix alone (`codex/findings-p3-*`,
@@ -229,22 +233,22 @@ bootstrap and audit both through the API:
 
 ```bash
 gh api --method PUT \
-  repos/eventloops/upstroke/actions/permissions/fork-pr-contributor-approval \
+  repos/sourcemaps/upstroke/actions/permissions/fork-pr-contributor-approval \
   -H 'X-GitHub-Api-Version: 2026-03-10' \
   -f approval_policy=all_external_contributors
 
-gh api --method PUT repos/eventloops/upstroke/immutable-releases \
+gh api --method PUT repos/sourcemaps/upstroke/immutable-releases \
   -H 'X-GitHub-Api-Version: 2026-03-10'
 
 gh variable set UPSTROKE_IMMUTABLE_RELEASES_REQUIRED \
-  --repo eventloops/upstroke --body true
+  --repo sourcemaps/upstroke --body true
 
-gh api repos/eventloops/upstroke/actions/permissions/fork-pr-contributor-approval \
+gh api repos/sourcemaps/upstroke/actions/permissions/fork-pr-contributor-approval \
   -H 'X-GitHub-Api-Version: 2026-03-10'
-gh api repos/eventloops/upstroke/immutable-releases \
+gh api repos/sourcemaps/upstroke/immutable-releases \
   -H 'X-GitHub-Api-Version: 2026-03-10'
 gh variable get UPSTROKE_IMMUTABLE_RELEASES_REQUIRED \
-  --repo eventloops/upstroke
+  --repo sourcemaps/upstroke
 ```
 
 Fork pull requests are provisional: their checks are candidate-controlled, so the whole diff

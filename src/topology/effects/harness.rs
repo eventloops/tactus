@@ -315,12 +315,13 @@ impl HookHarness {
     ///
     /// Everything a funnel hooks until [`Self::end_fast_sequence`] is recorded
     /// as having run inside this sequence, which is what a no-execution entry
-    /// is measured against. A second `begin` closes the first.
+    /// is measured against. A second `begin` closes the first, because this
+    /// pushes a new sequence and sets `recording` unconditionally, whatever
+    /// it held before.
     /// A name is a label the suite chose and not an identity: beginning one
     /// twice records two sequences, so a second run under a name that saw
     /// something is still held to having seen something of its own.
     pub fn begin_fast_sequence(&mut self, name: &str) {
-        self.end_fast_sequence();
         self.fast.push(FastSequence {
             name: name.to_owned(),
             touched: Vec::new(),
