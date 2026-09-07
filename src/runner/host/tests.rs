@@ -5329,26 +5329,88 @@ fn a_refused_name_is_refused_identically_without_asking_the_filesystem_again() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+// The scratch tree of the memo fixture below, which perturbs one directory's
+// mode. `Drop` restores that mode and then removes the tree — the removal has to
+// walk back into the directory, so that order is load-bearing — and it runs on a
+// return and on an unwind alike, so an assertion firing while the execute bit is
+// cleared leaves neither the mutation nor the tree behind (§6, §12). A cleanup
+// failure is reported only when the thread is not already panicking, so it can
+// never mask the primary failure; `Scratch` in `inherited_writer` above takes
+// the same shape.
+#[cfg(unix)]
+struct PerturbedScratch {
+    root: PathBuf,
+    dir: PathBuf,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl PerturbedScratch {
+    // Takes the tree and records `dir`'s mode as it stands. Calling this before
+    // anything perturbs the mode is what makes the restore below the original
+    // one rather than a guess.
+    fn own(root: PathBuf, dir: PathBuf) -> Self {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let before = std::fs::metadata(&dir).expect("read the perturbed directory's mode");
+        // `mode()` carries the file-type bits as well; the permission bits are
+        // the ones a restore may set.
+        let mode = before.permissions().mode() & 0o7777;
+        Self { root, dir, mode }
+    }
+
+    // The perturbed directory. The guard owns the path, so nothing else has to
+    // keep a copy of it alive for the cleanup.
+    fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    // The mode that directory had before the test perturbed it.
+    fn mode(&self) -> u32 {
+        self.mode
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PerturbedScratch {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let restored =
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(self.mode));
+        let removed = std::fs::remove_dir_all(&self.root);
+        if !std::thread::panicking() {
+            restored.expect("restore the perturbed directory's mode");
+            removed.expect("remove the memo fixture");
+        }
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn a_stat_failure_is_not_memoised_as_a_permanent_refusal() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let root = scratch("memo-transient");
-    let bin = root.join("bin");
+    let installed = root.join("bin");
     let name = format!("upstroke-d2-{}", crate::ulid::ulid());
     let file = shim_file_name(&name);
-    let shim = marker_shim(&bin, &file, "RECOVERED");
+    let shim = marker_shim(&installed, &file, "RECOVERED");
+    // Established before the mode is touched, so every path out of this test
+    // from here on restores it and removes the tree.
+    let fixture = PerturbedScratch::own(root, installed);
+    let bin = fixture.dir();
+
     // Denying traversal into `bin` makes `fs::metadata` on the candidate fail
     // with something other than not-found: an undetermined answer, not a
     // finding that the program is absent.
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644))
+    std::fs::set_permissions(bin, std::fs::Permissions::from_mode(0o644))
         .expect("clear the directory's execute bit");
 
     let runner =
-        HostRunner::new().with_environment(environment_on_path(&[&bin], Some(REAL_PATHEXT)));
+        HostRunner::new().with_environment(environment_on_path(&[bin], Some(REAL_PATHEXT)));
     let composed = composed(&[
-        ("PATH", path_of(&[&bin]).as_os_str()),
+        ("PATH", path_of(&[bin]).as_os_str()),
         ("PATHEXT", OsStr::new(REAL_PATHEXT)),
     ]);
     let first = runner
@@ -5362,15 +5424,12 @@ fn a_stat_failure_is_not_memoised_as_a_permanent_refusal() {
 
     // The directory becomes searchable again; a transient failure must not
     // have been cached as if it were permanent.
-    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755))
+    std::fs::set_permissions(bin, std::fs::Permissions::from_mode(fixture.mode()))
         .expect("restore the directory's execute bit");
     let second = runner.program_for(&name, &composed).expect(
         "access recovered, so the memo must search again instead of replaying the stat failure",
     );
     assert_eq!(second, shim);
-
-    let _ = std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

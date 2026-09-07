@@ -2664,6 +2664,51 @@ The CLI appears under the run.
 
 The oracle: it really is installed now.
 
+## `struct PerturbedScratch {`
+
+The RAII owner of the fixture below: a scratch tree, plus the mode one of
+its directories had before the test cleared a bit of it.
+
+`Drop` restores the mode and then removes the tree, in that order because
+the removal has to walk back into the directory the test made
+untraversable. Both halves run on an unwind as well as on a return, so an
+assertion firing while the execute bit is cleared cannot leave the
+permission mutation or the tree behind — §6's rule that a guard beats a
+`start`/`finish` pair whose second half can be skipped, and §12's unique
+temporary directory with RAII cleanup. A cleanup failure is reported only
+when the thread is not already panicking, so tidying up can never replace
+the failure the test was reporting with one of its own; [`HeldFork`] takes
+the same shape for the same reason.
+
+`own` reads the mode instead of assuming `0o755`, and it is called before
+anything perturbs it, so what the restore puts back is what was there.
+
+## `fn a_stat_failure_is_not_memoised_as_a_permanent_refusal() {`
+
+A `stat` this platform refused to answer is not remembered as a decision.
+
+The other failure branch of the memo, and the one where fail-*closed*
+would be the error. `resolve_program` returns
+[`UpstrokeError::Filesystem`] for a candidate whose `stat` failed for a
+reason other than not-found, and that says the question is undetermined,
+not that the program is absent. Caching it would make a transient
+condition — an `EIO`, a mount that is briefly unreadable — permanent for
+the runner's lifetime, and rebuilding it from a stored string would
+flatten it into a `Refused` it never was.
+
+**The control is the recovery.** The execute bit goes back after the first
+call, and the second call finds the shim. A memo holding the failure would
+replay it instead, so the assertion fails for exactly the defect rather
+than for a fixture in which nothing changed. The first call asserts the
+*variant* as well, so flattening the typed error is caught even where the
+caching rule is right.
+
+Unix only: it needs a mode that denies traversal, and it is the platform's
+own refusal rather than an injected one that is under test. An execution
+identity that ignores the mode — `root` above all — is not the platform
+this asserts about, and the `expect_err` then fails with its diagnostic
+rather than passing quietly.
+
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {`
 
 Production reaches every spawn of a run through **one** `HostRunner`.
