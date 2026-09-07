@@ -719,7 +719,12 @@ by how far the launch got and by what the cancel established — two facts
 kept apart. Before `docker start` was attempted (`NotCreated`, `Created`)
 the fate is `NeverStarted` whatever the cancel achieved: a created but
 never started container holds no process, and a `docker create` whose
-answer was lost cannot have started one either. Once `docker start` was
+answer was lost cannot have started one either. Whether the start was
+attempted is the funnel's to say ([`super::StartFailure`]): a refusal at
+`Container.Start`'s `Before` phase never issued `docker start`, so the
+launch stays at `Created` — the cover review of `8a5f59e8` found every
+start failure recorded as `Started` (`PR8-R4-START-NOT-ATTEMPTED`).
+ Once `docker start` was
 attempted (`Started`) the cancel's evidence decides — `Gone` when the
 runtime confirmed a stop or a forced removal, `Unresolved` when it
 confirmed neither, and an answer that another reclaimer's removal is in

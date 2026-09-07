@@ -550,6 +550,21 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             survivor: Some(Liveness::Running),
             view_and_intent_retained: true,
         },
+        Cell {
+            case: "the funnel refuses before `docker start` is attempted and the cancel cannot \
+                   reach the runtime",
+            unreachable: &[RuntimeOp::Stop, RuntimeOp::Remove],
+            failing: &[],
+            removal_in_progress: false,
+            hook: Some((ContainerSite::Start, HookPhase::Before)),
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::NeverStarted,
+            start_attempted: false,
+            survivor: Some(Liveness::Exited),
+            view_and_intent_retained: true,
+        },
     ];
 
     let mut seen = 0_usize;
@@ -631,7 +646,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
         }
         seen += 1;
     }
-    assert_eq!(seen, 15, "every cell of the container fate matrix ran");
+    assert_eq!(seen, 16, "every cell of the container fate matrix ran");
 }
 
 #[test]

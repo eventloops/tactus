@@ -108,12 +108,24 @@ fn funnel<T>(
     site: ContainerSite,
     primitive: impl FnOnce() -> Result<T, UpstrokeError>,
 ) -> Result<T, UpstrokeError> {
+    funnel_reporting_attempt(hooks, site, primitive).map_err(|(_, error)| error)
+}
+
+fn funnel_reporting_attempt<T>(
+    hooks: &mut dyn ContainerHooks,
+    site: ContainerSite,
+    primitive: impl FnOnce() -> Result<T, UpstrokeError>,
+) -> Result<T, (bool, UpstrokeError)> {
     let id = EffectSiteId::Container(site);
     let trace = hooks.trace();
     trace.site(site, TracePhase::Before);
-    apply(hooks.phase(id, HookPhase::Before), id, HookPhase::Before)?;
-    let produced = primitive()?;
-    apply(hooks.phase(id, HookPhase::After), id, HookPhase::After)?;
+    if let Err(error) = apply(hooks.phase(id, HookPhase::Before), id, HookPhase::Before) {
+        return Err((false, error));
+    }
+    let produced = primitive().map_err(|error| (true, error))?;
+    if let Err(error) = apply(hooks.phase(id, HookPhase::After), id, HookPhase::After) {
+        return Err((true, error));
+    }
     trace.site(site, TracePhase::After);
     Ok(produced)
 }
@@ -320,15 +332,25 @@ fn expect_mounted_volumes_present(
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct StartFailure {
+    pub attempted: bool,
+    pub error: UpstrokeError,
+}
+
 pub fn start_container(
     hooks: &mut dyn ContainerHooks,
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
     intent: &IntentWritten,
-) -> Result<(), UpstrokeError> {
-    expect_site(site, Operation::Start)?;
+) -> Result<(), StartFailure> {
+    expect_site(site, Operation::Start).map_err(|error| StartFailure {
+        attempted: false,
+        error,
+    })?;
     let name = intent.name().as_str().to_owned();
-    funnel(hooks, site, || runtime.start(&name).map_err(refused))
+    funnel_reporting_attempt(hooks, site, || runtime.start(&name).map_err(refused))
+        .map_err(|(attempted, error)| StartFailure { attempted, error })
 }
 
 fn expect_intent_for(intent: &IntentWritten, name: &str, verb: &str) -> Result<(), UpstrokeError> {
@@ -463,7 +485,8 @@ pub fn launch(
             ),
         });
     }
-    start_container(hooks, ContainerSite::Start, runtime, &written)?;
+    start_container(hooks, ContainerSite::Start, runtime, &written)
+        .map_err(|failure| failure.error)?;
     Ok(Launched {
         name: plan.name.clone(),
         intent_path,

@@ -171,6 +171,15 @@ trace on both sides.
 An `Err` from the `After` phase is returned *after* the primitive ran, which
 is the whole point of the error-return mode.
 
+## `fn funnel_reporting_attempt<T>(`
+
+The same funnel, saying on failure whether the primitive was reached. An
+`Err` from the `Before` phase is returned *before* the primitive ran, and
+for one site that difference is process evidence: a `docker start` that was
+never issued left a created container holding no process, while one whose
+answer was lost may have started it. `funnel` is this with the flag
+dropped, so there is one funnel body and not two.
+
 ## `enum Operation {`
 
 ---------------------------------------------------------------------------
@@ -499,9 +508,22 @@ Refuse a create whose named volumes are not already there.
 
 See [`create_container`] for why this is here and not only at resolution.
 
+## `pub struct StartFailure {`
+
+How a start failed, and whether `docker start` was attempted before it
+did. The cover review of `8a5f59e8` injected an error at `Container.Start`'s
+`Before` phase, verified `RuntimeOp::Start` absent from the runtime's calls,
+and watched the launch record `ContainerReached::Started` all the same, so
+with the cancel unable to reach the runtime the fate was `Unresolved` where
+`NeverStarted` was the truth and the integration left its transaction open
+instead of consuming the outage deferral (`PR8-R4-START-NOT-ATTEMPTED`).
+The flag comes from [`funnel_reporting_attempt`], which is the only thing
+that knows on which side of the primitive the failure happened.
+
 ## `pub fn start_container(`
 
-`Container.Start` (R26).
+`Container.Start` (R26). Its failure says whether the start was attempted
+([`StartFailure`]), because the launch's fate turns on exactly that.
 
 **The container to start is named by the proof and by nothing else.**
 `expected_failures_refusals[6]` is "container start without an intent is
@@ -512,8 +534,10 @@ is no argument to pass that is not evidence.
 
 ### Errors
 
-[`UpstrokeError::Refused`] when `site` does not name this operation or the
-runtime refuses.
+[`StartFailure`] carrying [`UpstrokeError::Refused`] when `site` does not
+name this operation or the runtime refuses, with `attempted` false when
+`docker start` was never issued.
+
 
 ## `fn expect_intent_for(intent: &IntentWritten, name: &str, verb: &str) -> Result<(), UpstrokeError> {`
 

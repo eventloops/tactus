@@ -606,19 +606,24 @@ impl ContainerRunner {
                 },
             ));
         }
-        if let Err(error) =
+        if let Err(failure) =
             start_container(hooks, ContainerSite::Start, self.runtime.as_ref(), &written)
         {
             return Err(self.cancelled(
                 hooks,
                 plan,
-                error,
+                failure.error,
                 Reached {
                     view: Some(view_path),
-                    container: ContainerReached::Started,
+                    container: if failure.attempted {
+                        ContainerReached::Started
+                    } else {
+                        ContainerReached::Created
+                    },
                 },
             ));
         }
+
         Ok(Launched {
             name: plan.name.clone(),
             intent_path,

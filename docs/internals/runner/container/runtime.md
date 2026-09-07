@@ -509,7 +509,8 @@ Start it.
 
 ## `pub trait ContainerRuntime: Send + Sync` › `fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError>;`
 
-Stop or kill it, and say what that established ([`Settled`]). **Idempotent
+Stop or kill it, and say what that established (`Settled`)
+. **Idempotent
 and tolerant of already-gone.**
 
 ### Errors
@@ -519,7 +520,8 @@ for a reason other than the container being absent.
 
 ## `pub trait ContainerRuntime: Send + Sync` › `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>;`
 
-Remove it, and say what that established ([`Settled`]). **Idempotent and
+Remove it, and say what that established (`Settled`)
+. **Idempotent and
 tolerant of already-gone**, because "two concurrent reclaimers converge" —
 and the loser of a removal race is told so rather than told the process is
 gone.

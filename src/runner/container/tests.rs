@@ -1085,8 +1085,9 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
             }
             ContainerSite::Start => {
                 let proof = proof.as_ref().expect("the Start cell mints one");
-                start_container(hooks, site, &runtime, proof)
+                start_container(hooks, site, &runtime, proof).map_err(|failure| failure.error)
             }
+
             ContainerSite::MountGitView => mount_git_view(hooks, site, &view, &request).map(|_| ()),
             ContainerSite::Stop => {
                 stop_container(hooks, site, &runtime, &name, StopMode::Graceful).map(|_| ())
