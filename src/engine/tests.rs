@@ -2947,12 +2947,15 @@ fn forward_dependencies_run_in_topo_order_not_plan_order() {
 
 #[test]
 fn a_contradictory_pass_fails_closed() {
-    let failure = review_failure(review::ReviewResult::Judged(crate::ir::Verdict {
-        pass: true,
-        reasons: vec!["looks fine".to_owned()],
-        required_changes: vec!["parameterize the SQL".to_owned()],
-        needs_human: false,
-    }))
+    let failure = review_failure(
+        review::ReviewResult::Judged(crate::ir::Verdict {
+            pass: true,
+            reasons: vec!["looks fine".to_owned()],
+            required_changes: vec!["parameterize the SQL".to_owned()],
+            needs_human: false,
+        }),
+        false,
+    )
     .expect("a pass that still demands changes cannot commit");
     assert_eq!(failure.kind, FailureKind::ReviewFailed);
     assert!(
@@ -2962,55 +2965,70 @@ fn a_contradictory_pass_fails_closed() {
     );
 
     assert!(
-        review_failure(review::ReviewResult::Judged(crate::ir::Verdict {
-            pass: true,
-            reasons: vec!["meets the criteria".to_owned()],
-            required_changes: Vec::new(),
-            needs_human: false,
-        }))
+        review_failure(
+            review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: true,
+                reasons: vec!["meets the criteria".to_owned()],
+                required_changes: Vec::new(),
+                needs_human: false,
+            }),
+            false
+        )
         .is_none()
     );
 }
 
 #[test]
 fn an_unavailable_reviewer_is_not_a_rejection() {
-    let failure = review_failure(review::ReviewResult::Unavailable {
-        status: OutcomeStatus::RateLimited,
-        detail: "5-hour limit reached".to_owned(),
-    })
+    let failure = review_failure(
+        review::ReviewResult::Unavailable {
+            status: OutcomeStatus::RateLimited,
+            detail: "5-hour limit reached".to_owned(),
+        },
+        false,
+    )
     .expect("still fails the attempt");
     assert_eq!(failure.kind, FailureKind::RateLimited);
     assert_eq!(failure.origin, FailureOrigin::Reviewer);
     assert!(failure.is_outage(), "defers instead of blaming the worker");
     assert!(failure.reason.contains("reviewer unavailable"));
 
-    let failure = review_failure(review::ReviewResult::Unavailable {
-        status: OutcomeStatus::Timeout,
-        detail: String::new(),
-    })
+    let failure = review_failure(
+        review::ReviewResult::Unavailable {
+            status: OutcomeStatus::Timeout,
+            detail: String::new(),
+        },
+        false,
+    )
     .expect("still fails");
     assert_eq!(failure.kind, FailureKind::Timeout);
     assert_eq!(failure.origin, FailureOrigin::Reviewer);
 
-    let failure = review_failure(review::ReviewResult::Unavailable {
-        status: OutcomeStatus::AgentError,
-        detail: "spawn failed".to_owned(),
-    })
+    let failure = review_failure(
+        review::ReviewResult::Unavailable {
+            status: OutcomeStatus::AgentError,
+            detail: "spawn failed".to_owned(),
+        },
+        false,
+    )
     .expect("still fails");
     assert_eq!(failure.kind, FailureKind::ReviewUnavailable);
 }
 
 #[test]
 fn required_changes_reach_the_retry_as_a_clean_list() {
-    let failure = review_failure(review::ReviewResult::Judged(crate::ir::Verdict {
-        pass: false,
-        reasons: vec!["incomplete".to_owned()],
-        required_changes: vec![
-            "handle the empty-input case".to_owned(),
-            "add a round-trip test".to_owned(),
-        ],
-        needs_human: false,
-    }))
+    let failure = review_failure(
+        review::ReviewResult::Judged(crate::ir::Verdict {
+            pass: false,
+            reasons: vec!["incomplete".to_owned()],
+            required_changes: vec![
+                "handle the empty-input case".to_owned(),
+                "add a round-trip test".to_owned(),
+            ],
+            needs_human: false,
+        }),
+        false,
+    )
     .expect("fails");
     assert_eq!(
         failure.feedback.as_deref(),
@@ -4215,15 +4233,18 @@ fn both_feedback_sources_reach_the_durable_attempt_record() {
          retry what the gate printed"
     );
 
-    let review = super::attempt::review_failure(review::ReviewResult::Judged(crate::ir::Verdict {
-        pass: false,
-        reasons: vec!["the parser accepts a trailing comma".to_owned()],
-        required_changes: vec![
-            "reject a trailing comma in `parse_list`".to_owned(),
-            "add a case for the empty list".to_owned(),
-        ],
-        needs_human: false,
-    }))
+    let review = super::attempt::review_failure(
+        review::ReviewResult::Judged(crate::ir::Verdict {
+            pass: false,
+            reasons: vec!["the parser accepts a trailing comma".to_owned()],
+            required_changes: vec![
+                "reject a trailing comma in `parse_list`".to_owned(),
+                "add a case for the empty list".to_owned(),
+            ],
+            needs_human: false,
+        }),
+        false,
+    )
     .expect("a failed verdict is a failure");
     assert_eq!(
         durable_detail(&review).as_deref(),

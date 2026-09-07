@@ -7272,6 +7272,7 @@ fn a_resume_completes_an_already_present_publication_at_the_candidate_commit_and
 #[derive(Default)]
 struct DriveSeams {
     gate_fails: Option<crate::error::ProcessFate>,
+    review_fails: Option<crate::error::ProcessFate>,
     gate_times_out: bool,
     gate_exit_code: Option<i32>,
     input_rejected: bool,
@@ -7361,6 +7362,10 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
             if error.fate.is_unresolved() {
                 return Err(error.into());
             }
+            // As `run_review` does: the double reports what the Runner
+            // established about the process, so it cannot hide the outage
+            // attribution INV-23 names.
+            let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);
             return Ok(crate::review::ReviewOutcome {
                 result: crate::review::ReviewResult::Unavailable {
                     status: crate::ir::OutcomeStatus::AgentError,
@@ -7369,6 +7374,7 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
                 cost_usd: None,
                 invocations: 0,
                 transcript: PathBuf::from("driven-review"),
+                never_started,
             });
         }
         Ok(crate::review::ReviewOutcome {
@@ -7385,6 +7391,7 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
             cost_usd: self.cost_usd,
             invocations: 1,
             transcript: PathBuf::from("driven-review"),
+            never_started: false,
         })
     }
 }
@@ -7399,6 +7406,7 @@ struct DrivenRun {
 
 struct DrivenRunner {
     fails: Option<crate::error::ProcessFate>,
+    review_fails: Option<crate::error::ProcessFate>,
     times_out: bool,
     exit_code: i32,
     runs: Mutex<Vec<DrivenRun>>,
@@ -7434,7 +7442,12 @@ impl Runner for DrivenRunner {
                 workspace: request.workspace.clone(),
                 head,
             });
-        if let Some(fate) = self.fails {
+        let fate = self.fails.or_else(|| {
+            (request.role == crate::runner::ExecutionRole::Review)
+                .then_some(self.review_fails)
+                .flatten()
+        });
+        if let Some(fate) = fate {
             return Err(RunnerError::new(
                 &request.invocation,
                 fate,
@@ -7507,6 +7520,7 @@ fn drive_hooked(
 ) -> Driven {
     let runner = DrivenRunner {
         fails: seams.gate_fails,
+        review_fails: seams.review_fails,
         times_out: seams.gate_times_out,
         exit_code: seams.gate_exit_code.unwrap_or(0),
         runs: Mutex::new(Vec::new()),
@@ -9837,5 +9851,79 @@ fn a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fa
         1,
         "one review crossed the ceiling, so this incarnation admits no further review: {:?}",
         driven.reviewer_models
+    );
+}
+
+/// A reviewer whose process never started settles as a `RunnerSpawnFailure`
+/// (`invariants[22]`, INV-23), and every other unavailable reviewer still
+/// settles as `ReviewUnavailable`.
+///
+/// INV-23 requires it in those words — a container whose reported image id
+/// differs from the record "refuses during pre-flight or rebuild and is a
+/// RunnerSpawnFailure outage settlement mid-run" — and says the rule covers
+/// "every probe, worker, gate, review, and re-ask process of the run". The
+/// container runner detects a reviewer's image mismatch before start and
+/// answers `NeverStarted`; `run_review` contains that so the pass can defer
+/// instead of ending the command, and the contained result was
+/// `Unavailable{AgentError}`, which the generic mapping turns into
+/// `ReviewUnavailable` — a statement about the reviewer where the invariant
+/// names one about the runner. Deferral and containment were right, and the
+/// `Gone` arm below is the control that says this repair changed only the
+/// attribution of the one fate the invariant names.
+#[test]
+fn a_reviewer_whose_process_never_started_is_a_runner_spawn_failure() {
+    use crate::error::ProcessFate;
+    use crate::topology::events::{InfrastructureKind, UnavailableCause, UnavailableOutcome};
+
+    let cause = |tag: &str, fate: ProcessFate| {
+        let fixture = Fixture::build(
+            tag,
+            Damage {
+                two_tasks: true,
+                ..Damage::default()
+            },
+        );
+        plant_stale_verification(&fixture);
+        let driven = drive(
+            &fixture,
+            &DriveSeams {
+                review_fails: Some(fate),
+                ..DriveSeams::default()
+            },
+            1,
+        );
+        let terminals = unavailable_terminals(&driven.log);
+        assert_eq!(
+            terminals.len(),
+            1,
+            "the reviewer's runner failure settles exactly one terminal: {terminals:?}"
+        );
+        let terminal = terminals
+            .first()
+            .expect("the terminal just counted")
+            .clone();
+        assert!(
+            matches!(terminal.outcome, UnavailableOutcome::Deferred { .. }),
+            "containment and deferral are unchanged by the attribution: {:?}",
+            terminal.outcome
+        );
+        terminal.cause
+    };
+
+    assert_eq!(
+        cause("reviewer-never-started", ProcessFate::NeverStarted),
+        UnavailableCause::Infrastructure {
+            kind: InfrastructureKind::RunnerSpawnFailure
+        },
+        "a reviewer's process that was never started is the runner's failure, not the \
+         reviewer's answer"
+    );
+    assert_eq!(
+        cause("reviewer-gone", ProcessFate::Gone),
+        UnavailableCause::Infrastructure {
+            kind: InfrastructureKind::ReviewUnavailable
+        },
+        "and a reviewer whose process started and is now gone is still an unavailable review: \
+         INV-23 names the never-started fate and no other"
     );
 }

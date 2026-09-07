@@ -709,7 +709,7 @@ impl Judge<'_> {
 
             let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
             let cost_usd = outcome.cost_usd;
-            failure = review_failure(outcome.result);
+            failure = review_failure(outcome.result, outcome.never_started);
             reviews.push(
                 super::super::classify::ReviewPassFacts {
                     pass: reviewer.lens.name(),

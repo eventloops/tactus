@@ -860,7 +860,27 @@ fn park_question<J: Verification>(
     }
 }
 
+/// What the durable terminal says an infrastructure outage was.
+///
+/// **A process that never started is a `RunnerSpawnFailure`, whatever the
+/// failure it produced is called.** `invariants[22]` (INV-23) requires it in
+/// those words — a container whose reported image id differs from the record
+/// "refuses during pre-flight or rebuild and is a RunnerSpawnFailure outage
+/// settlement mid-run" — and says the rule covers "every probe, worker, gate,
+/// review, and re-ask process of the run". A reviewer's container refused
+/// before `docker start` reaches here as a `ReviewUnavailable` because that is
+/// what an unavailable review pass is called, and the generic mapping cannot
+/// override a named invariant. `IntegrationCx::verify` already answers
+/// `RunnerSpawnFailure` for the gate and worker processes, whose runner errors
+/// reach it as a `JudgeError::Runner`; a reviewer's do not, because
+/// `run_review` contains them so the pass can defer instead of ending the
+/// command. Deferral and containment are right; only the attribution was not.
 fn infrastructure(failure: &AttemptFailure) -> UnavailableCause {
+    if failure.never_started {
+        return UnavailableCause::Infrastructure {
+            kind: InfrastructureKind::RunnerSpawnFailure,
+        };
+    }
     let kind = match failure.kind {
         FailureKind::RateLimited => InfrastructureKind::RateLimited,
         FailureKind::ReviewUnavailable => InfrastructureKind::ReviewUnavailable,
