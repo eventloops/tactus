@@ -235,7 +235,6 @@ fn the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas() {
         );
     }
 
-    let evidence = "the gate `clippy` failed: exit 1 (REPAIR-SPEC-UNIQUE-EVIDENCE)";
     let review = crate::events::ReviewRecord {
         pass: "acceptance".to_owned(),
         agent: "claude-code".to_owned(),
@@ -247,40 +246,94 @@ fn the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas() {
         cost_usd: Some(0.5),
         outcome: crate::events::ReviewPassOutcome::Failed,
     };
-    let rejected = merge_rejected(
-        run.emitter.fold(),
-        &ids,
-        &candidate,
-        head.clone(),
-        SequenceId(1),
-        crate::topology::events::RejectionDisposition::CodeRejected {
-            verification: super::code_rejection_record(false, vec![review], evidence.to_owned()),
-        },
-        region(&["shared.txt"]),
+
+    // The evidence is not written into the record here. It is produced by the
+    // production classification of a failing gate and of a rejecting reviewer,
+    // and carried through `integrate::code_record` — the conversion that used to
+    // keep `reason` and drop `feedback`. A test that hands `code_rejection_record`
+    // its own `detail` sits downstream of that conversion and proves only that
+    // the spec carries what it was given (round six, finding 2).
+    let gate_output = "REPAIR-SPEC-GATE-EVIDENCE\nerror[E0308]: mismatched types";
+    assert!(
+        gate_output.contains('\n'),
+        "a real log tail is more than one line, and the conversion has to carry all of it"
+    );
+    let gate_failure = crate::engine::classify::gate_failure(&crate::gates::GateFailure {
+        gate: "clippy".to_owned(),
+        summary: "exit 1".to_owned(),
+        log_tail: gate_output.to_owned(),
+    });
+    let required_change = "REPAIR-SPEC-REQUIRED-CHANGE: restore the deleted assertion";
+    let review_failure = crate::engine::attempt::review_failure(
+        crate::review::ReviewResult::Judged(crate::ir::Verdict {
+            pass: false,
+            reasons: vec!["the proposed tree regresses merged behaviour".to_owned()],
+            required_changes: vec![required_change.to_owned()],
+            needs_human: false,
+        }),
+        false,
     )
-    .expect("the code rejection builds");
-    let spec = serde_json::to_string(&rejected.repair.entry.spec).expect("the spec serializes");
-    for needle in [
-        candidate.commit_sha.as_str(),
-        candidate.candidate_ref.as_str(),
-        head.as_str(),
-        "REPAIR-SPEC-UNIQUE-EVIDENCE",
-        "gates failed",
-        "acceptance",
-        "claude-opus-5",
-        "sequence 1",
-        root_body.as_str(),
+    .expect("a rejecting verdict is an attempt failure");
+
+    // The needle is one line of the evidence, because the spec is asserted
+    // against its JSON encoding and a newline is `\n` there.
+    for (what, failure, evidence, verdict) in [
+        (
+            "the failing gate's own output",
+            gate_failure,
+            "REPAIR-SPEC-GATE-EVIDENCE",
+            "gates failed",
+        ),
+        (
+            "the reviewer's required change",
+            review_failure,
+            required_change,
+            "rejected",
+        ),
     ] {
+        let judgement = crate::engine::topology::attempt::Judgement {
+            gates: Vec::new(),
+            reviews: vec![review.clone()],
+            failure: Some(failure.clone()),
+        };
+        let verification = crate::engine::topology::integrate::code_record(&judgement, &failure);
         assert!(
-            spec.contains(needle),
-            "the frozen spec of a code-rejected repair embeds `{needle}`: {spec}"
+            verification.detail.contains(&failure.reason),
+            "[{what}] the summary is still there: {verification:?}"
+        );
+        let rejected = merge_rejected(
+            run.emitter.fold(),
+            &ids,
+            &candidate,
+            head.clone(),
+            SequenceId(1),
+            crate::topology::events::RejectionDisposition::CodeRejected { verification },
+            region(&["shared.txt"]),
+        )
+        .expect("the code rejection builds");
+        let spec = serde_json::to_string(&rejected.repair.entry.spec).expect("the spec serializes");
+        for needle in [
+            candidate.commit_sha.as_str(),
+            candidate.candidate_ref.as_str(),
+            head.as_str(),
+            evidence,
+            verdict,
+            "acceptance",
+            "claude-opus-5",
+            "sequence 1",
+            root_body.as_str(),
+        ] {
+            assert!(
+                spec.contains(needle),
+                "[{what}] the frozen spec of a code-rejected repair embeds `{needle}`: {spec}"
+            );
+        }
+        assert_eq!(
+            rejected.repair.entry.spec.kind,
+            crate::ir::TaskKind::Fix,
+            "[{what}] and it is still a Fix"
         );
     }
-    assert_eq!(
-        rejected.repair.entry.spec.kind,
-        crate::ir::TaskKind::Fix,
-        "and it is still a Fix"
-    );
 }
 
 fn region(paths: &[&str]) -> PathSet {

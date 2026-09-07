@@ -1308,6 +1308,92 @@ fn verification_snapshots_are_removed_only_after_the_terminal() {
     }
 }
 
+/// A rejection's frozen repair spec and the record it was built from. What PR9
+/// dispatches from is the spec's body; the record is what the spec was built
+/// out of, and a repair that reaches one and not the other is not a repair.
+#[track_caller]
+fn code_rejection(run: &Run) -> (crate::topology::events::VerificationRecord, String) {
+    let rejected = rejected_of(run);
+    let RejectionDisposition::CodeRejected { verification } = rejected.disposition else {
+        panic!("a verification rejection is a code rejection");
+    };
+    (verification, rejected.repair.entry.spec.body)
+}
+
+#[test]
+fn a_failing_gates_own_output_reaches_the_frozen_repair_spec() {
+    let mut run = Run::started("gate-repair-evidence");
+    let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+    let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
+    published(integrate_through(&mut run, &first).expect("alpha publishes"));
+    run.verify_gates.push(passing_gate());
+    run.runner.set_codes(vec![1]);
+
+    let terminal = integrate_through(&mut run, &second).expect("a failing gate rejects beta");
+    assert!(
+        matches!(terminal, Terminal::Rejected { .. }),
+        "{terminal:?}"
+    );
+
+    let (verification, body) = code_rejection(&run);
+    assert_eq!(verification.verdict, VerificationVerdict::GatesFailed);
+    let diagnostic = crate::engine::topology::scaffold::GATE_DIAGNOSTIC;
+    assert!(
+        verification.detail.contains(diagnostic),
+        "the durable rejection kept the summary and dropped the gate's own output, which is the \
+         evidence the repair has to work from: {}",
+        verification.detail
+    );
+    assert!(
+        verification.detail.contains("failed: exit 1"),
+        "and the summary is still there beside it: {}",
+        verification.detail
+    );
+    assert!(
+        body.contains(diagnostic),
+        "the frozen repair spec PR9 dispatches from carries the failing gate's output: {body}"
+    );
+    run.replay_twice_equal();
+}
+
+#[test]
+fn a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec() {
+    let mut run = Run::started("review-repair-evidence");
+    let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+    let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
+    published(integrate_through(&mut run, &first).expect("alpha publishes"));
+    run.verify_reviewers.push(passing_reviewer());
+    run.verify_review = VerifyReview::NeedsChanges;
+
+    let terminal = integrate_through(&mut run, &second).expect("a rejecting reviewer rejects beta");
+    assert!(
+        matches!(terminal, Terminal::Rejected { .. }),
+        "{terminal:?}"
+    );
+
+    let (verification, body) = code_rejection(&run);
+    assert_eq!(verification.verdict, VerificationVerdict::Rejected);
+    // `attempt::review_failure` renders each `required_changes` entry as its own
+    // `- ` line and leaves the verdict's reasons in the summary, so this is the
+    // reviewer's demand and not a restatement of why the pass failed.
+    assert!(
+        verification.detail.contains("- restore it"),
+        "the durable rejection kept the generic rejection reason and dropped the reviewer's \
+         required change: {}",
+        verification.detail
+    );
+    assert!(
+        verification.detail.contains("review failed"),
+        "and the summary is still there beside it: {}",
+        verification.detail
+    );
+    assert!(
+        body.contains("- restore it"),
+        "the frozen repair spec PR9 dispatches from carries the reviewer's required change: {body}"
+    );
+    run.replay_twice_equal();
+}
+
 fn rejected_of(run: &Run) -> crate::topology::events::MergeRejected {
     run.emitter
         .durable_events()
