@@ -618,28 +618,28 @@ private functions around them; the `ContainerRuntime` trait's signatures, the fr
 frozen event vocabulary, the effect-site inventory and `src/topology/**` are untouched. Finding 2
 writes a longer string into a field that already exists.
 
-**Two things this round observed and did not fix, and one it corrected in passing.** The
-corrected one is in this section: round five's legacy table named the caller of
-`cleanup_gate_workspace` as `reclaim_snapshot_intents`, and the function is
-`reclaim_gate_workspaces` — a census row naming a function that does not exist is the shape of
-defect this section is for, so it is fixed here rather than recorded. What is only recorded:
-`pr8-plan.md` §2's staged-implementation tables cite twelve test names in backticks that no
-longer resolve — `kill_between_prepared_and_cas`, `human_required_verdict_parks_task` and ten
-others — because they are the names the plan *intended* before the code was written and the tests
-landed under different ones (`a_human_required_verdict_parks_the_task` for that one). §2 is a
-historical plan and this round does not rewrite it; a reader should not take a backticked name
-there as a citation. Derived by extracting every backticked snake_case identifier of twenty
-characters or more from the three record files and resolving each against `git ls-files src`.
+**Every name this round's records cite was resolved, and three answers came back.** Two checks
+were run over the tree: every backticked snake_case identifier of twenty characters or more in the
+three record files, against `git ls-files src`; and every `docs/internals/` heading, which the
+notes files' own preamble defines as "the line of code the comment sat above, spelled as it is in
+the source", against its module.
 
-**One thing this round observed and did not fix.** `docs/internals/` headings are grep strings —
-the notes file's own preamble says each heading is "the line of code the comment sat above, spelled
-as it is in the source" — and every heading this round's signature changes made stale was
-repointed, checked by resolving all of them against their modules. That check also found one
-heading that was already stale at the reviewed head and is unrelated to this round:
-`docs/internals/engine/topology/integrate.md`'s `Rejected { sequence: SequenceId, key: TaskKey },`,
-which the source spells across three lines. It is left alone — a round of four findings does not
-edit a notes section it has no other business in — and recorded here so it is not rediscovered as
-new.
+**One is corrected here.** §7.4's legacy table named the caller of `cleanup_gate_workspace` as
+`reclaim_snapshot_intents`; the function is `reclaim_gate_workspaces`. A census row naming a
+function that does not exist is the shape of defect this section is for, so it is fixed rather than
+recorded.
+
+**Two are recorded and left.** `pr8-plan.md` §2's staged-implementation tables cite twelve test
+names that no longer resolve — `kill_between_prepared_and_cas`, `human_required_verdict_parks_task`
+and ten others — because they are the names the plan *intended* before the code was written, and
+the tests landed under different ones (`a_human_required_verdict_parks_the_task` for that one). §2
+is the plan as written; a reader should not take a backticked name there as a citation, and this
+round does not rewrite a historical section for it. And one notes heading was already stale at the
+reviewed head: `docs/internals/engine/topology/integrate.md`'s
+`Rejected { sequence: SequenceId, key: TaskKey },`, which the source spells across three lines. It
+is left alone — a round of four findings does not edit a notes section it has no other business in
+— and recorded so it is not rediscovered as new. Every heading *this* round's signature changes
+made stale was repointed.
 
 **One thing this round measured twice, and the second measurement is the one quoted.** The
 box's `upstroke-build` allocates from a shared pool of slot target directories, and this crate's
@@ -654,8 +654,9 @@ names. Nothing in cargo's output says so.
 Every number quoted in this record and in `pr8-body.md` is from a run whose log carries
 `Compiling upstroke v0.1.0 (/srv/worktrees/pr8)`, and the closing baseline was re-taken through
 `w1-eight-iso`, which binds the target base to `/mnt/ramtarget/iso-pr8`, private to this worktree:
-nine gates green at `88c9230`, `test 2373 passed; 0 failed; 43 ignored`. The three contaminated
-runs measured nothing and are quoted nowhere. The mutation replays of §9.3 are unaffected — each
+nine gates green at the round's final head with `test 2373 passed; 0 failed; 43 ignored`, and
+every step's log carrying its own `Compiling`/`Checking` line naming this worktree. The three
+contaminated runs measured nothing and are quoted nowhere. The mutation replays of §9.3 are unaffected — each
 killed a test by name that exists only in this tree, which a foreign binary cannot do.
 
 ### 9.3 The mutations replayed this round
