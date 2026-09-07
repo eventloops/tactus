@@ -7,8 +7,11 @@ sentences, so the JSON text of the slice contract is the text implemented). Brie
 `START-PR8.md` as amended on 2026-09-06 (no pull request, no review, no findings lane; the body
 goes to `pr8-body.md`), then `START-PR8-FIX.md` of 2026-09-07 for the repair round after the
 three reviews of `3414dc58`, then `START-PR8-FIX2.md` of the same day for the second repair round
-after the three reviews of the repair range `3414dc58..916852c9` (`pr8-triage.md` §5).
-Implementation model: Claude Fable 5.1 at max effort, all three rounds.
+after the three reviews of the repair range `3414dc58..916852c9` (`pr8-triage.md` §5), then
+`START-PR8-FIX3.md` of the same day for the third repair round — the Runner seam only — after the
+single review of the repair range `916852c9..79ddbffb` (`pr8-triage.md` §6).
+Implementation model: Claude Fable 5.1 at max effort, the implementation and all three repair
+rounds.
 
 This file is the standing plan and the record of every reading taken where the packet was
 ambiguous. Each reading is a decision, not a question. It is updated as commits land. Where the
@@ -302,12 +305,27 @@ offer, the entry now says so and cites the passage that settles it.
   is not an observed failure of the sequence but the coordinator's loss of its own process, and
   the resources the terminal would reclaim are that process's. So `Runner::run` returns
   `RunnerError { invocation, fate: ProcessFate, source }`, with the fate made where the evidence
-  is: the host funnel at its spawn, kill and reap points (`NeverStarted` until the spawn returns,
-  `Unresolved` until a kill is reaped or an exit observed and reaped, then `Gone`), the container
-  runner from its cancel and release results (`NeverStarted` when the launch was refused or
-  cancelled with the container confirmed released; `Gone` when the release confirmed it stopped
-  and removed; `Unresolved` when the runtime did not confirm, or the output was a timeout whose
-  stop failed). The integration settles `Infrastructure{RunnerSpawnFailure}` on `NeverStarted`
+  is — and, the rule the third repair round made explicit at both Runners, **process-fate
+  evidence is kept distinct from whether every cleanup step completed**: a cleanup failure is
+  never read as "the process may still run", and a reaped leader or a removed record is never
+  read as "the tree is gone". The host funnel: `NeverStarted` until the spawn has created a
+  process (on Windows the spawn boundary's own cleanup establishes `Gone`, or leaves
+  `Unresolved`, for a process created behind a failed containment step); `Unresolved` from then
+  on; `Gone` only from tree-level evidence — the Supervisor's `finish` establishing the process
+  group has no non-zombie member on Unix, the job observed empty on Windows — with the direct
+  child's kill and reap tidy-up whose failures are reported and never evidence, so a post-spawn
+  containment failure, a reaper that failed, or a Windows job cleanup that failed after the direct
+  child exited all leave `Unresolved`. The container runner: before `docker start` was attempted a
+  failed launch is `NeverStarted` whatever the cancel achieved, because a created-but-never-started
+  container holds no process; once `docker start` was attempted, or the container was running, the
+  fate is `Gone` when the runtime established the process gone — the supervisor observed the
+  container terminated, a stop succeeded, or a forced removal succeeded — and `Unresolved` only
+  when none of those holds. A start the runtime refused cannot be told from a start whose
+  acknowledgement was lost, so a refused start whose cancel completes is `Infrastructure{Other}`
+  (established gone) rather than `RunnerSpawnFailure`; both defer identically. A container the
+  runtime confirmed neither stopped nor removed keeps its R19 view and R26 intent, which the next
+  census reclaims it through; a view or an intent that could not be released is residue, not
+  liveness. The integration settles `Infrastructure{RunnerSpawnFailure}` on `NeverStarted`
   (INV-23's mid-run image mismatch is this), `Infrastructure{Other}` on `Gone`, and on
   `Unresolved` ends the command resumably with the transaction open, the snapshot retained and
   nothing appended; the next resume's startup census reclaims the earlier incarnation's container
@@ -315,7 +333,10 @@ offer, the entry now says so and cites the passage that settles it.
   recovery step (f) settles the verification interrupted and reclaims the snapshot. `run_review`
   propagates an `Unresolved` Runner error rather than reporting the review unavailable, so the
   reviewer path cannot settle a terminal over a running reviewer either. Test doubles must say
-  what they claim: a double that returns an untyped error does not compile.
+  what they claim: a double that returns an untyped error does not compile. (The second repair
+  round's version of this reading classified the host by the leader's reap and the container by
+  whether both cleanup operations completed; the review of `79ddbffb` found defect A and defect B
+  both reachable through it, `pr8-triage.md` §6.)
 - **R26. Foreign Git state at integration.** `decisions.repairs.not_repairs` lists "foreign Git
   state" among the failures that at integration terminate `merge_verification_unavailable{Deferred
   | Parked}`. A `UpstrokeError::Git` observed anywhere in the verification — the review diff, the
@@ -397,6 +418,21 @@ repair (the mutation named in §5 below), the records kept current between them:
 | `test(engine): the production verifier is observed through the loop, the sampler proves its kills, the crash child reports, and the spend gap is pinned` | adequacy 3 (`PR8-R2-SNAPSHOT-ORACLE`), adequacy 4 (`PR8-R2-SAMPLER-ORACLE`), regression 2 (`PR8-R2-UNREACHABLE`), adequacy 1 / record F2 (`PR8-R2-SPEND-REPLAY`, deferred) |
 | `docs(internals): the three statements the prose relocation preserved false` | record item 7 (`PR8-R2-RECORD-PROSE`) |
 | `docs(pr8): the record after the second repair round` | this file, `pr8-body.md`, `pr8-triage.md`; the provenance section (`PR8-R2-RECORD-PROVENANCE`) |
+
+### The third repair round (2026-09-07)
+
+The single review of the repair range `916852c9..79ddbffb` — the Runner seam only — and its
+triage are `pr8-triage.md` §6. One commit per finding or closely related group, each with a
+test that fails without its repair (the mutation named in §5 below), the records kept current
+between them:
+
+| Commit | Findings |
+|---|---|
+| `docs(pr8): triage of the round-three review at 79ddbffb` | the dispositions |
+| `fix(runner): the container runner classifies from process evidence alone, and keeps a live container's view and intent` | findings 2, 3 and 4 (`PR8-R3-CONTAINER-START`, `PR8-R3-CONTAINER-RETAIN`, `PR8-R3-CONTAINER-EVIDENCE`); the fate matrix that kills M4 |
+| `fix(agent): the host funnel claims Gone only from group evidence, and the Windows spawn boundary carries its fate` | finding 1 (`PR8-R3-HOST-GROUP-GONE`); the host fate tests that kill M3 |
+| `test(engine): repeated pre-start container outages consume defers, and an unresolved verification keeps its entitlements with the open transaction` | finding 2's loop witness through the production `ContainerRunner`; finding 5's pin (`PR8-R3-RECORD-ENTITLEMENTS`, a record defect) |
+| `docs(pr8): the record after the third repair round` | this file, `pr8-body.md`, `pr8-triage.md` |
 
 ## 3. `src/topology/**` changes: Class A / B / C
 
@@ -527,3 +563,36 @@ recorded — a field on `merge_verification_unavailable`, or an erratum on
   `runner::container::exec::tests::the_runner_reports_what_it_established_about_the_process_when_it_fails`
   (three fates from the production `ContainerRunner` over the fake runtime) and
   `review::tests::an_unresolved_runner_error_propagates_instead_of_reporting_the_review_unavailable`.
+
+- **The third repair round's witnesses** (`pr8-triage.md` §6), each replayed against the
+  repaired tree at `507eee1f` with the mutation applied by an asserted replacement, the named
+  tests run, and the file restored from `HEAD`; each fails exactly the tests named. The two
+  mutations that survived `2342 passed, 43 ignored` at `79ddbffb`: M3, the host funnel's
+  post-spawn `Unresolved` made `Gone`, fails
+  `agent::proc::tests::a_containment_failure_after_the_spawn_leaves_the_fate_unresolved`; M4, a
+  successful output with a failed release made `Gone` in `ContainerRunner::run`, fails the
+  timed-out-with-neither-stop-nor-removal cell of
+  `runner::container::exec::tests::the_runner_reports_what_it_established_about_the_process_when_it_fails`.
+  One mutation per repair: `settle_failed_supervision` setting `Gone` from the leader's reap (the
+  second round's rule) fails `a_reaped_leader_does_not_prove_its_group_gone_when_the_reaper_failed`,
+  `a_lost_group_settles_unresolved_even_when_the_leader_reaps_cleanly` and
+  `an_established_group_settles_gone_whatever_the_leaders_own_reap_says`; a lost `docker create`
+  classified by the cancel's outcome fails the matrix and
+  `recover::tests::repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner`;
+  an attempted start with a clean cancel made `NeverStarted` fails the matrix; the retention of the
+  view and the intent removed fails
+  `a_container_the_runtime_cannot_confirm_stopped_keeps_its_mounted_git_view_and_intent` and the
+  matrix; `container_gone` made false on either cleanup failure (the second round's rule) fails
+  the matrix; the release never told the exit was observed fails the matrix; and the integration's
+  `Err` arm cancelling the reservation unconditionally fails
+  `a_runner_that_loses_track_of_a_running_gate_refuses_resumably_and_reclaims_nothing` (the
+  cancellation of a converted reservation is itself refused, and the step's error is no longer the
+  Runner's). Two cells are pinned by reading and not by a mutation: the observed-exit branch of the
+  Unix loop passing `false` (the group not established) when `finish` fails, because a
+  funnel-level reaper failure arms the fail-closed `SIGTERM` and cannot be injected inside the test
+  process — the reviewer's reproduction of that cell is the helper-level test above; and the
+  Windows branch (the `Gone`-after-`finish_direct_exit` order and the spawn boundary's fate), which
+  was type-checked and clippy-clean for `x86_64-pc-windows-msvc` on the build box and executes on
+  winguest. The fix-up that followed the replay (`287563f0`, the Unix group signal of `kill_tree`
+  moved into a positively gated helper because the platform census refuses a body no CI runner
+  compiles) changes that helper's shape only; no witness exercises it.

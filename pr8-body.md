@@ -52,7 +52,14 @@ the container runner classifies from its cancel and release results (`src/runner
 `src/runner/container/exec.rs`), `run_review` propagates an unresolved one (`src/review.rs`), the
 probe boundaries carry it through (`src/engine/topology/preflight.rs`, `create.rs`), and the
 review-input classifier is split so the integration consults its size/opacity half
-(`src/engine/classify.rs`). Every Runner test double changed signature with the trait.
+(`src/engine/classify.rs`). Every Runner test double changed signature with the trait. The third
+repair round changes the same seam again and nothing else: the host funnel claims `Gone` only from
+group evidence and its Windows spawn boundary carries the fate its own cleanup established
+(`src/agent/proc.rs`); the container runner's launch records whether `docker start` was attempted,
+its release reports process evidence apart from which cleanup steps completed, and a container the
+runtime cannot confirm stopped keeps its Git view and intent for the next census
+(`src/runner/container.rs`, `src/runner/container/exec.rs`); the engine gains a read-only count of
+cancelled reservations for a test (`src/engine/topology/identity.rs`, `run.rs`).
 
 Out of scope, and neither built nor stubbed: repair **execution** (PR9), the production writer, the
 slot broker. A PR8 build refuses, before any append, dispatch of a Repair-origin task and any
@@ -105,12 +112,18 @@ already settled are marked as such):
   ran under: the task's validated override, else the frozen rung at the fold-derived rung position
   (R18).
 - A Runner error settles a terminal only when the Runner established that no process survives:
-  `RunnerSpawnFailure` when none was started, `Infrastructure{Other}` when one started and is
-  established gone, and no terminal at all — the command ends resumably with the transaction open
-  and the snapshot retained — when the Runner cannot say; the next resume's census reclaims the
-  container before the verification is settled interrupted (R25). Foreign Git state observed by the
-  verification and a gate that times out are outages of the sequence (`Infrastructure{Other}`,
-  R26, R27); every other verification error ends the command resumably (R24).
+  `RunnerSpawnFailure` when none was started, `Infrastructure{Other}` when one may have started and
+  is established gone, and no terminal at all — the command ends resumably with the transaction
+  open and the snapshot retained — when the Runner cannot say; the next resume's census reclaims
+  the container before the verification is settled interrupted (R25). The fate is process
+  evidence kept apart from cleanup completion: the host funnel says `Gone` only when the process
+  group (Unix) or the job (Windows) was established empty, never from the direct child's reap; the
+  container runner says `NeverStarted` for any failure before `docker start` was attempted and,
+  after it, `Gone` only when the runtime observed the exit or confirmed a stop or a forced removal,
+  retaining a container's view and intent whenever it confirmed neither (R25, third repair round).
+  Foreign Git state observed by the verification and a gate that times out are outages of the
+  sequence (`Infrastructure{Other}`, R26, R27); every other verification error ends the command
+  resumably (R24).
 - The integration diff is classified for size and opacity and the review-input policy consulted;
   the attempt path's Test-provenance rule is not applied to it (R28).
 - An integration's judged reviews are charged to the candidate's task and the run at the
@@ -128,13 +141,13 @@ already settled are marked as such):
 ## Validation
 
 All ten gates green locally, from the repository root, on the last code commit of this branch,
-`10dec0f5f56d58fb91e9f62566ef8edb95a07d59`; the commit that follows it changes the three record files and no code, and the ten gates
-were rerun on it before the push:
+`287563f0ff7ff9e5736170fa574cfad8b6dc147d`; the commit that follows it changes the three record
+files and no code, and the ten gates were rerun on it before the push:
 
 ```
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features            # 2343 lib tests passed, 0 failed, 43 ignored (Linux)
+cargo test --all-targets --all-features            # 2351 lib tests passed, 0 failed, 43 ignored (Linux)
 cargo +1.85.0 check --locked --all-targets --all-features
 bash .github/scripts/test-release-record.sh
 bash .github/scripts/test-pr-policy.sh
@@ -220,6 +233,32 @@ Proof obligations from the contract, and where each is met:
   Runner's own classification:
   `runner::container::exec::tests::the_runner_reports_what_it_established_about_the_process_when_it_fails`,
   `review::tests::an_unresolved_runner_error_propagates_instead_of_reporting_the_review_unavailable`.
+- **The fate is process evidence, at both Runners** (the third repair round). The container
+  runner: `the_runner_reports_what_it_established_about_the_process_when_it_fails` is a
+  thirteen-cell matrix over the fake runtime — the runtime down before `docker create`, a refused
+  create, an image mismatch, a refused start, a committed start whose launch then fails, a start
+  lost with the cancel establishing nothing, an observation lost with the release completing, a
+  lost stop followed by a successful forced removal, all three lost, an observed exit followed by
+  a lost collection and release, and three timed-out outputs (a failed view discard only, a failed
+  stop with a successful removal, neither stop nor removal) — each asserting the fate, whether
+  `docker start` was attempted, what survived and in what state, and whether the view and intent
+  were retained; `a_container_the_runtime_cannot_confirm_stopped_keeps_its_mounted_git_view_and_intent`
+  keeps both and reclaims them through the intent once the runtime is back;
+  `recover::tests::repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner`
+  drives three restarts of the production runner over a runtime lost at `docker create` each time
+  (Deferred 1, Deferred 2, Parked, no `docker start` ever issued). The host funnel:
+  `agent::proc::tests::a_reaped_leader_does_not_prove_its_group_gone_when_the_reaper_failed`
+  (Linux: the leader killed and reaped, a same-group `sleep` verified running, the fate
+  `Unresolved`), `a_lost_group_settles_unresolved_even_when_the_leader_reaps_cleanly`,
+  `an_established_group_settles_gone_whatever_the_leaders_own_reap_says`,
+  `a_containment_failure_after_the_spawn_leaves_the_fate_unresolved` (the three post-spawn
+  containment points), `a_spawn_that_fails_before_any_process_exists_is_never_started`, and on
+  Windows `a_windows_spawn_that_fails_after_creation_leaves_no_suspended_stub` (now asserting the
+  boundary's fate) and `a_windows_spawn_that_fails_before_creation_is_never_started`. The
+  entitlements after an unresolved verification:
+  `recover::tests::an_unresolved_verification_leaves_its_entitlements_with_the_open_transaction`
+  (the transaction open, the fold counting it as holding the pipeline entitlement, the provisional
+  reservation converted at the start append and not cancelled, a second step admitting nothing).
 - **The production verifier, observed through the loop.**
   `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal`:
   for the prepared, rejected and parked shapes the gate ran on a checkout whose HEAD is the
@@ -244,7 +283,10 @@ Proof obligations from the contract, and where each is met:
   per repair of the first round; and, for the second round, the blanket Runner-error conversion
   restored, the Git arm removed, the timed-out-gate check disabled, the provenance rule restored
   at integration, the spec body not embedded, the two snapshot mutations the reviewers found
-  surviving, and the sampler's kill deleted (`pr8-plan.md` §5).
+  surviving, and the sampler's kill deleted; and, for the third round, the two mutations that
+  survived the suite at `79ddbffb` (M3, the host's post-spawn `Unresolved` made `Gone`; M4, a
+  timed-out output with a failed release made `Gone`) and one mutation per repair of the round
+  (`pr8-plan.md` §5).
 
 ## Review evidence
 
@@ -298,6 +340,24 @@ fails without the repair, except the spend replay gap, which the contract settle
 frozen vocabulary and which is deferred with a ledger row and an owner decision owed
 (`PR8-R2-SPEND-REPLAY`); R22, which had called it a permitted reading, is withdrawn.
 
+A single frontier review was then run by the owner against the exact head `79ddbffb`, over the
+repair range `916852c9..79ddbffb` only — the change to the `Runner` trait's error type, the one
+thing in the round no reviewer had seen — by `gpt-6-astra` at `max` effort, returning
+`CHANGES_REQUIRED` with five findings, three P1: the host claimed `Gone` from a reaped leader while
+a same-group descendant lived, a container outage before `docker create` was `Unresolved` and
+consumed no defer while a committed start was `NeverStarted`, an `Unresolved` release still pruned
+the Git view the live container had mounted, positive evidence of exit and removal was discarded,
+and the unresolved return was said to release both entitlements; two mutations had survived the
+whole suite. Every finding was triaged in `pr8-triage.md` §6 (Claude Fable 5.1 at max effort, a
+fresh autonomous session, 2026-09-07). Four were confirmed and repaired on this branch, each with
+a test that fails without the repair, and both surviving mutations are killed. The fifth is
+rejected as a code defect — a probe at the reviewed head shows the reservation converted at the
+start append and the cancellation not reached, the entitlements being the open transaction's — and
+confirmed as a record defect: the sentence that misled the reviewer was this branch's own triage,
+now corrected, and the accounting is pinned by a test. The reviewer confirmed the rest of the seam
+sound (the adapters, `gates.rs`, the v0.1 worker, `run_review`, no accidental catch-all), and
+none of that was touched.
+
 The repaired head has not been reviewed. The frontier review of it is **owed and is the owner's
 to run**; it is not part of this branch. The ledger below carries the canonical header and one
 row per distinct finding.
@@ -315,10 +375,18 @@ count changes which repair admissions the fold accepts. All are exercised live a
 
 The second repair round changes the `Runner` trait's error type crate-wide: every Runner —
 the host and container runners, the probe boundaries, and every test double — now says what it
-established about the process when it fails. The v0.1 path is affected only in type: the host
+established about the process when it fails, and the third repair round fixes what each of the
+two Runners may claim. The v0.1 path is affected in type and in one exceptional path: the host
 runner's errors are the same errors with a fate attached, and `run_review` reports a reviewer
-unavailable exactly as before unless the Runner says the process may still be running, which the
-host funnel says only when its kill was not reaped.
+unavailable exactly as before except when that fate is `Unresolved`, which it propagates as an
+error instead. The host funnel says `Gone` only when the process group (Unix) or the job (Windows)
+was established empty, and `Unresolved` whenever it returned without that — a containment failure
+after the spawn, a reaper that failed, a Windows job cleanup that failed after the direct child
+exited — the direct child's own reap never being the evidence. (An earlier version of this
+paragraph said the funnel reports `Unresolved` only when its kill was not reaped; the review of
+`79ddbffb` showed that false in both directions, and the code now matches this sentence.) The
+Windows branch of the funnel was type-checked and clippy-clean for `x86_64-pc-windows-msvc` on the
+build box and executes on the winguest CI leg; it was not run locally.
 
 Two known gaps were deferred by the owner on 2026-09-07, each with a standing finding filed in
 `reviews/findings/`. `PR8-CRASH-002`: a lock file left by a coordinator
@@ -371,3 +439,8 @@ owns.
 | PR8-R2-UNREACHABLE | P2 | 916852c9638383af3964f743d48e14bf859138c3 / src/engine/topology/recover/tests.rs:6491 | recovery returns before the armed append, on a third-SHA refusal -> let _ discards the result -> a bare unreachable! ends the child with no report of why | introduced_by_feature | docs-contract | 69463499 | standards section 7, held by review: `two_crash_kill_child` reports what recovery returned into the parent's report file and fails plainly; no unreachable! was added by this pull request | fixed |
 | PR8-R2-RECORD-PROSE | P3 | 916852c9638383af3964f743d48e14bf859138c3 / docs/internals/engine/topology/integrate.md:323 | the prose relocation preserves three statements false against the code -> a StaleNotImplemented refusal that does not exist, a head check skipped under any transaction, a person asked below the limit refused | introduced_by_feature | docs-contract | 4de4c74e | corrected to what `integrate_stale`, `ensure_recorded_integration_ref` and `check_merge_rejected` do; `test-internals-notes.sh` holds the pointers, review holds the sentences | fixed |
 | PR8-R2-RECORD-PROVENANCE | P2 | 916852c9638383af3964f743d48e14bf859138c3 / pr8-body.md:194 | the body names Opus 4.8 at high effort and the review script's default reviewer -> the plan names Fable 5.1 at max -> MAINTAINING.md requires the frontier reviewer model and effort in the body and the body names what did not run | introduced_by_feature | docs-contract | 3414dc58 | the settled values from the owner and the worktree model-intent files are in the Review evidence section; `validate-pr-body.sh` holds the sections | fixed |
+| PR8-R3-HOST-GROUP-GONE | P1 | 79ddbffbb5fb087bfb89f88321a3f60a2a88bdb1 / src/agent/proc.rs:442 | a gate forks a same-group descendant -> the reaper is lost and Supervisor.finish fails -> the direct child is killed and reaped -> settle_failed_supervision sets Gone from the reap -> the integration settles Infrastructure{Other} and disposes the snapshot beside the live descendant; on Windows Gone is stored before the job is observed empty, and a spawn that fails after CreateProcess discards its cleanup evidence behind NeverStarted | fix_regression | correctness | cd4610f6 | `a_reaped_leader_does_not_prove_its_group_gone_when_the_reaper_failed`, `a_lost_group_settles_unresolved_even_when_the_leader_reaps_cleanly`, `a_containment_failure_after_the_spawn_leaves_the_fate_unresolved` | fixed |
+| PR8-R3-CONTAINER-START | P1 | 79ddbffbb5fb087bfb89f88321a3f60a2a88bdb1 / src/runner/container/exec.rs:631 | Docker is down before docker create -> create, stop and remove all fail -> cancelled classifies Unresolved though no process can exist -> the command ends resumably instead of deferring, and four such outages consume no defer; conversely a committed docker start followed by a clean cancel is NeverStarted and settles RunnerSpawnFailure | fix_regression | correctness | cd4610f6 | `the_runner_reports_what_it_established_about_the_process_when_it_fails`, `repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner` | fixed |
+| PR8-R3-CONTAINER-RETAIN | P1 | 79ddbffbb5fb087bfb89f88321a3f60a2a88bdb1 / src/runner/container.rs:527 | observe, stop and remove unreachable -> cancel_reached prunes the R19 view and removes the R26 intent after both failures -> the running container's mounted Git metadata is deleted and no record names the residue | fix_regression | crash-consistency | cd4610f6 | `a_container_the_runtime_cannot_confirm_stopped_keeps_its_mounted_git_view_and_intent` | fixed |
+| PR8-R3-CONTAINER-EVIDENCE | P2 | 79ddbffbb5fb087bfb89f88321a3f60a2a88bdb1 / src/runner/container.rs:518 | a stop fails and the forced removal succeeds, or a timed-out output's release fails only at the view discard, or an observed exit precedes a failed stop -> container_released is false -> Unresolved -> an observed outage ends the command as an interruption and consumes no defer | fix_regression | correctness | cd4610f6 | `the_runner_reports_what_it_established_about_the_process_when_it_fails` | fixed |
+| PR8-R3-RECORD-ENTITLEMENTS | P2 | 79ddbffbb5fb087bfb89f88321a3f60a2a88bdb1 / pr8-triage.md:137 | the round-two triage says the caller's cancel releases both entitlements after an unresolved verification -> the reviewer measures the reservation ledger at 0 and reports a release -> the reservation had converted at merge_verification_started and the open transaction holds the entitlements, and nothing cancels them | introduced_by_feature | docs-contract | 1e2a0733 | `an_unresolved_verification_leaves_its_entitlements_with_the_open_transaction` pins the conversion, the open transaction's holding and that a second step admits nothing; the triage sentence is corrected | fixed |
