@@ -326,9 +326,12 @@ it.
 
 ### Errors
 
-Any refusal of the sequence it runs, and — in this build —
-[`Refusal::StaleNotImplemented`] for a candidate whose base is no longer
-the head, refused before any staging effect.
+Any refusal of the sequence it runs. A candidate whose base is no longer
+the head is not refused: it takes the stale path (`integrate_stale`),
+cherry-picked onto the head in a staging worktree and verified there. (An
+earlier build refused it as `StaleNotImplemented`; that variant no longer
+exists, and the sentence that said so survived the prose relocation until
+the reviews of `916852c9`.)
 
 ## `pub enum Terminal {`
 

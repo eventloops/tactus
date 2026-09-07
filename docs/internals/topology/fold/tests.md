@@ -2933,7 +2933,10 @@ verification, built as a log so the refusals can be checked on replay.
 ## `fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {` › `let (under, log) = verifying(1);`
 
 Below the limit: the first repair of a run that allows one automatic
-repair is runnable, and asking a person instead is refused.
+repair is runnable, and a `HumanRequired` admission — asking a person
+for an allowance the lineage still has — is refused. A `HumanBinding`
+admission is accepted on either side of the limit: it is the empty
+intersection's shape, not the exhausted allowance's (`pr8-plan.md` R8).
 
 ## `fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {` › `let (at_limit, log) = verifying(0);`
 

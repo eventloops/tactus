@@ -100,10 +100,11 @@ created. The three reviews of `3414dc58` found the base compared after a
 publication, which refused every resume of a run that had merged anything
 (`pr8-triage.md` C1).
 
-It is skipped entirely when the proven prefix carries an integration
-transaction — [`finish_integration`] at step (f) owns the ref then — and
-otherwise its position is before step (d)'s first append, and every bound on
-it is a separate clause:
+It is skipped only when the proven prefix carries a `Prepared` transaction
+— [`finish_integration`] at step (f) owns the ref then, moving it by the
+authorized CAS — and runs under a `VerificationStarted` one, whose interrupted
+settlement moves no ref (`pr8-plan.md` R23). Otherwise its position is before
+step (d)'s first append, and every bound on it is a separate clause:
 
 * **After (a1).** It is a durable effect on a repository ref. O18 puts the
   stable-prefix barrier before the census's fold-derived reclaim, before any
