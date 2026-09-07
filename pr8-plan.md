@@ -313,6 +313,8 @@ mutation witness replayed against the repaired tree) and passes at the repair:
 | `test(engine): cherry-pick residue converges through integration recovery, and the stale fixtures move the head by a publication` | conformance F9, tests 11; crash 2 pinned as deferred; R23's check under a verifying transaction |
 | `test(engine): the recover tests satisfy the crate's effect lints` | clippy on the new tests; internals notes |
 | `docs(pr8): the record after the repair round` | this file, `pr8-body.md`, `pr8-triage.md` |
+| `test(engine): the residue sampler removes git's common-dir lock residue after a kill` | the macOS CI failure of the sampler; a second sighting of `PR8-CRASH-002` |
+| `docs(internals): the integration slice's prose moves to its notes files` | CODING_STANDARDS §13: every comment the pull request added to a module with notes moves to `docs/internals/`, and the four new modules gain notes files; no code changes |
 
 ## 3. `src/topology/**` changes: Class A / B / C
 

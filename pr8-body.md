@@ -107,7 +107,7 @@ already settled are marked as such):
 ## Validation
 
 All ten gates green locally, from the repository root, on the last code commit of this branch,
-`254597cd44f3b1f9adc5f4d7ac6d1a0e7b8ff1a3`; the commit that follows it changes the three record
+`4de4c74efafd37054f790aeef5de9668e36729d4`; the commit that follows it changes the three record
 files and no code, and the ten gates were rerun on it before the push:
 
 ```
@@ -217,6 +217,13 @@ is beyond this slice's reach and is deferred with a ledger row and an owner deci
 (`PR8-CRASH-002`). The two documentation defects the owner was being asked to approve on — the
 over-limit `HumanBinding` description and the empty-intersection ladder — are corrected: the
 description to what the fold does, and the code to what R10 recorded.
+
+After the push, CI's macOS leg failed once in the residue sampler: a killed `git cherry-pick`
+left `packed-refs.lock` in the common git dir — the Ref-lock residue class `PR8-CRASH-002`
+defers — and the sampler now removes git's ref-lock residue after each kill as an operator
+would. The prose this pull request had put into source files then moved to the modules' notes
+under `docs/internals/` (CODING_STANDARDS §13), with notes files created for `integrate.rs`,
+`repair.rs` and their test modules; that commit changes no code.
 
 The repaired head has not been reviewed. The frontier review of it is **owed and is the owner's
 to run**; it is not part of this branch. The ledger below carries the canonical header and one
