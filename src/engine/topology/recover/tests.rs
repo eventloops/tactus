@@ -8108,8 +8108,6 @@ fn repeated_container_launch_outages_before_start_consume_defers_through_the_pro
         .into_iter()
         .enumerate()
     {
-        // The runtime is back for the resume, so the census reclaims whatever the
-        // previous outage retained; it goes down again at the next `docker create`.
         for op in [RuntimeOp::Create, RuntimeOp::Stop, RuntimeOp::Remove] {
             fake.set_reachable(op);
         }

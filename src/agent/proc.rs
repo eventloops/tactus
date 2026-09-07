@@ -494,46 +494,42 @@ fn kill_tree(terminate_site: ProcessSite, child: &mut ProcessTree) -> Result<(),
     }
     #[cfg(not(windows))]
     {
+        let mut not_established = Vec::new();
         #[cfg(unix)]
-        let signalled = match i32::try_from(child.id()) {
-            Ok(pid) => {
-                // SAFETY: `run_with_timeout` put this child in a new process group
-                // whose id is the child's pid. A negative pid targets that group only.
-                if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
-                    Ok(())
-                } else {
-                    let error = std::io::Error::last_os_error();
-                    if error.raw_os_error() == Some(libc::ESRCH) {
-                        Ok(())
-                    } else {
-                        Err(error)
-                    }
-                }
-            }
-            Err(_) => Err(std::io::Error::from_raw_os_error(libc::EINVAL)),
-        };
-        #[cfg(not(unix))]
-        let signalled: std::io::Result<()> = Ok(());
+        if let Err(error) = signal_group_kill(child) {
+            not_established.push(format!("the group signal failed ({error})"));
+        }
         let _ = child.kill();
-        let reaped = child.wait().map(|_| ());
-        match (signalled, reaped) {
-            (Ok(()), Ok(())) => Ok(()),
-            (signalled, reaped) => Err(UpstrokeError::Agent {
+        if let Err(error) = child.wait() {
+            not_established.push(format!("the direct child's reap failed ({error})"));
+        }
+        if not_established.is_empty() {
+            Ok(())
+        } else {
+            Err(UpstrokeError::Agent {
                 message: format!(
-                    "terminating the agent process group did not establish it gone: the group \
-                     signal {}, the direct child's reap {}",
-                    signalled.map_or_else(
-                        |error| format!("failed ({error})"),
-                        |()| "was delivered".to_owned()
-                    ),
-                    reaped.map_or_else(
-                        |error| format!("failed ({error})"),
-                        |()| "succeeded".to_owned()
-                    ),
+                    "terminating the agent process group did not establish it gone: {}",
+                    not_established.join("; ")
                 ),
-            }),
+            })
         }
     }
+}
+
+#[cfg(unix)]
+fn signal_group_kill(child: &ProcessTree) -> std::io::Result<()> {
+    let pid =
+        i32::try_from(child.id()).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+    // SAFETY: `run_with_timeout` put this child in a new process group whose id
+    // is the child's pid. A negative pid targets that group only.
+    if unsafe { libc::kill(-pid, libc::SIGKILL) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error)
 }
 
 #[cfg(all(unix, test))]

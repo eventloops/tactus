@@ -314,6 +314,14 @@ after a delivered `SIGKILL` no member can run user code or complete a
 for a pid the kernel issued. The review of `79ddbffb` found it answering
 an unconditional `Ok` with every result discarded.
 
+## `fn signal_group_kill(child: &ProcessTree) -> std::io::Result<()> {`
+
+The Unix half of [`kill_tree`]'s evidence: `SIGKILL` to the group the
+child leads, `Ok` when it was delivered or `ESRCH` said the group is
+already empty. Its own function so the non-Windows block of `kill_tree`
+carries one positively gated statement and no `not(unix)` body — the
+platform census (`effects::tests`) refuses a body no CI runner compiles.
+
 ## `fn settle_failed_supervision(`
 
 Tidy the direct child after a supervision failure and store the fate.

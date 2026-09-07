@@ -3797,8 +3797,6 @@ fn a_containment_failure_after_the_spawn_leaves_the_fate_unresolved() {
             .pid
             .and_then(|pid| i32::try_from(pid).ok())
             .expect("the child was created before the containment point");
-        // The funnel returned without observing any cleanup of the group it
-        // created, so this test settles the group itself.
         // SAFETY: the group is the one this test's own child leads; a negative
         // pid targets that group only, and ESRCH means it is already gone.
         let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
