@@ -34,7 +34,10 @@ pending, the integration ref must name the log's latest publication — and the 
 decision reads the same rule, so a head the log did not put there refuses before any append.
 
 This slice is inert by default: the schema-4 topology engages only by explicit schema choice, and
-the v0.1 path is unchanged.
+the v0.1 path is unchanged **but for one declared exception** — an unresolved host reviewer now
+propagates the Runner's error through the legacy attempt instead of producing an unavailable-review
+result. That change, and the type changes around it, are stated in Risk and rollback below; it is
+the only behaviour of the released path this branch alters.
 
 ## Scope
 
@@ -436,6 +439,32 @@ gone and every cleanup that takes an expected-old value, each listed with where 
 comes from (§7.3, §7.4). What the reviewer cleared is undisturbed, no new Class B change was
 needed, and neither deferred finding was reopened.
 
+A final cover review of the whole slice against master was then run by the owner against the exact
+head `716cf89a` — the branch merged up to master, ten gates green locally and all eleven CI checks
+green across the ubuntu, macOS and Windows matrix — by a frontier reviewer at `ultra` effort (the
+review record the owner supplied names the effort and not the model), returning `CHANGES_REQUIRED`
+with six findings: two P1, three P2, one P3, and two of the six in code that predates this slice.
+It cleared the structural core again — no stable-prefix or CAS ordering defect, no undeclared
+Class C, the three approved Class B descriptions matching the code — and what it found was edges:
+macOS process-enumeration failures read as an empty process group, because Apple's `proc_listpids`
+answers a failed call with the same zero it answers an empty group with; completed review costs
+discarded live when a later snapshot failed, so the loop admitted another sequence in the same
+incarnation against a total that was missing them; the read-only proposal classifier writing the
+index outside every effect hook; a reviewer's image mismatch attributed as `ReviewUnavailable`
+where INV-23 names `RunnerSpawnFailure`; the §7.4 cleanup census not exhaustive though it claimed
+to be; and the body's unchanged-v0.1 and rollback claims contradicting its own Risk section. Every
+finding was triaged in `pr8-triage.md` §8 (Claude Fable 5.1 at max effort, a fresh autonomous
+session, 2026-09-07) and confirmed; the four code findings were repaired on this branch with a test
+that fails without the repair, and the two record findings were corrected in the record. A seventh
+row was raised by this round rather than the reviewer, sweeping the class finding 3 named:
+`PR5-CONF-002` had established that Git's porcelain writes the index it is only asked to read and
+applied `--no-optional-locks` at one call site, and the rest of the manager's reads never got it.
+§7.3 is corrected for the macOS row and re-examined end to end for the species of error behind it —
+an observation whose failure mode is indistinguishable from its success value — and §7.4's domain
+is restated and completed across both the schema-4 and the legacy layer. Neither deferred finding
+is reopened; finding 2 is adjacent to `PR8-R2-SPEND-REPLAY` and distinct from it, and §8.2 records
+why, so the two are not folded together later.
+
 The repaired head has not been reviewed. The frontier review of it is **owed and is the owner's
 to run**; it is not part of this branch. The ledger below carries the canonical header and one
 row per distinct finding.
@@ -472,6 +501,20 @@ coordinator and resume hold a borrowed one for their whole command (those two si
 in behaviour); and mirrors every successful append into the event list the run carries, in the one
 emit funnel, so the live head rule reads what recovery appended.
 
+The fifth repair round touches the v0.1 path in type only. `review_failure` takes a second
+argument, and `ReviewOutcome` and `AttemptFailure` each gain one in-memory field recording whether
+the Runner established that the process never started; nothing serializes any of it and the legacy
+ladder reads none of it, so every legacy path answers exactly what it answered before. The round's
+other changes are schema-4 only or are reads: the review account is on the topology judge and the
+legacy attempt passes `NoReviewAccount`, and the two Git reads made read-only —
+`WorkspaceManager::proposal_state`'s unmerged-entry query and `read_only_git`'s
+`--no-optional-locks` — are both in the schema-4 workspace manager, which no v0.1 command uses.
+The macOS process-group scanner is shared by both engines and its change is a refusal where it
+previously answered wrongly: a failed enumeration is now unknown rather than an empty group, which
+the reaper's loop already treats as "keep killing", so on the one platform it affects the released
+path becomes fail-closed where it was fail-open. **It executes for the first time on CI's macOS
+leg**; this box is Linux and the platform-independent half of the rule is what the test covers.
+
 
 Two known gaps were deferred by the owner on 2026-09-07, each with a standing finding filed in
 `reviews/findings/`. `PR8-CRASH-002`: a lock file left by a coordinator
@@ -483,9 +526,11 @@ previous incarnation's total would have refused; recording it needs a review rec
 unavailable terminal, which the frozen vocabulary lacks.
 
 Rollback is clean: the schema-4 topology is inert unless a plan selects it, so reverting the branch
-removes the machinery without touching the v0.1 path or any released behaviour. No data migration,
-no on-disk format change outside the run-scoped `refs/upstroke/runs/<run>/…` namespace this slice
-owns.
+removes the machinery and restores the released path exactly — including the one behaviour of it
+this branch changes, the unresolved host reviewer declared above, which reverts with everything
+else. Nothing else in the v0.1 path differs, so a revert has no other released behaviour to undo.
+No data migration, no on-disk format change outside the run-scoped
+`refs/upstroke/runs/<run>/…` namespace this slice owns.
 
 ## Review finding ledger
 
@@ -535,3 +580,10 @@ owns.
 | PR8-R4-SUBSTITUTED-PIN-LIVE | P1 | 8a5f59e8ca2272e253e326685d15136c6008e1d0 / src/engine/topology/integrate.rs:869 | verification records proposal P and pins it -> another writer moves the pin to X -> the verification rejects or parks -> reclaim_staging reads X and deletes expected-old at X -> the substituted ref is gone and the terminal returns success | introduced_by_feature | correctness | 2d1b4c72 | `a_rejected_or_unavailable_terminal_refuses_to_delete_a_pin_another_writer_substituted` | fixed |
 | PR8-R4-START-NOT-ATTEMPTED | P2 | 8a5f59e8ca2272e253e326685d15136c6008e1d0 / src/runner/container/exec.rs:618 | the funnel refuses at Container.Start's Before phase -> docker start is never issued -> the launch records Started -> with stop and remove unavailable the fate is Unresolved instead of NeverStarted -> the transaction stays open instead of consuming the outage deferral | fix_regression | correctness | 52d1fa05 | `the_runner_reports_what_it_established_about_the_process_when_it_fails`, the cell with the funnel refusing before `docker start` | fixed |
 | PR8-R4-REVIEW-ORACLE | P2 | 8a5f59e8ca2272e253e326685d15136c6008e1d0 / src/engine/topology/recover/tests.rs:7315 | both review doubles ignore the workspace they are handed -> the integration reviewers' workspace is pointed into staging -> snapshot creation and cleanup kept -> all 366 engine-topology tests pass while verification_isolation is violated | introduced_by_feature | correctness | 2d1b4c72 | `stale_candidate_takes_staging_path_and_publishes_pinned_proposal`, `terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay`, `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal`; the doubles run a process in the workspace they are handed | fixed |
+| PR8-R5-MACOS-ENUMERATION | P1 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / src/agent/proc.rs:3811 | a host gate times out -> SIGKILL is issued and a same-group descendant has not terminated -> proc_listpids fails and Apple's wrapper reports the failure as a return of zero -> the scanner reads zero as an empty enumeration and answers Some(false) -> the reaper's cleanup loop exits at once, reaps the anchor and acknowledges CLEANUP -> Supervisor::finish succeeds beside the survivor, permitting termination reporting, snapshot removal and release of the cleanup lease | pre_existing | correctness | the macOS scanner as first written; the Linux scanner has no such ambiguity | `a_pid_enumeration_that_failed_is_not_an_empty_process_group` over `listed_pid_bytes`, which is compiled and exercised on every platform because the scanner around it compiles only on macOS | fixed |
+| PR8-R5-DISCARDED-REVIEW-COST | P1 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / src/engine/topology/attempt.rs:624 | 1.30 is charged under a 2.20 run ceiling -> the first integration review returns and costs 2.50 -> creating the second reviewer's snapshot fails with a Git error -> ? discards the judge's completed-review vector and charging happens only on a successful judgement return -> the sequence settles unavailable rather than ending the command -> the loop admits another sequence in the same incarnation and 6.30 is accounted against 8.80 spent | introduced_by_feature | correctness | 2d1b4c72 | `a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fails`; the rule is `ReviewAccount`, reported as each pass returns, and `verify` no longer charges from the judgement | fixed |
+| PR8-R5-CLASSIFIER-INDEX-WRITE | P2 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / src/workspace_manager.rs:2609 | a proposal cherry-pick is already present -> proposal_state is called to classify the failure -> its porcelain git diff runs update-index --refresh against the working tree -> index.lock is created and renamed over index -> a function that takes no hooks and names no effect site has written a resource outside every effect hook | introduced_by_feature | correctness | 2d1b4c72 | `the_proposal_classifier_writes_no_index_while_reading_an_empty_pick` hashes the index across the whole call; the read is the plumbing `diff-files`, which `diff.autoRefreshIndex` documents as outside the porcelain refresh | fixed |
+| PR8-R5-READ-ONLY-SWEEP | P2 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / src/workspace_manager.rs:3416 | the residue classifier asks whether an interrupted git add published its blobs -> worktree_has_unstaged_changes runs git status --porcelain -> git takes the index lock opportunistically to write back a refreshed stat cache -> the classifier rewrites the index of the worktree it is classifying, and its own index.lock is what a later classification reads as proof the publication never happened | pre_existing | correctness | PR5-CONF-002, which named this mechanism and applied the flag at one call site | `a_worktree_inspecting_read_writes_no_index`; `--no-optional-locks` moves into `read_only_git` itself and the per-call constant is removed, so dropping it is a single witnessed change | fixed |
+| PR8-R5-REVIEWER-SPAWN-FAILURE | P2 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / src/review.rs:547 | a reviewer's container reports an image id that is not the recorded one -> the runner refuses before docker start and answers NeverStarted -> run_review contains it as Unavailable{AgentError} so the pass defers instead of ending the command -> review_failure maps it to ReviewUnavailable -> integration persists Infrastructure{ReviewUnavailable} where INV-23 requires RunnerSpawnFailure for a mid-run image mismatch, reviewers and re-asks included | introduced_by_feature | docs-contract | 2d1b4c72 | `a_reviewer_whose_process_never_started_is_a_runner_spawn_failure`, with a Gone control; `review_infrastructure_failures_become_unavailable_outcomes` pins the production run_review carrying the fate | fixed |
+| PR8-R5-CENSUS-DOMAIN | P2 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / pr8-triage.md:298 | the cleanup census is derived by grepping the schema-4 manager's primitive names -> the legacy Workspace reaches Git through git update-ref and git worktree remove --force directly -> no legacy site can appear -> the section claims every production site and states that only two orphan prunes read their expected-old from the ref, while workspace.rs:1157 is a third | introduced_by_feature | docs-contract | 1e2a0733 | the domain is restated as every ref deletion, ref move, worktree removal and snapshot removal in both layers, the grep that derives it is named, a legacy table is added with each site's authority, and the count is corrected to three; no runtime defect was established in the omitted operations, by the reviewer or here | fixed |
+| PR8-R5-V01-CLAIM | P3 | 716cf89af6817b7797ca954944c83dd37ea7a7f3 / pr8-body.md:37 | the Risk section declares that an unresolved host reviewer now propagates an error through the legacy attempt -> the Summary says the v0.1 path is unchanged and the rollback paragraph says a revert touches no released behaviour -> the body contradicts itself about the one released behaviour this branch changes | introduced_by_feature | docs-contract | cd4610f6 | both sentences are qualified against the declared exception and the Risk section carries the fifth round's own v0.1 surface; `validate-pr-body.sh` holds the sections | fixed |

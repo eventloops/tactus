@@ -494,6 +494,45 @@ the records kept current between them; the two class sweeps the brief asked for 
 | `test(engine): the review doubles run a process in the workspace they are handed, and the isolation oracles observe each reviewer's checkout` | finding 6 (`PR8-R4-REVIEW-ORACLE`) |
 | `docs(pr8): the record after the fourth repair round` | this file, `pr8-body.md`, `pr8-triage.md` |
 
+### The fifth repair round (2026-09-07)
+
+The final cover review of the whole slice at `716cf89a` and its triage are `pr8-triage.md` §8.
+Six findings — two P1, three P2, one P3 — of which four are code and two are the record; a
+seventh row was raised by this round rather than the reviewer, sweeping the class finding 3
+named. One commit per finding, each code repair with a test that fails without it (the mutations
+of §8.3 of the triage), the records kept current between them:
+
+| Commit | Findings |
+|---|---|
+| `fix(agent): a macOS pid enumeration that failed is not an empty process group` | finding 1 (`PR8-R5-MACOS-ENUMERATION`); §7.3's macOS row corrected and the class re-examined |
+| `fix(engine): a completed integration review is charged when it completes, not when the judgement returns` | finding 2 (`PR8-R5-DISCARDED-REVIEW-COST`) |
+| `fix(workspace): the proposal classifier and the manager's reads write no index` | finding 3 (`PR8-R5-CLASSIFIER-INDEX-WRITE`) and the class sweep (`PR8-R5-READ-ONLY-SWEEP`) |
+| `fix(engine): a reviewer whose process never started settles as a runner spawn failure` | finding 4 (`PR8-R5-REVIEWER-SPAWN-FAILURE`); INV-23 |
+| `chore(effects): classify libc::ENOMEM, which the macOS enumeration test names` | the governance row the new test's constant needs |
+| `docs(pr8): the record after the fifth repair round` | this file, `pr8-body.md`, `pr8-triage.md`: §7.3 corrected and re-examined, §7.4's domain restated and completed across both layers (finding 5, `PR8-R5-CENSUS-DOMAIN`), and the body's v0.1 and rollback claims qualified (finding 6, `PR8-R5-V01-CLAIM`) |
+
+Nothing in the round is Class B or Class C. `ReviewAccount`, `NoReviewAccount`, the two
+`never_started` fields and `listed_pid_bytes` are in-memory types and a pure function; nothing new
+is serialized; the frozen fold, the frozen event vocabulary and `src/topology/**` are untouched.
+The three approved Class B changes and their descriptions are unchanged.
+
+Two readings this round records, because both were choices and not deductions:
+
+- **Finding 3 is repaired by making the read read-only rather than by routing it through the
+  effect funnel.** The brief allowed either. There is no site to route it to: the frozen
+  `EffectSiteId` names no classification read, every `ObjectSite` variant documents "the row that
+  references the created object immediately after the effect", and a classifier creates nothing to
+  reference — so adding one is a change under the `src/topology/**` freeze, for a function whose
+  whole contract is that it is a read. `git diff-files` is the answer rather than
+  `-c diff.autoRefreshIndex=false` because `diff.autoRefreshIndex`'s own documentation excludes the
+  plumbing commands from the refresh, which makes the read-only-ness a property of the command
+  rather than of a configuration default that a future Git could change.
+- **Finding 4 is carried on an in-memory fact and not on a new vocabulary entry.** A
+  `FailureKind::RunnerSpawnFailure` would be the obvious shape and is not available: `FailureKind`
+  is serialized into `events.jsonl` through the schema-3 records, so a new variant is a Class C
+  wire change. `InfrastructureKind::RunnerSpawnFailure` already exists and is exactly what INV-23
+  names, so what was missing was never a vocabulary entry but the fact that reaches it.
+
 ## 3. `src/topology/**` changes: Class A / B / C
 
 Rule applied: a read-only accessor that exposes a derivation the fold already makes is
@@ -677,4 +716,29 @@ recorded — a field on `merge_verification_unavailable`, or an erratum on
   engine-topology tests — fails `stale_candidate_takes_staging_path_and_publishes_pinned_proposal`,
   `terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay` and
   `the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshots_after_the_terminal`.
+
+- **The fifth repair round's witnesses** (`pr8-triage.md` §8.3), applied the same way, except that
+  each file is restored from the commit that carries its repair rather than from `HEAD`, because
+  `git checkout -- <file>` over an uncommitted repair discards the repair rather than the mutation.
+  Each fails exactly the test named: `listed_pid_bytes`'s `errno` arm dropped fails
+  `a_pid_enumeration_that_failed_is_not_an_empty_process_group`, which then reads Apple's failure
+  answer as an enumeration of nothing; the per-pass charge removed and `verify`'s old
+  `record_reviews` on the returned judgement restored fails
+  `a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fails` at the
+  reviewer's own numbers, 1.2999999999999998 → 6.3 with three reviewers where the ceiling admits
+  one; `proposal_state`'s `diff-files` restored to the porcelain `diff` fails
+  `the_proposal_classifier_writes_no_index_while_reading_an_empty_pick`; `--no-optional-locks`
+  dropped from `read_only_git` fails `a_worktree_inspecting_read_writes_no_index`; and the
+  never-started arm removed from `integrate::infrastructure` fails
+  `a_reviewer_whose_process_never_started_is_a_runner_spawn_failure` with `ReviewUnavailable`
+  where INV-23 names `RunnerSpawnFailure`.
+
+  **Two of those tests were vacuous when first written, and the mutation is what said so.** With
+  the stat-dirty input made by rewriting a tracked file byte for byte at the time of the test, both
+  index-hash tests passed under their own mutations: Git will not cache a stat that is not older
+  than the index it is writing, so the refresh had nothing it was permitted to write back and the
+  index was unchanged for a reason that had nothing to do with the repair. The input was changed to
+  age the file into the past, a different second per call, and measured first in a shell
+  reproduction of the same linked-worktree shape — porcelain `diff` moves the index, `diff-files`,
+  `diff --cached` and `--no-optional-locks status` do not — before the tests were rerun.
 

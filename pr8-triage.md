@@ -277,8 +277,8 @@ the test modules excluded (the `Boundary` double in `agent/mod.rs` and `Scripted
 | `agent/proc.rs` `run_with_timeout_and_limit` before `ProcessTree::spawn` returns; `validate_process_sites`; `HostRunner::run` composing the environment or resolving the program (`runner/host.rs`); `ContainerRunner::run` building its plan (`exec.rs`); `AgentProbe::run` refusing a non-slotted request (`create.rs`) | `NeverStarted` | No `spawn`, `CreateProcess` or `docker create` was issued. |
 | `ProcessTree::spawn` on Unix | `NeverStarted` | `Command::spawn` returned an error; the kernel created no process. |
 | Windows spawn boundary `spawn_suspended_in_job_with` | `NeverStarted` before `CreateProcess`; `settle_suspended`: `Gone` when the job was observed empty or the never-resumed suspended child was reaped; `settle_resumed`: `Gone` only when the job was observed empty; else `Unresolved` | `Job::terminate_and_wait` reads the job's active-process count to zero; a suspended child that was never resumed ran no instruction and so has no descendant, which is why its reap is complete evidence on that arm and on no other. |
-| Unix register-error fallback (`termination.register` failed) | `Gone` only when `kill_tree` answered `Ok` | `kill(-pgid, SIGKILL)` accepted by the kernel for the whole group (or the group already absent) and the direct child reaped, after the supervisor was dropped. The one host site whose evidence is the kernel's acceptance of the group signal rather than a settlement observation; a member that had left its group before the signal is outside the host contract (`invariants[17].recovery`: escaped daemonized descendants). Third-round repair, unchanged, recorded here as the weakest claim in the class. |
-| Unix loop after exit, output limit or timeout; `settle_failed_supervision` | `Gone` only when `Supervisor::finish` returned `Ok` | The reaper answered `CLEANUP` with `OK`, which it does only after `group_has_non_zombie_members(pgid)` read `false` from `/proc` under repeated `SIGKILL`; a `finish` failure arms the fail-closed `SIGTERM` and leaves `Unresolved`. The direct child's own kill and reap are tidy-up, never evidence. |
+| Unix register-error fallback (`termination.register` failed) | `Gone` only when `kill_tree` answered `Ok` | `kill(-pgid, SIGKILL)` accepted by the kernel for the whole group (or the group already absent) and the direct child reaped, after the supervisor was dropped. The one host site whose evidence is the kernel's acceptance of the group signal rather than a settlement observation; a member that had left its group before the signal is outside the host contract (`invariants[17].recovery`: escaped daemonized descendants). Third-round repair, unchanged. Recorded in round four as the weakest claim in the class; that ranking was wrong, and the macOS scanner row above was weaker — this row's evidence is thin but it is evidence *about the group*, where the macOS enumeration was returning a value that was not an observation at all. |
+| Unix loop after exit, output limit or timeout; `settle_failed_supervision` | `Gone` only when `Supervisor::finish` returned `Ok` | The reaper answered `CLEANUP` with `OK`, which it does only after `group_has_non_zombie_members(pgid)` answered `Some(false)` under repeated `SIGKILL`; a `finish` failure arms the fail-closed `SIGTERM` and leaves `Unresolved`. The direct child's own kill and reap are tidy-up, never evidence. **The scanner is per-platform and the two answers are not the same claim.** On Linux `Some(false)` is `getdents64` reaching the end of `/proc` with no member of the group left un-zombied, and a `getdents64` failure returns a negative value, so zero is unambiguous. On macOS it was `proc_listpids` returning zero — and Apple's wrapper *also* returns zero when the call failed, `__proc_info`'s `-1` reported as `0` with `errno` set and an out-of-range type refused with `EINVAL` and `0`, so a failed enumeration was read as an empty group (round five, finding 1). `errno` is now cleared before the call and read after, and a zero answer with a non-zero `errno` is `None`, which the loop treats as "keep killing" exactly as the Linux `None` is treated. |
 | Windows loop after exit, output limit or timeout | `Gone` after `finish_direct_exit` or `kill_tree` returned `Ok` | `TerminateJobObject` then the job's active-process count read zero within the budget; a timeout leaves `Unresolved`. |
 | `ContainerRunner::cancelled` (`exec.rs`) | `NeverStarted` for `NotCreated` and `Created`; `Gone` for `Started` only with `container_gone` | Whether `docker start` was issued, now reported by the funnel itself (finding 5); a created, never-started container holds no process. |
 | `cancel_reached` (`container.rs`) | `container_gone` | The caller observed the exit (`ObservedExited`: the supervisor's `observe` answered `Exited` or `Gone`), or a stop or a removal answered `Settled::ProcessGone`. `RemovalInProgress` and every failure are named in the residue and count for nothing (finding 2). |
@@ -288,17 +288,67 @@ the test modules excluded (the `Boundary` double in `agent/mod.rs` and `Scripted
 | `reclaim` (the census, `container.rs`) | proceeds to `rm`, the view and the intent | `observe_terminated`: up to eight observations answering `Exited` or `Gone`; the kill's and the removal's answers let a racing reclaimer continue and are not read as evidence. |
 | `Registering::run` (`preflight.rs`) | `RunnerError::gone` when only the ledger or slot bookkeeping failed after the inner runner returned `Ok` | Inherits the inner runner's `Ok`, which the host funnel returns only after `finish` established the group empty and the container runner only after its release established the container gone. |
 | `IntegrationCx::verify` (`run.rs`); `run_review` (`review.rs`) | consume a fate | `NeverStarted` settles `RunnerSpawnFailure`, `Gone` settles `Infrastructure{Other}`, `Unresolved` ends the command resumably (R25); `run_review` propagates `Unresolved` and reports the other two as unavailable. |
-| The Unix reaper after coordinator death (`settle_after_coordinator_death`, `reclaim_labeled_containers`) | nothing for the engine | Settles its group by the same `/proc` criterion and issues `docker kill` and `docker rm --force` for labeled containers until the listing is stable; the next coordinator's census re-observes every container through its intent. |
+| The Unix reaper after coordinator death (`settle_after_coordinator_death`, `reclaim_labeled_containers`) | nothing for the engine | Settles its group through the same `cleanup_reaper_group` loop and the same per-platform scanner as the row above — so it carried the macOS defect and is fixed by the same repair — and issues `docker kill` and `docker rm --force` for labeled containers until the listing is stable; the next coordinator's census re-observes every container through its intent. |
 
 No other production site constructs `ProcessFate::Gone`, `ProcessFate::NeverStarted`, `Liveness::Gone`
 or `Settled::ProcessGone`.
 
+**Re-examined in round five for one species of error.** Round five's finding 1 was not a new site;
+it was a site in this table whose stated evidence was false on one platform, because the call it
+rested on *answers a failure with the same value it answers success with*. Zero pids means both
+"no process is in the group" and "the call could not enumerate the group". Every row above was
+re-read against that question — where does this observation's failure mode land, and can it be told
+from the value that means gone? — and this is what each answered:
+
+- **Distinguishable by construction, no further claim needed.** The pre-spawn `NeverStarted` rows
+  (no call was made), `ProcessTree::spawn` and the Windows spawn boundary (an `Err`), the funnel's
+  own `attempted` flag, `cancel_reached` and `ContainerRunner::run` (typed `Settled`), `Registering::run`
+  (it inherits an inner `Ok`), and the two consumers.
+- **Windows job accounting, checked because it is the closest analogue.** `Job::active_processes_with`
+  reads `ActiveProcesses` out of a zero-initialised `JOBOBJECT_BASIC_ACCOUNTING_INFORMATION`, and a
+  failed `QueryInformationJobObject` leaves that zero in place — the same shape. It is **not** the
+  same defect: the `BOOL` is tested first and a zero return is `Err(last_os_error())`, so the zeroed
+  struct is never read as an answer, and `windows_job::tests` already pins that ("a zero BOOL from
+  `QueryInformationJobObject` is a failure"). `terminate_and_wait` turns a query error into `Err`,
+  and the caller's `is_ok()` then reads `Unresolved`.
+- **`settle_stop`, `settle_remove`, `stop_answer`, `removal_answer`.** A failure the normalizers do
+  not recognise is returned as the failure, never as a settlement: `removal_answer` answers `None`
+  and `settle_*` reconstructs the original `RuntimeError`. `is_absent` and the in-progress phrase
+  are the only two strings that become an answer, and `DockerCli::inspect` maps only `is_absent` to
+  an absent object, so a daemon that cannot be reached is an error and not a gone container.
+- **`DockerCli::observe`'s fallthrough is the remaining weak arm in the class, and it is not a
+  defect today.** `running`, `restarting`, `paused` and `removing` are `Running` and *everything
+  else* is `Exited`, so an answer the arm does not enumerate lands on the terminated side, which is
+  the direction that matters. It holds because Docker's status vocabulary is closed and every member
+  of it is classified — `created`, `exited` and `dead` are all states with no live process — and
+  because every way the query can fail is an `Err` before the match is reached. What would make it a
+  defect is a runtime state that means "a process is still running" and is not one of the four:
+  then the census would observe a live container terminated and `reclaim` would remove it. Refusing
+  an unenumerated state instead of assuming it is terminated is the conforming shape; it is a
+  behaviour change to PR6 code with no reproduction behind it, so it is recorded here rather than
+  made, and nothing in this slice reaches it that did not before.
+
 ### 7.4 Class 2 — every cleanup that takes an expected-old value or removes a resource, and where its authority comes from
 
 The rule: no cleanup establishes the authority it acts under; every expected-old value comes from
-the record that authorized the resource, never from reading the resource's current state. Every
-production ref deletion, swap, pin prune, worktree removal and snapshot removal, from `grep` over
-`src/` with the test modules excluded:
+the record that authorized the resource, never from reading the resource's current state.
+
+**The domain, restated in round five, because the version below it was not the domain the section
+claimed.** Round four derived this table by grepping for the *schema-4 manager's primitive names* —
+`delete_ref_expected_old`, `compare_and_swap_ref`, `prune_pin`, `prune_orphan_pin`,
+`remove_worktree`, `remove_snapshot` — and then wrote a closing sentence about every production
+site. The legacy `Workspace` (`src/workspace.rs`) reaches Git through `git update-ref` and
+`git worktree remove --force` directly and calls none of those names, so no legacy site could
+appear, and the section's "the two orphan prunes are the only sites whose expected-old is read from
+the ref" was false: there are three. The domain is every production **ref deletion, ref move,
+worktree removal and snapshot removal in both layers**, derived by grepping `src/` for
+`update-ref`, `worktree` + `remove`, and the six manager primitives, with the `#[cfg(test)]` regions
+excluded — which is what drops `runner/container/view.rs`'s `update-ref`, a fixture inside a test
+module. The two tables below are that domain. Round five found no runtime defect in the sites round
+four had omitted, and the reviewer that named them established none either; each is listed with its
+authority so the claim can be checked rather than taken.
+
+#### The schema-4 sites
 
 | Site | Acts on | Expected-old or authority |
 |---|---|---|
@@ -328,9 +378,29 @@ production ref deletion, swap, pin prune, worktree removal and snapshot removal,
 | `reclaim` (the census) | the container, its view and its intent | The intent record the census discovered and classified (a dead owner by the run-lock probe, or an earlier incarnation of this run), after `observe_terminated`. |
 
 No other production site calls `delete_ref_expected_old`, `compare_and_swap_ref`, `prune_pin`,
-`prune_orphan_pin`, `remove_worktree` or `remove_snapshot`. The two orphan prunes are the only
-sites whose expected-old is read from the ref, and both are the contract's own construction for a
-pin that precedes its record; every other value is the record's.
+`prune_orphan_pin`, `remove_worktree` or `remove_snapshot`.
+
+#### The legacy sites (`src/workspace.rs`, schema 1–3)
+
+Round four's omission. None of these is reached by a schema-4 run: the legacy coordinator and
+`engine/resume.rs` are their only callers, and this slice adds no caller to any of them.
+
+| Site | Acts on | Expected-old or authority |
+|---|---|---|
+| `Workspace::prepare_commit_from_candidate`, the pin creation (`workspace.rs:984`) | `refs/upstroke/prepared/<run>/<task>-<attempt>` | Expected-old is the null id: the ref must not exist. Not a cleanup, listed because it is the write the two prunes below are the other half of — it is what makes the pin precede its record. The ref is refused if it is symbolic before the write and read back for the exact target after. |
+| `Workspace::remove_prepared_pin` (`workspace.rs:1136`) | the same pin | `prepared.commit_sha`, from the durable `PreparedCommit` record. Absent is done; any other target refuses naming both ("points at `X`, not the recorded commit `Y`"). The record's value, never the ref's. |
+| `Workspace::remove_orphan_prepared_pin` (`workspace.rs:1155`) | a pin whose attempt has no settlement | Expected-old **is the ref's current target** — the third site in the class, and the one that disproves round four's closing sentence. The authority is the log's absence of a record at exactly that pin: `engine/resume.rs:505` calls it once per `interrupted_attempts()` entry, at `prepared_pin_ref(run_id, task_index, attempt)`, and an interrupted attempt is one with an open `in_flight` and therefore no settlement and no `PreparedCommit`. A pin a record *does* name is the row above's and is compared with the record. The expected-old serves atomicity against a concurrent writer, not authority, exactly as it does for the two schema-4 orphan prunes; a symbolic pin refuses without dereferencing. |
+| `Workspace::advance_prepared_commit` (`workspace.rs:1199`) | the run branch, then the pin | `prepared.parent_sha` → `prepared.commit_sha`, both from the `PreparedCommit` record, after four read-only refusals: the record's branch is the requested one, HEAD is on that branch, the commit object matches its durable prepared identity, and the pin names that commit. The publication is read back before the pin is pruned through the row above. |
+| `cleanup_gate_workspace` from `reclaim_snapshot_intents` (`workspace.rs:737`) | a gate worktree, its hooks directory and its intent file | The durable snapshot intent file the reclaim just listed — the record that authorized the worktree. The name is validated (`valid_snapshot_name`) before it is used as a path, and an unexpected file in the intent directory refuses rather than being deleted. A worktree removal takes no expected-old; what would make this site wrong is deriving *which* worktree from the filesystem rather than from the intent, and it does not. |
+| `cleanup_gate_workspace` from `PendingGateWorkspace::drop` (`workspace.rs:1388`) | the same three | The creating process removing what it created and did not hand over: the guard is armed at creation and disarmed by `finish`. |
+| `cleanup_gate_workspace` from `GateWorkspace::drop` (`workspace.rs:1607`) | the same three | The same process removing the workspace it owns for the duration of the gate run. |
+| `Workspace::discard_uncommitted` (`workspace.rs:1221`) | uncommitted working-tree content | Not an accounted resource and not a ref, listed because it removes something. Its authority is the refusal that precedes it in `engine/resume.rs`: the branch head must equal the run's recorded head, or the resume refuses rather than discarding, so what is uncommitted is the interrupted run's own. The paths are summarised into the resume warnings before they are discarded. `refuse_unsafe_checkout_tree` refuses the reset itself if HEAD's tree is not what it expects. |
+
+So the class has **three** sites whose expected-old is read from the ref — `recover::reclaim_stale_residue`'s
+orphan `prepared/<next_seq>`, `candidate::prune_orphan_pin`, and `Workspace::remove_orphan_prepared_pin` —
+and all three are the same construction: a pin created before the record that would name it, whose
+authority is that record's absence at exactly that name. Every other expected-old in either table is
+the record's.
 
 ### 7.5 The mutations replayed this round
 
@@ -371,4 +441,51 @@ a native macOS one).
 | 4 | A reviewer whose process never started is a spawn failure, not a reviewer's answer: `run_review`'s unavailable outcome records that the process never started, `review_failure` carries it on the failure, and the integration's `infrastructure` mapping answers `RunnerSpawnFailure` for it, which is what INV-23 names for a mid-run image mismatch including reviewers and re-asks. No new `FailureKind` and no new `InfrastructureKind`: both vocabularies are frozen and both already have what this needs. | `review.rs`, `ladder.rs`, `engine/attempt.rs`, `topology/integrate.rs` |
 | 5 | §7.4's domain is restated as what it actually has to cover — every production ref deletion, ref move, worktree removal and snapshot removal in **both** the schema-4 `WorkspaceManager` layer and the legacy `Workspace` layer — and re-derived by grep over that domain. Each newly listed site gets its authority. | `pr8-triage.md` §7.4 |
 | 6 | The Summary's "the v0.1 path is unchanged" and the rollback paragraph's "without touching the v0.1 path or any released behaviour" are qualified against the Risk section's own declared exception. | `pr8-body.md` |
+
+### 8.2 The findings
+
+| # | Finding | Disposition | Evidence and repair |
+|---|---|---|---|
+| 1 (P1) [`PR8-R5-MACOS-ENUMERATION`] | macOS process-enumeration errors were false proof the group was gone: Apple's `proc_listpids` returns **zero on failure** — `__proc_info`'s `-1` reported as `0` with `errno` set, and an out-of-range type refused with `EINVAL` and `0` — and the scanner rejected a negative return while reading zero as an enumeration, answering `Some(false)`. A host gate times out, SIGKILL is issued, a same-group descendant has not terminated, the enumeration fails, `cleanup_reaper_group`'s loop exits at once, the anchor is reaped and `CLEANUP` acknowledged, so `Supervisor::finish` succeeds beside the survivor — which permits termination reporting, snapshot removal and release of the cleanup lease. Class 1 again, at the one site whose evidence was platform-specific and whose row in §7.3 described the Linux implementation only. Predates this slice. | **confirmed** | Reproduced by the reviewer as a portable scanner witness against Apple's failure response (`Some(false)` where unknown was true); **not a native macOS reproduction**, and this box is Linux, so the repair is reasoned from the syscall contract rather than measured on the platform. `invariants[17].recovery` (INV-18), `invariants[14]` (INV-15), `slice_contract.cancellation`. Repair: `errno` is cleared immediately before the call and read immediately after with nothing between, and the decision — what a return and an `errno` mean together — is `listed_pid_bytes`, a function compiled and exercised on **every** platform because the scanner around it compiles only on macOS. Unknown is `None`, which `cleanup_reaper_group` already treats as "keep killing", exactly as the Linux `None` is treated; `verify_group_scanner` fails closed on it at launch. Test: `agent::proc::termination::tests::a_pid_enumeration_that_failed_is_not_an_empty_process_group` (Apple's three failure answers are unknown; a genuine empty group with `errno` untouched is `Some(0)`; a listing is a listing even with a stale `errno`; a full buffer and a negative return are unknown). The call-site wiring is type-checked and clippy-clean for `x86_64-apple-darwin` on this box and first executed on CI's macOS leg, where `verify_group_scanner` refuses to launch any agent if it is wrong. Mutation: the `errno` arm dropped, the test reads `Some(0)` for Apple's failure. |
+| 2 (P1) [`PR8-R5-DISCARDED-REVIEW-COST`] | A later snapshot failure discarded completed review costs live: completed passes lived in the judge's local vector and `IntegrationCx::verify` charged them only on a successful judgement return, so a failure after a paid pass discarded the vector with `?`. The Git-error arm settles the sequence *unavailable* rather than ending the command, so the loop admitted another sequence in the same incarnation against a total the pass was missing from. | **confirmed** | Reproduced through the loop at the reviewer's shape and numbers: 1.30 charged, a 2.20 ceiling, a 2.50 first review, the second reviewer's `git worktree add` failing on an obstructed slot — `Deferred → Waited → Integrated`, three reviewers where the ceiling admits one, 6.30 accounted against 8.80 spent. `decisions.coordinator_integration.dispositions`; `slice_contract.side_effect_vs_event_ordering`. Repair: `Judge::judge` takes a `ReviewAccount` and reports each pass to it as the pass returns, so every exit from `judge` leaves the account complete; the integration's account is the run's live `Spend` and `verify` no longer charges from the judgement it gets back. The legacy attempt path and the scaffold pass `NoReviewAccount` — they charge from the durable `AttemptRecord` their settlement writes — so v0.1 is unchanged. `Spend::record_reviews` and the live charge now accumulate through one `record_review_cost`, so a replayed total is built by the same additions in the same order. Test: `recover::tests::a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fails`. Mutation: the charge removed and `verify`'s old `record_reviews` restored — the test reads 1.2999999999999998 → 6.3, the reviewer's own numbers. |
+| 3 (P2) [`PR8-R5-CLASSIFIER-INDEX-WRITE`] | The read-only proposal classifier wrote the index outside every effect hook: `proposal_state` takes no hooks and names no site on the stated ground that it "creates no object, moves no ref and touches no index", and its unmerged-entry query was the porcelain `git diff`, which runs `update-index --refresh` against the working tree first (`diff.autoRefreshIndex`, default true) and writes the result. | **confirmed** | Reproduced with the actual manager by the reviewer — staging, an empty cherry-pick, only an unchanged file's timestamp moved, `Empty` returned and the 209-byte index's hash changed — with a control that passed once the refresh was disabled; and re-measured here at the syscall level, `open(index.lock, O_RDWR\|O_CREAT\|O_EXCL)` then `rename(index.lock, index)` on git 2.43. `decisions.effect_site_inventory.{mechanism,identity,claim_scope}`. Repair: **made genuinely read-only, not routed through the funnel** — there is no site to route it to, the frozen `EffectSiteId` names no classification read, and adding one is a change under the `src/topology/**` freeze for a function that creates nothing to account for. The plumbing `git diff-files` is the answer rather than a configuration override because `diff.autoRefreshIndex`'s own documentation excludes it ("affects only `git diff` Porcelain"), and the two produce byte-identical `--name-status --diff-filter=U -z` records for the same unmerged entries (measured). The classification is unchanged and still pinned: the conflict arm by `integrate::tests::a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect`, the empty arm by the new test. Test: `workspace_manager::tests::the_proposal_classifier_writes_no_index_while_reading_an_empty_pick`, which hashes the index across the whole call and so covers the `--cached` diff too. Mutation: the porcelain `diff` restored, the test fails. |
+| 3b (P2) [`PR8-R5-READ-ONLY-SWEEP`] | **Raised here, sweeping finding 3's class.** `PR5-CONF-002` named this mechanism — Git's porcelain takes the index lock opportunistically to write back a refreshed stat cache — and applied `--no-optional-locks` at one call site. Every other read through `read_only_git` kept the behaviour, and one of them is reached from the residue classifier: `git status --porcelain` rewrites the index of the worktree it is classifying, which makes the classifier's own `index.lock` a thing a later classification reads as proof that an interrupted `git add` never published. Predates this slice. | **confirmed** | Measured on git 2.43 in a linked worktree with only a tracked file's timestamp aged: `git status --porcelain=v1 -z --no-renames --untracked-files=all` moves the index's hash and the same command with `--no-optional-locks` does not. Repair: the flag moves into `read_only_git` itself, once, so a read added later inherits it, and the per-call `READ_ONLY` constant at `index_differs_from` is **removed** — two sources for one suppression would mean dropping either is not a witness. Test: `workspace_manager::tests::a_worktree_inspecting_read_writes_no_index`. Mutation: the flag dropped from the helper, the test fails. The setup itself was mutation-checked: an unchanged file rewritten *now* is racily clean and Git writes back nothing, so the first version of both tests passed under their own mutations and the input was changed to age the file into the past. |
+| 4 (P2) [`PR8-R5-REVIEWER-SPAWN-FAILURE`] | Reviewer image mismatches got the wrong durable classification: the container runner detects the mismatch before start and answers `NeverStarted`; `run_review` contained that as `Unavailable{AgentError}` so the pass could defer instead of ending the command, `review_failure` turned it into `ReviewUnavailable`, and integration persisted `Infrastructure{ReviewUnavailable}`. `invariants[22].statement` (INV-23) requires **`RunnerSpawnFailure`** for a mid-run image mismatch and says the rule covers "every probe, worker, gate, review, and re-ask process of the run", so R4's generic mapping does not get to answer for it. | **confirmed** | The reviewer's static production sequence, walked and confirmed: `exec.rs`'s pre-start mismatch → `NeverStarted` → `run_review` → `review_failure` → `infrastructure`. Deferral and containment were already correct; only the attribution was wrong. Repair: what the Runner established is carried out of `run_review` on the outcome, marks the failure, and is read by `integrate::infrastructure`. **No new `FailureKind` and no new `InfrastructureKind`**: both vocabularies are frozen and serialized, `RunnerSpawnFailure` is already in the one that matters, and the new fact is in memory only, so the legacy ladder — which never reads it — is unchanged. R4's §7.3 row for the two consumers is corrected with it. Both review doubles now report the fate the way `run_review` does, so neither can hide the attribution the way a double that ignored its workspace hid R4's isolation defect. Tests: `recover::tests::a_reviewer_whose_process_never_started_is_a_runner_spawn_failure` (with a `Gone` control saying the attribution changed for the one fate the invariant names and no other, and both arms asserting the deferral is unchanged) and `review::tests::review_infrastructure_failures_become_unavailable_outcomes` (the production `run_review` carrying the fate). Mutation: the never-started arm removed from `infrastructure`, the test reads `ReviewUnavailable`. |
+| 5 (P2) [`PR8-R5-CENSUS-DOMAIN`] | The §7.4 cleanup census was not exhaustive though it claimed to be: it was derived by grepping the *schema-4 manager's primitive names*, and the legacy `Workspace` reaches Git through `git update-ref` and `git worktree remove --force` directly, so no legacy site could appear. `Workspace::remove_prepared_pin`, `remove_orphan_prepared_pin`, `advance_prepared_commit` and `cleanup_gate_workspace` were all missing, and `workspace.rs:1157` deletes an orphan pin at its **observed target**, which disproves the section's "the two orphan prunes are the only sites whose expected-old is read from the ref". | **confirmed (record)** | The reviewer established census omissions and no runtime defect in the omitted operations, and neither did this round. §7.4 is rewritten: the domain is restated as every production ref deletion, ref move, worktree removal and snapshot removal **in both layers**, with the grep that derives it named; the schema-4 table is unchanged; a legacy table is added with each site's authority; and the closing sentence is corrected to **three** orphan prunes, all the same construction — a pin created before the record that would name it, whose authority is that record's absence at exactly that name. The legacy orphan prune's disjointness is checked rather than assumed: `resume.rs:505` calls it once per `interrupted_attempts()` entry, an interrupted attempt has an open `in_flight` and therefore no settlement and no `PreparedCommit`, and a pin a record does name is the record-authorized row instead. |
+| 6 (P3) [`PR8-R5-V01-CLAIM`] | The body's unchanged-v0.1 and rollback claims contradicted its own Risk section, which correctly declares that an unresolved host reviewer now propagates an error through the legacy attempt instead of producing an unavailable-review result. | **confirmed (record)** | Both sentences are qualified against the exception the Risk section already states, and the Risk section is extended with round five's own v0.1 surface: `review_failure` gains a parameter and `ReviewOutcome` and `AttemptFailure` each gain an in-memory field, none of which the legacy ladder reads, so the legacy behaviour is unchanged in every path but the one already declared. |
+
+Neither deferred finding is reopened or repaired. `PR8-R2-SPEND-REPLAY` is **adjacent to finding 2 and
+distinct from it**, and the distinction is the reason finding 2 needs no Class C change: that finding
+is a *restart* losing the cost of a verification that reached `merge_verification_unavailable`,
+whose frozen terminal carries no review record, and conforming needs a wire-vocabulary change the
+owner deferred on 2026-09-07. Finding 2 involves no restart at all — the cost is known, in memory,
+and thrown away inside one incarnation, and holding it needs nothing but charging it where it is
+earned. After this repair the live account is right and the replayed account still under-counts on
+that path by exactly the deferred gap, unchanged in extent: the vocabulary still cannot carry a cost
+with no terminal, and `a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap`
+still pins it. Do not fold the two together.
+
+No new Class B change and no Class C: `ReviewAccount`, `never_started` and `listed_pid_bytes` are
+in-memory types and a pure function, nothing is serialized, and the frozen fold, the frozen event
+vocabulary and `src/topology/**` are untouched.
+
+### 8.3 The mutations replayed this round
+
+Each applied by an asserted replacement against the repaired tree, the named tests run, and the file
+restored from the commit that carries the repair — never by `git checkout` over an uncommitted one:
+
+| Mutation | Fails |
+|---|---|
+| `listed_pid_bytes`'s `errno` arm dropped | `a_pid_enumeration_that_failed_is_not_an_empty_process_group` (Apple's failure answer reads `Some(0)`) |
+| the per-pass charge removed and `verify`'s `record_reviews` on the judgement restored | `a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fails` (1.2999999999999998 → 6.3) |
+| `proposal_state`'s `diff-files` restored to the porcelain `diff` | `the_proposal_classifier_writes_no_index_while_reading_an_empty_pick` |
+| `--no-optional-locks` dropped from `read_only_git` | `a_worktree_inspecting_read_writes_no_index` |
+| the never-started arm removed from `integrate::infrastructure` | `a_reviewer_whose_process_never_started_is_a_runner_spawn_failure` (`ReviewUnavailable` for `RunnerSpawnFailure`) |
+
+And one **control on the tests rather than the code**, because two of them were vacuous when first
+written: with the stat-dirty input made by rewriting a tracked file byte for byte *now*, both
+index-hash tests passed under the mutations above. Git will not cache a stat that is not older than
+the index it is writing, so the refresh had nothing it was allowed to write back and the
+measurement read clean for a reason unrelated to the repair. The input was changed to age the file
+into the past, a different second per call, and only then did the mutations kill the tests.
 
