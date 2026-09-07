@@ -130,7 +130,7 @@ impl HostEnvironment {
                         "the command overlay sets `{key}`, which is reserved by the host runner \
                          (`{reserved}`). An adapter may select a profile or change CLI behaviour, \
                          but the runner owns the environment the process executes in \
-                         (design/08_design_trait_surface.md:57-63)"
+                         (DESIGN.md §8)"
                     ),
                 });
             }
