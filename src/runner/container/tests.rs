@@ -1908,12 +1908,38 @@ fn step_phrase(site: ContainerSite) -> &'static str {
     }
 }
 
-const DAEMON_ALREADY_STOPPED: &str = "Error response from daemon: cannot kill container: \
-     upstroke-c: container 0079320fdf5654fbf3aa45a154e4d49328c1cc1de3b1af4a6cc24540519ecede \
-     is not running";
-const DAEMON_ABSENT_ON_KILL: &str =
-    "Error response from daemon: cannot kill container: upstroke-c: No such container: upstroke-c";
-const DAEMON_ABSENT_ON_STOP: &str = "Error response from daemon: No such container: upstroke-c";
+// The daemon's three transcribed answers, each naming the container it is
+// about, which is how a reclaimer tells an answer about its own container from
+// an answer — or a path — that merely spells the phrase.
+fn daemon_already_stopped(name: &str) -> String {
+    format!(
+        "Error response from daemon: cannot kill container: {name}: container \
+         0079320fdf5654fbf3aa45a154e4d49328c1cc1de3b1af4a6cc24540519ecede is not running"
+    )
+}
+
+fn daemon_absent_on_kill(name: &str) -> String {
+    format!("Error response from daemon: cannot kill container: {name}: No such container: {name}")
+}
+
+fn daemon_absent_on_stop(name: &str) -> String {
+    format!("Error response from daemon: No such container: {name}")
+}
+
+/// The container every transcribed diagnostic in this file is about.
+const SETTLED_TARGET: &str = "upstroke-c";
+
+/// The observation a proposed settlement is established against, for the tests
+/// whose subject is the diagnostic rather than the observation.
+fn observed(liveness: Liveness) -> impl FnOnce(&str) -> Result<Liveness, RuntimeError> {
+    move |_| Ok(liveness)
+}
+
+/// An observer that must not be reached: the outcome settles, or refuses to,
+/// without asking the runtime anything.
+fn never_observed(target: &str) -> Result<Liveness, RuntimeError> {
+    panic!("`{target}` was observed for an outcome that needed no observation")
+}
 
 #[test]
 fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {
@@ -1923,22 +1949,39 @@ fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not(
             detail: detail.to_owned(),
         })
     };
+    let refused = |detail: &str| -> Result<Settled, RuntimeError> {
+        Err(RuntimeError::Failed {
+            operation: RuntimeOp::Stop,
+            detail: detail.to_owned(),
+        })
+    };
 
     let tolerated = [
-        DAEMON_ALREADY_STOPPED,
-        DAEMON_ABSENT_ON_KILL,
-        DAEMON_ABSENT_ON_STOP,
+        (daemon_already_stopped(SETTLED_TARGET), Liveness::Exited),
+        (daemon_absent_on_kill(SETTLED_TARGET), Liveness::Gone),
+        (daemon_absent_on_stop(SETTLED_TARGET), Liveness::Gone),
     ];
-    for detail in tolerated {
+    for (detail, agreeing) in &tolerated {
+        let (detail, agreeing) = (detail.as_str(), *agreeing);
         assert_eq!(
-            super::settle_stop(failed(detail)),
+            super::settle_stop(SETTLED_TARGET, failed(detail), observed(agreeing)),
             Ok(Settled::ProcessGone),
             "a reclaimer that arrives second must converge on `{detail}`, and each of these is the \
              daemon saying the process is not running"
         );
+        assert_eq!(
+            super::settle_stop(SETTLED_TARGET, failed(detail), observed(Liveness::Running)),
+            refused(detail),
+            "a runtime that still lists the container running contradicts `{detail}`, and a \
+             proposal the runtime contradicts is the failure it was"
+        );
     }
     assert_eq!(
-        tolerated.iter().collect::<BTreeSet<_>>().len(),
+        tolerated
+            .iter()
+            .map(|(detail, _)| detail)
+            .collect::<BTreeSet<_>>()
+            .len(),
         3,
         "three distinct daemon answers, not one repeated"
     );
@@ -1948,23 +1991,169 @@ fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not(
          container, but did not receive an exit event",
         "Error response from daemon: cannot stop container: upstroke-c: permission denied",
     ] {
-        let error = super::settle_stop(failed(detail)).expect_err("a real failure is a failure");
+        let error = super::settle_stop(SETTLED_TARGET, failed(detail), never_observed)
+            .expect_err("a real failure is a failure");
         assert!(!error.is_unreachable(), "{error}");
         assert_eq!(error.operation(), RuntimeOp::Stop);
     }
 
-    let unreachable = super::settle_stop(Err(RuntimeError::Unreachable {
-        operation: RuntimeOp::Stop,
-        detail: DAEMON_ALREADY_STOPPED.to_owned(),
-    }))
+    let unreachable = super::settle_stop(
+        SETTLED_TARGET,
+        Err(RuntimeError::Unreachable {
+            operation: RuntimeOp::Stop,
+            detail: daemon_already_stopped(SETTLED_TARGET),
+        }),
+        never_observed,
+    )
     .expect_err("unreachable is never `already settled`");
     assert!(unreachable.is_unreachable(), "{unreachable}");
 
     assert_eq!(
-        super::settle_stop(Ok("upstroke-c\n".to_owned())),
+        super::settle_stop(
+            SETTLED_TARGET,
+            Ok("upstroke-c\n".to_owned()),
+            never_observed
+        ),
         Ok(Settled::ProcessGone),
-        "`docker stop` and `docker kill` return after the daemon has seen the exit"
+        "`docker stop` and `docker kill` return after the daemon has seen the exit, so their \
+         success is the daemon's own answer and needs no second observation"
     );
+}
+
+/// The three shapes a diagnostic can have that must never settle anything, each
+/// one refused by a different half of the mechanism. Dropping the line-start
+/// requirement admits the first two; dropping the target requirement admits the
+/// first and the third.
+const SETTLES_NOTHING: &[(&str, &str)] = &[
+    (
+        "the reviewer's witness: TLS material missing under a directory named for the phrase, \
+         which the CLI quotes back after failing before it contacted the daemon",
+        "Failed to initialize: unable to resolve docker endpoint: open \
+         /tmp/pr8-docker-classifier-witness/no such container/ca.pem: no such file or directory",
+    ),
+    (
+        "the same local failure under a path that names the container as well as the phrase",
+        "Failed to initialize: unable to resolve docker endpoint: open \
+         /srv/upstroke-c/no such container/ca.pem: no such file or directory",
+    ),
+    (
+        "the daemon answering about a different container",
+        "Error response from daemon: No such container: upstroke-other",
+    ),
+];
+
+#[test]
+fn a_diagnostic_that_is_not_the_daemon_answering_about_this_container_settles_nothing() {
+    for (shape, detail) in SETTLES_NOTHING {
+        assert!(
+            !super::is_absent(SETTLED_TARGET, detail),
+            "{shape}: read as an absent container, so the mounted view, the intent and the \
+             snapshots go beside a container that is still there: {detail}"
+        );
+        assert_eq!(super::stop_answer(SETTLED_TARGET, detail), None, "{shape}");
+        assert_eq!(
+            super::removal_answer(SETTLED_TARGET, detail),
+            None,
+            "{shape}"
+        );
+        for operation in [RuntimeOp::Stop, RuntimeOp::Remove] {
+            let outcome = || {
+                Err(RuntimeError::Failed {
+                    operation,
+                    detail: (*detail).to_owned(),
+                })
+            };
+            let refused = || -> Result<Settled, RuntimeError> {
+                Err(RuntimeError::Failed {
+                    operation,
+                    detail: (*detail).to_owned(),
+                })
+            };
+            assert_eq!(
+                super::settle_stop(SETTLED_TARGET, outcome(), never_observed),
+                refused(),
+                "{shape}: a stop settled on it"
+            );
+            assert_eq!(
+                super::settle_remove(SETTLED_TARGET, outcome(), never_observed),
+                refused(),
+                "{shape}: a removal settled on it"
+            );
+        }
+    }
+    assert_eq!(
+        SETTLES_NOTHING
+            .iter()
+            .map(|(_, detail)| detail)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        3,
+        "three distinct shapes, not one repeated"
+    );
+    assert!(
+        super::is_absent(SETTLED_TARGET, &daemon_absent_on_stop(SETTLED_TARGET)),
+        "and the daemon's own answer about this container is still an absence, or the refusals \
+         above hold for no reason"
+    );
+}
+
+#[test]
+fn a_listing_answers_for_exactly_the_container_it_was_asked_about() {
+    let listing = "upstroke-c-longer\u{1f}running\nupstroke-c\u{1f}exited\n";
+    assert_eq!(
+        super::listed_state(listing, SETTLED_TARGET),
+        Some("exited"),
+        "`--filter name=` is a regular expression and matches every longer name that contains \
+         this one, so the exact comparison is what decides"
+    );
+    assert_eq!(
+        super::listed_state(listing, "upstroke-c-longer"),
+        Some("running")
+    );
+    assert_eq!(
+        super::listed_state("", SETTLED_TARGET),
+        None,
+        "a listing that succeeded and holds nothing is the daemon saying the container is gone"
+    );
+    assert_eq!(
+        super::listed_state("upstroke-other\u{1f}running\n", SETTLED_TARGET),
+        None
+    );
+    assert_eq!(
+        super::listed_state("upstroke-c\n", SETTLED_TARGET),
+        None,
+        "a line with no separator carries no state, and no state is not a state"
+    );
+
+    assert_eq!(super::liveness_of(None), Liveness::Gone);
+    for live in ["running", "restarting", "paused", "removing"] {
+        assert_eq!(super::liveness_of(Some(live)), Liveness::Running, "{live}");
+    }
+    for terminated in ["created", "exited", "dead"] {
+        assert_eq!(
+            super::liveness_of(Some(terminated)),
+            Liveness::Exited,
+            "{terminated}"
+        );
+    }
+
+    for observed in [Liveness::Gone, Liveness::Exited] {
+        assert!(
+            super::establishes(Settled::ProcessGone, observed),
+            "{observed:?}"
+        );
+    }
+    assert!(
+        !super::establishes(Settled::ProcessGone, Liveness::Running),
+        "a container the runtime still lists running establishes no process gone"
+    );
+    for observed in [Liveness::Gone, Liveness::Exited, Liveness::Running] {
+        assert!(
+            super::establishes(Settled::RemovalInProgress, observed),
+            "a removal another reclaimer holds claims nothing about the process, so there is \
+             nothing for an observation to establish: {observed:?}"
+        );
+    }
 }
 
 struct DockerLikeStop<'a> {
@@ -2029,11 +2218,11 @@ impl ContainerRuntime for DockerLikeStop<'_> {
             }
             Liveness::Exited => Err(RuntimeError::Failed {
                 operation: RuntimeOp::Stop,
-                detail: DAEMON_ALREADY_STOPPED.to_owned(),
+                detail: daemon_already_stopped(name),
             }),
             Liveness::Gone => Err(RuntimeError::Failed {
                 operation: RuntimeOp::Stop,
-                detail: DAEMON_ABSENT_ON_KILL.to_owned(),
+                detail: daemon_absent_on_kill(name),
             }),
         };
         self.raw
@@ -2043,7 +2232,7 @@ impl ContainerRuntime for DockerLikeStop<'_> {
                 Ok(text) => format!("ok:{}", text.trim()),
                 Err(error) => format!("err:{error}"),
             });
-        super::settle_stop(outcome)
+        super::settle_stop(name, outcome, |target| self.inner.observe(target))
     }
 
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
@@ -3193,7 +3382,7 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
          this file no longer matches it: {detail}"
     );
     assert_eq!(
-        super::stop_answer(detail),
+        super::stop_answer(name, detail),
         Some(Settled::ProcessGone),
         "the tolerance does not recognise the daemon's own answer: {detail}"
     );
@@ -3543,7 +3732,7 @@ fn the_docker_diagnostic_classifier_tells_unreachable_from_answered() {
 fn the_two_docker_diagnostic_tables_never_claim_one_message() {
     for (command, detail) in UNREACHABLE_STDERR {
         assert!(
-            !super::is_absent(detail),
+            !super::is_absent(SETTLED_TARGET, detail),
             "`{command}`: an unreachable runtime read as an absent object, which is tolerated \
              silently: {detail}"
         );
@@ -3553,7 +3742,7 @@ fn the_two_docker_diagnostic_tables_never_claim_one_message() {
     }
     let racing =
         "Error response from daemon: cannot kill container: c: container 9f is not running";
-    assert_eq!(super::stop_answer(racing), Some(Settled::ProcessGone));
+    assert_eq!(super::stop_answer("c", racing), Some(Settled::ProcessGone));
     assert!(!is_unreachable_diagnostic(racing));
 }
 
@@ -3713,6 +3902,208 @@ fn real_docker_prints_the_transcribed_unreachable_diagnostics() {
         use std::os::unix::fs::PermissionsExt as _;
         let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o755));
         let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {
+    let trace = ContainerTrace::recording();
+    if let Err(reason) = docker_gate(
+        "real_docker_fails_locally_without_ever_saying_a_container_is_gone",
+        trace,
+    ) {
+        return skipped(&reason);
+    }
+
+    // The reviewer's witness, reproduced against the live CLI: TLS material that
+    // is not there, under a directory named for the phrase each normalizer used
+    // to search the whole of stderr for. The CLI fails before it contacts the
+    // daemon and quotes the path back, so the phrase is in stderr and nothing
+    // about the container was ever asked.
+    let root = scratch("local-failure-phrases");
+    let target = "upstroke-c";
+    let phrases = [
+        "no such container",
+        "no such object",
+        "no such volume",
+        "worker is not running",
+        "removal is already in progress",
+        &format!("{target} no such container"),
+    ];
+    let mut measured = 0_usize;
+    for phrase in phrases {
+        let certs = root.join(phrase);
+        fs::create_dir_all(&certs).expect("a certificate directory named for the phrase");
+        for (what, args) in [
+            ("observe", vec!["container", "inspect", target]),
+            ("stop", vec!["kill", target]),
+            ("remove", vec!["rm", "--force", "--volumes", target]),
+            ("listing", vec!["ps", "--all"]),
+        ] {
+            let mut spec = CommandSpec::new(super::DOCKER_PROGRAM);
+            for arg in args {
+                spec = spec.arg(arg);
+            }
+            let output = host::test_support::build_command(&spec)
+                .env("DOCKER_TLS_VERIFY", "1")
+                .env("DOCKER_CERT_PATH", &certs)
+                .env("DOCKER_HOST", "tcp://127.0.0.1:2376")
+                .output()
+                .expect("docker starts");
+            assert!(
+                !output.status.success(),
+                "[{phrase}/{what}] the CLI succeeded with no TLS material"
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            assert!(
+                stderr.contains(phrase),
+                "[{phrase}/{what}] the CLI no longer quotes the path it could not read, so this \
+                 measurement no longer reproduces the finding: {stderr:?}"
+            );
+            assert!(
+                !super::is_absent(target, &stderr),
+                "[{phrase}/{what}] a local CLI failure established an absent container: {stderr:?}"
+            );
+            assert_eq!(
+                super::stop_answer(target, &stderr),
+                None,
+                "[{phrase}/{what}] {stderr:?}"
+            );
+            assert_eq!(
+                super::removal_answer(target, &stderr),
+                None,
+                "[{phrase}/{what}] {stderr:?}"
+            );
+            let failed = |operation| {
+                Err(RuntimeError::Failed {
+                    operation,
+                    detail: stderr.clone(),
+                })
+            };
+            let refused = |operation| -> Result<Settled, RuntimeError> {
+                Err(RuntimeError::Failed {
+                    operation,
+                    detail: stderr.clone(),
+                })
+            };
+            assert_eq!(
+                super::settle_stop(target, failed(RuntimeOp::Stop), never_observed),
+                refused(RuntimeOp::Stop),
+                "[{phrase}/{what}] {stderr:?}"
+            );
+            assert_eq!(
+                super::settle_remove(target, failed(RuntimeOp::Remove), never_observed),
+                refused(RuntimeOp::Remove),
+                "[{phrase}/{what}] {stderr:?}"
+            );
+            measured += 1;
+        }
+    }
+    assert_eq!(
+        measured,
+        phrases.len() * 4,
+        "every phrase was measured against every command"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn real_docker_lists_the_state_the_settlement_observation_reads() {
+    let trace = ContainerTrace::recording();
+    let docker = match docker_gate(
+        "real_docker_lists_the_state_the_settlement_observation_reads",
+        trace,
+    ) {
+        Ok(docker) => docker,
+        Err(reason) => return skipped(&reason),
+    };
+    let (_, image) = match gated_image(docker.as_ref()) {
+        Ok(image) => image,
+        Err(reason) => return no_image(&reason),
+    };
+
+    let name = format!("upstroke-r6-listing-{}", std::process::id());
+    let longer = format!("{name}-longer");
+    let spec = |name: &str| CreateSpec {
+        name: name.to_owned(),
+        image_id: image.id.clone(),
+        labels: BTreeMap::new(),
+        mounts: Vec::new(),
+        env: Vec::new(),
+        command: vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 30".to_owned()],
+        workdir: None,
+        read_only_root: true,
+    };
+    for existing in [&name, &longer] {
+        let _ = docker.remove(existing);
+    }
+
+    assert_eq!(
+        docker.observe(&name).expect("reachable"),
+        Liveness::Gone,
+        "a listing that succeeded and holds nothing is the daemon saying the container is gone"
+    );
+
+    docker.create(&spec(&name)).expect("created");
+    docker
+        .create(&spec(&longer))
+        .expect("the colliding name created");
+    docker.start(&longer).expect("the colliding name started");
+
+    // The `name=` filter is a regular expression, so the longer name is in this
+    // container's listing; the observation is the exact line's state and not the
+    // filter's.
+    let listing = docker
+        .raw(
+            RuntimeOp::Observe,
+            &name,
+            &[
+                "ps",
+                "--all",
+                "--filter",
+                &format!("name={name}"),
+                "--format",
+                super::CONTAINER_STATE_FORMAT,
+            ],
+        )
+        .expect("the daemon lists");
+    assert!(
+        listing.lines().count() >= 2,
+        "the filter no longer matches the longer name, so the exact comparison is untested \
+         here: {listing:?}"
+    );
+    assert_eq!(super::listed_state(&listing, &name), Some("created"));
+    assert_eq!(super::listed_state(&listing, &longer), Some("running"));
+    assert_eq!(
+        docker.observe(&name).expect("reachable"),
+        Liveness::Exited,
+        "a created container holds no process"
+    );
+    assert_eq!(
+        docker.observe(&longer).expect("reachable"),
+        Liveness::Running
+    );
+
+    docker.start(&name).expect("started");
+    assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Running);
+    assert_eq!(
+        docker.stop(&name, StopMode::Kill).expect("killed"),
+        Settled::ProcessGone
+    );
+    assert_eq!(docker.observe(&name).expect("reachable"), Liveness::Exited);
+    assert_eq!(
+        docker.stop(&name, StopMode::Kill).expect(
+            "a second kill is the daemon's `is not running`, established against its own listing"
+        ),
+        Settled::ProcessGone
+    );
+
+    for existing in [&name, &longer] {
+        assert_eq!(
+            docker.remove(existing).expect("removed"),
+            Settled::ProcessGone
+        );
+        assert_eq!(docker.observe(existing).expect("reachable"), Liveness::Gone);
     }
 }
 
@@ -4356,9 +4747,10 @@ fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_
         })
     };
 
+    let absent = daemon_absent_on_stop(SETTLED_TARGET);
     let tolerated = [
         (DAEMON_REMOVAL_IN_PROGRESS, Settled::RemovalInProgress),
-        (DAEMON_ABSENT_ON_STOP, Settled::ProcessGone),
+        (absent.as_str(), Settled::ProcessGone),
         (
             "Error response from daemon: No such object: upstroke-c",
             Settled::ProcessGone,
@@ -4366,11 +4758,24 @@ fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_
     ];
     for (detail, settled) in tolerated {
         assert_eq!(
-            super::settle_remove(failed(detail)),
+            super::settle_remove(SETTLED_TARGET, failed(detail), observed(Liveness::Gone)),
             Ok(settled),
             "a reclaimer that arrives second must converge on `{detail}`, and only an absent \
              container says the process is gone: the daemon sets its removal-in-progress flag \
              before it kills"
+        );
+        assert_eq!(
+            super::settle_remove(SETTLED_TARGET, failed(detail), observed(Liveness::Running)),
+            if settled.process_gone() {
+                Err(RuntimeError::Failed {
+                    operation: RuntimeOp::Remove,
+                    detail: detail.to_owned(),
+                })
+            } else {
+                Ok(settled)
+            },
+            "a runtime that still lists the container running contradicts an absence and \
+             contradicts nothing about a removal another reclaimer holds: {detail}"
         );
     }
     assert_eq!(
@@ -4383,44 +4788,57 @@ fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_
         "three distinct daemon answers, not one repeated"
     );
     assert!(
-        !super::is_absent(DAEMON_REMOVAL_IN_PROGRESS),
+        !super::is_absent(SETTLED_TARGET, DAEMON_REMOVAL_IN_PROGRESS),
         "an in-progress removal is not an absent container; if `is_absent` starts covering it, \
          the tolerance below stops being an independently droppable predicate"
     );
     assert_eq!(
-        super::removal_answer(DAEMON_REMOVAL_IN_PROGRESS),
+        super::removal_answer(SETTLED_TARGET, DAEMON_REMOVAL_IN_PROGRESS),
         Some(Settled::RemovalInProgress)
     );
     assert_eq!(
-        super::removal_answer(&DAEMON_REMOVAL_IN_PROGRESS.to_ascii_uppercase()),
-        Some(Settled::RemovalInProgress)
+        super::removal_answer(
+            SETTLED_TARGET,
+            &DAEMON_REMOVAL_IN_PROGRESS.to_ascii_uppercase()
+        ),
+        Some(Settled::RemovalInProgress),
+        "the daemon's marker, the phrase and the target are all matched without regard to case"
     );
 
     for detail in [
         "Error response from daemon: cannot remove container: upstroke-c: permission denied",
         "Error response from daemon: You cannot remove a running container upstroke-c",
     ] {
-        let error = super::settle_remove(failed(detail)).expect_err("a real failure is a failure");
+        let error = super::settle_remove(SETTLED_TARGET, failed(detail), never_observed)
+            .expect_err("a real failure is a failure");
         assert!(!error.is_unreachable(), "{error}");
         assert_eq!(error.operation(), RuntimeOp::Remove);
     }
 
-    let unreachable = super::settle_remove(Err(RuntimeError::Unreachable {
-        operation: RuntimeOp::Remove,
-        detail: DAEMON_REMOVAL_IN_PROGRESS.to_owned(),
-    }))
+    let unreachable = super::settle_remove(
+        SETTLED_TARGET,
+        Err(RuntimeError::Unreachable {
+            operation: RuntimeOp::Remove,
+            detail: DAEMON_REMOVAL_IN_PROGRESS.to_owned(),
+        }),
+        never_observed,
+    )
     .expect_err("unreachable is never `already settled`");
     assert!(unreachable.is_unreachable(), "{unreachable}");
 
     assert_eq!(
-        super::stop_answer(DAEMON_REMOVAL_IN_PROGRESS),
+        super::stop_answer(SETTLED_TARGET, DAEMON_REMOVAL_IN_PROGRESS),
         Some(Settled::RemovalInProgress),
         "a kill answered with another reclaimer's removal lets the reclaimer continue and \
          establishes nothing about the process"
     );
 
     assert_eq!(
-        super::settle_remove(Ok("upstroke-c\n".to_owned())),
+        super::settle_remove(
+            SETTLED_TARGET,
+            Ok("upstroke-c\n".to_owned()),
+            never_observed
+        ),
         Ok(Settled::ProcessGone),
         "`docker rm --force` kills and waits before it answers"
     );
@@ -4515,10 +4933,14 @@ fn real_docker_prints_the_transcribed_removal_in_progress_diagnostic() {
         "the daemon's answer changed shape: {detail}"
     );
     assert_eq!(
-        super::settle_remove(Err(RuntimeError::Failed {
-            operation: RuntimeOp::Remove,
-            detail: detail.clone(),
-        })),
+        super::settle_remove(
+            name,
+            Err(RuntimeError::Failed {
+                operation: RuntimeOp::Remove,
+                detail: detail.clone(),
+            }),
+            never_observed,
+        ),
         Ok(Settled::RemovalInProgress),
         "the loser of a real removal race must continue without claiming the process gone: \
          {detail}"

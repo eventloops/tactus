@@ -341,8 +341,10 @@ impl ContainerRuntime for FakeRuntime {
 
     fn stop(&self, name: &str, _mode: StopMode) -> Result<Settled, RuntimeError> {
         let settled = super::settle_stop(
+            name,
             self.enter(RuntimeOp::Stop, name)
                 .map(|()| format!("{name}\n")),
+            |target| self.observe(target),
         )?;
         if settled.process_gone() {
             if let Some(container) = self.state().containers.get_mut(name) {
@@ -354,8 +356,10 @@ impl ContainerRuntime for FakeRuntime {
 
     fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         let settled = super::settle_remove(
+            name,
             self.enter(RuntimeOp::Remove, name)
                 .map(|()| format!("{name}\n")),
+            |target| self.observe(target),
         )?;
         if settled.process_gone() {
             self.state().containers.remove(name);
@@ -451,6 +455,8 @@ pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[
     "real_docker_prints_the_transcribed_removal_in_progress_diagnostic",
     "real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_none",
     "real_docker_a_container_contains_a_daemonised_descendant",
+    "real_docker_fails_locally_without_ever_saying_a_container_is_gone",
+    "real_docker_lists_the_state_the_settlement_observation_reads",
 ];
 
 pub(crate) fn absent_reason() -> String {

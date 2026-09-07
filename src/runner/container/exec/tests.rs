@@ -82,8 +82,9 @@ const VOLUMES: &[(&str, &str)] = &[
     ("codex", "upstroke-creds-codex"),
 ];
 const EVENT_LOG_MARKER: &str = "COORDINATOR-EVENT-LOG-a5f2";
-const REMOVAL_IN_PROGRESS_DIAGNOSTIC: &str =
-    "Error response from daemon: removal of container upstroke-c is already in progress";
+fn removal_in_progress_diagnostic(name: &str) -> String {
+    format!("Error response from daemon: removal of container {name} is already in progress")
+}
 
 const IMAGE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -577,12 +578,6 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
         for op in cell.failing {
             fixture.runtime.fake().set_failing(*op);
         }
-        if cell.removal_in_progress {
-            fixture
-                .runtime
-                .fake()
-                .set_docker_stderr(RuntimeOp::Remove, REMOVAL_IN_PROGRESS_DIAGNOSTIC);
-        }
         let request = gate_request(
             ShellKind::Sh.spec(if cell.timeout.is_zero() {
                 "sleep 600"
@@ -595,6 +590,14 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
         );
         let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
             .expect("a container name");
+        if cell.removal_in_progress {
+            // The daemon's answer names the container it is about, and nothing
+            // reads an answer about another one as this container's settlement.
+            fixture.runtime.fake().set_docker_stderr(
+                RuntimeOp::Remove,
+                &removal_in_progress_diagnostic(name.as_str()),
+            );
+        }
         if cell.mismatch {
             fixture
                 .runtime
