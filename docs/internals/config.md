@@ -1079,9 +1079,10 @@ the default is doing the work rather than the fixture.
 Every shape `[runner]` refuses, each with the reason, and each named.
 
 An unknown key is an **error** here, the same as an unknown `[engine]`
-key, and the grid says so out loud: `knid = "container"` leaves the run
-executing on the host while its config reads as though gate code were
-confined.
+key, and the grid says so out loud: `knid = "container"` is named and
+refused before a run starts. Refusing is the point. Drop `knid` quietly
+and the run executes on the host while its config reads as though gate
+code were confined.
 
 Second field held constant: every cell is a `[runner]` section and
 nothing else, so no cell can fail for another section's reason.
