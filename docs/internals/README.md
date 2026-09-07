@@ -60,15 +60,20 @@ Extended notes for [`src/runner/host.rs`][host].
 [host]: ../../../src/runner/host.rs
 ```
 
-A definition counts only where a renderer would also read it: at block level,
-after the opening paragraph rather than above it, and outside fenced and
-indented code, HTML comments, raw HTML blocks and paragraph text. Only the
-first claim on a label decides, as it does for a reader: a definition the gate
-cannot read -- one inside a blockquote or a list, or with its destination
-wrapped onto the next line -- refuses that label rather than letting a later
-definition stand in for it. A title is separated from its destination by
-whitespace. A construct spelled outside what the gate reads is reported as a
-missing backlink; nothing passes unchecked.
+A definition counts only where a renderer would also read it: its colon follows
+its label directly, and it sits at block level, after the opening paragraph
+rather than above it, and outside fenced and indented code, HTML comments, raw
+HTML blocks and paragraph text. Only the first claim on a label decides, as it
+does for a reader: a definition the gate cannot read -- one inside a blockquote
+or a list, however the two nest, or with its destination wrapped onto the next
+line -- refuses that label rather than letting a later definition stand in for
+it. A label that itself wraps onto the next line refuses every reference in the
+file, because the gate cannot say which label it was. A title is separated from
+its destination by whitespace, and backslash escapes are not modelled at all: a
+destination or title carrying one is refused, since an escaped delimiter closes
+nothing and the plain reading would end the title, or the destination, where
+Markdown does not. A construct spelled outside what the gate reads is reported
+as a missing backlink; nothing passes unchecked.
 
 The repository-relative link works in a checkout and on GitHub. A separate
 `Source on GitHub` link points to the module's GitHub page for readers on

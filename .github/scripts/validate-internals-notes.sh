@@ -110,10 +110,12 @@ while IFS= read -r notes; do
   #
   # A reference is only as good as the definition a renderer would pick, which
   # is the FIRST claim on the label. So a label is claimed by every definition
-  # shaped line the renderer could read -- inside a blockquote or a list, or
-  # with its destination wrapped onto the next line -- and a claim this parser
-  # cannot read refuses the label rather than letting a later definition stand
-  # in for it. Text that is not a definition at all claims nothing: a fenced or
+  # shaped line the renderer could read -- inside a blockquote or a list, in
+  # whatever nesting, or with its destination wrapped onto the next line -- and
+  # a claim this parser cannot read refuses the label rather than letting a
+  # later definition stand in for it. A label that wraps onto the next line is
+  # a claim this parser cannot even name, so it refuses every reference in the
+  # file. Text that is not a definition at all claims nothing: a fenced or
   # indented code line, an HTML comment or raw HTML block, and a paragraph
   # continuation. Everything this refuses is a refusal, never an acceptance: a
   # construct spelled in a way the parser does not read is reported as a
@@ -125,10 +127,30 @@ while IFS= read -r notes; do
     # The length of the run of ch at the start of s. Interval expressions are
     # avoided throughout: this gate runs under whichever awk the runner has.
     function run_of(s, ch,   n) { n = 0; while (substr(s, n + 1, 1) == ch) n++; return n }
+    # Backslash escapes are not modelled anywhere in this parser. A destination
+    # or title holding one is refused rather than read as though the backslash
+    # were an ordinary character: an escaped delimiter closes nothing, so the
+    # naive reading can end a title or a destination where Markdown does not.
+    # Labels are already held to the same rule where they are read.
+    function unescaped(s) { return index(s, "\\") == 0 }
+    # s with its block container prefixes removed, however they nest. One pass
+    # of each marker is not enough: "- > " is a list holding a blockquote, and
+    # a renderer reads the definition inside it.
+    function strip_containers(s,   prev) {
+      prev = s "."
+      while (s != prev) {
+        prev = s
+        sub(/^[ \t]*>[ \t]?/, "", s)
+        if (s ~ /^[ \t]*[-+*][ \t]/) sub(/^[ \t]*[-+*][ \t]+/, "", s)
+        else if (s ~ /^[ \t]*[0-9]+[.)][ \t]/) sub(/^[ \t]*[0-9]+[.)][ \t]+/, "", s)
+      }
+      sub(/^[ \t]+/, "", s)
+      return s
+    }
 
     # The destination of an inline link, given the text just after its "(".
     # Empty unless the parentheses hold a destination and an optional title.
-    function inline_destination(rest,   dest, head, gap) {
+    function inline_destination(rest,   dest, head, gap, title) {
       sub(/^[ \t]+/, "", rest)
       head = substr(rest, 1, 1)
       if (head == "<") {
@@ -139,6 +161,7 @@ while IFS= read -r notes; do
         dest = substr(rest, 1, RLENGTH)
       }
       rest = substr(rest, RLENGTH + 1)
+      if (!unescaped(dest)) return ""
       # A "(" straight after a bare destination belongs to it: Markdown allows
       # balanced parentheses there. With no whitespace before it there is no
       # title either, so the whitespace rule below refuses the line.
@@ -153,17 +176,20 @@ while IFS= read -r notes; do
       else if (head == "'"'"'") { if (!match(rest, /^'"'"'[^'"'"']*'"'"'/)) return "" }
       else if (head == "(") { if (!match(rest, /^\([^()]*\)/)) return "" }
       else return ""
+      title = substr(rest, 1, RLENGTH)
       rest = substr(rest, RLENGTH + 1)
+      if (!unescaped(title)) return ""
       sub(/^[ \t]+/, "", rest)
       if (substr(rest, 1, 1) != ")") return ""
       return dest
     }
 
     # The destination of a link reference definition line, or empty when the
-    # line is not one this parser reads.
+    # line is not one this parser reads. The colon follows the label with
+    # nothing between them, as Markdown requires.
     function definition_destination(text,   rest, head, dest) {
       rest = text
-      sub(/^\[[^][]+\][ \t]*:/, "", rest)
+      sub(/^\[[^][]+\]:/, "", rest)
       sub(/^[ \t]+/, "", rest)
       head = substr(rest, 1, 1)
       if (head == "<") {
@@ -176,10 +202,12 @@ while IFS= read -r notes; do
       # An empty destination means the real one is on the next line, which
       # this parser does not read: it returns empty and the label is refused.
       rest = substr(rest, RLENGTH + 1)
+      if (!unescaped(dest)) return ""
       if (rest == "") return dest
       if (rest !~ /^[ \t]/) return ""
       rest = trim(rest)
       if (rest == "") return dest
+      if (!unescaped(rest)) return ""
       if (rest ~ /^"[^"]*"$/ || rest ~ /^'"'"'[^'"'"']*'"'"'$/ || rest ~ /^\([^()]*\)$/) return dest
       return ""
     }
@@ -200,7 +228,7 @@ while IFS= read -r notes; do
       if (line ~ /^(    | *\t| *[>#]| *[-+*][ \t]| *[0-9]+[.)][ \t]| *~~~)/) exit
       # A link reference definition renders nothing, so it cannot open a file.
       # An indented one has already left through the container rule above.
-      if (bare ~ /^\[[^][]+\][ \t]*:/) exit
+      if (bare ~ /^\[[^][]+\]:/) exit
 
       at = index(line, "[")
       if (at == 0) exit
@@ -253,21 +281,32 @@ while IFS= read -r notes; do
     line ~ /^[[:space:]]*$/ { in_paragraph = 0; next }
     {
       head = substr(bare, 1, 1)
-      if (indent < 4 && (head == "`" || head == "~") && run_of(bare, head) >= 3) {
+      # Four spaces or more starts no block: it is an indented code block where
+      # no paragraph is open, and a lazy continuation of the paragraph where
+      # one is. Neither a fence, a heading nor a definition begins here.
+      if (indent >= 4) next
+      run = run_of(bare, head)
+      if ((head == "`" || head == "~") && run >= 3) {
+        # A backtick fence takes no backtick in its info string. A line that
+        # breaks that rule opens nothing; it is ordinary paragraph text, and
+        # the fence a reader sees may open on a later line.
+        if (head == "`" && index(substr(bare, run + 1), "`") > 0) {
+          in_paragraph = 1
+          next
+        }
         fence = head
-        fence_len = run_of(bare, head)
+        fence_len = run
         in_paragraph = 0
         next
       }
       # An HTML comment is a block only where it begins the line; elsewhere it
       # is inline and leaves the paragraph it sits in open.
-      if (indent < 4 && substr(bare, 1, 4) == "<!--") {
+      if (substr(bare, 1, 4) == "<!--") {
         if (index(substr(bare, 5), "-->") == 0) comment = 1
         in_paragraph = 0
         next
       }
-      if (indent < 4 && head == "<") { html = 1; next }
-      if (indent >= 4 && !in_paragraph) next
+      if (head == "<") { html = 1; next }
       # An ATX heading is one to six hashes and then a space or end of line.
       # "#not a heading" is paragraph text and ends nothing.
       hashes = run_of(bare, "#")
@@ -276,16 +315,23 @@ while IFS= read -r notes; do
         next
       }
       # Every definition-shaped line a renderer could read claims its label,
-      # container prefixes included; only the first claim decides.
-      body = bare
-      sub(/^[>[:space:]]*/, "", body)
-      if (body ~ /^[-+*][ \t]/ || body ~ /^[0-9]+[.)][ \t]/) {
-        sub(/^[^ \t]+[ \t]+/, "", body)
+      # container prefixes included, however they nest; only the first claim
+      # decides.
+      body = strip_containers(bare)
+      # A label may run past the end of its line, and a definition whose label
+      # wraps names a destination this parser never reads. It cannot say which
+      # label that is, so an unclosed opening bracket where a block may begin
+      # refuses every reference in the file rather than let a later definition
+      # stand in for the first.
+      if (!in_paragraph && substr(body, 1, 1) == "[" && index(body, "]") == 0) {
+        unread_claim = 1
+        in_paragraph = 1
+        next
       }
-      if (!in_paragraph && body ~ /^\[[^][]+\][ \t]*:/) {
+      if (!in_paragraph && body ~ /^\[[^][]+\]:/) {
         ref = norm(substr(body, 2, index(body, "]") - 2))
         dest = ""
-        if (body == bare && indent < 4) dest = definition_destination(body)
+        if (body == bare) dest = definition_destination(body)
         if (!(ref in claimed)) {
           claimed[ref] = 1
           if (dest != "") defs[ref] = dest
@@ -297,7 +343,7 @@ while IFS= read -r notes; do
     }
 
     END {
-      if (result == "" && want != "" && (want in defs)) result = defs[want]
+      if (result == "" && want != "" && !unread_claim && (want in defs)) result = defs[want]
       # Whether the destination is this module is a question for resolution
       # below, not for the parser: it is printed exactly as it was written.
       print result

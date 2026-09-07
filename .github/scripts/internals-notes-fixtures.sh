@@ -255,12 +255,14 @@ check 1 a_definition_cannot_open_the_file
 # Only the first claim on a label decides, so a definition the renderer reads
 # and this parser does not must refuse the label, never defer to a later one.
 
-for context in wrapped_definition quoted_definition_shadow listed_definition_shadow; do
+for context in wrapped_definition quoted_definition_shadow listed_definition_shadow listed_quote_shadow quoted_list_shadow; do
   fixture capacity
   case "$context" in
     wrapped_definition)        printf '[Source][mod]\n\n[mod]:\n  ../../src/missing.rs\n\n[mod]: %s\n' "$link" ;;
     quoted_definition_shadow)  printf '[Source][mod]\n\n> [mod]: ../../src/missing.rs\n\n[mod]: %s\n' "$link" ;;
     listed_definition_shadow)  printf '[Source][mod]\n\n- [mod]: ../../src/missing.rs\n\n[mod]: %s\n' "$link" ;;
+    listed_quote_shadow)       printf '[Source][mod]\n\n- > [mod]: ../../src/missing.rs\n\n[mod]: %s\n' "$link" ;;
+    quoted_list_shadow)        printf '[Source][mod]\n\n> - [mod]: ../../src/missing.rs\n\n[mod]: %s\n' "$link" ;;
   esac > "$tree/$notes"
   check 1 "${context}_refuses_its_label"
 done
@@ -269,15 +271,30 @@ fixture capacity
 printf '[Source][mod]\n\n[mod]:\n\n[mod]: %s\n' "$link" > "$tree/$notes"
 check 1 a_wrapped_definition_refuses_its_label
 
+# A label may run past the end of its line, and the definition it opens names a
+# destination this gate never reads. It cannot say which label that is, so an
+# unclosed bracket where a block may begin refuses every reference in the file.
+
+fixture capacity
+printf '[Source][mod]\n\n[\nmod]: ../../src/missing.rs\n\n[mod]: %s\n' "$link" > "$tree/$notes"
+check 1 a_wrapped_label_refuses_every_reference
+
+fixture capacity
+printf '[Source](%s)\n\n[unclosed\n' "$link" > "$tree/$notes"
+check 0 an_unclosed_bracket_leaves_an_inline_backlink_alone
+
 # Paragraph text is not a block boundary. An inline comment and a bare hash
 # leave the paragraph open, so what follows is continuation, not a definition.
 
-for context in inline_comment_in_prose hash_without_a_space seventh_level_hashes; do
+for context in inline_comment_in_prose hash_without_a_space seventh_level_hashes indented_hash; do
   fixture capacity
   case "$context" in
     inline_comment_in_prose) printf '[Source][mod]\nprose <!--x-->\n[mod]: %s\n' "$link" ;;
     hash_without_a_space)    printf '[Source][mod]\n#not a heading\n[mod]: %s\n' "$link" ;;
     seventh_level_hashes)    printf '[Source][mod]\n####### not a heading\n[mod]: %s\n' "$link" ;;
+    # Four spaces is past where a heading may start, so the line is a lazy
+    # continuation of the paragraph and what follows is continuation too.
+    indented_hash)           printf '[Source][mod]\nprose\n    # heading\n[mod]: %s\n' "$link" ;;
   esac > "$tree/$notes"
   check 1 "${context}_does_not_end_the_paragraph"
 done
@@ -285,6 +302,33 @@ done
 fixture capacity
 printf '[Source][mod]\n\n<script>\n\n[mod]: %s\n</script>\n' "$link" > "$tree/$notes"
 check 1 a_raw_html_block_supplies_no_definition
+
+# A backtick fence takes no backtick in its info string. A line that breaks
+# that rule opens no fence, so the fence a reader sees opens later and the
+# apparent definition is inside it.
+
+fixture capacity
+printf '[Source][mod]\nprose\n```a`b\n```\n[mod]: %s\n' "$link" > "$tree/$notes"
+check 1 a_backtick_in_a_fence_info_string_opens_no_fence
+
+fixture capacity
+printf '[Source][mod]\nprose\n```md\n```\n\n[mod]: %s\n' "$link" > "$tree/$notes"
+check 0 a_plain_fence_info_string_ends_the_paragraph
+
+# A link reference definition puts its colon straight after the label.
+
+for context in space_before_colon tab_before_colon; do
+  fixture capacity
+  case "$context" in
+    space_before_colon) printf '[Source][mod]\n\n[mod] : %s\n' "$link" ;;
+    tab_before_colon)   printf '[Source][mod]\n\n[mod]\t: %s\n' "$link" ;;
+  esac > "$tree/$notes"
+  check 1 "${context}_is_not_a_definition"
+done
+
+fixture capacity
+printf '[mod] : the module\n\n[mod]: %s\n' "$link" > "$tree/$notes"
+check 0 a_label_before_a_spaced_colon_is_a_shortcut_reference
 
 # A title is separated from its destination by whitespace, and parentheses
 # straight after a bare destination belong to the destination.
@@ -295,6 +339,22 @@ for context in angle_destination_then_title bare_destination_with_parentheses de
     angle_destination_then_title)     printf '[Source](<%s>"the module")\n' "$link" ;;
     bare_destination_with_parentheses) printf '[Source](%s(the module))\n' "$link" ;;
     definition_destination_then_title) printf '[Source][mod]\n\n[mod]: <%s>"the module"\n' "$link" ;;
+  esac > "$tree/$notes"
+  check 1 "${context}_is_not_a_backlink"
+done
+
+# Backslash escapes are not modelled: an escaped delimiter closes nothing, so a
+# destination or title carrying one is refused rather than read as though the
+# backslash were an ordinary character. The escaped quote leaves the title
+# unclosed and the link unmade; the escaped separator names a path that only a
+# path layer treating a backslash as a separator resolves to the module.
+
+for context in inline_escaped_title_quote definition_escaped_title_quote escaped_destination_separator; do
+  fixture capacity
+  case "$context" in
+    inline_escaped_title_quote)     printf '[Source](%s "the module\\")\n' "$link" ;;
+    definition_escaped_title_quote) printf '[Source][mod]\n\n[mod]: %s "the module\\"\n' "$link" ;;
+    escaped_destination_separator)  printf '[Source](../../src\\capacity.rs)\n' ;;
   esac > "$tree/$notes"
   check 1 "${context}_is_not_a_backlink"
 done
