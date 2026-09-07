@@ -1,20 +1,20 @@
 # Contributing to upstroke
 
-Contributions are welcome. Please open an issue before starting anything substantial — the build
-order in `DESIGN.md` §21 is deliberate, and it's worth checking that a change fits where the
+Contributions are welcome. Please open an issue before starting anything substantial: the build
+order in `DESIGN.md` §21 is deliberate, and it is worth checking that a change fits where the
 project currently is.
 
-Every change enters `master` through the same path: open a draft pull request early, wait for the
-deterministic CI and PR-policy gates, then obtain an independent frontier-model review of the exact
-green head before merge. The reviewed SHA and a durable link to the verdict are recorded in the
-pull request; a new push invalidates the review and restarts the sequence; the owner's merge is the
-attestation. See [`MAINTAINING.md`](MAINTAINING.md) for the full lifecycle, trust boundary, and
-emergency policy. Contributions from external forks remain provisional: the required checks are
-candidate-controlled, so a fork's entire diff — workflow edits included — is reviewed before merge.
+Every change enters `master` the same way: a draft pull request opened early, the deterministic CI
+and PR-policy gates green, one independent frontier-model review of the exact green head, findings
+triaged (serious P1s fixed and re-reviewed; `MUST` deviations in touched code and evidence-backed
+findings fixed whatever their label; the rest fixed or logged as tech debt), and the owner's merge
+as the attestation. [`MAINTAINING.md`](MAINTAINING.md) has the full lifecycle, trust boundary
+and release contract. Contributions from external forks are provisional: the required checks are
+candidate-controlled, so a fork's entire diff, workflow edits included, is reviewed before merge.
 
 ## Before you send a PR
 
-The project holds itself to these; CI enforces all eight, verbatim:
+CI enforces all ten of these, verbatim, from the repository root:
 
 ```bash
 cargo fmt --check
@@ -25,24 +25,23 @@ bash .github/scripts/test-release-record.sh
 bash .github/scripts/test-pr-policy.sh
 bash .github/scripts/test-pr-ledger-evidence.sh
 bash .github/scripts/test-docs-consistency.sh
+bash .github/scripts/test-internals-notes.sh
+bash .github/scripts/test-pr-ready-audit.sh
 ```
 
-Run all eight from the repository root. CI splits them across its jobs — `lint` runs rustfmt,
-Clippy and the four Bash gates, `test` runs the suite, `msrv` runs the locked check, and Clippy
-runs again on the Windows and macOS lint legs — and `upstroke-ci` aggregates every leg.
-`CLAUDE.md`'s Gates section records the root-invocation trap and the `jq` prerequisite the
-release-record fixture carries; `CODING_STANDARDS.md` §2 is the normative statement of this
-baseline, and no gate checks that these copies of it agree.
+`CODING_STANDARDS.md` §2 is the normative statement of this baseline and says how CI splits it
+across jobs. `test-release-record.sh` needs `jq`; `test-pr-policy.sh` only works from the root.
 
 Use the pull-request template to record the exact commands, implementation provenance, reviewed
-SHA, review model and effort, evidence link, risk, and rollback. Resolve every review conversation;
+SHA, review model and effort, evidence link, risk and rollback. Resolve every review conversation;
 merge commits are the only accepted merge method.
 
-[`CODING_STANDARDS.md`](CODING_STANDARDS.md) is the normative implementation standard; read it
-before changing Rust code. Among its hard requirements: edition 2024 with MSRV 1.85, no
-`.unwrap()` or `.expect()` in production, `anyhow` only at the binary edge (libraries return typed
-`thiserror` errors), and paths represented with `std::path` types. Windows, macOS, and Linux are
-supported targets. The eight commands above are the automated baseline, not the whole standard.
+[`CODING_STANDARDS.md`](CODING_STANDARDS.md) indexes the implementation standards; read the
+sections a change touches before changing Rust. Among the hard requirements: edition 2024 with MSRV
+1.85, no `.unwrap()` or `.expect()` in production, `anyhow` only at the binary edge (libraries
+return typed `thiserror` errors), paths through `std::path` types, and no shared ownership, locks
+or clones without a stated reason. Windows, macOS and Linux are supported targets. The ten
+commands above are the automated baseline, not the whole standard.
 
 ## Contributor Licence Agreement
 
@@ -54,7 +53,7 @@ pull request is your acceptance, and it applies to every contribution you make t
 2. **You grant a licence.** You grant Cameron Lambert (the "Maintainer") a perpetual, worldwide,
    non-exclusive, royalty-free, irrevocable licence to reproduce, modify, distribute and
    sublicense your contribution, **including the right to license it under terms other than the
-   AGPL**, such as a commercial licence.
+   Apache License**.
 
 3. **You grant a patent licence.** You grant the Maintainer and all recipients of the software a
    perpetual, worldwide, non-exclusive, royalty-free, irrevocable patent licence covering your
@@ -68,13 +67,14 @@ pull request is your acceptance, and it applies to every contribution you make t
 
 ### Why this exists
 
-upstroke is released under the AGPL, which some organisations cannot use — a policy prohibition, or
-a product they need to keep closed. Being able to offer those users a commercial licence is part
-of how the project intends to sustain itself. That is only possible if one party can license the
-whole codebase, which is what clause 2 preserves.
+Licences are not forever: this project began under the AGPL and was relicensed to Apache-2.0 on
+2026-09-01. A move like that is only ever cheap while one party can license the whole codebase,
+which is what clause 2 preserves as outside contributions arrive: a future change, such as a
+licence exception or a newer licence version, should not require tracking down every past
+contributor.
 
-The trade is explicit and worth stating plainly: your contribution may end up in a commercially
-licensed copy of upstroke. Everything you contribute also remains available to everyone under the
-AGPL, permanently — that cannot be taken back. If clause 2 isn't acceptable to you, say so in the
-PR; a change can often be reworked as a suggestion instead, and that's a perfectly good way to
-contribute.
+The trade is explicit and worth stating plainly: your contribution may later be offered under
+terms you did not choose. Everything you contribute also remains available to everyone under
+the Apache License 2.0, permanently — that cannot be taken back. If clause 2 isn't acceptable
+to you, say so in the PR; a change can often be reworked as a suggestion instead, and that's a
+perfectly good way to contribute.

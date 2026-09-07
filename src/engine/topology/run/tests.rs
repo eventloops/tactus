@@ -1,17 +1,9 @@
-//! The loop's branches, checked against the packet's list rather than against
-//! the implementation.
+//! Extended notes: `docs/internals/engine/topology/run/tests.md`
 
 use super::*;
 use crate::topology::events::{AttemptNumber, DerivedOutcome, GenerationId};
 use crate::topology::registry::TaskKey;
 
-/// The transcribed list is the packet's list — seven branches, these labels, in
-/// this order.
-///
-/// `decisions.sequential_substrate.loop` names them in one sentence, split on
-/// `->`. A branch dropped from [`LoopBranch::ALL`] would make every other test
-/// in this file pass by asking for less, which is exactly how step (g) survived
-/// two review rounds in `recover.rs`.
 #[test]
 fn the_transcribed_loop_branches_are_the_packets_seven() {
     assert_eq!(
@@ -32,13 +24,6 @@ fn the_transcribed_loop_branches_are_the_packets_seven() {
     );
 }
 
-/// Every branch this build does not perform says which, and why, in the type.
-///
-/// **The point of this test is the third disposition.** `RefusedByCheckpoint`
-/// is a decision the packet licenses; `NotYetImplemented` is debt. A build that
-/// conflated them would be indistinguishable from one that had quietly dropped
-/// a branch — and "quietly dropped a branch" is the defect this whole module
-/// exists because of.
 #[test]
 fn every_branch_states_what_this_build_does_with_it() {
     let refused: Vec<&str> = LoopBranch::ALL
@@ -54,8 +39,6 @@ fn every_branch_states_what_this_build_does_with_it() {
          something the packet did not let it refuse"
     );
 
-    // And the debt, named rather than implied. This assertion is expected to
-    // shrink as branches land; it must never grow.
     let owed: Vec<&str> = LoopBranch::ALL
         .iter()
         .filter(|branch| branch.disposition() == Disposition::NotYetImplemented)
@@ -70,9 +53,6 @@ fn every_branch_states_what_this_build_does_with_it() {
          empty now: {owed:?}"
     );
 
-    // **What is another slice's, cited rather than owed.** `ingest answers` is
-    // not debt and is not a checkpoint refusal — the packet authorises exactly
-    // two of those — so it carries the contract passage that assigns it.
     let elsewhere: Vec<&str> = LoopBranch::ALL
         .iter()
         .filter(|branch| matches!(branch.disposition(), Disposition::NotThisSlice { .. }))
@@ -84,10 +64,6 @@ fn every_branch_states_what_this_build_does_with_it() {
         "a branch left this build's scope without saying which slice took it"
     );
 
-    // The half-built one, and both halves in the branch's own words. A branch
-    // that performs a durable append and reports `NotYetImplemented` would be
-    // claiming the log is untouched when it is not; one that reported
-    // `Performed` would be claiming an attempt ran.
     assert_eq!(
         LoopBranch::ReadyDispatch.disposition(),
         Disposition::Performed,
@@ -96,14 +72,6 @@ fn every_branch_states_what_this_build_does_with_it() {
     );
 }
 
-/// Every `Step` a selection can produce maps to exactly one branch, or to none
-/// for a stated reason.
-///
-/// The mapping is total by construction — `LoopBranch::of` matches on `Step`
-/// exhaustively, so a new variant does not compile until someone decides which
-/// branch it belongs to. What this test adds is the *two `None` arms*, which a
-/// compiler cannot check: they are the claim that neither is a branch of the
-/// loop, and each is wrong in a different and specific way if the claim slips.
 #[test]
 fn every_step_belongs_to_one_branch_or_to_none_for_a_reason() {
     let cases: Vec<(Step, Option<LoopBranch>)> = vec![
@@ -145,14 +113,6 @@ fn every_step_belongs_to_one_branch_or_to_none_for_a_reason() {
     }
 }
 
-/// A refusal says which branch, and — this is the part that matters — whether
-/// anything happened.
-///
-/// **The two messages must not be interchangeable.** A branch that performed
-/// nothing says so, and an operator reading it knows the log is untouched. A
-/// branch that appended and then stopped says what it did, because an operator
-/// told "not implemented" after a durable `task_dispatched` would go looking
-/// for a run directory that does not match the message.
 #[test]
 fn a_refusal_names_the_branch_and_says_whether_anything_happened() {
     let untouched = LoopBranch::HardBlock.unimplemented().to_string();
@@ -166,13 +126,6 @@ fn a_refusal_names_the_branch_and_says_whether_anything_happened() {
         "and says the run is untouched: {untouched}"
     );
 
-    // **No branch is `PartlyImplemented` today**, and that is a statement about
-    // this build rather than about the type. `ReadyRetry` was the last one and
-    // became `Performed` when its second half landed. The variant stays because
-    // the next branch built in halves will need it, and this assertion is what
-    // says so out loud the moment one appears — a half-built branch is the one
-    // shape whose refusal has to say what it already did, because by then
-    // `attempt_started` or `task_dispatched` is durable.
     assert!(
         LoopBranch::ALL
             .iter()
@@ -182,8 +135,6 @@ fn a_refusal_names_the_branch_and_says_whether_anything_happened() {
          for a run that had not started"
     );
 
-    // Every refusal names its own branch, whatever its disposition. A message
-    // that named the wrong one would send an operator to the wrong lane.
     for branch in LoopBranch::ALL {
         let refusal = branch.unimplemented().to_string();
         assert!(
@@ -194,18 +145,6 @@ fn a_refusal_names_the_branch_and_says_whether_anything_happened() {
     }
 }
 
-/// The bytes [`crate::effects::production_code`] blanked out of `source`.
-///
-/// The blanker is position-preserving, so the count is also the number of
-/// source positions the region no longer offers a needle. A scan is only
-/// meaningful over a region where this is non-zero: a comment or a literal left
-/// standing is text a substring search reads as production code.
-///
-/// # Panics
-///
-/// When the region is not its source's length. That is the other half of the
-/// same contract — an offset into a region that has changed length names a
-/// different line of the file the census is reporting on.
 fn blanked_bytes(source: &str, code: &str) -> usize {
     assert_eq!(
         code.len(),
@@ -223,32 +162,6 @@ fn blanked_bytes(source: &str, code: &str) -> usize {
         .count()
 }
 
-/// The region guard the source censuses in this file share, and what replaced
-/// the ratio each of them used to open with.
-///
-/// Each opened with `code.len() * n > source.len()`. That guard was written for
-/// a **truncating** region, where a short result really does mean "a census over
-/// a fraction of a file reports zero for the part it never read".
-/// [`crate::effects::production_code`] does not truncate — it overwrites
-/// comments, literals and `#[cfg(test)]` items with spaces and keeps every
-/// newline — so `code.len() == source.len()` whatever it removed, and the ratio
-/// was already true before the blanker ran. It could not tell a working blanker
-/// from one that had stopped removing anything, and over unblanked source a
-/// needle quoted in a doc comment is counted as a call site.
-///
-/// So the two halves are asserted apart: something was blanked, and enough was
-/// left to scan. `CODING_STANDARDS.md` §12 requires the first of every scan and
-/// the length contract of the blanker;
-/// [`the_blanked_region_count_falls_to_zero_when_nothing_was_removable`] is the
-/// control that this number can reach zero, which is what the ratio could not.
-///
-/// `retained_floor` is each census's own tolerance, carried across unchanged:
-/// the unblanked remainder must exceed one `retained_floor`th of the file.
-///
-/// # Panics
-///
-/// When the region changed length, blanked nothing, or retained less than its
-/// floor.
 fn assert_blanked_region(file: &str, source: &str, code: &str, retained_floor: usize) {
     let blanked = blanked_bytes(source, code);
     assert!(
@@ -267,14 +180,6 @@ fn assert_blanked_region(file: &str, source: &str, code: &str, retained_floor: u
     );
 }
 
-/// The blanked-region count reaches zero, which is what the ratio it replaced
-/// could not.
-///
-/// [`assert_blanked_region`] is the guard three source censuses in this file
-/// open with, and a guard that cannot fail is not a guard. These two fixtures
-/// are the control in both directions: one carries a removable region of each
-/// kind the region function knows, the other carries none, and the retired
-/// ratio is asserted here to be satisfied by the second.
 #[test]
 fn the_blanked_region_count_falls_to_zero_when_nothing_was_removable() {
     const REMOVABLE: &str = "// a line comment\n\
@@ -317,33 +222,6 @@ fn the_blanked_region_count_falls_to_zero_when_nothing_was_removable() {
     );
 }
 
-/// **Every append the driver makes propagates its error.**
-///
-/// The append-error protocol is five obligations, and all five begin with the
-/// error *reaching* the protocol. A `let _ = self.emit(..)` reaches none of
-/// them: the fold is not poisoned, no reservation or invocation is cancelled,
-/// and the command reports success for a run whose log does not contain the
-/// line it just claimed to write.
-///
-/// Catalogue entry `PR7-SELECT-026` did exactly that to the
-/// `Admitted::BudgetExceeded` arm and the whole suite stayed green, because the
-/// arms whose append failure *is* armed by a fixture are not that one.
-///
-/// A **census rather than a fixture per arm**, for the reason the other four
-/// single-authority censuses exist: a per-arm test proves the arm it names and
-/// says nothing about the arm added next week. This proves the property over
-/// every append site the driver has, including the ones not yet written.
-///
-/// The region is [`crate::effects::production_code`], which blanks comments and
-/// strings — a `let _ = self.emit(` quoted in a doc comment must not fail this,
-/// and a truncating region would let a site below the cut through, which is
-/// `PR4-CENSUS-COMMENT-ORACLE` and is how the barrier census scanned 4.7% of
-/// this very file.
-///
-/// The guard on that region is [`assert_blanked_region`], which counts what was
-/// blanked. The length ratio this test used to open with could not: the region
-/// function preserves length by contract, so the ratio held of a blanker that
-/// had removed nothing and left every quoted `self.emit(` as a call site.
 #[test]
 fn every_driver_append_propagates_its_error() {
     const FILE: &str = "src/engine/topology/run.rs";
@@ -360,7 +238,6 @@ fn every_driver_append_propagates_its_error() {
     let mut unpropagated = Vec::new();
     for (at, _) in code.match_indices(needle) {
         sites += 1;
-        // Walk to the matching close paren, then check what follows it.
         let mut depth = 0_i32;
         let mut end = None;
         for (offset, ch) in code[at + needle.len() - 1..].char_indices() {
@@ -397,29 +274,6 @@ fn every_driver_append_propagates_its_error() {
     );
 }
 
-/// **The loop chooses its branch through one selector.**
-///
-/// `decisions.sequential_substrate.loop` gives seven branches in one order, and
-/// `select` is where that order lives. Catalogue entry `PR7-SELECT-015` added a
-/// **second** selector — `select_rescan`, ordered Dispatch/Retry/Integrate
-/// instead of Integrate/Retry/Dispatch — pointed `TopologyRun::step` at it, and
-/// left canonical `select` untouched with every one of its tests still passing.
-/// The whole suite was green.
-///
-/// That is the seams category in its purest form: `select.rs` is coherent,
-/// `run.rs` is coherent, and the branch order the packet specifies is not the
-/// one the run takes. No per-function test can see it, because each function is
-/// right about itself.
-///
-/// The fifth single-authority census this slice owns, and the cheapest: the
-/// driver reaches its branch order through exactly one call, and `checkpoint`
-/// guards exactly that call's result. A second selector makes this count zero,
-/// not two — which is why the assertion is on the **canonical** name rather than
-/// on a total.
-///
-/// The region carries [`assert_blanked_region`] for the reason the append census
-/// above does: the ratio both used to open with is true of a region that blanked
-/// nothing, and a `select(` in a doc comment would then be counted as the call.
 #[test]
 fn the_loop_selects_through_one_function() {
     const FILE: &str = "src/engine/topology/run.rs";
@@ -431,8 +285,6 @@ fn the_loop_selects_through_one_function() {
 
     assert_blanked_region(FILE, &source, &code, 10);
 
-    // Calls, not definitions — neither is defined here, but the filter is the
-    // one the barrier census learned to use and costs nothing.
     let calls = |needle: &str| {
         code.match_indices(needle)
             .filter(|(at, _)| !code[..*at].trim_end().ends_with("fn"))
@@ -457,38 +309,6 @@ fn the_loop_selects_through_one_function() {
     );
 }
 
-/// **The frozen pool table is read through one seam.**
-///
-/// `AttemptPlans::pool_for` exists so that the plan builder, the reviewer
-/// profile and the driver's `RetryRequest` reach one answer. `79cd9c8` said it
-/// gave the rule "one production implementation" and it did not: `assembly.rs`
-/// called `crate::capacity::pool_for` from three places, two of them
-/// character-for-character copies of the seam's body, and the seam's only caller
-/// was `run.rs`. `reviews/FINDINGS.md` §19, claim (4).
-///
-/// **The needle is a free call to `pool_for`**, through the shared
-/// [`crate::effects::census_domain::production_calls`]. It was the literal
-/// `capacity::pool_for(`, which reasons about one direction only — a longer
-/// identifier colliding with it — and not about the other: `use
-/// crate::capacity::pool_for;` followed by a bare `pool_for(...)` is the
-/// ordinary way to write a second implementation and that literal does not
-/// match it. Both spellings are already live in this tree. `R5-SEAMS-002`.
-///
-/// **What it still cannot see, stated rather than left to be found**: a second
-/// resolution that never names the function. `capacity::pool_for` is
-/// `pools.iter().find(…)`, and a caller walking `self.pools` inline is a second
-/// implementation of the rule with no `pool_for` in it. A name census cannot
-/// reach that, so what this asserts is **one named resolution**, not one
-/// resolution.
-///
-/// **The count is one and not zero.** Zero would mean the seam had been rewritten
-/// to resolve pools some other way, which is the same defect from the other
-/// side, so the assertion is an equality.
-///
-/// The needle controls at the end are controls on *identifier matching*; the
-/// premise underneath them — that the region was blanked at all — is
-/// [`assert_blanked_region`]'s, because the ratio this census used to open with
-/// held of a blanker that had removed nothing.
 #[test]
 fn the_frozen_pool_table_is_read_through_one_seam() {
     const FILE: &str = "src/engine/assembly.rs";
@@ -499,17 +319,6 @@ fn the_frozen_pool_table_is_read_through_one_seam() {
     let code = crate::effects::production_code(&source);
     assert_blanked_region(FILE, &source, &code, 2);
 
-    // **Free calls to `pool_for`, not the qualified spelling.** The needle was
-    // the literal `capacity::pool_for(`, which does not match the ordinary way
-    // to write a second implementation — `use crate::capacity::pool_for;` and
-    // then a bare `pool_for(...)`. Both idioms are live in this tree
-    // (`config.rs` writes the qualified form, `capacity.rs` the bare one), so
-    // it is not a hypothetical spelling. `R5-SEAMS-002`, `PR7-R5-ATT-002`.
-    //
-    // `Call::Free` is what separates a second implementation from the seam's
-    // own callers: the plan builder and the reviewer profile ask
-    // `self.pool_for(...)`, a method call, and the trait method's definition is
-    // filtered as a definition.
     use crate::effects::census_domain::{Call, production_calls};
 
     let calls = production_calls(&code, "pool_for", Call::Free);
@@ -521,8 +330,6 @@ fn the_frozen_pool_table_is_read_through_one_seam() {
          pays for those"
     );
 
-    // Controls on the needle itself, both directions, because a needle that has
-    // stopped matching reads exactly like a clean file.
     assert_eq!(
         production_calls(
             "use crate::capacity::pool_for;\nfn second() { pool_for(agent, pools); }\n",
@@ -545,41 +352,16 @@ fn the_frozen_pool_table_is_read_through_one_seam() {
     );
 }
 
-/// A production `AttemptStarted4` struct expression: the line it opens on, and
-/// the expression its top-level `pool` field is initialised with.
 #[derive(Debug)]
 struct AttemptStartedSite {
     line: usize,
     pool: String,
 }
 
-/// A character an identifier may be spelled with, and therefore one that must
-/// not be touching a name for the match to be that name.
 fn is_name_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
-/// Whether the text ending where an `AttemptStarted4` begins opens a **struct
-/// expression**, rather than a declaration or a return type.
-///
-/// The path this name may be the last segment of is skipped first:
-/// `events::AttemptStarted4 { … }` is the same expression as a bare one, and the
-/// keyword that decides the context sits before the whole path rather than
-/// before its last segment.
-///
-/// What remains is read for the forms that are certainly **not** an expression —
-/// a return type, and the item headers that introduce a name followed by a brace
-/// of their own. `fn build() -> AttemptStarted4 {` is the one this census was
-/// measured to mis-read: the exact-byte needle it used counted a function's
-/// signature as a construction, and then failed looking for a `pool` field in a
-/// function body.
-///
-/// Everything else is read as an expression or a pattern. That is the safe
-/// direction, and the one [`crate::effects::production_code`] argues for about
-/// its own region: a domain that is too large makes the census report more,
-/// never less. A struct *pattern* naming `pool: None` is reported rather than
-/// skipped, which is a decision someone is asked to make rather than one the
-/// instrument makes silently.
 fn opens_a_struct_expression(before: &str) -> bool {
     const NOT_EXPRESSIONS: &[&str] = &["struct", "enum", "union", "trait", "impl", "for"];
 
@@ -597,13 +379,6 @@ fn opens_a_struct_expression(before: &str) -> bool {
     })
 }
 
-/// The offset of the delimiter closing the one opened at `open`, or `None` when
-/// what lies between them does not nest.
-///
-/// `{`, `(` and `[` are all tracked, and a closer that does not match its opener
-/// ends the walk without an answer. Counting braces alone cannot tell a body
-/// that ends from one whose delimiters cross, and the second is a region the
-/// scanner has lost rather than one it has read.
 fn matching_delimiter(code: &str, open: usize) -> Option<usize> {
     let mut stack = Vec::new();
     for (offset, ch) in code[open..].char_indices() {
@@ -624,14 +399,6 @@ fn matching_delimiter(code: &str, open: usize) -> Option<usize> {
     None
 }
 
-/// The expression the field `name` is initialised with at the **top level** of a
-/// struct expression's `body`, or `None` when it has no such field.
-///
-/// Never a field of the same name inside a nested literal. The body is split on
-/// its own commas — the ones outside every nested `{}`, `()` and `[]` — because
-/// the line-oriented rule this replaces read
-/// `binding: Binding {\n    pool: None,\n}` as this literal's own `pool` and
-/// reported a value the event never carried.
 fn top_level_field(body: &str, name: &str) -> Option<String> {
     let mut depth = 0_usize;
     let mut start = 0_usize;
@@ -657,22 +424,13 @@ fn top_level_field(body: &str, name: &str) -> Option<String> {
         }
         let rest = field[label.len()..].trim_start();
         match rest.strip_prefix(':') {
-            // `pool: <expression>`. A `pool::…` is a path, not this field.
             Some(value) if !value.starts_with(':') => Some(value.trim().to_owned()),
-            // The shorthand `pool`, which names the binding of that name.
             _ if rest.is_empty() => Some(label),
             _ => None,
         }
     })
 }
 
-/// `text` as the sequence of tokens it is written from: a run of identifier
-/// characters is one token, and every other non-whitespace character is its own.
-///
-/// Formatting is not part of the authority a site names — `plan.pool.clone()`
-/// and the same expression broken across lines are the same expression — and
-/// tokenising rather than stripping whitespace is what keeps `mut pool` and
-/// `mutpool` apart while doing it.
 fn expression_tokens(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut word = String::new();
@@ -694,38 +452,10 @@ fn expression_tokens(text: &str) -> Vec<String> {
     tokens
 }
 
-/// Whether `found` is the `expected` authority expression.
-///
-/// **An allowlist of one, not a denylist of spellings.** The oracle this
-/// replaces asked whether the value began with `None`, which is a denylist with
-/// two holes in it and both are reachable. It admitted every other way of
-/// writing absence — `Option::None`, `None::<String>`, `Default::default()`,
-/// `<_>::default()` — as an authority, and it called any authority whose *name*
-/// began with `None` an invention. Naming the expression each site is supposed
-/// to carry closes both at once: there is nothing to enumerate, and a name is
-/// only ever read as a name.
 fn is_the_declared_authority(found: &str, expected: &str) -> bool {
     expression_tokens(found) == expression_tokens(expected)
 }
 
-/// Every production `AttemptStarted4` struct expression in `code`.
-///
-/// `code` is a blanked region, so a brace inside a comment or a string literal
-/// is already a space and can neither open a body nor close one — and a comment
-/// *between* the name and its brace is whitespace for the same reason, because
-/// the blanker preserves position. `AttemptStarted4 /* the retry arm */ {` is
-/// one of this type's spellings and the exact-byte needle this replaces did not
-/// see it, which put a whole construction site outside the domain.
-///
-/// The three questions are asked apart: is the match this type's name and not
-/// part of a longer one; is a brace what follows it across whitespace; and is
-/// the context an expression rather than a declaration or a return type.
-///
-/// # Panics
-///
-/// When a literal's delimiters do not nest, or when one carries no top-level
-/// `pool` field. Both are the census losing its subject, which is not the same
-/// answer as finding it clean.
 fn attempt_started_sites(code: &str) -> Vec<AttemptStartedSite> {
     const TYPE: &str = "AttemptStarted4";
 
@@ -757,21 +487,8 @@ fn attempt_started_sites(code: &str) -> Vec<AttemptStartedSite> {
     found
 }
 
-/// The scanner reads struct expressions, and reads return types and
-/// declarations as neither.
-///
-/// [`attempt_started_sites`] is the domain of
-/// [`both_attempt_started_arms_take_their_pool_from_an_authority`], and a domain
-/// derived by an exact-byte needle is a domain that both misses members and
-/// invents them. Each fixture here is one of the two directions, measured on the
-/// needle this replaces.
 #[test]
 fn the_attempt_started_scanner_reads_expressions_and_not_return_types() {
-    // **Missed.** A comment between the name and its brace is legal Rust and a
-    // needle of `AttemptStarted4 {` does not match it. Blanked in place it is
-    // whitespace, so the scan is over `production_code`'s region rather than the
-    // raw fixture — the comment must really have been blanked for the gap to be
-    // whitespace at all.
     const COMMENT_SEPARATED: &str = "fn dispatch() {\n\
                                      let started = AttemptStarted4 /* the arm */ {\n\
                                      pool: plan.pool.clone(),\n\
@@ -794,11 +511,6 @@ fn the_attempt_started_scanner_reads_expressions_and_not_return_types() {
         "the sites were found but read the wrong field: {separated:?}"
     );
 
-    // **Invented.** A return type, the type's own declaration, an inherent
-    // `impl` and a trait `impl` all put this name in front of a brace, and none
-    // of them constructs anything. The one expression nested inside them is what
-    // the scan is for, and finding it is the half that proves the rejections are
-    // not just a scan that stopped early.
     const NOT_CONSTRUCTIONS: &str = "struct AttemptStarted4 {\n\
                                      pool: Option<String>,\n\
                                      }\n\
@@ -828,8 +540,6 @@ fn the_attempt_started_scanner_reads_expressions_and_not_return_types() {
         "the one real expression in that fixture was not the one read: {constructions:?}"
     );
 
-    // **The name, not a name it is inside of.** Both directions, because the
-    // boundary is two checks and one of them passing reads exactly like both.
     const LONGER_NAMES: &str = "fn go() {\n\
                                 let a = AttemptStarted4Extended {\n\
                                 pool: None,\n\
@@ -843,10 +553,6 @@ fn the_attempt_started_scanner_reads_expressions_and_not_return_types() {
         "a longer identifier ending or beginning with this type's name was read as the type"
     );
 
-    // **The outer field, not a nested one of the same name.** The rule this
-    // replaces took the first line whose trimmed text began `pool:`, so a nested
-    // literal spelled across lines supplied the answer. Both orders, because the
-    // defect is only visible in one of them.
     const NESTED_FIRST: &str = "fn go() {\n\
                                 let started = AttemptStarted4 {\n\
                                 binding: Binding {\n\
@@ -874,19 +580,10 @@ fn the_attempt_started_scanner_reads_expressions_and_not_return_types() {
     }
 }
 
-/// The authority oracle names the expression a site is supposed to carry,
-/// rather than spelling out the ways a value can be absent.
-///
-/// [`is_the_declared_authority`] is what
-/// [`both_attempt_started_arms_take_their_pool_from_an_authority`] judges each
-/// site with. The rule it replaces — "the value begins with `None`" — is a
-/// denylist, and the two holes below are both reachable in ordinary Rust.
 #[test]
 fn the_pool_authority_oracle_names_the_expression_rather_than_absence() {
     const AUTHORITY: &str = "plan.pool.clone()";
 
-    // The first hole: every other way to write "no pool", none of which begins
-    // with `None` except the one that does.
     for invention in [
         "None",
         "Option::None",
@@ -904,96 +601,28 @@ fn the_pool_authority_oracle_names_the_expression_rather_than_absence() {
         );
     }
 
-    // The second hole, in the other direction: a name is a name, and one that
-    // begins with `None` is not an absence.
     assert!(
         is_the_declared_authority("NonePool::resolve(agent)", "NonePool::resolve(agent)"),
         "an authority whose name begins with `None` was read as an invention, which is the \
          false positive a prefix test buys with the false negatives above"
     );
 
-    // Formatting is not the expression. `cargo fmt` breaking a line must not
-    // move a site out of conformance.
     assert!(
         is_the_declared_authority("plan\n            .pool\n            .clone()", AUTHORITY),
         "the same expression, wrapped, was read as a different one"
     );
 
-    // But whitespace between tokens is not nothing, which is what a rule that
-    // simply stripped it would have made it.
     assert!(
         !is_the_declared_authority("mut pool", "mutpool"),
         "two tokens were run together into one, so expressions that differ compare equal"
     );
 
-    // And the conforming case, so that a green result here is a claim about an
-    // oracle that accepts something.
     assert!(
         is_the_declared_authority("plan.pool.clone()", AUTHORITY),
         "the authority a site actually carries was not accepted, so every site is an offender"
     );
 }
 
-/// **Both arms of `attempt_started` get their pool from an authority.**
-///
-/// `attempt_started` is appended from two places and they reach it differently:
-/// the dispatch arm builds its plan first and reads `plan.pool`; the retry arm
-/// appends **before** its plan exists, because `settle::retry` produces the
-/// event and the plan is built after. Sol's `R3-SEAMS-001` is what that
-/// asymmetry produced — the retry passed `pool: None`, so a resumed run's ledger
-/// recorded no pool while the plan it then built resolved one, and the two
-/// disagreed about the same attempt.
-///
-/// **Each site names the expression it is supposed to carry**, and
-/// [`is_the_declared_authority`] compares against that rather than against a
-/// list of ways to write absence. The rule this replaces asked whether the value
-/// began with `None`: it admitted `Option::None` and `Default::default()` as
-/// authorities, and it called an authority whose name began with `None` an
-/// invention. A census's claim is only as narrow as its oracle, and "not
-/// invented here" was never what that oracle asked.
-///
-/// **The domain is one struct expression per site, and that count is asserted.**
-/// [`attempt_started_sites`] reads the type's name in expression context rather
-/// than the bytes `AttemptStarted4 {`, because that needle both missed
-/// constructions — a comment between the name and its brace — and invented them
-/// — `-> AttemptStarted4 {`. The scan this all replaces read the *first* literal
-/// in each file and stopped, so a second construction site lay outside the
-/// scanned domain while `checked == SITES.len()` still read as full coverage.
-/// The control at the end of the test is that second-position violation, written
-/// in both of the spellings the byte needle could not reach.
-///
-/// # Two corrections to what this test was said to be
-///
-/// **It is not the only witness available, and the claim that it was is false.**
-/// `79cd9c8`'s message argued a source census was structurally necessary because
-/// "a retry is only reachable *within* one process … and **no driver fixture can
-/// reach the arm**". One does: the fixture is
-/// `recover::tests::the_retaining_incarnation_retries_in_place`, and it exists —
-/// **named, not cited by line**. The first draft of this block quoted
-/// `recover/tests.rs:5488` as terminal output — correct **at `c01a844`** — and the
-/// very next commit inserted nineteen lines above it. `PR7-R6-ATT-003`, and
-/// the rule it gives: a doc comment names an item, because a line number is a
-/// claim about a version of a file and decays silently. The doc-comment filter
-/// (`| grep -v '///'`) is the other half — a needle quoted here would otherwise
-/// match its own quotation, `reviews/FINDINGS.md` §4.
-///
-/// It drives `TopologyRun::step` twice in one process and the second iteration
-/// **is** the retained-generation retry. It now asserts the pool on both
-/// `attempt_started` appends, which is the behavioural witness this census was
-/// offered in place of. `reviews/FINDINGS.md` §19, claim (3).
-///
-/// **And this census does not read the file the defect was in.** The two sites
-/// below are `attempt.rs` and `settle.rs`; the literal `None` that
-/// `R3-SEAMS-001` found was in **`run.rs`**, which fills `settle::retry`'s
-/// `RetryRequest`, and `settle.rs`'s own literal reads `request.pool` and was
-/// correct throughout. Measured at `5a08f19`: restoring `pool: None` in
-/// `run.rs` leaves this census green **and the entire suite green** — 1698 + 8
-/// passed, 0 failed. The behavioural assertion above is what kills it. §19,
-/// claim (2).
-///
-/// So this census keeps a real and narrower job: the two *literals* name the
-/// authority each is supposed to name. It is not a witness that the value
-/// arriving at them is right.
 #[test]
 fn both_attempt_started_arms_take_their_pool_from_an_authority() {
     const SITES: &[(&str, &str, &str)] = &[
@@ -1054,13 +683,6 @@ fn both_attempt_started_arms_take_their_pool_from_an_authority() {
          attempt drained: {off_authority:?}"
     );
 
-    // **The control, written the three ways the rules this replaces could not
-    // read.** The second construction site is past the one `.find` stopped at;
-    // it is spelled with a comment between the name and its brace, which the
-    // byte needle did not match; and its pool is `Option::default()`, which the
-    // `None` prefix test admitted as an authority. `CODING_STANDARDS.md` §12: a
-    // positive control inside a truncated domain does not prove that the whole
-    // named domain was scanned.
     const SECOND_ARM_INVENTS_ITS_POOL: &str = "fn dispatch() {\n\
                                                let started = AttemptStarted4 {\n\
                                                pool: plan.pool.clone(),\n\
@@ -1089,5 +711,152 @@ fn both_attempt_started_arms_take_their_pool_from_an_authority() {
         !is_the_declared_authority(&control[1].pool, "plan.pool.clone()"),
         "an invented pool in the second site is what this census exists to catch, and the \
          scan did not see it: {control:?}"
+    );
+}
+
+#[test]
+fn the_settled_notes_separate_the_successful_and_the_failed_settlement() {
+    const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/run.md");
+
+    let settled = NOTES
+        .split("\n## ")
+        .find(|section| section.starts_with("`pub enum Progress` › `Settled {`"))
+        .expect("the notes carry the `Settled {` heading the branch summary sits under");
+    let settled = settled.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    for (proposition, pin) in [
+        (
+            "which settlement is appended depends on `accepted`",
+            "depends on `accepted`",
+        ),
+        (
+            "a rejected attempt settles with `attempt_finished`",
+            "rejected attempt ends at `attempt_finished`",
+        ),
+        (
+            "an accepted attempt appends no `attempt_finished`",
+            "never appends `attempt_finished`",
+        ),
+        (
+            "an accepted attempt settles at `candidate_prepared`",
+            "`candidate_prepared`",
+        ),
+        (
+            "and `task_candidate_created` follows it",
+            "`task_candidate_created`",
+        ),
+    ] {
+        assert!(
+            settled.contains(pin),
+            "the `Settled {{` summary must state that {proposition}; looked for {pin:?} in:\n{settled}"
+        );
+    }
+
+    assert!(
+        !settled.contains("the attempt through the Runner, and `attempt_finished`."),
+        "the retired claim that the whole ready-dispatch branch ends in \
+         `attempt_finished` must not come back:\n{settled}"
+    );
+}
+
+#[test]
+fn the_ready_branch_notes_do_not_owe_the_attempt_the_branch_runs() {
+    const NOTES: &str = include_str!("../../../../docs/internals/engine/topology/run.md");
+    const ARM: &str = "`pub const fn disposition(self) -> Disposition` › `Self::";
+
+    let section = |heading: &str| -> String {
+        NOTES
+            .split("\n## ")
+            .find(|section| section.starts_with(heading))
+            .map(|section| section.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_else(|| panic!("the notes carry no {heading:?} heading"))
+    };
+
+    for (branch, variant, states, retired) in [
+        (
+            LoopBranch::ReadyDispatch,
+            "ReadyDispatch",
+            &[
+                (
+                    "the branch performs all four of its clauses",
+                    "All four clauses",
+                ),
+                (
+                    "the fourth of which is the attempt and its settlement",
+                    "run one attempt through the Runner and settle",
+                ),
+            ][..],
+            &[
+                (
+                    "only the first three clauses are performed",
+                    "The first three are here",
+                ),
+                (
+                    "the branch stops before the attempt, at `OpenNoAttempt`",
+                    "leaves instead is `OpenNoAttempt`",
+                ),
+            ][..],
+        ),
+        (
+            LoopBranch::ReadyRetry,
+            "ReadyRetry",
+            &[
+                (
+                    "the branch performs its clause whole",
+                    "generation\", whole:",
+                ),
+                (
+                    "the attempt and its settlement included",
+                    "the attempt itself and its settlement",
+                ),
+                (
+                    "reached through the ready-dispatch branch's own machinery",
+                    "the same `attempt` and `settle`",
+                ),
+            ][..],
+            &[(
+                "running and settling the retry is still owed",
+                "half still owed",
+            )][..],
+        ),
+    ] {
+        assert_eq!(
+            branch.disposition(),
+            Disposition::Performed,
+            "`{}` is no longer `Performed`; these pins describe a branch that \
+             runs its attempt and settles it, so they are the wrong assertions \
+             for whatever it does now",
+            branch.label()
+        );
+
+        let notes = section(&format!("{ARM}{variant} => Disposition::Performed,`"));
+        for (proposition, pin) in states {
+            assert!(
+                notes.contains(pin),
+                "the `{variant}` section must state that {proposition}; looked \
+                 for {pin:?} in:\n{notes}"
+            );
+        }
+        for (claim, pin) in retired {
+            assert!(
+                !notes.contains(pin),
+                "the retired claim that {claim} must not come back — \
+                 `TopologyRun::step` and `TopologyRun::retry_ready` both reach \
+                 `attempt` and `settle`; found {pin:?} in:\n{notes}"
+            );
+        }
+    }
+
+    let partly = section("`pub enum Disposition` › `PartlyImplemented {`");
+    assert!(
+        partly.contains("No branch is `PartlyImplemented` today"),
+        "the `PartlyImplemented` section must say the variant has no \
+         inhabitants, because its example is a build that no longer \
+         exists:\n{partly}"
+    );
+    assert!(
+        !partly.contains("the ready-dispatch branch's first three clauses are"),
+        "the retired claim that the ready-dispatch branch is presently \
+         half-built must not come back:\n{partly}"
     );
 }

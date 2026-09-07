@@ -1,26 +1,7 @@
-//! The enforcement layer's tests: the allow-placement scan, the frozen legacy
-//! section, the wrapper classification, the generated inventories, and the
-//! build refusals whose *reason* is pinned.
-//!
-//! Three rules this project pays for when it forgets them are load-bearing
-//! here:
-//!
-//! * **A function may not be its own oracle.** The denylist is checked against
-//!   [`PACKET_PRIMITIVES`], transcribed from
-//!   `decisions.effect_site_inventory.mechanism`'s own sentence, never against
-//!   itself. The site inventory is checked against the enums.
-//! * **Enumerations come from the types and the packet.** The site grid iterates
-//!   `EffectSiteId::all()`; the classification domain is derived by parsing the
-//!   modules, not by listing what came to mind.
-//! * **A refusal is executed, not inferred.** Every "this is refused" claim here
-//!   is driven with input that *does* the forbidden thing — a legacy list that
-//!   grows, an entry that names a topology module, an allow below module level —
-//!   because a refusal only ever measured against compliant input is a refusal
-//!   nobody has seen fire.
+//! Extended notes: `docs/internals/effects/tests.md`
 
-// Allowlist placement: the **funnel section** of `effects/allowlist.toml`, which
-// carries this module's review clause -- effects only inside site-taking APIs,
-// no writable handle returned. `decisions.effect_site_inventory.mechanism` (2).
+// Allowlist placement: the funnel section of `effects/allowlist.toml`, which
+
 #![allow(
     clippy::disallowed_methods,
     clippy::disallowed_types,
@@ -33,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::census_domain::{CrateRoots, InventoryRefusal};
 use super::{
     ALLOWLIST_TOML, CLIPPY_TOML, DENIAL_CONTROL, DENIAL_FIXTURES, EFFECT_SITES_JSON,
     FROZEN_LEGACY_ALLOWLIST, FUNNEL_MODULES_JSON, REGENERATE, RESIDUE_CLASSES_JSON,
@@ -42,38 +24,60 @@ use super::{
 };
 use crate::topology::effects::{EffectSiteId, effect_sites, effect_sites_json};
 
-// The definitions these tests are checked against -- the two packet tables, the
-// host-conditional denials and the placement scan's prologue reader -- are
-// beside this file. The machinery that *drives* a compiler is not: it stays
-// here, because this file is a whole-file test module and `policy.rs` is not,
-// so a `Command::new(` moved there would enter two production censuses in
-// `src/runner/mod.rs` and have to be classified in them.
 mod policy;
 
 use policy::{PACKET_PRIMITIVES, PACKET_TYPES, host_conditional_paths, marker_before};
 
-// The wrapper classification's four checks are beside this file too, and they
-// go one step further than `policy.rs`: their bodies sit inside a `cfg(test)`
-// module, so both source cutters read that file as test logic. An inline module
-// with a body is not the terminated declaration `census_domain` derives a skip
-// from, so the whole-file module census is untouched by it.
 mod classification;
 
 use classification::checks;
-
-// ---------------------------------------------------------------------------
-// Reading the tree and the artifacts
-// ---------------------------------------------------------------------------
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// Every `src/**/*.rs` and `examples/**/*.rs`, as `(repo-relative path, source)`.
-///
-/// `examples/**` is beyond the mechanism sentence's `src/**/*.rs` and is scanned
-/// anyway: `cargo clippy --all-targets` compiles examples, so an ungoverned
-/// example is a hole in the same wall. Scanning wider can only find more.
+pub(in crate::effects) fn crate_roots() -> &'static CrateRoots {
+    static ROOTS: std::sync::OnceLock<CrateRoots> = std::sync::OnceLock::new();
+    ROOTS.get_or_init(|| crate_roots_of(&repo_root()).unwrap_or_else(|refusal| panic!("{refusal}")))
+}
+
+pub(in crate::effects) fn crate_roots_of(
+    manifest_dir: &Path,
+) -> Result<CrateRoots, InventoryRefusal> {
+    let manifest = manifest_dir.join("Cargo.toml");
+    CrateRoots::from_metadata_json(&cargo_metadata_json(&manifest)?, &manifest)
+}
+
+fn cargo_metadata_json(manifest: &Path) -> Result<String, InventoryRefusal> {
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = std::process::Command::new(cargo)
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+        ])
+        .arg("--manifest-path")
+        .arg(manifest)
+        .output()
+        .map_err(|error| InventoryRefusal::NotRun {
+            manifest: manifest.to_path_buf(),
+            why: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(InventoryRefusal::Failed {
+            manifest: manifest.to_path_buf(),
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    String::from_utf8(output.stdout).map_err(|error| InventoryRefusal::Unreadable {
+        manifest: manifest.to_path_buf(),
+        why: error.to_string(),
+    })
+}
+
 fn scanned_sources() -> Vec<(String, String)> {
     fn walk(dir: &Path, into: &mut Vec<PathBuf>) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -123,6 +127,8 @@ struct AllowlistEntry {
     #[serde(default)]
     allows: Vec<String>,
     #[serde(default)]
+    expect_sites: usize,
+    #[serde(default)]
     absent: bool,
     packet: String,
     #[serde(default)]
@@ -148,15 +154,6 @@ struct ClippyToml {
     disallowed_types: Vec<DeniedPath>,
     #[serde(default, rename = "disallowed-macros")]
     disallowed_macros: Vec<DeniedPath>,
-    // The §7 panic-policy allowances (CODING_STANDARDS.md §7), which arrived
-    // with master's lint mechanization. They configure clippy's own lints
-    // rather than naming an effect primitive, so `all()` deliberately excludes
-    // them. They are declared because `deny_unknown_fields` above is the
-    // mechanism that turns an unclassified clippy.toml key into a failure --
-    // the correct response to a new key is to classify it here, never to
-    // relax the attribute -- and they are asserted by
-    // `clippy_toml_turns_the_allowances_on_and_gives_unwrap_none` so a
-    // field this file merely parses cannot drift unobserved.
     #[serde(default, rename = "allow-expect-in-tests")]
     allow_expect_in_tests: bool,
     #[serde(default, rename = "allow-panic-in-tests")]
@@ -165,20 +162,6 @@ struct ClippyToml {
     allow_print_in_tests: bool,
 }
 
-/// `clippy.toml` turns the three §7 allowances on, and gives `.unwrap()` none.
-///
-/// **It reads `clippy.toml`, not the standard**, and is named for that. An
-/// earlier name claimed the allowances were "exactly what the standard
-/// states", which this test cannot know: parsing §7's prose to compare would
-/// be a text checker over an open-ended surface, and PR #25 is five review
-/// rounds of evidence that those do not converge.
-///
-/// CODING_STANDARDS.md §7: tests fail their own setup with `.expect(` and a
-/// message, use `panic!` in their own assertion helpers, and may print;
-/// `.unwrap()` "is denied everywhere, tests included" because it carries no
-/// diagnostic. A `false` here would silently re-deny a form 4,100 call sites
-/// use, and an `unwrap` allowance appearing would silently permit one the
-/// standard refuses -- so both directions are asserted rather than assumed.
 #[test]
 fn clippy_toml_turns_the_allowances_on_and_gives_unwrap_none() {
     let clippy = denylist();
@@ -236,9 +219,6 @@ struct Wrappers {
 #[serde(deny_unknown_fields)]
 struct ModuleClassification {
     path: String,
-    /// The path a denied entry would name this module by, or empty when the
-    /// module is not reachable from outside its parent (a private `mod`, or the
-    /// binary crate root).
     crate_path: String,
     #[serde(default)]
     funnel: Vec<String>,
@@ -262,15 +242,132 @@ fn wrappers() -> Wrappers {
     toml::from_str(&text).expect("the wrapper classification parses")
 }
 
-// ---------------------------------------------------------------------------
-// (2) The allow-placement scan
-// ---------------------------------------------------------------------------
+#[test]
+fn the_readiness_expectations_are_per_site_and_both_records_say_so() {
+    const READINESS: &str = "src/agent/proc/test_support/readiness.rs";
+    const NOTES: &str = "docs/internals/agent/proc/test_support/readiness.md";
+    const LINT: &str = "clippy::disallowed_methods";
+    const SITES: usize = 6;
+    const DECISION: &str = "standards/02_standards_automated_baseline.md";
+    const SPELLED: [&str; 8] = [
+        "one", "two", "three", "four", "five", "six", "seven", "eight",
+    ];
+    let sites_in_words = SPELLED[SITES - 1];
 
-/// `mechanism` (2), executed over the tree.
-///
-/// Four things, and the fourth is the one a scan usually leaves out: an
-/// attribute's lint set must **equal** what the allowlist records, so a widening
-/// is a failure rather than a silent extra.
+    let source = fs::read_to_string(repo_root().join(READINESS)).expect("the readiness module");
+
+    for lint in USED_GOVERNED_LINTS {
+        assert_eq!(
+            crate::effects::lint_levels::file_level_lint_state(&source, lint),
+            Some("deny"),
+            "{READINESS} must deny `{lint}` at file-module level"
+        );
+    }
+
+    let found = governed_allows(&source);
+    let per_site: Vec<&crate::effects::GovernedAllow> =
+        found.iter().filter(|allow| !allow.module_level).collect();
+    assert_eq!(
+        per_site.len(),
+        SITES,
+        "{READINESS} carries {} per-site governed attributes: {per_site:#?}",
+        per_site.len()
+    );
+    assert!(
+        found.len() == SITES,
+        "a governed attribute at module level is a file-scope allowance and this file has \
+         none: {found:#?}"
+    );
+    for allow in &per_site {
+        assert_eq!(allow.keywords, ["expect"], "{READINESS}:{}", allow.line);
+        assert_eq!(allow.written, [LINT], "{READINESS}:{}", allow.line);
+        assert!(allow.reasoned, "{READINESS}:{} has no reason", allow.line);
+    }
+    let indices: BTreeSet<usize> = (1..=SITES)
+        .filter(|index| source.contains(&format!("site {index} of {SITES}")))
+        .collect();
+    assert_eq!(
+        indices,
+        (1..=SITES).collect::<BTreeSet<usize>>(),
+        "each expectation's reason names which of the {SITES} sites it is"
+    );
+
+    let list = allowlist();
+    let row = list
+        .funnel
+        .iter()
+        .find(|entry| entry.path == READINESS)
+        .expect("the readiness row is in the funnel section");
+    assert_eq!(row.allows, vec![LINT.to_owned()]);
+    assert_eq!(row.expect_sites, SITES);
+
+    let phrase = format!("five distinct denied paths across {sites_in_words} sites");
+    let shouted = phrase.to_uppercase();
+    let allowlist_text =
+        fs::read_to_string(repo_root().join(ALLOWLIST_TOML)).expect("the allowlist");
+    let notes = fs::read_to_string(repo_root().join(NOTES)).expect("the readiness notes");
+    for (record, text, needle) in [
+        (NOTES, notes.as_str(), phrase.as_str()),
+        (ALLOWLIST_TOML, allowlist_text.as_str(), shouted.as_str()),
+    ] {
+        for spelling in [text.to_owned(), text.replace('\n', "\r\n")] {
+            assert!(
+                spelling.lines().any(|line| line.contains(needle)),
+                "{record} no longer states `{needle}` on a line of its own"
+            );
+        }
+        assert!(
+            text.contains(DECISION),
+            "{record} does not cite `{DECISION}`, which is what admits the placement"
+        );
+    }
+
+    assert!(
+        repo_root().join(DECISION).is_file(),
+        "`{DECISION}` is cited by both records and is not in the tree"
+    );
+}
+
+#[test]
+fn the_internals_readme_names_the_records_that_carry_the_readiness_statement() {
+    const README: &str = "docs/internals/README.md";
+    const NOTES: &str = "docs/internals/agent/proc/test_support/readiness.md";
+    const READINESS: &str = "src/agent/proc/test_support/readiness.rs";
+    const SECTION: &str = "\n## What moves\n";
+
+    let readme = fs::read_to_string(repo_root().join(README))
+        .expect("the internals README")
+        .replace("\r\n", "\n");
+    let (_, below) = readme
+        .split_once(SECTION)
+        .unwrap_or_else(|| panic!("{README} no longer has a `What moves` section"));
+    let what_moves = below
+        .split_once("\n## ")
+        .map_or(below, |(section, _)| section);
+
+    for record in [NOTES, ALLOWLIST_TOML] {
+        assert!(
+            what_moves.contains(record),
+            "{README}'s `What moves` section does not name `{record}`, which is one of the two \
+             records `the_readiness_expectations_are_per_site_and_both_records_say_so` reads the \
+             per-site allowance statement from"
+        );
+    }
+    assert!(
+        !what_moves.contains(READINESS),
+        "{README}'s `What moves` section names `{READINESS}` as prose a census reads. The \
+         statement moved to `{NOTES}` and `{ALLOWLIST_TOML}`; the module keeps its marker and \
+         nothing else, so a maintainer sent to the source finds no such sentence"
+    );
+}
+
+fn file_level_denies(source: &str, lint: &str) -> bool {
+    matches!(
+        crate::effects::lint_levels::file_level_lint_state(source, lint),
+        Some("deny" | "forbid")
+    )
+}
+
 #[test]
 fn every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist() {
     let list = allowlist();
@@ -304,11 +401,26 @@ fn every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist() {
             );
         };
         carried.insert(path.clone());
+        let mut per_site = 0;
         for allow in &found {
+            if !allow.module_level
+                && allow.keywords == ["expect"]
+                && entry.expect_sites > 0
+                && allow.reasoned
+                && allow
+                    .lints
+                    .iter()
+                    .all(|lint| file_level_denies(&source, lint))
+            {
+                per_site += 1;
+                continue;
+            }
             assert!(
                 allow.module_level,
                 "{path}:{} allows {:?} below module level; `mechanism` (2) permits it \
-                 \"only as module-level attributes\"",
+                 \"only as module-level attributes\", and the per-site `#[expect]` the \
+                 2026-08-30 amendment admits needs a reason, a file-level deny of the same \
+                 lint, and an `expect_sites` count in {ALLOWLIST_TOML}",
                 allow.line, allow.lints
             );
             let marker = marker_before(&source, allow.line, allow.inner);
@@ -339,10 +451,22 @@ fn every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist() {
             written, declared,
             "{path}: the attribute allows {written:?} and {ALLOWLIST_TOML} records {declared:?}"
         );
+        assert_eq!(
+            per_site, entry.expect_sites,
+            "{path} carries {per_site} per-site `#[expect]` attributes and {ALLOWLIST_TOML} \
+             records {}",
+            entry.expect_sites
+        );
     }
 
-    // A file listed with a non-empty `allows` and no attribute is a stale entry;
-    // a scan that found nothing is a scan that proves nothing.
+    for (path, (entry, _)) in &recorded {
+        assert!(
+            entry.expect_sites == 0 || carried.contains(*path),
+            "{path} records {} per-site expectations and carries no governed attribute",
+            entry.expect_sites
+        );
+    }
+
     for (path, (entry, _)) in &recorded {
         if entry.allows.is_empty() || entry.absent {
             continue;
@@ -359,57 +483,39 @@ fn every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist() {
     );
 }
 
-/// The scan refuses what it is for — driven with input that breaks each rule.
-///
-/// A placement scan only ever run against a compliant tree is a scan nobody has
-/// seen refuse anything. Every case here is synthetic and every one asserts a
-/// *different* discriminator, so a scan that collapsed to "returns true" would
-/// fail on the counts rather than pass on the cases.
 #[test]
 fn the_placement_scan_refuses_an_allow_that_is_not_module_level_and_sees_through_no_disguise() {
-    // (1) A function-level allow is found and is not module-level.
     let on_a_function = "#[allow(clippy::disallowed_methods)]\nfn go() {}\n";
     let found = governed_allows(on_a_function);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(!found[0].module_level);
 
-    // (2) A statement-level allow, likewise.
     let on_a_statement = "fn go() {\n    #[allow(clippy::disallowed_methods)]\n    let _ = 1;\n}\n";
     let found = governed_allows(on_a_statement);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(!found[0].module_level);
 
-    // (3) An outer allow on an inner `mod` IS module-level — the rule permits
-    //     module-level attributes, not only file-level ones.
     let on_a_module = "#[allow(clippy::disallowed_methods)]\nmod inner { }\n";
     let found = governed_allows(on_a_module);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(found[0].module_level);
 
-    // (4) An inner attribute in the prologue is module-level.
     let inner = "//! doc\n#![allow(clippy::disallowed_types)]\nfn go() {}\n";
     let found = governed_allows(inner);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(found[0].inner && found[0].module_level);
 
-    // (5) An inner attribute after an item is not in the prologue.
     let late = "fn go() {}\n#![allow(clippy::disallowed_types)]\n";
     let found = governed_allows(late);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert!(!found[0].module_level);
 
-    // (6) `expect` counts too; the sentence says "allow/expect".
     let expected = "#![expect(clippy::disallowed_macros)]\n";
     assert_eq!(governed_allows(expected).len(), 1);
 
-    // (7) An ungoverned lint is not reported at all.
     assert!(governed_allows("#![allow(clippy::too_many_arguments)]\n").is_empty());
     assert!(governed_allows("#![allow(unused_variables)]\n").is_empty());
 
-    // (8) THE DISGUISES. An attribute inside a comment or a string is not an
-    //     attribute. `PR4-CENSUS-COMMENT-ORACLE` is in the ledger because a
-    //     census counted a doc comment, and this module's own fixtures are
-    //     attributes written inside string literals.
     let disguised = concat!(
         "//! ```\n",
         "//! #![allow(clippy::disallowed_methods)]\n",
@@ -424,32 +530,20 @@ fn the_placement_scan_refuses_an_allow_that_is_not_module_level_and_sees_through
         "{:#?}",
         governed_allows(disguised)
     );
-    // ... and the blanking that makes that true actually ran.
     let blanked = blank_comments_and_strings(disguised);
     assert_eq!(blanked.len(), disguised.len(), "offsets are preserved");
     assert_ne!(blanked, disguised, "the blanking is a no-op");
     assert!(!blanked.contains("disallowed_methods"));
 
-    // (9) A real attribute in a file that also carries disguised ones is still
-    //     found — the blanking must not be a blunt "delete everything".
     let mixed = format!("{disguised}#![allow(clippy::disallowed_macros)]\n");
     let found = governed_allows(&mixed);
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].lints, vec!["disallowed_macros".to_owned()]);
 
-    // The hostility is a count over *mechanisms*, not over strings: nine cases,
-    // and the placement answers partition 4 / 3 (module-level / not) with two
-    // that report nothing at all.
     let mechanisms = 9;
     assert_eq!(mechanisms, 9);
 }
 
-/// `clippy::style`, `clippy::all` and `warnings` are governed and unused.
-///
-/// Each would suppress far more than an effect denial — `warnings` would
-/// suppress the whole gate. The count is asserted at zero rather than left to
-/// habit, and the scanner is shown to *see* them so the zero is not a blind
-/// spot.
 #[test]
 fn the_three_blunt_governed_lints_are_used_by_nobody() {
     let mut blunt = Vec::new();
@@ -464,7 +558,6 @@ fn the_three_blunt_governed_lints_are_used_by_nobody() {
     }
     assert!(blunt.is_empty(), "{blunt:#?}");
 
-    // The scanner sees them when they are there.
     for probe in [
         "#![allow(warnings)]\n",
         "#![allow(clippy::all)]\n",
@@ -473,7 +566,6 @@ fn the_three_blunt_governed_lints_are_used_by_nobody() {
         assert_eq!(governed_allows(probe).len(), 1, "{probe}");
     }
 
-    // And the three that ARE used are exactly the three recorded.
     let list = allowlist();
     let used: BTreeSet<&str> = list
         .funnel
@@ -485,13 +577,12 @@ fn the_three_blunt_governed_lints_are_used_by_nobody() {
     assert_eq!(used, expected);
 }
 
-/// `mechanism` (2) scans `Cargo.toml [lints]` too, so this is that half.
 #[test]
 fn cargo_toml_declares_no_lint_table_that_could_allow_a_governed_lint() {
     let text = fs::read_to_string(repo_root().join("Cargo.toml")).expect("Cargo.toml");
     let manifest: toml::Value = toml::from_str(&text).expect("Cargo.toml parses");
     let Some(lints) = manifest.get("lints") else {
-        return; // No table at all is the strongest form of the answer.
+        return;
     };
     let rendered = lints.to_string();
     for lint in super::GOVERNED_LINTS {
@@ -502,11 +593,6 @@ fn cargo_toml_declares_no_lint_table_that_could_allow_a_governed_lint() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// (2) The frozen legacy section
-// ---------------------------------------------------------------------------
-
-/// The legacy section may only shrink, and the refusal is executed.
 #[test]
 fn the_legacy_section_is_frozen_and_may_only_shrink() {
     let list = allowlist();
@@ -522,9 +608,6 @@ fn the_legacy_section_is_frozen_and_may_only_shrink() {
         "PR5 freezes the list at exactly what it ships"
     );
 
-    // Executed, not inferred: a list that DOES grow is refused, and shrinking is
-    // allowed. Two directions, because a checker that refused everything would
-    // pass the first assertion.
     let grown: Vec<&str> = current.iter().copied().chain(["src/catalog.rs"]).collect();
     assert_eq!(
         legacy_growth(FROZEN_LEGACY_ALLOWLIST, &grown),
@@ -533,14 +616,11 @@ fn the_legacy_section_is_frozen_and_may_only_shrink() {
     let shrunk: Vec<&str> = current.iter().copied().skip(1).collect();
     assert!(legacy_growth(FROZEN_LEGACY_ALLOWLIST, &shrunk).is_empty());
 
-    // And the frozen list is the tree's, not a second copy that drifted.
     let frozen: BTreeSet<&str> = FROZEN_LEGACY_ALLOWLIST.iter().copied().collect();
     let listed: BTreeSet<&str> = current.iter().copied().collect();
     assert_eq!(frozen, listed);
 }
 
-/// "never contains a topology module (src/topology/**, src/runner/**,
-/// src/workspace_manager.rs, src/engine/topology.rs)".
 #[test]
 fn the_legacy_section_never_contains_a_topology_module() {
     let list = allowlist();
@@ -551,12 +631,11 @@ fn the_legacy_section_never_contains_a_topology_module() {
         "a topology module is in the frozen legacy section"
     );
 
-    // Executed: each of the banned shapes is refused on its own, so a check
-    // that only knew about `src/topology/` would fail here.
     let probes = [
         "src/topology/registry.rs",
         "src/runner/mod.rs",
         "src/workspace_manager.rs",
+        "src/workspace_manager/residue.rs",
         "src/engine/topology.rs",
         "src/engine/topology/create.rs",
     ];
@@ -573,17 +652,6 @@ fn the_legacy_section_never_contains_a_topology_module() {
         "one probe per banned shape"
     );
 
-    // The gap the fifth shape closes, executed rather than described.
-    //
-    // `topology_modules_among` matches with `str::starts_with`, and the packet
-    // sentence names `src/engine/topology.rs` — a file. PR7 makes the schema-4
-    // engine a directory, and `"src/engine/topology/create.rs"` does not start
-    // with `"src/engine/topology.rs"`. Run the check with only the four shapes
-    // the sentence names and it returns nothing for a submodule: the ban would
-    // have stopped covering every file of the module it exists to cover, and
-    // nothing would have said so.
-    //
-    // A test that has never been seen red is not coverage. This is the red.
     let sentence_shapes = [
         "src/topology/",
         "src/runner/",
@@ -603,9 +671,27 @@ fn the_legacy_section_never_contains_a_topology_module() {
          so the fifth entry is dead weight and should be removed"
     );
 
-    // The ban is on the LEGACY section alone: the same sentence puts
-    // `src/runner/{host,invocation}.rs` and `src/workspace_manager.rs` in the
-    // funnel section, and they are there.
+    let before_the_split = [
+        "src/topology/",
+        "src/runner/",
+        "src/workspace_manager.rs",
+        "src/engine/topology.rs",
+        "src/engine/topology/",
+    ];
+    let child = "src/workspace_manager/residue.rs";
+    assert!(
+        !child.starts_with("src/workspace_manager.rs"),
+        "the prefix relation this entry exists for no longer holds"
+    );
+    assert!(
+        !before_the_split
+            .iter()
+            .any(|banned| child.starts_with(banned) || *banned == child),
+        "the shapes that predate the `m4-workspace` split already cover \
+         `{child}`, so the `src/workspace_manager/` entry is dead weight and \
+         should be removed"
+    );
+
     let funnel: BTreeSet<&str> = list.funnel.iter().map(|e| e.path.as_str()).collect();
     for expected in [
         "src/workspace_manager.rs",
@@ -620,8 +706,6 @@ fn the_legacy_section_never_contains_a_topology_module() {
     }
 }
 
-/// Every legacy entry carries the justification the packet asks for, and every
-/// funnel entry carries its review clause.
 #[test]
 fn every_allowlist_entry_carries_its_justification_and_names_a_real_file() {
     let list = allowlist();
@@ -662,11 +746,6 @@ fn every_allowlist_entry_carries_its_justification_and_names_a_real_file() {
             );
         }
     }
-    // **Empty since PR6.** It held exactly one entry — `src/runner/container.rs`,
-    // the file `FunnelGroup::Container.module()` names and PR5 did not have —
-    // and PR6 adds that file, so the allowlist now describes the tree it is in
-    // with nothing left over. A new entry appearing here would mean the
-    // allowlist had started describing a tree that does not exist.
     assert_eq!(absent, Vec::<&str>::new(), "the absent set moved");
     assert!(
         repo_root().join("src/runner/container.rs").is_file(),
@@ -675,10 +754,6 @@ fn every_allowlist_entry_carries_its_justification_and_names_a_real_file() {
          reading as agreement"
     );
 }
-
-// ---------------------------------------------------------------------------
-// (1) The denylist
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_denylist_names_every_primitive_the_packet_enumerates() {
@@ -708,8 +783,6 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
         .collect();
     assert!(missing.is_empty(), "disallowed-types omits {missing:?}");
 
-    // The three lists exist and none is vacuous. An empty `disallowed-macros`
-    // would satisfy "clippy.toml has three lists" and enforce nothing.
     assert!(!denied.disallowed_methods.is_empty());
     assert!(!denied.disallowed_types.is_empty());
     assert!(
@@ -717,8 +790,6 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
         "the macro list is the one that can be vacuous without looking it"
     );
 
-    // Every entry says why. A denial without a reason is a denial the next
-    // author deletes.
     for entry in denied.all() {
         assert!(
             entry.reason.starts_with("UPSTROKE-EFFECT")
@@ -729,23 +800,6 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
         );
     }
 
-    // "docker invocation helpers". PR6 adds them, so this is no longer an
-    // absence claim: exactly one production file may name a container runtime,
-    // and it is the module `FunnelGroup::Container.module()` names.
-    //
-    // **The predecessor of this block could not fail.** It searched
-    // `blank_comments_and_strings(...)` for `"docker` — and that function blanks
-    // string literals *including their quotes*, so the needle it looked for was
-    // one the haystack could never contain. Measured at PR6, when a real
-    // `const DOCKER_PROGRAM: &str = "docker"` landed in production and the
-    // census stayed green. The comparison is against the **unblanked**
-    // production region now, and the control below proves the needle is
-    // findable.
-    //
-    // The **set** of files is the claim, in the idiom of
-    // `runner::tests::every_production_process_start_is_classified`: a new file
-    // naming a container runtime is the finding, and every file in the set has
-    // a reason.
     const NAMES_A_CONTAINER_RUNTIME: &[(&str, &str)] = &[
         (
             "src/effects/tests.rs",
@@ -753,10 +807,26 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
              have to be written down",
         ),
         (
+            "src/agent/proc/tests.rs",
+            "the Process funnel's `#[cfg(test)]` suite, out of line since M6. \
+             The reaper-reclaim tests name the runtime the cleanup reaper is \
+             armed with -- the same text was inside `src/agent/proc.rs` below \
+             its `#[cfg(test)]` cut and so was never in this domain; it is \
+             named for the same reason `fake.rs` is, the marker being at the \
+             DECLARATION and not in the file",
+        ),
+        (
             "src/runner/container.rs",
             "the Container funnel: `FunnelGroup::Container.module()`, the one \
              production file that may reach a container runtime, and the one \
              `Command::new(` row in `every_production_process_start_is_classified`",
+        ),
+        (
+            "src/runner/container/exec/tests.rs",
+            "the `ContainerRunner`'s `#[cfg(test)]` suite, out of line since W1. \
+             The same text was inside `exec.rs` below its `#[cfg(test)]` cut and \
+             so was never in this domain; it is named for the same reason \
+             `fake.rs` is, the marker being at the DECLARATION and not in the file",
         ),
         (
             "src/runner/container/fake.rs",
@@ -775,11 +845,6 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
         .collect();
     let mut naming: BTreeSet<String> = BTreeSet::new();
     for (path, source) in scanned_sources() {
-        // Comments blanked and **strings kept**: the needle lives inside a
-        // string literal, so the sibling blanker would remove the very bytes
-        // this looks for. Comments are blanked because a doc comment quoting
-        // the packet's "docker ps" is prose, and a census that counted it would
-        // be the fifth `PR4-CENSUS-COMMENT-ORACLE`.
         let production = blank_comments(&production_region(&source));
         for needle in ["\"docker", "\"podman", "docker::", "bollard", "DockerCli"] {
             if production.contains(needle) {
@@ -794,9 +859,6 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
          a helper the denylist does not name, or a row this table needs"
     );
 
-    // And the helpers themselves are denied by name, which is the packet's
-    // actual requirement: the six effectful operations of the two seams the
-    // Container sites are primitives of.
     for helper in [
         "upstroke::runner::container::runtime::ContainerRuntime::create",
         "upstroke::runner::container::runtime::ContainerRuntime::start",
@@ -813,15 +875,9 @@ fn the_denylist_names_every_primitive_the_packet_enumerates() {
     }
 }
 
-/// A denied path that does not resolve enforces nothing, and clippy says so with
-/// a bare `warning:` that `-D warnings` does **not** escalate (measured on
-/// clippy 0.1.97). This is the check that would otherwise not exist.
 #[test]
 fn every_denied_path_this_host_can_resolve_does_resolve() {
     let scratch = scratch_dir("resolve");
-    // The repo's own denylist, with every `allow-invalid` stripped, so the
-    // suppression cannot hide a typo from this test the way it hides the
-    // platform-conditional entries from the gate.
     let denied_text = fs::read_to_string(repo_root().join(CLIPPY_TOML)).expect("clippy.toml");
     let stripped = denied_text.replace(", allow-invalid = true", "");
     assert_ne!(stripped, denied_text, "no allow-invalid entry to strip");
@@ -838,8 +894,6 @@ fn every_denied_path_this_host_can_resolve_does_resolve() {
          denial that enforces nothing."
     );
 
-    // The control: a typo IS detected. Without it, a probe that silently linted
-    // nothing would report an empty set and pass.
     let with_typo = format!("{stripped}\n[[extra]]\n",).replace("[[extra]]\n", "");
     let with_typo = with_typo.replace(
         "disallowed-methods = [",
@@ -853,8 +907,6 @@ fn every_denied_path_this_host_can_resolve_does_resolve() {
     );
 }
 
-/// Run clippy over an empty probe with `dir`'s `clippy.toml` and collect the
-/// paths it reports as unreachable.
 fn unresolved_paths(dir: &Path, tag: &str) -> BTreeSet<String> {
     let (deps, rlib) = crate_under_test();
     let source = dir.join(format!("{tag}.rs"));
@@ -898,9 +950,6 @@ fn unresolved_paths(dir: &Path, tag: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Every dependency rlib beside the test executable, so the probe links the
-/// crates whose paths the denylist names — `libc` above all, whose entries would
-/// otherwise be silently unchecked.
 fn extern_dependencies(deps: &Path) -> Vec<(String, PathBuf)> {
     let mut best: BTreeMap<String, (std::time::SystemTime, PathBuf)> = BTreeMap::new();
     let Ok(entries) = fs::read_dir(deps) else {
@@ -939,19 +988,6 @@ fn extern_dependencies(deps: &Path) -> Vec<(String, PathBuf)> {
         .collect()
 }
 
-/// The platform-conditional denials name something this tree really calls.
-///
-/// `windows_sys::*` cannot be resolved from a Unix host at all — clippy ignores
-/// a path whose crate is not linked, without even the unreachable-path notice —
-/// so a typo there would be invisible on the only platform where the lint gate
-/// runs. What *is* checkable from here is that every such path's item name
-/// appears in this tree's own Windows source. A misspelling diverges from the
-/// call site and fails.
-///
-/// **The residual, stated:** this proves the name is spelled the way the tree
-/// spells it, not that `windows_sys` exports it at that module path. The
-/// msvc-target clippy run is what proves the second half, and it is a gate
-/// rather than a test.
 #[test]
 fn every_platform_conditional_denial_names_something_real() {
     let denied = denylist();
@@ -968,8 +1004,6 @@ fn every_platform_conditional_denial_names_something_real() {
             continue;
         }
         let item = entry.path.rsplit("::").next().expect("a path has an item");
-        // `exec*` is the packet's own wildcard: the tree calls none of them
-        // today and the sentence still requires them denied.
         const PACKET_ONLY: &[&str] = &[
             "setsid",
             "execv",
@@ -1001,11 +1035,6 @@ fn every_platform_conditional_denial_names_something_real() {
         "only {checked} platform-conditional denials were checked"
     );
 
-    // `allow-invalid` suppresses the unreachable-path notice, so it is also the
-    // one way to hide a typo from `every_denied_path_this_host_can_resolve_does_
-    // resolve`. It is therefore spent on exactly the paths that are a real
-    // module on one supported platform and no module on the other, and the set
-    // is written out rather than counted.
     let suppressed: BTreeSet<&str> = denied
         .all()
         .filter(|entry| entry.allow_invalid)
@@ -1014,12 +1043,6 @@ fn every_platform_conditional_denial_names_something_real() {
     assert_eq!(
         suppressed,
         BTreeSet::from([
-            // Real on Linux, no module on Darwin: `libc` does not define `pipe2`
-            // for macOS. Added after CI's macOS job found it -- this project has
-            // a Windows guest and no macOS host, which is `PR5-MACOS-CLIPPY-NEVER-
-            // RUN`. The suppression is what keeps the `lint (macos)` job green;
-            // `host_conditional_paths` still asserts the path is unresolved there,
-            // because that test strips `allow-invalid` before it probes.
             "libc::pipe2",
             "std::os::unix::fs::symlink",
             "std::os::windows::fs::symlink_dir",
@@ -1029,31 +1052,10 @@ fn every_platform_conditional_denial_names_something_real() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// `proof_tests[4]` — the fixtures whose failure reason is pinned
-// ---------------------------------------------------------------------------
-
-/// `proof_tests[4]`: "injected renamed-import / re-export / function-value /
-/// legacy-wrapper call fixtures fail the build".
-///
-/// A fixture asserting "this does not build" is green whether it failed for the
-/// intended reason or a typo. Four things are asserted that a bare refusal
-/// cannot give:
-///
-/// * a **positive control** compiles clean first, so a mis-wired `--extern` or a
-///   missing `clippy.toml` cannot make every fixture "refuse";
-/// * each fixture emits **exactly** its declared lint and no other governed one;
-/// * clippy's message names the **resolved** path — `std::fs::write`, not the
-///   alias the fixture wrote — which is the whole of `mechanism` (1)'s claim
-///   that resolution defeats renaming;
-/// * the shapes are counted, so a deleted fixture is loud.
 #[test]
 fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
     let scratch = scratch_dir("denial");
 
-    // The control first. If this does not compile clean, nothing below means
-    // anything -- `PR5-C-DOCTEST-FIXTURES-NEVER-RAN` is the ledger entry for
-    // fixtures that were green having never executed.
     let (ok, diagnostics) = lint_fixture(&scratch, "control", DENIAL_CONTROL);
     assert!(
         ok && diagnostics.is_empty(),
@@ -1087,10 +1089,6 @@ fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
         lints.insert(fixture.lint);
     }
 
-    // `mechanism` (1) names five resolution shapes -- "aliases, re-exports,
-    // function values, method calls, and macro-expanded code" -- and
-    // `proof_tests[4]` names four fixtures. The grid covers the union plus the
-    // type list, which is seven, and all three lints fire.
     assert_eq!(shapes.len(), 7, "{shapes:?}");
     assert_eq!(lints.len(), 3, "{lints:?}");
     for required in [
@@ -1106,8 +1104,6 @@ fn every_declared_effect_denial_refuses_for_the_reason_it_declares() {
     }
 }
 
-/// Compile `body` as its own crate under the repo's `clippy.toml`, and return
-/// whether it compiled plus every clippy diagnostic it emitted.
 fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String)>) {
     let (deps, rlib) = crate_under_test();
     let source = dir.join(format!("{tag}.rs"));
@@ -1166,15 +1162,6 @@ fn lint_fixture(dir: &Path, tag: &str, body: &str) -> (bool, Vec<(String, String
     (output.status.success(), diagnostics)
 }
 
-/// `clippy-driver`, from `PATH` or from the active toolchain's sysroot.
-///
-/// **Not** optional, and not skipped when missing: a build refusal whose only
-/// evidence is a fixture nothing executes is `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`,
-/// and the rule adopted from it is to name the command that runs the fixture and
-/// check that the command is one CI runs. `.github/workflows/ci.yml` installs
-/// the clippy component in both the `test` and the `lint` job, and
-/// [`the_workflow_that_runs_these_tests_installs_the_compiler_they_need`]
-/// asserts it.
 fn clippy_driver() -> PathBuf {
     let sysroot = std::process::Command::new("rustc")
         .arg("--print")
@@ -1194,53 +1181,23 @@ fn clippy_driver() -> PathBuf {
     PathBuf::from(name)
 }
 
-// ---------------------------------------------------------------------------
-// The CI workflow, read as a document rather than as text
-// ---------------------------------------------------------------------------
-//
-// `BRIDGE-CI-SHAPE-TEST-IS-A-SUBSTRING-ORACLE` in `reviews/FINDINGS.md` deferred
-// this section's repair for one reason -- it needs a YAML parser and the crate
-// had no `[dev-dependencies]` at all. The dependency is added, so the repair is
-// made: every claim below is an equality over a parsed mapping or an exact
-// scalar pin, and the two escapes the row enumerates are executed as mutations
-// that must be refused.
-//
-// **The ruling this section used to carry is withdrawn.** An earlier round
-// argued from PR #25 that a checker over this surface cannot converge. PR #25's
-// retained half kept C1-C4 as equalities and exact pins and it is the withdrawn
-// half that compared prose across an open document set; the lesson supports a
-// structural equality here rather than licensing repeated `contains`.
-
-// The shape itself, and the oracle that reads the document against it, are
-// implementation and live beside this file rather than in it. `ci_model` is the
-// single authority for what CI runs and on which runners; `workflow` turns a
-// parsed document into complaints and carries the mutations that prove each
-// complaint fires. The cfg census below reads `ci_model` too -- which is why
-// the constants are a module of their own and not a half of `workflow`.
-//
-// What stays here is what this section *is*: the five tests, and, further down,
-// the join where the census and the workflow contract meet.
-
 mod ci_model;
 mod workflow;
 
-use ci_model::{CI_TARGETS, CI_WORKFLOW, MSRV_COMMAND, MSRV_JOB, RUSTFLAGS_KEY};
+use ci_model::{
+    CI_TARGETS, CI_WORKFLOW, MSRV_COMMAND, MSRV_JOB, OVERRIDING_REPO_FILES, RUSTFLAGS_KEY,
+    TEST_COMMAND, WINDOWS_TEST_FLOOR, WINDOWS_TEST_WITNESS,
+};
 use workflow::{
-    WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints, ci_workflow_text,
+    WORKFLOW_ESCAPES, ci_msrv_job_complaints, ci_test_job_complaints,
+    ci_test_windows_job_complaints, ci_windows_build_witness_complaints, ci_workflow_text,
     complaint_codes, declared_msrv_toolchain, declared_rust_version, field, field_names,
     mutate_workflow, parse_workflow, rustflags_complaints, scalar, steps_of, three_component,
     workflow_complaints,
 };
 
-/// The parser this oracle depends on has the two properties it was chosen for.
-///
-/// Executed rather than believed. A silent change in either -- a dependency
-/// bump, a feature flag -- weakens every equality in this section, so it fails
-/// here first.
 #[test]
 fn the_workflow_parser_rejects_duplicate_keys_and_reads_on_as_a_string() {
-    // The control: the same shape without the duplicate parses, so "refused"
-    // below is not "refuses everything".
     let clean = "jobs:\n  lint:\n    runs-on: ubuntu-latest\n";
     let parsed = parse_workflow(clean).expect("the control document parses");
     assert_eq!(
@@ -1269,10 +1226,6 @@ fn the_workflow_parser_rejects_duplicate_keys_and_reads_on_as_a_string() {
         );
     }
 
-    // YAML 1.1 resolves the bare word `on` to the boolean `true`, which would
-    // put the workflow's trigger block under a key no reader looks for. A 1.2
-    // parser reads it as the string it is, and `field_names` renders a non-string
-    // key rather than dropping it, so this would fail loudly either way.
     let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
     assert!(
         field_names(&doc).contains("on"),
@@ -1281,18 +1234,10 @@ fn the_workflow_parser_rejects_duplicate_keys_and_reads_on_as_a_string() {
     );
 }
 
-/// Every escape the ledger and this section's history name is refused.
-///
-/// The oracle is run against mutated documents because an oracle only ever run
-/// on conforming input is one nobody has seen refuse anything -- the rule this
-/// file states in its own header and the reason `PR5-C-DOCTEST-FIXTURES-NEVER-RAN`
-/// exists.
 #[test]
 fn the_workflow_shape_oracle_refuses_every_escape_the_ledger_names() {
     let text = ci_workflow_text();
 
-    // The negative control first: the real document has no complaint, so a
-    // refusal below is the mutation and not a contract that refuses everything.
     let doc = parse_workflow(&text).expect(CI_WORKFLOW);
     let clean = workflow_complaints(&doc);
     assert!(
@@ -1331,14 +1276,6 @@ fn the_workflow_shape_oracle_refuses_every_escape_the_ledger_names() {
     );
 }
 
-/// The command that executes the fixtures is one CI runs, on every platform.
-///
-/// `clippy-driver` is a test dependency of that job and `dtolnay/rust-toolchain`
-/// installs the minimal profile, so the components list is part of the claim.
-/// The predecessor asked whether the word `clippy` appeared on a `components:`
-/// line of the comment-stripped text, and whether the file contained the test
-/// command anywhere; both survive an `echo`, and the strip existed only because
-/// the job's own comment spelled the needle.
 #[test]
 fn the_workflow_that_runs_these_tests_installs_the_compiler_they_need() {
     let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
@@ -1350,23 +1287,70 @@ fn the_workflow_that_runs_these_tests_installs_the_compiler_they_need() {
     );
 }
 
-/// The MSRV leg checks the floor the manifest publishes, on every platform.
-///
-/// Four claims. Three were held by nothing at all before this test: that the leg
-/// is enabled and unabsolved, that its command is the documented one *including*
-/// `--locked`, and that its matrix is every supported runner. The fourth, the
-/// toolchain, was held loosely -- `.github/scripts/test-docs-consistency.sh`'s C2
-/// accepts `rust-version` "or a patch release of it" -- and is held exactly here.
-/// It is derived from the manifest and quoted from it on failure, because a
-/// literal `1.85.0` would make this its own oracle for the fact it exists to
-/// hold.
-///
-/// The refusals are executed in [`WORKFLOW_ESCAPES`] -- every row named
-/// `MUT-MSRV-*` -- so this test passing is not the claim that the contract
-/// refuses nothing.
+#[test]
+fn the_self_hosted_windows_leg_runs_these_fixtures_on_the_pinned_labels() {
+    let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
+    let complaints = ci_test_windows_job_complaints(&doc);
+    assert!(
+        complaints.is_empty(),
+        "the self-hosted Windows leg does not run these fixtures the way the contract pins:\n{}",
+        complaints.join("\n")
+    );
+}
+
+#[test]
+fn the_hosted_windows_leg_still_links_every_test_binary() {
+    let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
+    let complaints = ci_windows_build_witness_complaints(&doc);
+    assert!(
+        complaints.is_empty(),
+        "no hosted leg code-generates and links the Windows tree the way the contract pins:\n{}",
+        complaints.join("\n")
+    );
+}
+
+#[test]
+fn no_repository_file_overrides_what_ci_compiles_or_runs() {
+    let root = repo_root();
+    let present: Vec<&str> = OVERRIDING_REPO_FILES
+        .iter()
+        .copied()
+        .filter(|name| root.join(name).exists())
+        .collect();
+    assert!(
+        present.is_empty(),
+        "these files outrank `{CI_WORKFLOW}` and this contract reads only the workflow: \
+         {present:?}. A toolchain file replaces the compiler every leg runs; a Cargo config \
+         can bind a target runner that reports success without executing a test binary. \
+         Adding one is a deliberate act: extend this contract in the same change."
+    );
+    let manifest: toml::Value =
+        toml::from_str(&fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml"))
+            .expect("Cargo.toml parses");
+    assert!(
+        manifest.get("workspace").is_none(),
+        "Cargo.toml declares a workspace, so `--all-targets --all-features` no longer selects \
+         this crate: `default-members` decides, and a member with no tests makes every CI \
+         command succeed without running this suite."
+    );
+}
+
+#[test]
+fn the_self_hosted_leg_counts_the_tests_it_ran() {
+    assert!(
+        WINDOWS_TEST_WITNESS.starts_with(TEST_COMMAND),
+        "the self-hosted leg's step does not open with `{TEST_COMMAND}`, so the suite it \
+         witnesses is not the suite the other legs run"
+    );
+    assert!(
+        WINDOWS_TEST_WITNESS.contains(&format!("-lt {WINDOWS_TEST_FLOOR}")),
+        "the self-hosted leg's step does not test the count against \
+         {WINDOWS_TEST_FLOOR}, so the floor this contract documents is not the floor it runs"
+    );
+}
+
 #[test]
 fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {
-    // The derivation, with its controls, before anything is asserted with it.
     assert_eq!(three_component("1.85"), "1.85.0");
     assert_eq!(three_component("1.85.0"), "1.85.0");
     assert_eq!(
@@ -1384,8 +1368,6 @@ fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {
         complaints.join("\n")
     );
 
-    // The toolchain claim once more as a bare equality, so its failure names the
-    // manifest and the workflow rather than only the complaint between them.
     let installed: Vec<&str> = field(&doc, "jobs")
         .and_then(|jobs| field(jobs, MSRV_JOB))
         .map(steps_of)
@@ -1402,9 +1384,6 @@ fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {
         declared_rust_version()
     );
 
-    // The order, as the indices themselves. `MUT-MSRV-CHECK-BEFORE-TOOLCHAIN`
-    // executes the refusal; this is the positive control beside it, and it fails
-    // with both positions named rather than with a complaint about them.
     let steps = field(&doc, "jobs")
         .and_then(|jobs| field(jobs, MSRV_JOB))
         .map(steps_of)
@@ -1426,29 +1405,12 @@ fn the_msrv_leg_checks_the_floor_the_manifest_publishes_on_every_platform() {
     );
 }
 
-/// The workflow-scope `-D warnings` is pinned, and nothing narrows it.
-///
-/// The refusals are driven on synthetic documents as well as on mutations of the
-/// real one, because on the real one this scan cannot be seen working *alone*:
-/// every job and step of the live workflow that could carry an `env:` is already
-/// covered by a field set, so `MUT-RUSTFLAGS-JOB-OVERRIDE` is refused twice
-/// over. Those rows still bind to the code this scan emits and nothing else
-/// emits, so they measure it; what they cannot show is it holding somewhere no
-/// field set does. Each document below carries one job that no other check in
-/// this section reaches, which is where that is shown.
-///
-/// The positive controls come first, in both halves: the real workflow satisfies
-/// the contract, and so does the minimal conforming probe. Without them a
-/// refusal below would be evidence of nothing.
 #[test]
 fn the_workflow_scope_rustflags_pin_refuses_weakening_and_every_override() {
-    /// A workflow carrying one job the rest of this section does not model.
     fn probe(header: &str, job_body: &str) -> String {
         format!("{header}jobs:\n  probe:\n{job_body}")
     }
-    /// A job that binds nothing of its own.
     const PLAIN: &str = "    runs-on: ubuntu-latest\n    steps:\n      - run: cargo check\n";
-    /// The pinned workflow-scope binding, written as the real document writes it.
     const PINNED: &str = "env:\n  RUSTFLAGS: -D warnings\n";
 
     let doc = parse_workflow(&ci_workflow_text()).expect(CI_WORKFLOW);
@@ -1635,11 +1597,6 @@ fn the_workflow_scope_rustflags_pin_refuses_weakening_and_every_override() {
         );
     }
 
-    // The other half of a scan that matches whole names case-insensitively: it
-    // must not fire on names that merely resemble the guarded ones. Each of these
-    // is a real thing a workflow could carry, and none of them is the warning
-    // policy. Without this block the case-insensitive widening above could be
-    // satisfied by a scan that refuses everything containing `rustflags`.
     for (shape, document) in [
         (
             "an unrelated variable whose name contains the guarded one",
@@ -1683,55 +1640,13 @@ fn the_workflow_scope_rustflags_pin_refuses_weakening_and_every_override() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The cfg census: effective predicates, decided against real valuations
-// ---------------------------------------------------------------------------
-//
-// The predecessor collected `target_os = "..."` names wherever they appeared at
-// a code position and treated each name as a platform demanding its own Clippy
-// runner. `BRIDGE-CI-SHAPE-TEST-IS-A-SUBSTRING-ORACLE` records three ways that
-// misreads the tree, and all three are what a name-collector cannot see:
-//
-//   * `not(any(target_os = "linux", target_os = "macos", target_os = "windows"))`
-//     reported all three platforms covered while **no** runner compiles the body;
-//   * `not(target_os = "freebsd")` would demand a FreeBSD runner for a body every
-//     runner compiles;
-//   * `let target_os = "android";` is code, passes a position gate, and was
-//     reported as a platform.
-//
-// Three further corrections come from the review of that repair, and each is a
-// claim the first structural version got wrong rather than a refinement:
-//
-//   * **Coverage is decided, never assumed.** The first version evaluated under
-//     three-valued logic and counted `Unknown` as coverage, so a predicate whose
-//     truth it could not decide was reported as compiled. Every valuation below
-//     is COMPLETE for the names this census models, an unmodelled name is a hard
-//     failure rather than an optimistic guess, and `test` is enumerated per
-//     invocation because `--all-targets` compiles the library twice.
-//   * **A `#[cfg]` is not the only cfg, and not every cfg gates.** `cfg!(P)` is a
-//     boolean expression: the code around it is compiled everywhere. `#[cfg_attr(
-//     P, attr)]` applies an attribute conditionally; the item is compiled
-//     everywhere. Counting either as a gated region invents platform demands the
-//     tree does not make.
-//   * **An item's predicate is not the attribute written on it.** Stacked
-//     `#[cfg]`s conjoin, and so does every enclosing guard -- the module block it
-//     sits in, and, for a whole-file module, the `#[cfg(test)] mod name;` that
-//     declares the file. Seventeen files in this tree are reached only that way.
-
-// The census is `cfg`, beside this file; the two tests below are what it answers
-// to. It decides predicates against `ci_model`'s targets -- the same table the
-// workflow contract above is checked against -- so "no runner compiles this
-// body" and "no job lints that platform" cannot drift apart.
-
-mod cfg;
+pub(crate) mod cfg;
 
 use cfg::{
     CFG_CENSUS_CONTROL, CFG_ESCAPES, CFG_GATE_FLOOR, CONTROL_GATES, CfgForm, CfgSite,
     NO_CI_RUNNER_COMPILES, WHOLE_FILE_TEST_MODULES, cfg_regions, compiled_by, parse_cfg,
 };
 
-/// The cfg census reads effective predicates, decides them, and knows which
-/// forms gate.
 #[test]
 fn the_cfg_census_evaluates_effective_predicates_against_the_valuations_ci_sets() {
     for (text, expected, why) in CFG_ESCAPES {
@@ -1749,9 +1664,6 @@ fn the_cfg_census_evaluates_effective_predicates_against_the_valuations_ci_sets(
         assert_eq!(compiled, expected, "`cfg({text})` -- {why}");
     }
 
-    // An unmodelled name is a hard failure, not an optimistic guess. This is the
-    // review's fourth finding as a control: the version this replaces answered
-    // `Unknown` here and the caller read `Unknown` as "every runner compiles it".
     let unmodelled = parse_cfg("feature = \"unshipped\"", false).expect("a parseable predicate");
     let refused = compiled_by(&unmodelled);
     assert!(
@@ -1759,9 +1671,6 @@ fn the_cfg_census_evaluates_effective_predicates_against_the_valuations_ci_sets(
         "a cfg key no valuation models was decided anyway, as {refused:?}"
     );
 
-    // The control rides along with the whole domain, so finding it proves the
-    // scan reaches injected content in the presence of every real file rather
-    // than in a fixture read on its own.
     let mut domain = scanned_sources();
     let real = domain.len();
     let fixture = "fixtures/cfg-census-control.rs";
@@ -1797,10 +1706,6 @@ fn the_cfg_census_evaluates_effective_predicates_against_the_valuations_ci_sets(
          predicate, and a `cfg(` from `fn cfg(bits: u32)` is a parameter list read as one."
     );
 
-    // The two non-gating forms are RECORDED and not counted. Recording them is
-    // what makes their exclusion measurable: `target_os = "plan9"` and
-    // `target_os = "haiku"` are compiled by no runner, so if either were read as
-    // a gate the census below would report an uncovered predicate.
     let by_form: BTreeMap<CfgForm, Vec<&str>> =
         injected
             .iter()
@@ -1822,8 +1727,6 @@ fn the_cfg_census_evaluates_effective_predicates_against_the_valuations_ci_sets(
         "`cfg!(P)` is an expression: both arms around it compile on every platform"
     );
 
-    // Two of the gates exist only because a guard was conjoined from somewhere
-    // other than the attribute itself.
     let stacked = injected
         .iter()
         .find(|site| site.rendered == "all(unix, target_os = \"macos\")")
@@ -1848,20 +1751,6 @@ fn the_cfg_census_evaluates_effective_predicates_against_the_valuations_ci_sets(
     );
 }
 
-/// Every platform this crate configures code for has a Clippy gate, and the
-/// aggregate makes that gate required.
-///
-/// The domain is derived from the tree rather than listed here: a written-down
-/// platform list is one nothing forces an author to extend, which is what the
-/// previous repair of this test shipped. The two halves join at the target
-/// tuple -- [`cfg_regions`] decides which runners compile each body, and the
-/// workflow contract requires a gate job whose `runs-on:` is that runner.
-///
-/// **Why this is one test and not three.** `PR5D-MSVC-CLIPPY-NEVER-RUN` and
-/// `PR5-MACOS-CLIPPY-NEVER-RUN` are the same defect on two platforms, found
-/// apart, because the Windows repair was written as an instance rather than a
-/// class. A derived domain makes the next platform's omission a failure here
-/// rather than a third finding.
 #[test]
 fn every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requires() {
     let sources = scanned_sources();
@@ -1883,8 +1772,6 @@ fn every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requ
         gates.len(),
         sources.len()
     );
-    // A boundary, not a count: the tree carries nested, negated predicates and a
-    // census that only reads flat ones would pass every other assertion here.
     assert!(
         gates
             .iter()
@@ -1892,20 +1779,18 @@ fn every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requ
         "the census did not find the nested negated predicate this tree is known to carry, \
          so it is reading a narrower grammar than the tree uses"
     );
-    // The whole-file guards are the other boundary. Every predicate in those
-    // files is `all(test, …)`, and a census that resolved none of them would
-    // read them all as unconditional.
     let under_a_file_guard: BTreeSet<&str> = gates
         .iter()
         .filter(|site| site.rendered.starts_with("all(test,") || site.rendered == "test")
         .map(|site| site.path.as_str())
         .collect();
     assert!(
-        under_a_file_guard.len() >= WHOLE_FILE_TEST_MODULES,
+        under_a_file_guard.len() >= WHOLE_FILE_TEST_MODULES.len(),
         "only {} file(s) carry a `test` guard the census resolved, and \
-         `the_declared_whole_file_test_modules_are_seventeen_and_three_are_not_called_tests` \
-         derives {WHOLE_FILE_TEST_MODULES} whole-file test modules on its own",
-        under_a_file_guard.len()
+         `the_whole_file_test_modules_are_resolved_from_the_declarations_not_the_file_names` \
+         resolves {} whole-file test modules on its own",
+        under_a_file_guard.len(),
+        WHOLE_FILE_TEST_MODULES.len()
     );
 
     let mut uncovered: BTreeMap<&str, Vec<String>> = BTreeMap::new();
@@ -1936,9 +1821,6 @@ fn every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requ
          purpose.\n{uncovered:#?}"
     );
 
-    // Each leg is load-bearing, with a witness. A runner no body needs is a job
-    // this contract would keep demanding for no reason; a body only one runner
-    // compiles is why that runner's leg cannot be dropped.
     for target in &CI_TARGETS {
         let only = BTreeSet::from([target.runner]);
         let witness = gates
@@ -1961,12 +1843,6 @@ fn every_platform_this_crate_configures_for_has_a_clippy_gate_the_aggregate_requ
     );
 }
 
-/// The crate's own rlib and the directory its dependencies are in.
-///
-/// The test binary lives beside them, so both are found from `current_exe`
-/// rather than from a guessed target directory — `CARGO_TARGET_DIR` here is the
-/// build wrapper's slot, not `target/`. The idiom is lane C's, from
-/// `src/events/log/tests.rs`.
 fn crate_under_test() -> (PathBuf, PathBuf) {
     let exe = std::env::current_exe().expect("the test executable");
     let deps = exe
@@ -2007,17 +1883,6 @@ fn scratch_dir(tag: &str) -> PathBuf {
     dir
 }
 
-// ---------------------------------------------------------------------------
-// (3) Wrapper classification
-// ---------------------------------------------------------------------------
-//
-// The four bodies are in `classification::checks`, beside this file. The names
-// here are the harness -- they are what the contract, CI and `--list` know --
-// and each one delegates and does nothing else. Every check reads
-// `effects/wrappers.toml` and `clippy.toml` against the tree they classify, so
-// the child is read-only and can be, and is, cut out as test logic by both
-// source cutters without joining the whole-file module census.
-
 #[test]
 fn every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified() {
     checks::reachable_fns_are_classified();
@@ -2038,26 +1903,6 @@ fn every_libc_item_the_tree_names_is_classified_and_the_effects_are_denied() {
     checks::libc_items_are_classified_and_denied();
 }
 
-// ---------------------------------------------------------------------------
-// `outputs` — the generated inventories
-// ---------------------------------------------------------------------------
-
-// What the artifacts *contain* and what the inventory *declares* are
-// definitions, and they live beside this file rather than in it: the CRLF
-// discipline every comparison is made under, the module a group's funnel bodies
-// are actually in, the sites no funnel names, the frozen sampling N, and the
-// two record generators. `artifacts` is the single authority for all six, and
-// the three Answer disagreements are its answer rather than this file's.
-//
-// What stays here is what this section *is*: the six tests -- and the reason
-// the boundary is drawn exactly there is that three of them **regenerate**.
-// `fs::write` is a denied primitive, `artifacts` restores that denial, and an
-// allowance may live only in a file `effects/allowlist.toml` lists; a child
-// that regenerated an artifact would need an entry in it. That is a governance
-// claim about where an effect may live, not a mechanical consequence of moving
-// a declaration, so the writes stay with the harness -- the same cut, for the
-// same reason, that left the effectful build helpers out of `policy.rs`.
-
 mod artifacts;
 
 use artifacts::{
@@ -2065,8 +1910,6 @@ use artifacts::{
     residue_record,
 };
 
-/// `outputs`: "effect_sites.json (from the enums) … generated from the enums by
-/// a test and attached to gate reports".
 #[test]
 fn the_checked_in_effect_sites_json_is_what_the_enums_generate() {
     let generated = format!(
@@ -2084,31 +1927,11 @@ fn the_checked_in_effect_sites_json_is_what_the_enums_generate() {
         on_disk, generated,
         "{EFFECT_SITES_JSON} is stale; regenerate with {REGENERATE}=1"
     );
-    // It really is the whole inventory, not a corner of it.
     assert_eq!(effect_sites().len(), EffectSiteId::all().len());
     assert!(on_disk.contains("\"site\": \"Event.OpenLog\""));
     assert!(on_disk.contains("\"site\": \"Object.CandidateCommitTree\""));
 }
 
-/// The companion artifact states where the funnel bodies actually are
-/// (`PR5-CONF-018`).
-///
-/// `effect_sites.json` ships `"module": "src/interaction.rs"` for
-/// `Answer.Ingest`, `Answer.PublishRename` and `Answer.StageWrite`, and the
-/// `AnswerSite::` literals are at `src/rundir.rs:899`, `:912` and `:934` and
-/// nowhere else. Until this round the only thing reconciling the artifact with
-/// the tree was a **test-side override** — [`funnel_module`] — so the artifact a
-/// gate report carries said something false about this tree and nothing checked
-/// in said otherwise. Measured: deleting that override makes the three Answer
-/// sites join the "no funnel names them" set, which is the finding.
-///
-/// The two axes are the *inventory's claim* and the *tree's answer*. Every
-/// existing test holds one constant and reads the other — the census searches
-/// the file the override names, the artifact test compares the file the enums
-/// name — so the pair was never written down together. Here they are written
-/// down together, for every site rather than for the three that disagree, so a
-/// fourth disagreement appearing later is a change to this file rather than a
-/// silence.
 #[test]
 fn the_checked_in_funnel_module_record_states_where_the_bodies_are() {
     let generated = funnel_module_record();
@@ -2139,8 +1962,6 @@ fn the_checked_in_funnel_module_record_states_where_the_bodies_are() {
         .collect();
     assert_eq!(
         disagreements,
-        // In `EffectSiteId::all()` order, which is the frozen enum's, so a site
-        // moving within the inventory is a change here too.
         ["Answer.StageWrite", "Answer.PublishRename", "Answer.Ingest"],
         "the set of sites whose funnel bodies are not where the inventory says          moved. Each one is a claim a gate report carries about this tree."
     );
@@ -2150,13 +1971,6 @@ fn the_checked_in_funnel_module_record_states_where_the_bodies_are() {
     }
 }
 
-/// Every module the inventory names is in the funnel section, and every site has
-/// a funnel that names it — or is recorded absent with the reason.
-///
-/// This is where an omission would live. `effect_sites.json` is generated from
-/// the enums so it cannot omit a *site*; what it can do is name a module that
-/// implements none of them, which reads identically to a module that implements
-/// all of them.
 #[test]
 fn every_site_the_inventory_declares_has_a_funnel_that_names_it_or_is_recorded_absent() {
     let list = allowlist();
@@ -2179,20 +1993,6 @@ fn every_site_the_inventory_declares_has_a_funnel_that_names_it_or_is_recorded_a
         );
     }
 
-    // Per site: does a funnel name it?
-    //
-    // Two mechanisms, because the three lanes built two and a grid that knew
-    // one would report the other's whole group as unimplemented:
-    //
-    //   * the variant literal — `RunDirSite::PublishMarker` inside the funnel
-    //     body, which is lane B's shape (one `pub fn` per site, site fixed);
-    //   * the site as a **parameter** — `fn create_ref_zero_old(site: RefSite,
-    //     …)`, which is lane A's and lane C's, and is the shape `identity`
-    //     literally describes ("every effectful funnel API takes its group's
-    //     site by value").
-    //
-    // Recorded per group by `funnel_mechanism` so a group that stopped doing
-    // either is loud rather than silently "still covered by the other".
     let mut sources: BTreeMap<String, String> = BTreeMap::new();
     let mut unimplemented = Vec::new();
     let mut mechanisms: BTreeMap<&str, &str> = BTreeMap::new();
@@ -2218,13 +2018,9 @@ fn every_site_the_inventory_declares_has_a_funnel_that_names_it_or_is_recorded_a
             unimplemented.push(site.name());
         }
     }
-    // Both mechanisms are in use. If one disappeared, every group would have to
-    // be re-measured against the other rather than inheriting a pass.
     let distinct: BTreeSet<&str> = mechanisms.values().copied().collect();
     assert_eq!(distinct.len(), 2, "{mechanisms:?}");
 
-    // The expected set, written out rather than counted, because *which* sites
-    // have no funnel is the finding and a count would hide a swap.
     let expected: BTreeSet<String> = SITES_WITHOUT_A_FUNNEL
         .iter()
         .map(|s| (*s).to_owned())
@@ -2237,13 +2033,6 @@ fn every_site_the_inventory_declares_has_a_funnel_that_names_it_or_is_recorded_a
     );
 }
 
-/// No production module may return a writable process handle through public or
-/// crate-visible API, directly or behind a function pointer.
-///
-/// This is structural over signatures, not a builder-name denylist. Renaming
-/// `build_command`, adding a second builder, or returning `fn() -> Command`
-/// therefore cannot make the finding disappear. Private construction inside a
-/// funnel and APIs that *consume* a Command remain permitted.
 #[test]
 fn no_production_api_exports_a_writable_process_command() {
     fn command_returning_public_signatures(source: &str) -> Vec<String> {
@@ -2309,8 +2098,6 @@ fn no_production_api_exports_a_writable_process_command() {
     );
 }
 
-/// `outputs`: "the residue-class evidence record (per element: constructed,
-/// classified, recovered; per site: sampling N and observed-class histogram)".
 #[test]
 fn the_checked_in_residue_class_record_is_what_the_enums_generate() {
     let generated = residue_record();
@@ -2326,12 +2113,8 @@ fn the_checked_in_residue_class_record_is_what_the_enums_generate() {
         "{RESIDUE_CLASSES_JSON} is stale; regenerate with {REGENERATE}=1"
     );
 
-    // The sampling N the record freezes is the N the harness runs.
-    // `command_internal_sub_effects` says "N frozen per site in the registry";
-    // `src/topology/registry.rs` is PR3's and frozen, and carries no N, so the
-    // record carries it and this is the cross-check that keeps the two equal.
-    let harness = fs::read_to_string(repo_root().join("src/workspace_manager.rs"))
-        .expect("src/workspace_manager.rs");
+    let harness = fs::read_to_string(repo_root().join("src/workspace_manager/tests.rs"))
+        .expect("src/workspace_manager/tests.rs");
     assert!(
         harness.contains(&format!("const SAMPLING_N: u32 = {SAMPLING_N};")),
         "the sampling harness no longer runs N = {SAMPLING_N}"
@@ -2339,48 +2122,12 @@ fn the_checked_in_residue_class_record_is_what_the_enums_generate() {
     assert!(on_disk.contains(&format!("\"sampling_n\": {SAMPLING_N}")));
 }
 
-/// The durability barrier is reached through **one** call each, and the syscall
-/// is inside it (`PR5-CONF-012`).
-///
-/// `proof_tests[9]` makes the durability ledger a *named proof*: "the sync
-/// ledger shows the synced length equal to the file length after open". The
-/// ledger entry is written beside the syscall by the same function, so it
-/// certifies itself: `let outcome = file.sync_all();` → `let outcome:
-/// io::Result<()> = Ok(());` survived the whole suite, with the fsync gone and
-/// every trace assertion still green. `sync_file_recorded`'s own doc conceded
-/// the residual in as many words, and the same shape held in
-/// `src/workspace_manager.rs` and for the Event sync records.
-///
-/// Nothing on a machine that does not lose power can see *inside* `fsync`. What
-/// can be seen is two things either side of it, and the repair is to make both
-/// checkable rather than one:
-///
-/// * **the syscall is there** — this census, which reads the source and fails if
-///   the call leaves the one function that is allowed to make it;
-/// * **the seam was reached as often as the ledger claims** —
-///   `rundir::tests::the_durability_ledger_counts_barriers_that_were_actually_
-///   performed`, which crosses the ledger's entries against
-///   `util::barriers_performed()`.
-///
-/// Neither alone is enough, and that is the point: a census cannot tell whether
-/// the line ran, and a counter cannot tell whether the line still contains the
-/// syscall.
-///
-/// `src/events/log/premove.rs` is excluded by name. It is `git show
-/// ff0490a:src/events.rs` kept verbatim as the independent oracle for
-/// byte-identical legacy behaviour, and its whole value is that it is unchanged.
 #[test]
 fn every_file_durability_barrier_in_a_funnel_module_goes_through_one_call() {
-    // The two functions that may name the primitive, and how many times each.
     const BARRIERS: &[(&str, &str, usize)] = &[
         ("src/util.rs", "fsync_file", 1),
         ("src/util.rs", "fsync_dir", 1),
     ];
-    // Line endings normalized before any structural search: the guest checks this
-    // tree out with CRLF, and `find("\n}\n")` does not match `\r\n}\r\n`. Measured —
-    // this census passed on Linux and panicked "the function ends" on Windows
-    // Server 2025, which is the platform half of the same lesson the rest of this
-    // round is about. `artifact_content` exists for exactly this reason.
     let util = artifact_content(
         &fs::read_to_string(repo_root().join("src/util.rs")).expect("src/util.rs"),
     );
@@ -2398,15 +2145,10 @@ fn every_file_durability_barrier_in_a_funnel_module_goes_through_one_call() {
         );
     }
 
-    // And nowhere else in the funnel modules, so a caller cannot quietly grow a
-    // second barrier the counter and this census both miss.
     const FUNNELS: &[&str] = &[
         "src/rundir.rs",
         "src/workspace_manager.rs",
         "src/events/log.rs",
-        // PR6's Container funnel writes the intent record durably and reaches
-        // the barrier through `util::fsync_file`/`util::fsync_dir` like every
-        // other funnel, so it belongs in the "and nowhere else" half.
         "src/runner/container.rs",
     ];
     for path in FUNNELS {
@@ -2421,9 +2163,6 @@ fn every_file_durability_barrier_in_a_funnel_module_goes_through_one_call() {
         );
     }
 
-    // The Event funnel's own primitive is `sync_data`, a different call with its
-    // own census next door, and it is named here so this test's silence about it
-    // is a decision rather than an oversight.
     let log = fs::read_to_string(repo_root().join("src/events/log.rs")).expect("src/events/log.rs");
     assert_eq!(
         blank_comments_and_strings(&production_region(&log))
@@ -2436,25 +2175,6 @@ fn every_file_durability_barrier_in_a_funnel_module_goes_through_one_call() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// "no topology production callers", and the source oracles under it
-// ---------------------------------------------------------------------------
-
-// The eleven bodies are in `source_oracles::oracles`, beside this file: the two
-// site censuses here, and, in the T-CONTAINER section further down, the five
-// that hold the two production regions and the whole-file module derivation.
-// The names in this file are the harness -- they are what the contract, CI,
-// `effects/wrappers.toml`, `reviews/FINDINGS.md` and `--list` know -- and each
-// one delegates and does nothing else.
-//
-// The boundary is drawn at "reads the tree, writes nothing". All eleven do
-// exactly that, so the child restores the three effect denials `super` allows
-// and takes no allowlist entry. The needles they carry -- a funnel table, a
-// `RunnerRequest {` in prose, the container-runtime literal -- are the reason
-// the bodies sit inside a `cfg(test)` module there rather than at file level:
-// both source cutters then read them as test logic, and the census that counts
-// files naming a container runtime keeps the set it has.
-
 mod source_oracles;
 
 use source_oracles::oracles;
@@ -2462,6 +2182,11 @@ use source_oracles::oracles;
 #[test]
 fn no_site_enums_row_mapping_has_a_wildcard_arm() {
     oracles::site_row_mappings_have_no_wildcard_arm();
+}
+
+#[test]
+fn the_row_mapping_census_reads_the_declared_production_module() {
+    oracles::the_row_mapping_census_domain_is_the_declared_module();
 }
 
 #[test]
@@ -2480,6 +2205,11 @@ fn the_comment_blanker_models_raw_strings_and_still_blanks_comments() {
 }
 
 #[test]
+fn the_two_blankers_each_carry_their_own_contract_in_the_notes() {
+    oracles::the_notes_give_each_blanker_its_own_contract();
+}
+
+#[test]
 fn a_multi_byte_char_literal_does_not_desync_the_blanker() {
     oracles::a_multi_byte_char_literal_keeps_the_blankers_phase();
 }
@@ -2488,32 +2218,6 @@ fn a_multi_byte_char_literal_does_not_desync_the_blanker() {
 fn a_region_that_cannot_find_an_items_end_blanks_the_attribute_not_the_file() {
     oracles::an_unfindable_item_end_blanks_the_attribute();
 }
-
-// ---------------------------------------------------------------------------
-// The T-CONTAINER mechanical checklist
-// ---------------------------------------------------------------------------
-
-// The nineteen-name transcription, the presence predicate they share and both
-// bodies are in `contract_mappings::mappings`, beside this file, with the three
-// R3b enumerations below. The names here are the harness -- they are what the
-// contract, CI and `--list` know -- and each one delegates and does nothing
-// else.
-//
-// The boundary is drawn at "resolves a transcribed enumeration against the
-// tree, and writes nothing". Both do exactly that, so the child restores the
-// three effect denials `super` allows and takes no allowlist entry.
-//
-// `the_view_directory_has_one_definition_in_the_tree` below is a mapping test
-// by shape and deliberately did NOT follow them. It constructs a
-// `ContainerName` to drive the mount side against the census side, and that is
-// one of the five needles `runner::container::resolve::tests::
-// no_module_outside_the_container_runner_writes_a_container_intent` counts over
-// the WHOLE file -- not over a production region, so an inline `cfg(test)`
-// module does not close it. That census excludes this file by exact path and
-// its exclusion names this very test as the reason; a child holding it would
-// need a second exclusion there, which is a change to another slice's census
-// rather than a consequence of moving a declaration. The same cut, for the same
-// reason, that left the effectful build helpers out of `policy.rs`.
 
 mod contract_mappings;
 
@@ -2529,37 +2233,8 @@ fn the_container_fault_row_predicate_refuses_a_name_that_is_only_prose() {
     mappings::the_presence_predicate_refuses_a_non_test_shape();
 }
 
-/// The R19 view directory has **one** definition in this tree.
-///
-/// `PR6E-005`. `src/runner/container/exec.rs` mounts the disposable Git view and
-/// `src/runner/container/census.rs` finds it again after a coordinator death.
-/// They were written in different lanes and each had its own definition of
-/// `<R>/views/<container-name>` — lane A's `join("views")` literal and lane C's
-/// `VIEWS_DIR` const — with nothing crossing them. Measured on the merged tree:
-/// `VIEWS_DIR = "views-mutated"` passed **all 1324 tests**, because lane C's
-/// fixtures plant orphan views through `view_path` itself and lane A's assert
-/// its own literal. A divergence leaves every orphan view unreclaimed after a
-/// crash, against `resource_accounting` R19's `NoRunFinished` ("pruned at the
-/// next write-command start after the owning container is observed terminated")
-/// and ST-16's closing clause "ledgers R19/R26 balance".
-///
-/// `exec::view_dir` now delegates to `census::view_path`, so the two cannot
-/// disagree. This is the guard against a **third** definition: the segment is
-/// declared once, by one const, and a second production site that joins a
-/// `"views"` literal fails here by name.
-///
-/// The class is `PR5D-VISIBILITY-CHECK-DUPLICATED` — a hand-maintained value
-/// kept in two places, where breaking one copy left the suite green because the
-/// other still answered.
 #[test]
 fn the_view_directory_has_one_definition_in_the_tree() {
-    // The domain is the container substrate's PRODUCTION modules. Test modules
-    // are excluded by name rather than by `production_region`, deliberately:
-    // `src/runner/container/tests.rs` is a whole-file `#[cfg(test)] mod tests;`
-    // with no inline marker, so `production_region` returns all 3 000 lines of
-    // it as production and a fixture asserting the path it expects would read as
-    // a second declaration. That inconsistency is `PR6E-006` and is a finding of
-    // its own; this test does not depend on it being repaired.
     let container: Vec<(String, String)> = scanned_sources()
         .into_iter()
         .filter(|(path, _)| {
@@ -2567,10 +2242,6 @@ fn the_view_directory_has_one_definition_in_the_tree() {
         })
         .collect();
     let modules: BTreeSet<&str> = container.iter().map(|(path, _)| path.as_str()).collect();
-    // CONTROL, and it is the one that stops this going vacuous: name the modules
-    // the scan must be looking at. A filter that matched nothing, or a rename
-    // that moved a half of the seam out of the scanned set, fails here rather
-    // than reporting one clean site — `PR5-DOCKER-CENSUS-CANNOT-FAIL`.
     assert_eq!(
         modules,
         BTreeSet::from([
@@ -2594,11 +2265,6 @@ fn the_view_directory_has_one_definition_in_the_tree() {
         let code = blank_comments(&production_region(source));
         for (index, _) in code.match_indices("\"views\"") {
             let line = code[..index].matches('\n').count() + 1;
-            // The property is "one site, and it is the census's". The LINE is
-            // incidental: pinning it made this test fail when repair C1's merge
-            // shifted census.rs by four lines, which is a true statement about
-            // line numbers and says nothing about the seam. Assert the path;
-            // carry the line into the message, where a human wants it.
             sites.push(path.clone());
             located.push(format!("{path}:{line}"));
         }
@@ -2613,9 +2279,6 @@ fn the_view_directory_has_one_definition_in_the_tree() {
          crosses the two halves. Sites found: {located:?}"
     );
 
-    // And the scan can see a declaration at all: a blanker that erased the code
-    // would report zero sites, which reads as "one definition" only because the
-    // expected list happens to be short.
     let (_, census) = container
         .iter()
         .find(|(path, _)| path == "src/runner/container/census.rs")
@@ -2626,8 +2289,6 @@ fn the_view_directory_has_one_definition_in_the_tree() {
         "the scan cannot see the declaration it is counting"
     );
 
-    // And the two halves really do answer the same thing, driven rather than
-    // read: the mount side and the census side, same inputs, same path.
     let root = Path::new("/private/root");
     let name = crate::runner::container::intent::ContainerName::from_parts(
         "repokey",
@@ -2643,20 +2304,1136 @@ fn the_view_directory_has_one_definition_in_the_tree() {
     );
 }
 
-// The five source-oracle bodies that close this section are in
-// `source_oracles::oracles` with the other six. They belong to that file and
-// stand here because this is where the harness names are: the whole-file module
-// derivation the four censuses skip by, and the two production regions every
-// prohibition census counts over.
+#[test]
+fn the_whole_file_test_modules_are_resolved_from_the_declarations_not_the_file_names() {
+    oracles::the_whole_file_modules_are_read_from_the_declarations();
+}
 
 #[test]
-fn the_declared_whole_file_test_modules_are_seventeen_and_three_are_not_called_tests() {
-    oracles::the_whole_file_test_modules_are_seventeen();
+fn the_module_scan_reads_ancestry_and_visibility_rather_than_text_after_an_attribute() {
+    use crate::effects::census_domain::{
+        Predicate, ScannedDeclaration, entails_test, parse_predicate, scan_module_declarations,
+    };
+
+    fn scan(source: &str) -> Vec<ScannedDeclaration> {
+        scan_module_declarations(source)
+            .unwrap_or_else(|refusal| panic!("the fixture is readable: {refusal}"))
+    }
+    fn only(source: &str) -> ScannedDeclaration {
+        let mut found = scan(source);
+        assert_eq!(found.len(), 1, "{source:?} -> {found:#?}");
+        found.remove(0)
+    }
+
+    let plain = only("#[cfg(test)]\nmod tests;\n");
+    assert_eq!(plain.name, "tests");
+    assert!(plain.inline_path.is_empty());
+    assert_eq!(plain.guard, "test");
+    assert!(plain.test_only);
+
+    for written in [
+        "#[cfg(test)]\npub mod helpers;\n",
+        "#[cfg(test)]\npub(crate) mod helpers;\n",
+        "#[cfg(test)]\npub(super) mod helpers;\n",
+        "#[cfg(test)]\npub(in crate::a::b) mod helpers;\n",
+    ] {
+        let qualified = only(written);
+        assert_eq!(qualified.name, "helpers", "{written:?}");
+        assert!(qualified.test_only, "{written:?}");
+    }
+    assert!(!only("pub(crate) mod helpers;\n").test_only);
+
+    let inherited =
+        only("#[cfg(test)]\npub(crate) mod test_support {\n    pub(crate) mod readiness;\n}\n");
+    assert_eq!(inherited.name, "readiness");
+    assert_eq!(inherited.inline_path, vec!["test_support".to_owned()]);
+    assert_eq!(inherited.guard, "test");
+    assert!(inherited.test_only);
+    let ungated = only("pub(crate) mod test_support {\n    pub(crate) mod readiness;\n}\n");
+    assert_eq!(ungated.inline_path, vec!["test_support".to_owned()]);
+    assert!(
+        !ungated.test_only,
+        "a declaration under an unguarded inline module is production code"
+    );
+
+    let deep =
+        only("mod outer {\n    #[cfg(test)]\n    mod middle {\n        pub mod leaf;\n    }\n}\n");
+    assert_eq!(deep.name, "leaf");
+    assert_eq!(
+        deep.inline_path,
+        vec!["outer".to_owned(), "middle".to_owned()]
+    );
+    assert!(deep.test_only);
+
+    let both = scan("#[cfg(test)]\nmod inner {\n    mod under;\n}\nmod beside;\n");
+    assert_eq!(both.len(), 2, "{both:#?}");
+    assert_eq!(both[0].name, "under");
+    assert_eq!(both[0].inline_path, vec!["inner".to_owned()]);
+    assert!(both[0].test_only);
+    assert_eq!(both[1].name, "beside");
+    assert!(both[1].inline_path.is_empty());
+    assert!(
+        !both[1].test_only,
+        "a declaration after the guarded block inherited a guard that had closed"
+    );
+
+    let after_a_function = scan("#[cfg(test)]\nfn helper() {}\nmod plain;\n");
+    assert_eq!(after_a_function.len(), 1, "{after_a_function:#?}");
+    assert!(!after_a_function[0].test_only);
+    assert!(
+        scan("#[cfg(test)]\nmod tests {\n    fn t() {}\n}\n").is_empty(),
+        "an inline module with a body names no file"
+    );
+
+    for (written, expected) in [
+        ("#[cfg(test)]\nmod x;\n", true),
+        ("#[cfg(all(test, unix))]\nmod x;\n", true),
+        ("#[cfg(all(unix, all(test, windows)))]\nmod x;\n", true),
+        ("#[cfg(test)]\n#[cfg(unix)]\nmod x;\n", true),
+        ("#[cfg(unix)]\nmod outer {\n#[cfg(test)]\nmod x;\n}\n", true),
+        ("#[cfg(any(test, unix))]\nmod x;\n", false),
+        ("#[cfg(not(test))]\nmod x;\n", false),
+        ("#[cfg(unix)]\nmod x;\n", false),
+        ("#[cfg(feature = \"slow\")]\nmod x;\n", false),
+        ("mod x;\n", false),
+    ] {
+        assert_eq!(
+            only(written).test_only,
+            expected,
+            "{written:?} was decided the other way"
+        );
+    }
+
+    for written in ["test", "all(test, unix)", "not(any(not(test), unix))"] {
+        let pred = parse_predicate(written).unwrap_or_else(|why| panic!("{written}: {why}"));
+        assert!(entails_test(&pred), "`{written}` does not entail `test`");
+    }
+    for written in [
+        "any(test, unix)",
+        "not(test)",
+        "unix",
+        "target_os = \"linux\"",
+        "all(unix, windows)",
+    ] {
+        let pred = parse_predicate(written).unwrap_or_else(|why| panic!("{written}: {why}"));
+        assert!(
+            !entails_test(&pred),
+            "`{written}` was read as entailing `test`"
+        );
+    }
+    assert_eq!(
+        parse_predicate("all(test, unix)").map(|pred| pred.render()),
+        Ok("all(test, unix)".to_owned())
+    );
+    assert_eq!(parse_predicate("test"), Ok(Predicate::Test));
+
+    for prose in [
+        "// #[cfg(test)] mod ghost;\n",
+        "/* #[cfg(test)] mod ghost; */\n",
+        "/// #[cfg(test)] mod ghost;\nfn documented() {}\n",
+        "const S: &str = \"#[cfg(test)] mod ghost;\";\n",
+        "const S: &str = r#\"#[cfg(test)] mod ghost;\"#;\n",
+        "const S: &[u8] = b\"#[cfg(test)] mod ghost;\";\n",
+    ] {
+        assert!(scan(prose).is_empty(), "{prose:?} derived a declaration");
+    }
+    let after_a_brace_char = only("const C: char = '{';\n#[cfg(test)]\nmod real;\n");
+    assert_eq!(after_a_brace_char.name, "real");
+    assert!(after_a_brace_char.inline_path.is_empty());
+    assert!(after_a_brace_char.test_only);
+
+    assert!(scan("fn models() {}\nstruct modest;\n").is_empty());
+
+    let past_a_macro = only("thread_local! {\n    static X: u8 = 0;\n}\n#[cfg(test)]\nmod real;\n");
+    assert_eq!(past_a_macro.name, "real");
+    assert!(past_a_macro.inline_path.is_empty());
+    assert!(past_a_macro.test_only);
+    let after_attributed_macro = only("#[cfg(test)]\nlazy! [ a, b ]\nmod plain;\n");
+    assert_eq!(after_attributed_macro.name, "plain");
+    assert!(
+        !after_attributed_macro.test_only,
+        "a `#[cfg(test)]` above a macro invocation carried to the next item"
+    );
+    let past_a_negation = only("fn f() { let _ = a != b; }\n#[cfg(test)]\nmod real;\n");
+    assert_eq!(past_a_negation.name, "real");
+    assert!(past_a_negation.test_only);
+
+    for tokens in [
+        "macro_rules! m {\n    (mod $n:ident) => {\n        ()\n    };\n}\n",
+        "m! { mod }\n",
+        "outer! { inner! { mod } }\n",
+    ] {
+        assert_eq!(
+            scan_module_declarations(tokens).map(|found| found.len()),
+            Ok(0),
+            "{tokens:?} was read as items rather than discarded"
+        );
+    }
+    let beside_a_macro = only(
+        "macro_rules! m {\n    (mod $n:ident) => {\n        ()\n    };\n}\n#[cfg(test)]\nmod real;\n",
+    );
+    assert_eq!(beside_a_macro.name, "real");
+    assert!(beside_a_macro.test_only);
+
+    for spaced in [
+        "vec ! [1, 2];\n#[cfg(test)]\nmod real;\n",
+        "assert /* sic */ ! (a == b);\n#[cfg(test)]\nmod real;\n",
+        "macro_rules ! m {\n    () => {\n        fn go() {}\n    };\n}\n#[cfg(test)]\nmod real;\n",
+        "macro_rules ! m {\n    (mod $n:ident) => {\n        ()\n    };\n}\n#[cfg(test)]\nmod real;\n",
+        "macro_rules /* named next */ ! m {\n    (mod $n:ident) => {\n        ()\n    };\n}\n#[cfg(test)]\nmod real;\n",
+    ] {
+        let past = only(spaced);
+        assert_eq!(past.name, "real", "{spaced:?}");
+        assert!(past.test_only, "{spaced:?}");
+    }
+
+    let inside_a_negated_block = only(
+        "#[cfg(test)]\nmod outer {\n    fn f() {\n        if !ready { }\n    }\n    mod inner;\n}\n",
+    );
+    assert_eq!(inside_a_negated_block.name, "inner");
+    assert_eq!(
+        inside_a_negated_block.inline_path,
+        vec!["outer".to_owned()],
+        "a negated condition was read as a macro and swallowed the block"
+    );
+    assert!(inside_a_negated_block.test_only);
+    for negation in [
+        "fn f() { if !ready { } }\n#[cfg(test)]\nmod real;\n",
+        "fn f() { while !done { } }\n#[cfg(test)]\nmod real;\n",
+        "fn f() { let _ = !flag; }\n#[cfg(test)]\nmod real;\n",
+    ] {
+        let past = only(negation);
+        assert_eq!(past.name, "real", "{negation:?}");
+        assert!(past.test_only, "{negation:?}");
+    }
+    let inside_a_negated_block = only(
+        "#[cfg(test)]\nmod outer {\n    fn f() {\n        if !ready {\n            mod local;\n        }\n    }\n}\n",
+    );
+    assert_eq!(inside_a_negated_block.name, "local");
+    assert_eq!(
+        inside_a_negated_block.inline_path,
+        vec!["outer".to_owned()],
+        "the negated block was skipped as a macro body and its declaration lost"
+    );
+    assert!(inside_a_negated_block.test_only);
+    let inside_a_negated_loop = only(
+        "mod outer {\n    fn f() {\n        while !done {\n            mod local;\n        }\n    }\n}\n",
+    );
+    assert_eq!(inside_a_negated_loop.name, "local");
+    assert!(!inside_a_negated_loop.test_only);
+
+    for negated_group in [
+        "#[cfg(test)]\nmod outer {\n    fn f() -> bool {\n        if !({ mod local {} true }) { false } else { true }\n    }\n}\n",
+        "mod outer {\n    fn f() -> bool {\n        !({ mod local {} true })\n    }\n}\n",
+        "mod outer {\n    fn f() {\n        while !({ mod local {} false }) { }\n    }\n}\n",
+        "mod outer {\n    fn f() -> bool {\n        return !({ mod local {} true });\n    }\n}\n",
+    ] {
+        let read = scan_module_declarations(negated_group)
+            .unwrap_or_else(|refusal| panic!("{negated_group:?} was refused: {refusal}"));
+        assert!(
+            read.is_empty(),
+            "an inline `mod local {{}}` names no file, so it is a scope and not a declaration: \
+             {negated_group:?} -> {read:#?}"
+        );
+    }
+    let through_a_negated_group = only(
+        "#[cfg(test)]\nmod outer {\n    fn f() -> bool {\n        if !({ mod local; true }) { false } else { true }\n    }\n}\n",
+    );
+    assert_eq!(through_a_negated_group.name, "local");
+    assert_eq!(
+        through_a_negated_group.inline_path,
+        vec!["outer".to_owned()],
+        "the negated group was skipped as a macro body and its declaration lost"
+    );
+    assert!(through_a_negated_group.test_only);
+
+    for (written, expected) in [
+        ("#[cfg(test)]\nmod r#type;\n", "type"),
+        ("#[cfg(test)]\npub(crate) mod r#fn;\n", "fn"),
+        ("#[cfg(test)]\nmod r#tests;\n", "tests"),
+    ] {
+        let raw = only(written);
+        assert_eq!(raw.name, expected, "{written:?}");
+        assert!(raw.test_only, "{written:?}");
+    }
+    assert!(scan("struct r#mod;\nfn f() { let raw = 1; }\n").is_empty());
+    let beside_a_raw_word = only("fn raw() {}\n#[cfg(test)]\nmod real;\n");
+    assert_eq!(beside_a_raw_word.name, "real");
+
+    let raw_binding = "fn f() { let r#mod = 1; }\n#[cfg(test)]\nmod tests;\n";
+    let read = scan_module_declarations(raw_binding).unwrap_or_else(|refusal| {
+        panic!("`let r#mod = 1;` is valid Rust and was refused: {refusal}")
+    });
+    assert_eq!(read.len(), 1, "{read:#?}");
+    assert_eq!(read[0].name, "tests");
+    assert!(read[0].test_only);
+
+    let raw_in_a_use = "#[cfg(test)]\nmod harness {\n    use std::r#mod as tests;\n}\n";
+    assert_eq!(
+        scan_module_declarations(raw_in_a_use),
+        Ok(Vec::new()),
+        "`use std::r#mod as tests;` declares no module, and the text inside `r#mod` is not an \
+         item"
+    );
+
+    for source in [
+        "fn f() { let r#mod = 1; }\n#[cfg(test)]\nmod real;\n",
+        "fn f() { let r#type = 1; }\n#[cfg(test)]\nmod real;\n",
+        "fn f() { let r = 1; }\n#[cfg(test)]\nmod real;\n",
+        "fn f() { let raw = 1; }\n#[cfg(test)]\nmod real;\n",
+    ] {
+        assert_eq!(only(source).name, "real", "{source:?}");
+        assert_eq!(
+            scan_module_declarations(&source.replace('\n', "\r\n")),
+            scan_module_declarations(source),
+            "CRLF: {source:?}"
+        );
+    }
+
+    let past_a_raw_macro = only("r#if! { let _ = 1; }\n#[cfg(test)]\nmod real;\n");
+    assert_eq!(past_a_raw_macro.name, "real");
+    assert!(past_a_raw_macro.test_only);
+
+    for fixture in [
+        "#[cfg(test)]\npub(crate) mod test_support {\n    pub(crate) mod readiness;\n}\n",
+        "mod outer {\n    #[cfg(test)]\n    mod middle {\n        pub mod leaf;\n    }\n}\n",
+        "macro_rules ! m {\n    (mod $n:ident) => {\n        ()\n    };\n}\n#[cfg(test)]\nmod real;\n",
+        "#[cfg(test)]\nmod r#type;\n",
+    ] {
+        let lf = scan_module_declarations(fixture);
+        let crlf = scan_module_declarations(&fixture.replace('\n', "\r\n"));
+        assert_eq!(lf, crlf, "CRLF changed the derivation for {fixture:?}");
+        assert!(lf.is_ok_and(|found| found.len() == 1));
+    }
+    for refused in [
+        "macro_rules! m {\n    () => {\n        #[cfg(test)]\n        mod x;\n    };\n}\n",
+        "#[cfg(test)]\nmod tests;\n#[cfg(test)]\nmod tests;\n",
+    ] {
+        assert_eq!(
+            scan_module_declarations(refused).is_err(),
+            scan_module_declarations(&refused.replace('\n', "\r\n")).is_err(),
+            "CRLF changed whether {refused:?} is refused"
+        );
+        assert!(scan_module_declarations(refused).is_err());
+    }
+}
+
+fn is_the_literal_mod_tests_form(name: &str, inline_path: &[String], guard: &str) -> bool {
+    name == "tests" && inline_path.is_empty() && guard == "test"
+}
+
+#[test]
+fn a_narrowed_cfg_guard_is_test_only_but_is_not_the_literal_mod_tests_form() {
+    use crate::effects::census_domain::{ScannedDeclaration, scan_module_declarations};
+
+    fn only(source: &str) -> ScannedDeclaration {
+        let mut found = scan_module_declarations(source)
+            .unwrap_or_else(|refusal| panic!("the fixture is readable: {refusal}"));
+        assert_eq!(found.len(), 1, "{source:?} -> {found:#?}");
+        found.remove(0)
+    }
+    fn literal(declaration: &ScannedDeclaration) -> bool {
+        is_the_literal_mod_tests_form(
+            &declaration.name,
+            &declaration.inline_path,
+            &declaration.guard,
+        )
+    }
+
+    let plain = only("#[cfg(test)]\nmod tests;\n");
+    assert_eq!(plain.guard, "test");
+    assert!(plain.test_only);
+    assert!(literal(&plain), "{plain:#?}");
+
+    for narrowed in [
+        "#[cfg(all(test, unix))]\nmod tests;\n",
+        "#[cfg(test)]\n#[cfg(unix)]\nmod tests;\n",
+    ] {
+        let declaration = only(narrowed);
+        assert_eq!(declaration.name, plain.name);
+        assert_eq!(declaration.inline_path, plain.inline_path);
+        assert!(
+            declaration.test_only,
+            "a narrowed guard still entails `test`, so the file is still a whole-file test \
+             module and still belongs in the census domain: {declaration:#?}"
+        );
+        assert_ne!(
+            declaration.guard, plain.guard,
+            "the guard is the only field that differs, so it is the only field that can \
+             distinguish them"
+        );
+        assert!(
+            !literal(&declaration),
+            "{narrowed:?} is not the literal `#[cfg(test)] mod tests;` form: rustc compiles no \
+             such module where the narrowing is false, and a census that counted it as the plain \
+             form would skip a file that is not there and lose the module on that platform in \
+             silence: {declaration:#?}"
+        );
+    }
+
+    let inherited = only("#[cfg(test)]\nmod test_support {\n    pub(crate) mod readiness;\n}\n");
+    assert_eq!(
+        (inherited.guard.as_str(), inherited.name.as_str()),
+        ("test", "readiness")
+    );
+    assert!(
+        inherited.test_only && !literal(&inherited),
+        "{inherited:#?}"
+    );
+    let other_name = only("#[cfg(test)]\nmod scaffold;\n");
+    assert_eq!(other_name.guard, "test");
+    assert!(other_name.inline_path.is_empty());
+    assert!(
+        other_name.test_only && !literal(&other_name),
+        "{other_name:#?}"
+    );
+}
+
+#[test]
+fn the_module_resolver_refuses_every_shape_it_cannot_resolve() {
+    use crate::effects::census_domain::{
+        CandidateRefusal, ScanRefusal, candidates_for, contained_in, declaration_cycle,
+        module_directory, parse_predicate, scan_module_declarations, sole_present,
+    };
+
+    fn refusal(source: &str) -> ScanRefusal {
+        scan_module_declarations(source).expect_err("this source is refused")
+    }
+
+    assert_eq!(
+        refusal("#[cfg(test)\nmod tests;\n"),
+        ScanRefusal::UnclosedAttribute { line: 1 }
+    );
+    assert_eq!(
+        refusal("mod a { }\n}\n"),
+        ScanRefusal::UnbalancedBraces { line: 2 }
+    );
+    for malformed in ["mod ;\n", "mod x = 3;\n", "mod trailing\n"] {
+        assert!(
+            matches!(refusal(malformed), ScanRefusal::MalformedDeclaration { .. }),
+            "{malformed:?} was read as a declaration"
+        );
+    }
+
+    for unreadable in [
+        "#[cfg(sometimes(test))]\nmod x;\n",
+        "#[cfg(test]\nmod x;\n",
+        "#[cfg()]\nmod x;\n",
+        "#[cfg(not(test, unix))]\nmod x;\n",
+        "#[cfg(feature =)]\nmod x;\n",
+    ] {
+        assert!(
+            matches!(refusal(unreadable), ScanRefusal::UnreadablePredicate { .. }),
+            "{unreadable:?} was decided rather than refused"
+        );
+    }
+    for unreadable in [
+        "",
+        "all(test",
+        "not(test, unix)",
+        "maybe(test)",
+        "all(test) extra",
+    ] {
+        assert!(
+            parse_predicate(unreadable).is_err(),
+            "`{unreadable}` parsed"
+        );
+    }
+
+    for pathed in [
+        "#[path = \"elsewhere.rs\"]\nmod x;\n",
+        "#[cfg_attr(unix, path = \"elsewhere.rs\")]\nmod x;\n",
+    ] {
+        assert!(
+            matches!(
+                refusal(pathed),
+                ScanRefusal::UnsupportedPathAttribute { .. }
+            ),
+            "{pathed:?} was resolved"
+        );
+    }
+    assert!(
+        scan_module_declarations("#[path = \"x\"]\nstruct S;\nmod y;\n").is_ok(),
+        "a `path` attribute on a non-module item is not a module path attribute"
+    );
+
+    for shaped in [
+        "macro_rules! m {\n    () => {\n        mod x;\n    };\n}\n",
+        "macro_rules! m {\n    () => {\n        #[cfg(test)]\n        mod x;\n    };\n}\n",
+        "quote! { mod x; }\n",
+        "paste!( mod x { } );\n",
+        "items![ pub(crate) mod x; ]\n",
+        "outer! { inner! { mod x; } }\n",
+        "macro_rules! r#mod {\n    () => {\n        mod x;\n    };\n}\n",
+        "macro_rules ! r#type {\n    () => {\n        #[cfg(test)]\n        mod x;\n    };\n}\n",
+        "quote! { mod r#type; }\n",
+        "r#if! { mod r#fn { } }\n",
+    ] {
+        assert!(
+            matches!(refusal(shaped), ScanRefusal::ModuleShapedMacroBody { .. }),
+            "{shaped:?} was read rather than refused"
+        );
+    }
+    for spaced in [
+        "macro_rules ! m {\n    () => {\n        mod x;\n    };\n}\n",
+        "macro_rules\n! m {\n    () => {\n        #[cfg(test)]\n        mod x;\n    };\n}\n",
+        "macro_rules /* named next */ ! m {\n    () => {\n        mod x;\n    };\n}\n",
+        "#[rustfmt::skip]\nmacro_rules  !  m  {\n    () => {\n        mod x;\n    };\n}\n",
+        "quote ! { mod x; }\n",
+        "quote // why\n! { mod x; }\n",
+        "quote /* why */ ! { pub(crate) mod x; }\n",
+        "items\n    ![ mod x { } ]\n",
+    ] {
+        assert!(
+            matches!(refusal(spaced), ScanRefusal::ModuleShapedMacroBody { .. }),
+            "{spaced:?} was read rather than refused"
+        );
+    }
+
+    for ordinary in [
+        "vec![1, 2, 3];\n",
+        "assert!(a == b, \"mod x; is prose here\");\n",
+        "macro_rules! m {\n    () => {\n        fn go() {}\n    };\n}\n",
+        "modify!(x);\n",
+    ] {
+        assert_eq!(
+            scan_module_declarations(ordinary).map(|found| found.len()),
+            Ok(0),
+            "{ordinary:?} was not discarded cleanly"
+        );
+    }
+
+    assert!(matches!(
+        refusal("#![cfg(test)]\nmod x;\n"),
+        ScanRefusal::UnsupportedInnerCfg { .. }
+    ));
+
+    assert!(matches!(
+        refusal("#[cfg(test)]\nmod tests;\n#[cfg(test)]\nmod tests;\n"),
+        ScanRefusal::DuplicateDeclaration { .. }
+    ));
+    assert!(
+        scan_module_declarations("mod a {\n    mod x;\n}\nmod b {\n    mod x;\n}\n").is_ok(),
+        "two parents each declaring `x` are not a duplicate"
+    );
+
+    let roots = crate::effects::tests::crate_roots();
+    let root = repo_root();
+    let named = |file: &str, inline: &[String], name: &str| {
+        candidates_for(roots, &root.join(file), inline, name)
+    };
+    assert_eq!(
+        named(
+            "src/agent/proc.rs",
+            &["test_support".to_owned()],
+            "readiness"
+        ),
+        Ok([
+            root.join("src/agent/proc/test_support/readiness.rs"),
+            root.join("src/agent/proc/test_support/readiness/mod.rs"),
+        ])
+    );
+    assert_eq!(
+        named("src/agent/proc.rs", &[], "readiness"),
+        Ok([
+            root.join("src/agent/proc/readiness.rs"),
+            root.join("src/agent/proc/readiness/mod.rs"),
+        ])
+    );
+    for flattened in named("src/agent/proc.rs", &[], "readiness").expect("inside the package") {
+        assert!(
+            !flattened.is_file(),
+            "{} exists, so the flattening mutation would resolve instead of refusing",
+            flattened.display()
+        );
+    }
+
+    assert_eq!(
+        named("src/engine/mod.rs", &[], "tests").map(|pair| pair[0].clone()),
+        Ok(root.join("src/engine/tests.rs"))
+    );
+    assert_eq!(
+        named("src/lib.rs", &[], "effects").map(|pair| pair[0].clone()),
+        Ok(root.join("src/effects.rs"))
+    );
+    assert_eq!(
+        named("src/main.rs", &[], "tests").map(|pair| pair[0].clone()),
+        Ok(root.join("src/tests.rs"))
+    );
+    assert!(
+        roots.is_root(&root.join("examples/probe.rs")),
+        "`examples/probe.rs` is a target of this package: {:?}",
+        roots.roots().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        named("examples/probe.rs", &[], "helper").map(|pair| pair[0].clone()),
+        Ok(root.join("examples/helper.rs"))
+    );
+    assert_eq!(
+        named("src/a/lib.rs", &[], "tests").map(|pair| pair[0].clone()),
+        Ok(root.join("src/a/lib/tests.rs"))
+    );
+    assert_eq!(
+        named("src/a/b/main.rs", &[], "tests").map(|pair| pair[0].clone()),
+        Ok(root.join("src/a/b/main/tests.rs"))
+    );
+    assert_eq!(
+        module_directory(roots, &root.join("src/a/mod.rs")),
+        Ok(root.join("src/a"))
+    );
+    assert_eq!(
+        module_directory(roots, &root.join("src/a/other.rs")),
+        Ok(root.join("src/a/other")),
+        "an ordinary module owns a directory named after it, never its parent"
+    );
+    let elsewhere = std::env::temp_dir().join("upstroke-not-this-package/src/lib.rs");
+    assert_eq!(
+        module_directory(roots, &elsewhere),
+        Err(CandidateRefusal::OutsideThePackage {
+            declared_in: elsewhere.clone(),
+            package_dir: root.clone(),
+        })
+    );
+    assert!(
+        CandidateRefusal::OutsideThePackage {
+            declared_in: elsewhere,
+            package_dir: root.clone(),
+        }
+        .to_string()
+        .contains("does not say whether it is a crate root"),
+        "the refusal says what it could not decide"
+    );
+
+    let pair = named("src/a.rs", &[], "b").expect("an ordinary module");
+    assert_eq!(sole_present(&pair, &|_| false), Err(0));
+    assert_eq!(sole_present(&pair, &|_| true), Err(2));
+    assert_eq!(sole_present(&pair, &|at| at == pair[0]), Ok(&pair[0]));
+    assert_eq!(sole_present(&pair, &|at| at == pair[1]), Ok(&pair[1]));
+
+    let base = Path::new("src/agent");
+    assert!(contained_in(
+        base,
+        Path::new("src/agent/proc/test_support/readiness.rs")
+    ));
+    assert!(
+        !contained_in(base, base),
+        "a directory does not contain itself"
+    );
+    assert!(!contained_in(base, Path::new("src/effects.rs")));
+    assert!(
+        !contained_in(base, Path::new("src/agent/../effects.rs")),
+        "a `..` component escapes and must not read as contained"
+    );
+
+    let edge = |from: &str, to: &str| (PathBuf::from(from), PathBuf::from(to));
+    let forest = vec![edge("a.rs", "a/b.rs"), edge("a/b.rs", "a/b/c.rs")];
+    assert_eq!(declaration_cycle(&forest), None);
+    assert!(
+        declaration_cycle(&[edge("a.rs", "a.rs")]).is_some(),
+        "a file declaring itself is a cycle"
+    );
+    assert!(
+        declaration_cycle(&[edge("a.rs", "b.rs"), edge("b.rs", "a.rs")]).is_some(),
+        "a two-file loop is a cycle"
+    );
+    let branching = vec![
+        edge("a.rs", "a/b.rs"),
+        edge("a.rs", "a/c.rs"),
+        edge("a/c.rs", "a.rs"),
+    ];
+    let closed = declaration_cycle(&branching).expect("the second edge closes a loop");
+    assert_eq!(
+        closed.first(),
+        closed.last(),
+        "a reported cycle must start and end at the same node: {closed:?}"
+    );
+    assert!(
+        closed.contains(&PathBuf::from("a/c.rs")),
+        "the reported cycle does not name the branch that closes it: {closed:?}"
+    );
+    assert_eq!(
+        declaration_cycle(&[edge("a.rs", "a/b.rs"), edge("a.rs", "a/c.rs")]),
+        None
+    );
+    let deferred = vec![
+        edge("a.rs", "a/b.rs"),
+        edge("a/b.rs", "a/b/leaf.rs"),
+        edge("a.rs", "a/c.rs"),
+        edge("a/c.rs", "a/d.rs"),
+        edge("a/d.rs", "a/c.rs"),
+    ];
+    assert!(
+        declaration_cycle(&deferred).is_some(),
+        "a cycle two branches deep was not reached"
+    );
+}
+
+#[test]
+#[should_panic(expected = "does not describe the tree this census was handed")]
+fn a_census_handed_a_source_root_the_manifest_does_not_describe_is_refused() {
+    let elsewhere = std::env::temp_dir().join("upstroke-not-this-package");
+    let _ = crate::effects::census_domain::declared_whole_file_test_modules(&elsewhere, &[]);
+}
+
+#[test]
+fn the_cfg_census_resolves_module_directories_through_the_target_inventory() {
+    for (file, directory) in [
+        ("src/lib.rs", "src"),
+        ("src/main.rs", "src"),
+        ("examples/probe.rs", "examples"),
+        ("src/engine/mod.rs", "src/engine"),
+        ("src/effects.rs", "src/effects"),
+        ("src/a/lib.rs", "src/a/lib"),
+        ("src/a/main.rs", "src/a/main"),
+    ] {
+        assert_eq!(cfg::module_dir(file), directory, "`{file}`");
+    }
+}
+
+#[test]
+fn the_crate_roots_come_from_the_manifest_and_an_arbitrary_bin_path_is_one() {
+    use crate::effects::census_domain::{CrateRoots, InventoryRefusal, module_directory};
+
+    fn by_stem(file: &Path) -> PathBuf {
+        let parent = file.parent().expect("a directory").to_path_buf();
+        let stem = file.file_stem().expect("a name");
+        if stem == "mod" || stem == "lib" || stem == "main" {
+            parent
+        } else {
+            parent.join(stem)
+        }
+    }
+
+    let scratch = scratch_dir("inventory");
+    fs::write(
+        scratch.join("Cargo.toml"),
+        "[package]\n\
+         name = \"upstroke-inventory-fixture\"\n\
+         version = \"0.0.0\"\n\
+         edition = \"2021\"\n\
+         \n\
+         [lib]\n\
+         path = \"src/lib.rs\"\n\
+         \n\
+         [[bin]]\n\
+         name = \"odd\"\n\
+         path = \"src/tools/odd.rs\"\n\
+         \n\
+         [[bin]]\n\
+         name = \"nested\"\n\
+         path = \"src/deep/nest/main.rs\"\n\
+         \n\
+         [workspace]\n",
+    )
+    .expect("the fixture manifest");
+
+    let inventory = crate_roots_of(&scratch).expect("cargo reads the fixture manifest");
+    assert_eq!(inventory.package_dir(), scratch.as_path());
+    assert_eq!(
+        inventory.roots().collect::<Vec<_>>(),
+        vec![
+            scratch.join("src/deep/nest/main.rs").as_path(),
+            scratch.join("src/lib.rs").as_path(),
+            scratch.join("src/tools/odd.rs").as_path(),
+        ],
+        "the inventory is exactly the manifest's three targets"
+    );
+
+    for (file, owns, stem_says) in [
+        ("src/tools/odd.rs", "src/tools", "src/tools/odd"),
+        ("src/deep/nest/main.rs", "src/deep/nest", "src/deep/nest"),
+        ("src/a/lib.rs", "src/a/lib", "src/a"),
+    ] {
+        let declared_in = scratch.join(file);
+        assert_eq!(
+            module_directory(&inventory, &declared_in),
+            Ok(scratch.join(owns)),
+            "`{file}` owns `{owns}`"
+        );
+        assert_eq!(
+            by_stem(&declared_in),
+            scratch.join(stem_says),
+            "the stem rule's answer for `{file}` is recorded, not guessed"
+        );
+    }
+    let disagreements = ["src/tools/odd.rs", "src/a/lib.rs"]
+        .into_iter()
+        .filter(|file| {
+            let declared_in = scratch.join(file);
+            module_directory(&inventory, &declared_in) != Ok(by_stem(&declared_in))
+        })
+        .count();
+    assert_eq!(
+        disagreements, 2,
+        "the manifest and the stem rule must disagree on the arbitrary bin path and on the \
+         nested `lib.rs`, or this control measures nothing"
+    );
+
+    let missing = scratch.join("no-such-package");
+    assert!(
+        matches!(
+            crate_roots_of(&missing),
+            Err(InventoryRefusal::Failed { .. })
+        ),
+        "a manifest that does not exist is a refusal, not an empty inventory"
+    );
+    let manifest = scratch.join("Cargo.toml");
+    let refusals: Vec<InventoryRefusal> = [
+        "this is not json",
+        "{}",
+        "{\"packages\":[]}",
+        "{\"packages\":[{\"manifest_path\":\"/somewhere/else/Cargo.toml\",\"targets\":[{\"src_path\":\"/somewhere/else/src/lib.rs\"}]}]}",
+        "{\"packages\":[{\"manifest_path\":\"PLACEHOLDER\",\"targets\":[]}]}",
+        "{\"packages\":[{\"manifest_path\":\"PLACEHOLDER\",\"targets\":[{\"name\":\"x\"}]}]}",
+    ]
+    .into_iter()
+    .map(|document| {
+        let document = document.replace(
+            "PLACEHOLDER",
+            &manifest.display().to_string().replace('\\', "\\\\"),
+        );
+        CrateRoots::from_metadata_json(&document, &manifest).expect_err("this document is refused")
+    })
+    .collect();
+    assert!(
+        matches!(refusals[0], InventoryRefusal::Unreadable { .. }),
+        "{:?}",
+        refusals[0]
+    );
+    assert!(
+        matches!(refusals[1], InventoryRefusal::Unreadable { .. }),
+        "{:?}",
+        refusals[1]
+    );
+    assert!(
+        matches!(refusals[2], InventoryRefusal::NoPackage { .. }),
+        "{:?}",
+        refusals[2]
+    );
+    assert!(
+        matches!(refusals[3], InventoryRefusal::NoPackage { .. }),
+        "a document describing a different package is refused rather than adopted: {:?}",
+        refusals[3]
+    );
+    assert!(
+        matches!(refusals[4], InventoryRefusal::NoTargets { .. }),
+        "{:?}",
+        refusals[4]
+    );
+    assert!(
+        matches!(refusals[5], InventoryRefusal::Unreadable { .. }),
+        "a target with no `src_path` is unreadable rather than skipped: {:?}",
+        refusals[5]
+    );
+    for refusal in &refusals {
+        assert!(
+            refusal.to_string().contains("cargo metadata")
+                || refusal.to_string().contains("declares no target"),
+            "the refusal names the authority it could not reach: {refusal}"
+        );
+    }
+
+    let live = crate::effects::tests::crate_roots();
+    assert_eq!(live.package_dir(), repo_root().as_path());
+    assert_eq!(
+        live.roots().collect::<Vec<_>>(),
+        vec![
+            repo_root().join("examples/probe.rs").as_path(),
+            repo_root().join("src/lib.rs").as_path(),
+            repo_root().join("src/main.rs").as_path(),
+        ],
+        "this package's exact target inventory"
+    );
+
+    let _ = fs::remove_dir_all(&scratch);
+}
+
+#[test]
+fn the_file_level_lint_reader_is_a_census_instrument_and_not_a_shipped_api() {
+    fn absent_from_production(source: &str) -> Vec<String> {
+        let production = crate::effects::production_code(source);
+        let whole = blank_comments_and_strings(source);
+        let mut wrong = Vec::new();
+        for needle in [
+            "fn file_level_lint_state(",
+            "fn names_lint(",
+            "mod lint_levels",
+        ] {
+            if !whole.contains(needle) {
+                wrong.push(format!("`{needle}` is not in src/effects.rs at all"));
+            }
+            if production.contains(needle) {
+                wrong.push(format!(
+                    "`{needle}` survives into the production region, which makes it a shipped \
+                     surface rather than a census instrument"
+                ));
+            }
+        }
+        wrong
+    }
+
+    let source = fs::read_to_string(repo_root().join("src/effects.rs")).expect("src/effects.rs");
+    assert!(
+        absent_from_production(&source).is_empty(),
+        "{:#?}",
+        absent_from_production(&source)
+    );
+    let crlf = source.replace('\n', "\r\n");
+    assert!(
+        absent_from_production(&crlf).is_empty(),
+        "{:#?}",
+        absent_from_production(&crlf)
+    );
+
+    assert!(
+        blank_comments_and_strings(&source).contains("pub(crate) mod lint_levels"),
+        "the lint reader's module is no longer `pub(crate)`"
+    );
+    assert!(
+        !blank_comments_and_strings(&source).contains("pub mod lint_levels"),
+        "the lint reader's module is `pub`, which is the surface this repair removed"
+    );
+
+    for prologue in [
+        "#![deny(clippy::disallowed_types)]\n",
+        "#![deny(clippy::disallowed_types)]\r\n",
+        "//! docs\r\n#![allow(clippy::too_many_arguments)]\r\n#![forbid(clippy::disallowed_macros)]\r\n",
+    ] {
+        let wanted = if prologue.contains("forbid") {
+            ("clippy::disallowed_macros", Some("forbid"))
+        } else {
+            ("clippy::disallowed_types", Some("deny"))
+        };
+        assert_eq!(
+            crate::effects::lint_levels::file_level_lint_state(prologue, wanted.0),
+            wanted.1,
+            "{prologue:?}"
+        );
+    }
+}
+
+#[test]
+fn the_file_level_lint_reader_answers_what_rustc_does() {
+    use crate::effects::lint_levels::{Resolution, file_level_lint_resolution};
+
+    const BODY: &str = "pub fn go(p: &std::path::Path) { let _ = std::fs::write(p, \"x\"); }\n";
+    const LINT: &str = "clippy::disallowed_methods";
+
+    fn compile(dir: &Path, tag: &str, source: &str) -> (bool, Vec<(String, String)>) {
+        let file = dir.join(format!("{tag}.rs"));
+        fs::write(&file, source).expect("the fixture");
+        let out = dir.join("out");
+        fs::create_dir_all(&out).expect("an output directory");
+        let output = std::process::Command::new(clippy_driver())
+            .env("CLIPPY_CONF_DIR", repo_root())
+            .args([
+                "--edition",
+                "2024",
+                "--crate-type",
+                "lib",
+                "--emit=metadata",
+                "--error-format=json",
+            ])
+            .arg("--out-dir")
+            .arg(&out)
+            .arg(&file)
+            .output()
+            .expect("clippy-driver runs; the lint gate uses the same binary");
+        let mut diagnostics = Vec::new();
+        for line in String::from_utf8_lossy(&output.stderr).lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let Some(code) = value
+                .get("code")
+                .and_then(|code| code.get("code"))
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            let level = value
+                .get("level")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            diagnostics.push((level.to_owned(), code.to_owned()));
+        }
+        (output.status.success(), diagnostics)
+    }
+
+    fn predict(resolution: Resolution) -> (bool, Vec<&'static str>, bool) {
+        if resolution.refused_downgrade {
+            return (false, Vec::new(), true);
+        }
+        match resolution.level {
+            Some("allow" | "expect") => (true, Vec::new(), false),
+            None | Some("warn") => (true, vec!["warning"], false),
+            Some("deny" | "forbid") => (false, vec!["error"], false),
+            other => panic!("the reader answered `{other:?}`, which nothing predicts"),
+        }
+    }
+
+    let scratch = scratch_dir("levels");
+    let table: &[(&str, &str)] = &[
+        ("bare", ""),
+        ("allow", "#![allow(clippy::disallowed_methods)]\n"),
+        ("warn", "#![warn(clippy::disallowed_methods)]\n"),
+        ("deny", "#![deny(clippy::disallowed_methods)]\n"),
+        ("forbid", "#![forbid(clippy::disallowed_methods)]\n"),
+        ("expect", "#![expect(clippy::disallowed_methods)]\n"),
+        (
+            "deny_then_allow",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "allow_then_deny",
+            "#![allow(clippy::disallowed_methods)]\n#![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "deny_then_warn",
+            "#![deny(clippy::disallowed_methods)]\n#![warn(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "deny_then_expect",
+            "#![deny(clippy::disallowed_methods)]\n#![expect(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "allow_warn_deny",
+            "#![allow(clippy::disallowed_methods)]\n#![warn(clippy::disallowed_methods)]\n\
+             #![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "allow_then_forbid",
+            "#![allow(clippy::disallowed_methods)]\n#![forbid(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "forbid_then_allow",
+            "#![forbid(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "forbid_then_warn",
+            "#![forbid(clippy::disallowed_methods)]\n#![warn(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "forbid_then_deny",
+            "#![forbid(clippy::disallowed_methods)]\n#![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "deny_then_allow_bare",
+            "#![deny(clippy::disallowed_methods)]\n#![allow(disallowed_methods)]\n",
+        ),
+        (
+            "prose_decoy",
+            "//! `#![allow(clippy::disallowed_methods)]` is written here in prose.\n\
+             #![deny(clippy::disallowed_methods)]\n",
+        ),
+        (
+            "attribute_after_the_prologue",
+            "#![deny(clippy::disallowed_methods)]\npub const S: &str = \
+             \"#![allow(clippy::disallowed_methods)]\";\n",
+        ),
+    ];
+
+    let mut observed_shapes: BTreeSet<(bool, Vec<String>, bool)> = BTreeSet::new();
+    for (tag, prologue) in table {
+        let source = format!("{prologue}{BODY}");
+        let resolution = file_level_lint_resolution(&source, LINT);
+        let (built, diagnostics) = compile(&scratch, tag, &source);
+        let fired: Vec<String> = diagnostics
+            .iter()
+            .filter(|(_, code)| code == LINT)
+            .map(|(level, _)| level.clone())
+            .collect();
+        let rejected = diagnostics.iter().any(|(_, code)| code == "E0453");
+        let (wants_build, wants_fired, wants_rejected) = predict(resolution);
+        assert_eq!(
+            (built, fired.clone(), rejected),
+            (
+                wants_build,
+                wants_fired
+                    .iter()
+                    .map(|level| (*level).to_owned())
+                    .collect(),
+                wants_rejected
+            ),
+            "`{tag}` — the reader answered {resolution:?} and clippy-driver did something else: \
+             built={built} fired={fired:?} E0453={rejected}; all diagnostics {diagnostics:?}"
+        );
+        observed_shapes.insert((built, fired, rejected));
+
+        assert_eq!(
+            file_level_lint_resolution(&source.replace('\n', "\r\n"), LINT),
+            resolution,
+            "`{tag}` reads differently under CRLF"
+        );
+    }
+
+    assert!(
+        observed_shapes.len() >= 4,
+        "the fixtures produced only {} distinct compiler outcomes: {observed_shapes:?}",
+        observed_shapes.len()
+    );
+
+    let deny_then_allow = format!(
+        "#![deny(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods)]\n{BODY}"
+    );
+    assert_eq!(
+        file_level_lint_resolution(&deny_then_allow, LINT),
+        Resolution {
+            level: Some("allow"),
+            refused_downgrade: false,
+        },
+        "deny then allow is effectively allow"
+    );
+    let forbid_then_allow = format!(
+        "#![forbid(clippy::disallowed_methods)]\n#![allow(clippy::disallowed_methods)]\n{BODY}"
+    );
+    assert_eq!(
+        file_level_lint_resolution(&forbid_then_allow, LINT),
+        Resolution {
+            level: Some("forbid"),
+            refused_downgrade: true,
+        },
+        "a forbid cannot be weakened; the attempt is E0453 and not a level"
+    );
+
+    let mut restated = Vec::new();
+    for (path, source) in scanned_sources() {
+        let blanked = blank_comments_and_strings(&source);
+        for lint in USED_GOVERNED_LINTS {
+            let bare = normalize_lint(lint).expect("a governed lint");
+            let stated = blanked
+                .split("#![")
+                .skip(1)
+                .filter(|attribute| {
+                    attribute
+                        .split(']')
+                        .next()
+                        .is_some_and(|body| body.contains(bare))
+                })
+                .count();
+            if stated > 1 {
+                restated.push(format!(
+                    "{path} states `{lint}` in {stated} inner attributes"
+                ));
+            }
+        }
+    }
+    assert!(
+        restated.is_empty(),
+        "the ordered reading is exercised by fixtures only while this holds: {restated:#?}"
+    );
+
+    let _ = fs::remove_dir_all(&scratch);
 }
 
 #[test]
 fn the_production_code_region_removes_a_configured_item_and_keeps_the_rest() {
     oracles::the_configured_item_is_removed_and_the_rest_kept();
+}
+
+#[test]
+fn the_production_code_region_excludes_typed_test_functions() {
+    oracles::typed_test_functions_are_removed_and_later_code_is_kept();
 }
 
 #[test]
@@ -2673,17 +3450,6 @@ fn the_production_code_region_contains_the_truncated_one() {
 fn every_production_region_that_stops_early_stops_at_a_module() {
     oracles::every_early_stop_is_at_a_module();
 }
-
-// ---------------------------------------------------------------------------
-// R3b: the enumerations the reconciliation promised and did not supply
-// ---------------------------------------------------------------------------
-
-// The three enumerations this section supplies -- the nine refusals with their
-// ordering predicates, the twelve ST-16 variants and the twelve clauses -- and
-// the body that holds them are in `contract_mappings::mappings` with the
-// T-CONTAINER transcription above. They are resolved by the same
-// `defining_test_sites` census and belong beside it; the name below is the
-// harness and delegates.
 
 #[test]
 fn every_pr6_refusal_st16_variant_and_invariant_clause_names_a_test_or_an_owner() {
