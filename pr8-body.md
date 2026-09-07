@@ -178,9 +178,15 @@ sixth rounds saw neither fingerprint: every full test run of both passed clean a
 attempt, so the sampler is counted against neither. The sightings in full, which the standing
 findings ask for before anything is called a flake, are `pr8-plan.md` §5.
 
+The run above is on a target directory private to this worktree, and every step's log names
+`Compiling`/`Checking upstroke v0.1.0 (/srv/worktrees/pr8)`. The box's shared slot pool gives two
+worktrees of this crate one artifact filename, and three runs late in the sixth round executed a
+sibling worktree's binary; nothing here is quoted from a run that does not name this worktree, and
+`pr8-triage.md` §9 records what those runs said.
+
 Two of the Docker-gated tests are the sixth round's and both **ran** here rather than skipping,
 against a live daemon (docker 29.7.2): the reviewer's local-CLI failure reproduced natively
-through the CLI's global TLS flags, and the listing the settlement observation reads, its state
+with the TLS environment set on the child process, and the listing the observation reads, its state
 vocabulary and its name collision measured on the daemon. Where no daemon answers they skip, as
 every `real_docker_*` test does, and the rules they measure are pinned on every platform by the
 unit tests beside them.
@@ -199,7 +205,7 @@ a pull-request description and the ledger below, which the policy gate greps fro
 body, cannot move. The sixth round moved two more passages the same way and for the same reason —
 the residue sampler's sightings in full, to `pr8-plan.md` §5, and the round-by-round review
 narrative for the first three rounds, to `pr8-triage.md` §§2–6 — each leaving its claim, its
-identifiers and a pointer here. The published body is 63416 characters, so a seventh round has
+identifiers and a pointer here. The published body is 63856 characters, so a seventh round has
 about two thousand to spend before it has to move something of its own. Nothing was dropped: the twenty-two obligations are real-repository CAS, orphan
 and third-SHA publication; fast with no staging; the three fast mismatches live and on replay; the
 stale path; the two-crash proof; completed publications resuming; the terminal-shape coverage
