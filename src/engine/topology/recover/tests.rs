@@ -265,6 +265,18 @@ impl Fixture {
         Self::build(tag, Damage::default())
     }
 
+    /// A healthy two-task run: what every stale-verification fixture needs,
+    /// since only a publication moves the integration head past the base.
+    fn two_tasks(tag: &str) -> Self {
+        Self::build(
+            tag,
+            Damage {
+                two_tasks: true,
+                ..Damage::default()
+            },
+        )
+    }
+
     fn public(&self) -> PathBuf {
         rundir::public_dir(&self.repo_root, RUN_ID)
     }
@@ -5744,13 +5756,13 @@ fn alpha_commit(fixture: &Fixture) -> (CommitSha, CommitSha) {
 /// The review passes ALPHA is frozen to require, as records that pass — read
 /// off the registry the current log folds to, exactly as a live candidate's
 /// would be.
-fn obliged_reviews(fixture: &Fixture) -> Vec<crate::events::ReviewRecord> {
+fn obliged_reviews_for(fixture: &Fixture, key: TaskKey) -> Vec<crate::events::ReviewRecord> {
     let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("the log parses");
     let fold = TopologyFold::replay(fixture.inputs(), &events).expect("the log replays");
     fold.registry()
         .expect("a registry")
-        .get(ALPHA)
-        .expect("alpha is registered")
+        .get(key)
+        .expect("the task is registered")
         .reviews
         .obliged_lenses()
         .into_iter()
@@ -5775,21 +5787,34 @@ fn alpha_candidate_prepared(
     tree: &CommitSha,
     names: &crate::engine::topology::candidate::CandidateNames,
 ) -> TopologyEventBody {
+    candidate_prepared_for(fixture, ALPHA, commit, tree, names, "candidate.txt")
+}
+
+/// The `candidate_prepared` of `key`'s generation 0 at `commit`/`tree`, whose
+/// attempt edited exactly `path` on the fixture base.
+fn candidate_prepared_for(
+    fixture: &Fixture,
+    key: TaskKey,
+    commit: &CommitSha,
+    tree: &CommitSha,
+    names: &crate::engine::topology::candidate::CandidateNames,
+    path: &str,
+) -> TopologyEventBody {
     let paths = PathSet::Prefixes {
-        paths: vec![GitPath("candidate.txt".to_owned())],
+        paths: vec![GitPath(path.to_owned())],
     };
     let mut attempt = attempt_record(1);
-    attempt.reviews = obliged_reviews(fixture);
+    attempt.reviews = obliged_reviews_for(fixture, key);
     TopologyEventBody::CandidatePrepared {
         data: Box::new(crate::topology::events::CandidatePrepared {
-            key: ALPHA,
+            key,
             generation: GEN,
             attempt: Box::new(attempt),
             base_sha: fixture.base_sha.clone(),
             parent_sha: fixture.base_sha.clone(),
             tree_sha: tree.clone(),
             commit_sha: commit.clone(),
-            message: "upstroke: alpha attempt 1".to_owned(),
+            message: format!("upstroke: task {} attempt 1", key.0),
             prepared_ref: names.prepared_ref.clone(),
             candidate_ref: names.candidate_ref.clone(),
             actual_paths: paths.clone(),
@@ -5803,6 +5828,20 @@ fn alpha_candidate_prepared(
 /// Plant a queued candidate for ALPHA on the base: its objects and refs, the
 /// integration ref at the base, and the log through `task_candidate_created`.
 fn plant_queued_candidate(fixture: &Fixture) -> PlantedTransaction {
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            fixture.base_sha.as_str(),
+        ],
+    );
+    plant_queued_candidate_events(fixture)
+}
+
+/// ALPHA's queued candidate on the base — its objects, refs and events —
+/// leaving the integration ref wherever it is.
+fn plant_queued_candidate_events(fixture: &Fixture) -> PlantedTransaction {
     use crate::workspace_manager::fixture::git;
     let (commit, tree) = alpha_commit(fixture);
     let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, ALPHA, GEN);
@@ -5813,14 +5852,6 @@ fn plant_queued_candidate(fixture: &Fixture) -> PlantedTransaction {
     git(
         &fixture.repo_root,
         &["update-ref", names.candidate_ref.as_str(), commit.as_str()],
-    );
-    git(
-        &fixture.repo_root,
-        &[
-            "update-ref",
-            fixture.started.integration_ref.as_str(),
-            fixture.base_sha.as_str(),
-        ],
     );
     let candidate = crate::topology::events::CandidateRef {
         key: ALPHA,
@@ -6216,102 +6247,53 @@ fn plant_snapshot(fixture: &Fixture, sequence: u64, commit: &str) -> PathBuf {
     snapshot.path().to_path_buf()
 }
 
-/// Plant an interrupted stale-clean verification: the candidate on the base,
-/// the integration head moved past it, the cherry-pick proposal pinned under
-/// `prepared/0`, the staging worktree at the proposal with its intent, and the
-/// log through `merge_verification_started` with no terminal — the state a
-/// crash mid-verify leaves.
+/// Plant an interrupted stale-clean verification: BETA published fast at
+/// sequence 0 (the only way the integration head moves), ALPHA's candidate on
+/// the base and therefore stale, its cherry-pick proposal pinned under
+/// `prepared/1`, the staging worktree at the proposal with its intent, and the
+/// log through `merge_verification_started` for sequence 1 with no terminal —
+/// the state a crash mid-verify leaves. Needs a two-task fixture.
 fn plant_stale_verification(
     fixture: &Fixture,
 ) -> (crate::topology::events::CandidateRef, CommitSha, GitRef) {
     use crate::workspace_manager::fixture::git;
-    let (candidate_commit, tree) = alpha_commit(fixture);
-    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, ALPHA, GEN);
-    git(
-        &fixture.repo_root,
-        &[
-            "update-ref",
-            names.prepared_ref.as_str(),
-            candidate_commit.as_str(),
-        ],
-    );
-    git(
-        &fixture.repo_root,
-        &[
-            "update-ref",
-            names.candidate_ref.as_str(),
-            candidate_commit.as_str(),
-        ],
-    );
+    let head = plant_published_beta(fixture);
+    let planted = plant_queued_candidate_events(fixture);
 
-    // The head moved on past the candidate's base, and the cherry-pick produced
-    // a proposal on that head.
-    let head = commit_on(
-        fixture,
-        fixture.base_sha.as_str(),
-        "other.txt",
-        "another task\n",
-        "upstroke: other",
-    );
+    // The cherry-pick produced a proposal on the moved head.
     let proposal = commit_on(
         fixture,
         head.as_str(),
         "candidate.txt",
         "the candidate edit\n",
-        "upstroke: proposal s0",
+        "upstroke: proposal s1",
     );
-    git(
-        &fixture.repo_root,
-        &[
-            "update-ref",
-            fixture.started.integration_ref.as_str(),
-            head.as_str(),
-        ],
-    );
-
     let pin = crate::engine::topology::integrate::prepared_pin_ref(
         RUN_ID,
-        crate::topology::events::SequenceId(0),
+        crate::topology::events::SequenceId(1),
     );
     git(
         &fixture.repo_root,
         &["update-ref", pin.as_str(), proposal.as_str()],
     );
-    plant_staging_worktree(fixture, 0, proposal.as_str());
+    plant_staging_worktree(fixture, 1, proposal.as_str());
 
-    let candidate = crate::topology::events::CandidateRef {
-        key: ALPHA,
-        generation: GEN,
-        commit_sha: candidate_commit.clone(),
-        candidate_ref: names.candidate_ref.clone(),
-    };
     append_events(
         fixture,
-        &[
-            dispatched_at(&fixture.base_sha),
-            attempt_started(1),
-            alpha_candidate_prepared(fixture, &candidate_commit, &tree, &names),
-            TopologyEventBody::TaskCandidateCreated {
-                data: crate::topology::events::TaskCandidateCreated {
-                    candidate: candidate.clone(),
+        &[TopologyEventBody::MergeVerificationStarted {
+            data: crate::topology::events::MergeVerificationStarted {
+                sequence: crate::topology::events::SequenceId(1),
+                candidate: planted.candidate.clone(),
+                basis: crate::topology::events::VerificationBasis::StaleClean {
+                    prepared_ref: pin.clone(),
                 },
+                expected_head: head.clone(),
+                proposed_sha: proposal.clone(),
             },
-            TopologyEventBody::MergeVerificationStarted {
-                data: crate::topology::events::MergeVerificationStarted {
-                    sequence: crate::topology::events::SequenceId(0),
-                    candidate: candidate.clone(),
-                    basis: crate::topology::events::VerificationBasis::StaleClean {
-                        prepared_ref: pin.clone(),
-                    },
-                    expected_head: head.clone(),
-                    proposed_sha: proposal.clone(),
-                },
-            },
-        ],
+        }],
     );
-    (candidate, head, pin)
+    (planted.candidate, head, pin)
 }
-
 fn interrupted_sequences(fixture: &Fixture) -> Vec<u32> {
     TopologyFold::parse_log(&fixture.log_bytes())
         .expect("the log parses")
@@ -6860,37 +6842,34 @@ fn a_resume_completes_a_prepared_transaction_whose_cas_already_ran_by_recording_
 
 #[test]
 fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue() {
-    let fixture = Fixture::healthy("finish-interrupt");
+    let fixture = Fixture::two_tasks("finish-interrupt");
     let (_candidate, head, pin) = plant_stale_verification(&fixture);
 
     assert!(
         ref_target(&fixture, pin.as_str()).is_some(),
-        "the fixture pinned the proposal under prepared/0"
+        "the fixture pinned the proposal under prepared/1"
     );
     assert!(
         fixture.manager().intents().expect("intents").contains(
             &crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(
-                0
+                1
             ))
         ),
         "the fixture left a staging intent"
     );
 
-    let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    outcome.expect("the resume settles the interrupted verification rather than refusing");
+    resume_with_real_refs(&fixture, &harness())
+        .expect("the resume settles the interrupted verification rather than refusing");
 
     assert_eq!(
         interrupted_sequences(&fixture),
-        vec![0],
+        vec![1],
         "recovery appended exactly one merge_verification_interrupted, for the open transaction"
     );
-    assert!(
-        merged_sequences(&fixture).is_empty(),
-        "an interrupted verification is not a publication: nothing merged"
+    assert_eq!(
+        merged_sequences(&fixture),
+        vec![0],
+        "an interrupted verification is not a publication: only BETA's sequence 0 merged"
     );
     assert_eq!(
         ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
@@ -6903,7 +6882,7 @@ fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue()
         "the proposal pin was pruned"
     );
     let staging =
-        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(0));
+        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(1));
     assert!(
         !fixture
             .manager()
@@ -6928,21 +6907,21 @@ fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue()
 
     // And it does: the next incarnation's loop takes the requeued candidate
     // through a fresh stale sequence — cherry-pick, pin, verification,
-    // publication — under sequence 1.
+    // publication — under sequence 2.
     let driven = drive(&fixture, &DriveSeams::default(), 1);
     assert!(
         matches!(
             driven.progress.first(),
             Some(Ok(Progress::Integrated {
                 key: ALPHA,
-                sequence: crate::topology::events::SequenceId(1),
+                sequence: crate::topology::events::SequenceId(2),
                 ..
             }))
         ),
         "the candidate re-verified and published under the next sequence: {:?}",
         driven.progress
     );
-    assert_eq!(merged_sequences(&fixture), vec![1]);
+    assert_eq!(merged_sequences(&fixture), vec![0, 2]);
     assert!(
         driven.invocations_balance && driven.entitlements_held == 0,
         "the re-verification's invocations settled and its holdings were released"
@@ -6955,12 +6934,12 @@ fn a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it() 
     // pin expected-old; reclaim snapshots". The gate snapshot a killed
     // verification left is reclaimed with force — and only after the
     // interrupted terminal is durable, the order the contract fixes.
-    let fixture = Fixture::healthy("interrupted-snapshot");
+    let fixture = Fixture::two_tasks("interrupted-snapshot");
     let (_candidate, _head, pin) = plant_stale_verification(&fixture);
     let proposed = ref_target(&fixture, pin.as_str()).expect("the recorded proposal");
-    let snapshot = plant_snapshot(&fixture, 0, &proposed);
+    let snapshot = plant_snapshot(&fixture, 1, &proposed);
     let slot = crate::workspace_manager::Slot::Snapshot {
-        name: crate::workspace_manager::SnapshotName::integration(0),
+        name: crate::workspace_manager::SnapshotName::integration(1),
     };
     assert!(
         fixture
@@ -6973,12 +6952,9 @@ fn a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it() 
     );
 
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    outcome.expect("the resume settles the interrupted verification");
-    assert_eq!(interrupted_sequences(&fixture), vec![0]);
+    resume_with_real_refs(&fixture, &harness)
+        .expect("the resume settles the interrupted verification");
+    assert_eq!(interrupted_sequences(&fixture), vec![1]);
     assert!(
         !fixture
             .manager()
@@ -7117,7 +7093,7 @@ fn a_resume_refuses_a_substituted_verification_pin_before_settling_it() {
     // nothing moved it since the read; authority comes from the record, and
     // the record disagrees, so recovery refuses — before the interrupted
     // terminal, and without touching the ref.
-    let fixture = Fixture::healthy("substituted-pin");
+    let fixture = Fixture::two_tasks("substituted-pin");
     let (_candidate, _head, pin) = plant_stale_verification(&fixture);
     crate::workspace_manager::fixture::git(
         &fixture.repo_root,
@@ -7147,7 +7123,7 @@ fn a_resume_refuses_a_substituted_verification_pin_before_settling_it() {
     assert!(
         fixture.manager().intents().expect("intents").contains(
             &crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(
-                0
+                1
             ))
         ),
         "the open transaction's staging is resumably open and untouched"
@@ -7164,7 +7140,7 @@ fn stale_clean_prepared(
 ) -> TopologyEventBody {
     TopologyEventBody::MergePrepared {
         data: Box::new(crate::topology::events::MergePrepared {
-            sequence: crate::topology::events::SequenceId(0),
+            sequence: crate::topology::events::SequenceId(1),
             disposition: crate::topology::events::PreparedDisposition::StaleClean,
             expected_head: head.clone(),
             proposed_sha: proposal.clone(),
@@ -7174,7 +7150,7 @@ fn stale_clean_prepared(
             candidate_ref: candidate.candidate_ref.clone(),
             prepared_ref: Some(pin.clone()),
             verification_source: crate::topology::events::VerificationSource::Verification {
-                sequence: crate::topology::events::SequenceId(0),
+                sequence: crate::topology::events::SequenceId(1),
             },
             verification: Some(passed_verification()),
             satisfies: vec![ALPHA],
@@ -7197,7 +7173,7 @@ fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {
     // moved to a third SHA. Publication refuses, the transaction stays open,
     // and its pin — a resumably open resource the cleanup rule forbids
     // touching — is still there for the resume that will complete it.
-    let fixture = Fixture::healthy("prepared-pin-kept");
+    let fixture = Fixture::two_tasks("prepared-pin-kept");
     let (candidate, head, pin) = plant_stale_verification(&fixture);
     let proposal = CommitSha(ref_target(&fixture, pin.as_str()).expect("the pinned proposal"));
     append_events(
@@ -7205,7 +7181,7 @@ fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {
         &[stale_clean_prepared(&candidate, &head, &proposal, &pin)],
     );
     let staging =
-        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(0));
+        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(1));
 
     // What the resume will read back is exactly what the live sequence
     // authorized: a stale-clean publication with its pin and its staging.
@@ -7218,7 +7194,7 @@ fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {
         assert_eq!(
             recovered,
             crate::engine::topology::integrate::Authorized {
-                sequence: crate::topology::events::SequenceId(0),
+                sequence: crate::topology::events::SequenceId(1),
                 key: ALPHA,
                 expected_head: head.clone(),
                 proposed_sha: proposal.clone(),
@@ -7263,7 +7239,7 @@ fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {
             && fixture.manager().slot_path(&staging).exists(),
         "the still-open transaction kept its staging worktree"
     );
-    assert!(merged_sequences(&fixture).is_empty());
+    assert_eq!(merged_sequences(&fixture), vec![0]);
 }
 
 #[test]
@@ -7272,7 +7248,7 @@ fn a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses
     // resolved sequence. It is pruned expected-old at the proposal the
     // verification recorded, and at any other SHA it refuses and stays.
     for substituted in [false, true] {
-        let fixture = Fixture::healthy(if substituted {
+        let fixture = Fixture::two_tasks(if substituted {
             "resolved-pin-substituted"
         } else {
             "resolved-pin-pruned"
@@ -7285,7 +7261,7 @@ fn a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses
                 stale_clean_prepared(&candidate, &head, &proposal, &pin),
                 TopologyEventBody::TaskMerged {
                     data: crate::topology::events::TaskMerged {
-                        sequence: crate::topology::events::SequenceId(0),
+                        sequence: crate::topology::events::SequenceId(1),
                         merged_sha: proposal.clone(),
                         satisfies: vec![ALPHA],
                         lease_release: crate::topology::events::MergeLeaseRelease::Candidate {
@@ -7331,7 +7307,7 @@ fn a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses
                 "the pin of a published sequence was pruned"
             );
         }
-        assert_eq!(merged_sequences(&fixture), vec![0]);
+        assert_eq!(merged_sequences(&fixture), vec![0, 1]);
     }
 }
 
@@ -7568,11 +7544,8 @@ fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
     use crate::engine::topology::run::{RunSeams, TopologyRun};
 
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(fixture, &runtime, &certifies);
-    let (outcome, _) = resume_holding(fixture, &harness, &given);
-    let (_, handle) = outcome.expect("the resume settles the planted state");
+    let (_, handle) =
+        resume_with_real_refs(fixture, &harness).expect("the resume settles the planted state");
     let mut run = TopologyRun::resumed(
         handle,
         fixture.inputs(),
@@ -7674,6 +7647,7 @@ fn an_integration_review_is_selected_against_the_candidates_recorded_implementer
     let fixture = Fixture::build(
         "recorded-implementer",
         Damage {
+            two_tasks: true,
             two_tier: true,
             alternative_reviewer: true,
             ..Damage::default()
@@ -7721,7 +7695,7 @@ fn a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers
     // {Infrastructure, Deferred} inside the frozen allowance and Parked at it;
     // `invariants[INV-23]`: a Runner that cannot run the process is a
     // RunnerSpawnFailure outage. The fixture allows three deferrals.
-    let fixture = Fixture::healthy("gate-spawn-outage");
+    let fixture = Fixture::two_tasks("gate-spawn-outage");
     plant_stale_verification(&fixture);
     let driven = drive(
         &fixture,
@@ -7747,11 +7721,11 @@ fn a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers
     assert_eq!(
         shapes,
         vec![
-            "unavailable(s1, parked=false)",
-            "waited",
             "unavailable(s2, parked=false)",
             "waited",
-            "unavailable(s3, parked=true)",
+            "unavailable(s3, parked=false)",
+            "waited",
+            "unavailable(s4, parked=true)",
         ],
         "each outage deferred inside the allowance and the third parked at it"
     );
@@ -7812,7 +7786,7 @@ fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {
     // R4: a review input that cannot be judged is HumanRequired, not a code
     // rejection and not a publication. The review-input policy refuses the
     // proposed tree before any reviewer runs.
-    let fixture = Fixture::healthy("input-rejected");
+    let fixture = Fixture::two_tasks("input-rejected");
     plant_stale_verification(&fixture);
     let driven = drive(
         &fixture,
@@ -7843,14 +7817,14 @@ fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {
         driven.reviewer_models.is_empty(),
         "no reviewer was invoked on an input the policy refused"
     );
-    assert!(merged_sequences(&fixture).is_empty());
+    assert_eq!(merged_sequences(&fixture), vec![0], "only BETA merged");
 }
 
 #[test]
 fn an_integration_reviews_cost_reaches_the_run_spend() {
     // The ceiling is checked against `Spend`, so a review an integration ran
     // must be charged there, live and on replay of the terminal's record.
-    let fixture = Fixture::healthy("integration-spend");
+    let fixture = Fixture::two_tasks("integration-spend");
     plant_stale_verification(&fixture);
     let driven = drive(
         &fixture,
@@ -7888,13 +7862,13 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
     // step integrates it — and refuses an answer to a repair-admission
     // question before any append, which is PR9's.
     let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);
-    let fixture = Fixture::healthy("park-answered");
+    let fixture = Fixture::two_tasks("park-answered");
     plant_stale_verification(&fixture);
     append_events(
         &fixture,
         &[TopologyEventBody::MergeVerificationUnavailable {
             data: crate::topology::events::MergeVerificationUnavailable {
-                sequence: crate::topology::events::SequenceId(0),
+                sequence: crate::topology::events::SequenceId(1),
                 cause: crate::topology::events::UnavailableCause::HumanRequired {
                     verdict: "a person must decide this integration".to_owned(),
                 },
@@ -7937,7 +7911,7 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
             driven.progress.get(1),
             Some(Ok(Progress::Integrated {
                 key: ALPHA,
-                sequence: crate::topology::events::SequenceId(1),
+                sequence: crate::topology::events::SequenceId(2),
                 ..
             }))
         ),
@@ -7948,6 +7922,7 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
     let fixture = Fixture::build(
         "repair-admission-answer",
         Damage {
+            two_tasks: true,
             no_automatic_repairs: true,
             ..Damage::default()
         },
@@ -7961,7 +7936,7 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
             &FixedIds,
             &candidate,
             head,
-            crate::topology::events::SequenceId(0),
+            crate::topology::events::SequenceId(1),
             crate::topology::events::RejectionDisposition::CodeRejected {
                 verification: crate::engine::topology::repair::code_rejection_record(
                     true,
@@ -8023,6 +7998,422 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
             .iter()
             .all(|event| !matches!(event.body, TopologyEventBody::QuestionAnswered { .. })),
         "nothing was appended for the refused answer"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T-PROPOSAL (a'): the cherry-pick residue class, recovered through the
+// resume — `C.proof_tests[2]` and `[T-PROPOSAL].test`.
+// ---------------------------------------------------------------------------
+
+const BETA: TaskKey = TaskKey(1);
+
+/// Publish BETA's candidate fast at sequence 0 — the candidate on the base,
+/// `merge_prepared(fast)`, the ref moved, `task_merged` — so the head has
+/// legitimately moved past the base. Needs a two-task fixture.
+fn plant_published_beta(fixture: &Fixture) -> CommitSha {
+    use crate::workspace_manager::fixture::git;
+    let commit = commit_on(
+        fixture,
+        fixture.base_sha.as_str(),
+        "other.txt",
+        "another task\n",
+        "upstroke: task 1 attempt 1",
+    );
+    let tree = CommitSha(git(
+        &fixture.repo_root,
+        &["rev-parse", &format!("{commit}^{{tree}}")],
+    ));
+    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, BETA, GEN);
+    for refname in [&names.prepared_ref, &names.candidate_ref] {
+        git(
+            &fixture.repo_root,
+            &["update-ref", refname.as_str(), commit.as_str()],
+        );
+    }
+    let candidate = crate::topology::events::CandidateRef {
+        key: BETA,
+        generation: GEN,
+        commit_sha: commit.clone(),
+        candidate_ref: names.candidate_ref.clone(),
+    };
+    append_events(
+        fixture,
+        &[
+            for_task(BETA, "beta", dispatched_at(&fixture.base_sha)),
+            for_task(BETA, "beta", attempt_started(1)),
+            candidate_prepared_for(fixture, BETA, &commit, &tree, &names, "other.txt"),
+            TopologyEventBody::TaskCandidateCreated {
+                data: crate::topology::events::TaskCandidateCreated {
+                    candidate: candidate.clone(),
+                },
+            },
+            TopologyEventBody::MergePrepared {
+                data: Box::new(crate::topology::events::MergePrepared {
+                    sequence: crate::topology::events::SequenceId(0),
+                    disposition: crate::topology::events::PreparedDisposition::Fast,
+                    expected_head: fixture.base_sha.clone(),
+                    proposed_sha: commit.clone(),
+                    key: BETA,
+                    generation: GEN,
+                    candidate_sha: commit.clone(),
+                    candidate_ref: names.candidate_ref.clone(),
+                    prepared_ref: None,
+                    verification_source:
+                        crate::topology::events::VerificationSource::CandidatePrepared {
+                            key: BETA,
+                            generation: GEN,
+                        },
+                    verification: None,
+                    satisfies: vec![BETA],
+                }),
+            },
+            TopologyEventBody::TaskMerged {
+                data: crate::topology::events::TaskMerged {
+                    sequence: crate::topology::events::SequenceId(0),
+                    merged_sha: commit.clone(),
+                    satisfies: vec![BETA],
+                    lease_release: crate::topology::events::MergeLeaseRelease::Candidate {
+                        key: BETA,
+                        generation: GEN,
+                    },
+                },
+            },
+        ],
+    );
+    git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            commit.as_str(),
+        ],
+    );
+    commit
+}
+
+/// A queued candidate whose base the integration head has legitimately moved
+/// past — BETA published at sequence 0 — so ALPHA's integration takes the
+/// staging path under sequence 1: returns the planted candidate and the head.
+fn plant_stale_queued_candidate(fixture: &Fixture) -> (PlantedTransaction, CommitSha) {
+    let head = plant_published_beta(fixture);
+    let planted = plant_queued_candidate_events(fixture);
+    (planted, head)
+}
+
+/// The per-worktree git dir of a linked worktree, where its administrative
+/// residue lives.
+fn worktree_git_dir(worktree: &Path) -> PathBuf {
+    PathBuf::from(crate::workspace_manager::fixture::git(
+        worktree,
+        &["rev-parse", "--absolute-git-dir"],
+    ))
+}
+
+/// After the residue is gone: the staging slot and every prepared pin, and
+/// the candidate still queued for the next incarnation.
+fn assert_staging_residue_reclaimed(fixture: &Fixture, staging: &Path, handle: &RunHandle) {
+    assert!(
+        !staging.exists(),
+        "the staging worktree was removed with force"
+    );
+    assert!(
+        fixture.manager().intents().expect("intents").is_empty(),
+        "the staging intent was reclaimed"
+    );
+    assert!(
+        fixture
+            .manager()
+            .refs_under(&format!(
+                "{}/{RUN_ID}/prepared/",
+                crate::engine::topology::candidate::RUN_REF_ROOT
+            ))
+            .expect("refs")
+            .is_empty(),
+        "no pin was created for a sequence that never started"
+    );
+    assert!(handle.fold.transaction().is_none());
+    assert_eq!(
+        handle.fold.task_state(ALPHA),
+        Some(TaskState::AwaitingMerge),
+        "the candidate is still queued: nothing was recorded for the interrupted pick"
+    );
+    assert!(
+        merged_sequences(fixture) == vec![0] && interrupted_sequences(fixture).is_empty(),
+        "only BETA's publication is recorded"
+    );
+}
+
+#[test]
+fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()
+ {
+    // The Internal residue class of Object.ProposalCherryPick, constructed by
+    // hand: objects the pick wrote that nothing references, and CHERRY_PICK_HEAD,
+    // MERGE_MSG, index.lock and sequencer state in the staging git dir. The
+    // resume reclaims the staging worktree with force — administrative
+    // residue and all — leaves the objects to Git, and the next incarnation
+    // integrates the candidate under the very sequence the residue held.
+    let fixture = Fixture::build(
+        "synthetic-residue",
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (planted, head) = plant_stale_queued_candidate(&fixture);
+    let staging = plant_staging_worktree(&fixture, 1, head.as_str());
+    let git_dir = worktree_git_dir(&staging);
+
+    // Objects written and never published: a blob and a commit no ref names.
+    let orphan_file = fixture.root.join("orphan-bytes");
+    crate::workspace_manager::fixture::write_file(&orphan_file, b"orphaned by a killed pick\n");
+    let blob = crate::workspace_manager::fixture::git(
+        &staging,
+        &[
+            "hash-object",
+            "-w",
+            orphan_file.to_str().expect("utf-8 scratch path"),
+        ],
+    );
+    let tree = crate::workspace_manager::fixture::git(&staging, &["rev-parse", "HEAD^{tree}"]);
+    let dangling = crate::workspace_manager::fixture::git(
+        &staging,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            head.as_str(),
+            "-m",
+            "upstroke: a proposal the pick never published",
+        ],
+    );
+    for (name, content) in [
+        ("CHERRY_PICK_HEAD", format!("{}\n", planted.commit)),
+        ("MERGE_MSG", "upstroke: alpha attempt 1\n".to_owned()),
+        ("index.lock", String::new()),
+        ("sequencer/todo", format!("pick {} alpha\n", planted.commit)),
+    ] {
+        crate::workspace_manager::fixture::write_file(&git_dir.join(name), content.as_bytes());
+    }
+
+    // The workspace manager's classifier reads it as the site's Internal class
+    // and names what was planted.
+    let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
+    let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
+        .at(&staging)
+        .from_base(head.as_str());
+    assert_eq!(
+        crate::workspace_manager::classify_object_residue(site, &target).expect("classified"),
+        crate::topology::effects::ObjectResidue::Internal
+    );
+    let elements = crate::workspace_manager::observed_residue_elements(site, &target)
+        .expect("the elements are observable");
+    for element in [
+        crate::topology::effects::ResidueElement::CherryPickHead,
+        crate::topology::effects::ResidueElement::MergeMsg,
+        crate::topology::effects::ResidueElement::IndexLock,
+        crate::topology::effects::ResidueElement::SequencerState,
+    ] {
+        assert!(
+            elements.contains(&element),
+            "{element:?} was planted and not observed: {elements:?}"
+        );
+    }
+
+    let (_, handle) = resume_with_real_refs(&fixture, &harness())
+        .expect("the resume reclaims the residue rather than refusing");
+    assert_staging_residue_reclaimed(&fixture, &staging, &handle);
+    drop(handle);
+    for object in [&blob, &dangling] {
+        assert!(
+            crate::workspace_manager::fixture::git_out(
+                &fixture.repo_root,
+                &["cat-file", "-e", object]
+            )
+            .status
+            .success(),
+            "an object the pick wrote is Git's once unreferenced, never deleted by recovery"
+        );
+    }
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated {
+                key: ALPHA,
+                sequence: crate::topology::events::SequenceId(1),
+                ..
+            }))
+        ),
+        "the candidate integrates under the sequence the residue held: {:?}",
+        driven.progress
+    );
+    let published =
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).expect("the ref moved");
+    assert_eq!(
+        crate::workspace_manager::fixture::git(
+            &fixture.repo_root,
+            &["rev-parse", &format!("{published}^")]
+        ),
+        head.0,
+        "the fresh pick's proposal sits on the moved head, not on the residue"
+    );
+}
+
+#[test]
+fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
+    // Object.ProposalCherryPick's frozen sampling N (effects/residue-classes.json).
+    const SAMPLING_N: u32 = 8;
+    let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
+
+    // How long the same pick takes when nothing kills it, measured in a probe
+    // fixture of its own; the kill ladder is fractions of it.
+    let two_tasks = || Damage {
+        two_tasks: true,
+        ..Damage::default()
+    };
+    let budget = {
+        let probe = Fixture::build("sample-probe", two_tasks());
+        let (planted, head) = plant_stale_queued_candidate(&probe);
+        let staging = plant_staging_worktree(&probe, 1, head.as_str());
+        let started = std::time::Instant::now();
+        let output = crate::workspace_manager::fixture::git_out(
+            &staging,
+            &["cherry-pick", planted.commit.as_str()],
+        );
+        assert!(
+            output.status.success(),
+            "the probe pick must really run: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        started.elapsed().max(Duration::from_micros(200))
+    };
+
+    let mut observed = Vec::new();
+    let mut refusals = Vec::new();
+    for run in 0..SAMPLING_N {
+        let fixture = Fixture::build(&format!("sample-{run}"), two_tasks());
+        let (planted, head) = plant_stale_queued_candidate(&fixture);
+        let staging = plant_staging_worktree(&fixture, 1, head.as_str());
+
+        // The real child, killed at an uncontrolled point of the ladder.
+        let mut child = crate::workspace_manager::fixture::KillableGitChild::spawn(
+            &staging,
+            &["cherry-pick".to_owned(), planted.commit.0.clone()],
+        );
+        std::thread::sleep(budget.mul_f64(f64::from(run + 1) / f64::from(SAMPLING_N + 1)));
+        child.kill();
+        let status = child.wait();
+
+        let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
+            .at(&staging)
+            .from_base(head.as_str());
+        match crate::workspace_manager::classify_object_residue(site, &target) {
+            Ok(class) => observed.push((class, status)),
+            Err(error) => refusals.push(format!("run {run}: {error}")),
+        }
+
+        // Whatever the sample left, the resume reclaims it and the candidate
+        // integrates under a fresh pick.
+        let (_, handle) = resume_with_real_refs(&fixture, &harness())
+            .unwrap_or_else(|error| panic!("run {run}: the resume did not converge: {error}"));
+        assert_staging_residue_reclaimed(&fixture, &staging, &handle);
+        drop(handle);
+        let driven = drive(&fixture, &DriveSeams::default(), 1);
+        assert!(
+            matches!(
+                driven.progress.first(),
+                Some(Ok(Progress::Integrated {
+                    key: ALPHA,
+                    sequence: crate::topology::events::SequenceId(1),
+                    ..
+                }))
+            ),
+            "run {run}: the candidate integrates after the reclaim under sequence 1: {:?}",
+            driven.progress
+        );
+    }
+
+    assert!(
+        refusals.is_empty(),
+        "the classifier refused {} of {SAMPLING_N} samples: {refusals:?}",
+        refusals.len()
+    );
+    assert_eq!(observed.len(), SAMPLING_N as usize);
+    let counted = |wanted: crate::topology::effects::ObjectResidue| {
+        observed
+            .iter()
+            .filter(|(class, _)| *class == wanted)
+            .count()
+    };
+    println!(
+        "integration residue sampling {site}: n={SAMPLING_N} budget={}us none={} internal={} after={} killed={}",
+        budget.as_micros(),
+        counted(crate::topology::effects::ObjectResidue::None),
+        counted(crate::topology::effects::ObjectResidue::Internal),
+        counted(crate::topology::effects::ObjectResidue::After),
+        observed
+            .iter()
+            .filter(|(_, status)| crate::workspace_manager::fixture::died_by_kill(status))
+            .count()
+    );
+}
+
+#[test]
+fn a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed() {
+    // PR8-CRASH-002 (deferred): a coordinator killed inside `git update-ref`
+    // leaves `<ref>.lock`, and the frozen effect inventory registers no
+    // residue class for any Ref site, so no recovery step may reclaim it.
+    // What holds today, pinned here: the authorized publication is retried,
+    // Git refuses on the lock, the refusal is resumable — the ref unchanged,
+    // merge_prepared durable, nothing appended — and once an operator removes
+    // the lock the next resume completes the publication.
+    let fixture = Fixture::healthy("cas-lock");
+    let planted = plant_prepared_fast(&fixture);
+    let lock = fixture
+        .git_dir
+        .join(fixture.started.integration_ref.as_str())
+        .with_extension("lock");
+    crate::workspace_manager::fixture::write_file(&lock, b"");
+    let before = fixture.log_bytes();
+
+    let locked = harness();
+    let text = message(
+        &resume_with_real_refs(&fixture, &locked)
+            .expect_err("Git refuses the swap while the lock file exists"),
+    );
+    assert!(
+        text.contains("integration.lock"),
+        "the refusal names the lock Git could not take: {text}"
+    );
+    assert_eq!(
+        cas_integration_entries(&locked),
+        1,
+        "the swap was attempted once, as T-FAST's resume action asks"
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(fixture.base_sha.as_str()),
+        "the ref is unchanged"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        before,
+        "nothing was appended: resumable"
+    );
+    assert!(
+        lock.exists(),
+        "recovery deleted a lock file no residue class authorizes it to"
+    );
+
+    std::fs::remove_file(&lock).expect("the operator removes the lock");
+    resume_with_real_refs(&fixture, &harness())
+        .expect("with the lock gone the authorized publication completes");
+    assert_eq!(merged_sequences(&fixture), vec![0]);
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str())
     );
 }
 

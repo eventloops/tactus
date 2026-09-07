@@ -115,15 +115,20 @@ it is a separate clause:
 * **After (c).** The repository is touched only once the recorded Runner has
   been rebuilt by inspection and its probes have answered, so a resume that
   cannot run at all leaves the object store exactly as it found it.
-* **Skipped under an open transaction.** This is the bound that is not
-  merely tidy. A run with an integration transaction is past P8: the
-  integration ref is the transaction's to move, and [`finish_integration`]
-  at step (f) moves it. The ref of such a run can still be *at* the recorded
-  base — the CAS has not run yet — and "present == base continue" would then
-  adopt, expected-old, a ref that `finish_integration` is about to compare
-  against and swap. That is the case the step's own refusals do not catch, so
-  the recovery skips the step when `fold.transaction()` is `Some`, and
-  `finish_integration` is the single writer of the ref.
+* **Skipped under a prepared publication.** This is the bound that is not
+  merely tidy. A run whose transaction has reached `merge_prepared` owns its
+  ref: `finish_integration` at step (f) compares it against the authorization
+  and swaps it, and the ref of such a run can still be *at* the recorded base
+  — the CAS has not run yet — so "present == base continue" would adopt,
+  expected-old, a ref that `finish_integration` is about to compare against
+  and swap. The recovery therefore skips the step exactly when the open
+  transaction is `Prepared`, and `finish_integration` is the single writer of
+  the ref. Under a *verifying* transaction the step runs: an interrupted
+  settlement moves no ref, so a ref that is neither at the base nor at the
+  last publication is foreign state (`[T-RESUME].refusal_condition`) whatever
+  the verification recorded, and refusing it here is refusing before any
+  append. The reviews of `3414dc58` had it skipped under any transaction
+  (`pr8-triage.md` R23).
 * **Before (d).** The step can refuse: a ref at another SHA, a symbolic ref,
   a ref checked out in a worktree. A refusal after `attempt_interrupted`,
   `generation_closed` and `run_resumed` is a resume half-performed — the
@@ -1269,11 +1274,12 @@ row.
 
 ## `ensure_recorded_integration_ref(&certified, seams.refs, hooks)?;`
 
-T-RUNSTART's P7/P8 repair, after (f) and before the first append. The
-module comment argues each bound; the one that is not merely tidy is (f),
-because a prefix with an unresolved integration transaction can have its
-ref still sitting at the recorded base, and "present == base continue"
-would adopt it under a transaction this build cannot resolve.
+T-RUNSTART's P7/P8 repair for a run that has not published, the
+published-run check for one that has, before the first append. The module
+comment argues each bound; the one that is not merely tidy is the prepared
+publication, whose ref is still at the recorded base until `finish_integration`
+swaps it — "present == base continue" would adopt it under that transaction,
+so the step is skipped for a `Prepared` transaction and for no other.
 
 ## `let mut reservations = Reservations::new();`
 

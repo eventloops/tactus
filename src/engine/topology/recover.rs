@@ -948,7 +948,18 @@ pub fn run_recovery_order(
     let mut certified = PreflightCertified::certify(rebuilt, seams.preflight)?;
     steps.push(RecoveryStep::C);
 
-    let had_transaction = fold_of(&certified).transaction().is_some();
+    // A `Prepared` transaction owns the ref: `finish_integration` compares it
+    // against the authorization and swaps it, so the startup check would only
+    // adopt what that step is about to move. Under any other prefix — no
+    // transaction, or a verification whose interrupted settlement moves no
+    // ref — the check runs: `[T-RESUME].refusal_condition`, "foreign
+    // integration state".
+    let publication_pending = matches!(
+        fold_of(&certified)
+            .transaction()
+            .map(|transaction| &transaction.class),
+        Some(crate::topology::fold::TransactionClass::Prepared { .. })
+    );
 
     let mut reservations = Reservations::new();
     let mut invocations = InvocationLedger::new();
@@ -996,11 +1007,11 @@ pub fn run_recovery_order(
             .refuse_unexpected_refs(&namespace, &expected)?;
     }
 
-    // The P7/P8 integration-ref repair is for a run killed at run-start. A run
-    // with an integration transaction is past P8 and the ref is the
-    // transaction's to move, so the repair is skipped and `finish_integration`
-    // owns the ref.
-    if !had_transaction {
+    // The P7/P8 integration-ref repair is for a run killed at run-start, and
+    // the published-run check for every later one. A run with a prepared
+    // publication is past both: the ref is the transaction's to move, so the
+    // step is skipped and `finish_integration` owns the ref.
+    if !publication_pending {
         ensure_recorded_integration_ref(&certified, seams.refs, context.hooks)?;
     }
 
