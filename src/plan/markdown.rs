@@ -321,20 +321,39 @@ mod tests {
     }
 
     #[test]
-    fn checklist_item_drops_an_ordinary_author_comment() {
-        let raw = "\
+    fn an_author_comment_stays_in_a_section_body_and_vanishes_from_a_checklist_item() {
+        // A section task's body is the original slice minus the cut annotation
+        // spans. An author's comment is never one of those spans, so the same
+        // comment that a checklist item drops survives here byte for byte.
+        let section_raw = "\
+## Design the widget API
+
+Pick the rollback shape. <!-- keep rollback enabled -->
+";
+        let section = parse(section_raw).plan;
+        let kept = section.tasks.first().expect("one section task");
+        assert_eq!(kept.title, "Design the widget API");
+        assert_eq!(
+            kept.body,
+            "Pick the rollback shape. <!-- keep rollback enabled -->"
+        );
+
+        // `checklist_drafts` copies only `Text` and `Code` events into a
+        // checklist item's title or body, and an author's comment arrives as
+        // `Html`/`InlineHtml`, so it reaches neither field: the task keeps the
+        // title without it and has no body at all.
+        let checklist_raw = "\
 # Checklist plan
 
 - [ ] Design the widget API <!-- keep rollback enabled -->
 - [x] Implement the widget store
 ";
-        let parsed = parse(raw);
-        let tasks = &parsed.plan.tasks;
-        assert_eq!(
-            tasks[0].title, "Design the widget API",
-            "unlike a section body, a checklist item drops an ordinary author \
-             comment rather than keeping it"
-        );
+        let checklist = parse(checklist_raw).plan;
+        let tasks = &checklist.tasks;
+        assert_eq!(tasks.len(), 2, "{tasks:?}");
+        let dropped = tasks.first().expect("one checklist task");
+        assert_eq!(dropped.title, "Design the widget API");
+        assert_eq!(dropped.body, "", "{dropped:?}");
     }
 
     #[test]

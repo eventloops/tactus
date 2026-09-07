@@ -54,6 +54,13 @@ every refusal says what the task gets instead:
 | `min=wat` | unknown min tier; **no floor** | routing's own choice; no valid floor was supplied |
 | `kind=fix kind=docs` | repeated; the last applies | the last value, parseable or not; the earlier one is not parsed |
 
+Both halves of the first row are pinned together by
+`plan::markdown::tests::an_author_comment_stays_in_a_section_body_and_vanishes_from_a_checklist_item`,
+which sends one author comment down both paths and asserts that the section
+task keeps it in its body while the checklist task has it in neither its title
+nor its body. Either half drifting fails that test rather than leaving this
+row quietly wrong.
+
 A value's warning is about the value that applies: `min=wat min=frontier`
 warns that `min` is repeated and binds `frontier`, and never says no floor
 binds. A successful parse returns warnings in `Parsed::warnings`.
