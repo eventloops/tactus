@@ -75,7 +75,8 @@ Verification defers per candidate — the fixture's `max_defers`.
 
 ## `pub struct CensusBounds` › `pub questions: u32,`
 
-Open questions.
+Open questions held at once — the simultaneity bound, not the number
+of question identities the fixture constructs.
 
 ## `pub struct CensusBounds` › `pub resumes: u32,`
 
@@ -512,8 +513,16 @@ Parameters range over the bounded identities exactly as
 `event_payload_classes` asks: both tasks, both generations, both
 attempts, the settlement transitions, the three publication
 dispositions each in a matching and a mismatching shape, the budget
-stop, the backoff wake, and `run_finished` for each of the four
-outcomes.
+stop, the backoff wake, a `question_raised` on each task, and
+`run_finished` for each of the four outcomes.
+
+The `question_raised` class carries its own weight rather than
+duplicating the parked settlement. `SettlementTransition::Parked` is
+the only other way this fixture opens a question, and it puts a task
+straight into `AwaitingInput` without ever visiting `Deferred`. A
+question raised on a task that is *already* deferred is the one
+sequence in which §26's rule bites — the backoff outlives the state
+change — and without this class the census never reaches it.
 
 ## `fn classes(fold: &TopologyFold) -> Vec<Candidate>` › `out.push(Candidate::new(`
 
@@ -552,8 +561,18 @@ RetainedIdle} and no unresolved integration transaction.
 
 ## `mod tests` › `fn backoff_pending(fold: &TopologyFold) -> bool {`
 
-`backoff_pending`: any task Deferred or any candidate
-verification-deferred.
+`backoff_pending`: any task the fold still holds a deferred-task record
+for, or any candidate verification-deferred.
+
+The first half reads that record rather than `task_state == Deferred`,
+because §26 keeps a task's backoff pending beneath a question:
+`set_state`'s `AwaitingInput` arm deliberately leaves the record alone,
+so a question raised on a deferred task moves it out of `Deferred`
+without ending its backoff. A mirror reading the state would say "not
+backing off" where the code says "backing off", and would agree with a
+mutant that deleted the real check. Nothing was miscomputed while it
+did — that state falls into the `NotEnding` no-op arm — but an oracle
+that agrees with a mutant is not evidence.
 
 ## `mod tests` › `fn questions_open(fold: &TopologyFold) -> bool {`
 
@@ -569,6 +588,16 @@ The Complete arm's own condition, read off the durable state.
 transitive dependency closure". The fixture plan has no dependencies,
 so no Pending task is ever derived-Blocked and the arm reduces to
 Merged-or-Failed here. PR10's fixtures carry the dependency shapes.
+
+## `mod tests` › `fn deferred_before_its_question(trace: &[TopologyEvent], key: TaskKey) -> bool {`
+
+Whether the accepted trace deferred `key` and only then raised a
+question on it, read off the events rather than off the fold.
+
+The fold records that a task is `AwaitingInput` with its backoff still
+pending; it does not record how it got there. This says which order the
+two happened in, so the witness below cannot be satisfied by a state
+that reached the same shape another way.
 
 ## `fn the_derived_outcome_is_total_over_every_explored_state()` › `let census = census();`
 
@@ -605,6 +634,24 @@ packet's precedence chain rather than by the function under test.
 
 The necessary conditions of the two arms the oracle above does
 not compute forwards, asserted backwards.
+
+## `fn the_derived_outcome_is_total_over_every_explored_state()` › `let deferred_then_awaiting_input = census.states().iter().any(|state| {`
+
+The mirror and the code are compared at every state above, which is
+worth nothing unless the exploration reaches the one state where they
+could disagree. This names that state, and names it on **one** task:
+the same key is `AwaitingInput`, still carries its own pending
+backoff, and was deferred by its own trace before the question was
+raised on it.
+
+All three clauses are load-bearing together. A state where one task is
+`AwaitingInput` from an ordinary parked settlement while a *different*
+task sits visibly `Deferred` satisfies each clause separately, and
+`task_state == Deferred` — the mirror this repair replaced — agrees
+with the production predicate there. So a witness that read the two
+halves independently would stay green after the `question_raised`
+class disappeared, and the defect it was added to pin would go
+unexercised.
 
 ## `fn a_state_with_admissible_work_and_no_budget_exceeded_clas…` › `let census = census();`
 
@@ -1273,11 +1320,20 @@ And maximum-plus-one is excluded rather than merely unobserved: the
 identities the fixture generates are exactly `1..=max`, densely,
 with nothing above.
 
-## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `assert_eq!(question_ids.len(), 4);`
+## `fn every_declared_dimension_reports_what_the_fixture_genera…` › `let identities = BTreeSet::from([`
 
-Four question identities are constructed and at most two are ever
-open together, so the bound is about simultaneity and is measured as
-such.
+Six question identities are constructed — one parked settlement per
+task per generation, and one raised directly on each task — and at
+most four are ever open together, so the bound is about simultaneity
+and is measured as such.
+
+The set is asserted rather than its size. `generated_by_the_classes`
+reads identities off the events, so a class that stopped constructing
+one, or renamed it, would keep the count and lose the identity; naming
+all six is what makes that visible. It is also the reason the
+`question_raised` arm is collected there at all: without it the helper
+would enumerate four of the six while claiming to enumerate every
+identity `classes()` constructs.
 
 ## `mod tests` › `fn merge_prepared_diff(left: &MergePrepared, right: &MergePrepared) -> Vec<&'static str> {`
 

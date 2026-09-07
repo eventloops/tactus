@@ -1144,9 +1144,6 @@ mod tests {
     }
 
     fn backoff_pending(fold: &TopologyFold) -> bool {
-        // §26: a task's backoff survives its move to `AwaitingInput` under a question, so the
-        // mirror reads the fold's own deferred-task record rather than the current task state,
-        // which a question raised on a `Deferred` task would otherwise clear from view.
         let deferred_task = [ALEPH, BET]
             .iter()
             .any(|key| fold.task_backoff_pending(*key));
@@ -1176,6 +1173,30 @@ mod tests {
             .leases()
             .is_none_or(|leases| !leases.any_candidate_or_lineage());
         every_task_terminal && queue_empty && no_lease && !questions_open(fold)
+    }
+
+    fn deferred_before_its_question(trace: &[TopologyEvent], key: TaskKey) -> bool {
+        let deferred_at = trace.iter().position(|event| match &event.body {
+            TopologyEventBody::AttemptFinished { data } => {
+                data.key == key
+                    && matches!(
+                        &data.settlement,
+                        AttemptSettlement::Closed {
+                            transition: SettlementTransition::Deferred { .. },
+                            ..
+                        }
+                    )
+            }
+            _ => false,
+        });
+        let raised_at = trace.iter().rposition(|event| match &event.body {
+            TopologyEventBody::QuestionRaised { data } => data.question.key == key,
+            _ => false,
+        });
+        match (deferred_at, raised_at) {
+            (Some(deferred), Some(raised)) => deferred < raised,
+            _ => false,
+        }
     }
 
     #[test]
@@ -1308,15 +1329,17 @@ mod tests {
         );
 
         let deferred_then_awaiting_input = census.states().iter().any(|state| {
-            [ALEPH, BET]
-                .iter()
-                .any(|key| state.fold.task_state(*key) == Some(TaskState::AwaitingInput))
-                && backoff_pending(&state.fold)
+            [ALEPH, BET].iter().any(|key| {
+                state.fold.task_state(*key) == Some(TaskState::AwaitingInput)
+                    && state.fold.task_backoff_pending(*key)
+                    && deferred_before_its_question(&state.trace, *key)
+            })
         });
         assert!(
             deferred_then_awaiting_input,
-            "no explored state reaches a task that is `AwaitingInput` while its backoff is \
-             still pending; the census mirror and the code can only disagree there"
+            "no explored state reaches one task that is `AwaitingInput` while that same task's \
+             own backoff is still pending, under a question its own trace raised after \
+             deferring it; the census mirror and the code can only disagree there"
         );
     }
 
@@ -2689,6 +2712,9 @@ mod tests {
                 TopologyEventBody::GenerationClosed { data } => {
                     generations.insert(data.generation.0);
                 }
+                TopologyEventBody::QuestionRaised { data } => {
+                    questions.insert(data.question.id.to_string());
+                }
                 _ => {}
             }
         }
@@ -2824,7 +2850,20 @@ mod tests {
             open_questions <= usize::try_from(bounds.questions).unwrap_or(usize::MAX),
             "{open_questions} questions were open at once"
         );
-        assert_eq!(question_ids.len(), 4);
+        let identities = BTreeSet::from([
+            "q-aleph-0".to_owned(),
+            "q-aleph-1".to_owned(),
+            "q-bet-0".to_owned(),
+            "q-bet-1".to_owned(),
+            "q-raised-aleph".to_owned(),
+            "q-raised-bet".to_owned(),
+        ]);
+        assert_eq!(
+            question_ids,
+            identities,
+            "every question identity the classes construct: one parked per task per generation, \
+             and one raised directly on each task"
+        );
     }
 
     fn merge_prepared_of(label: &str) -> MergePrepared {

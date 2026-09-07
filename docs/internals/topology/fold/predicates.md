@@ -257,3 +257,32 @@ materialization facts are still checked when the attempt is recorded.
 
 The same eligible candidate that makes integration admissible. The
 engine uses this borrowed result so its choice includes lineage questions.
+
+## `pub(crate) fn task_backoff_pending(&self, key: TaskKey) -> bool {`
+
+Whether the fold still holds a deferred-task record for `key`.
+
+**A crate-internal test seam, and not one of the readers counted
+above.** It is `#[cfg(test)]` and `pub(crate)`: not published API, and
+not something a run may select on. Its only caller is the census's
+independent mirror of [`Self::backoff_pending`]
+(`src/topology/census.rs`), which needs the per-key signal the
+aggregate predicate does not expose — §26 keeps a task's backoff
+pending once a question moves it to [`TaskState::AwaitingInput`], so a
+mirror reading `task_state` loses exactly the state the aggregate
+predicate is about.
+
+Narrow rather than `pub` because `deferred_tasks` is a representation
+the fold is free to reshape, and a published accessor over it would
+make that reshaping a SemVer question for the sake of one test oracle.
+It sits in its own `impl` block at the end of the file rather than
+beside [`Self::task_state`], because §12 puts test-only items after
+every production item: a mid-file `#[cfg(test)]` truncates the
+production region every source census reads.
+
+`false` before `run_started`, and `false` for a key the run does not
+register — absence and "no backoff pending" are one answer here, which
+is why this suits an oracle that already knows its keys and not a
+caller discovering them. Poisoning is not consulted, for the reason
+the other statement accessors give: a poisoned fold of a run with a
+deferred task still has one.

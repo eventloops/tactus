@@ -28,13 +28,6 @@ impl TopologyFold {
         self.task(key).map(|task| task.state)
     }
 
-    #[must_use]
-    pub fn task_backoff_pending(&self, key: TaskKey) -> bool {
-        self.run
-            .as_ref()
-            .is_some_and(|run| run.deferred_tasks.contains(&key))
-    }
-
     pub fn queue(&self) -> Option<&CandidateQueue> {
         self.run.as_ref().map(|run| &run.queue)
     }
@@ -170,5 +163,15 @@ impl TopologyFold {
     #[must_use]
     pub fn questions_open(&self) -> bool {
         self.run.as_ref().is_some_and(RunState::questions_open)
+    }
+}
+
+#[cfg(test)]
+impl TopologyFold {
+    #[must_use]
+    pub(crate) fn task_backoff_pending(&self, key: TaskKey) -> bool {
+        self.run
+            .as_ref()
+            .is_some_and(|run| run.deferred_tasks.contains(&key))
     }
 }
