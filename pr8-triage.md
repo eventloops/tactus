@@ -222,3 +222,28 @@ this round beside them.
 - R25 in `pr8-plan.md` is rewritten to the evidence rule at both Runners; §2 gains the third
   round's commits and §5 its witnesses.
 - The §5 sentence on the entitlements is corrected in place (finding 5).
+
+## 7. Round four — the cover review of `8a5f59e8` (the whole slice against master)
+
+One frontier review at `ultra` effort over the whole slice against master
+(`review-pr247-8a5f59e-cover.md`, the lens `lens-cover.md`; the review record names no
+model), returning `CHANGES_REQUIRED` with six findings, four P1, every one carrying a
+reproduction the reviewer ran; the two surviving witnesses are `cover-witnesses.patch`. Two
+findings are recurrences of classes earlier rounds declared fixed — a false `Gone` at a new
+site, and a cleanup establishing its own authority at a site the pin repairs never reached — so
+this round fixes each mechanism and then sweeps the tree for the class (§7.3, §7.4).
+
+Every finding is listed with a disposition. `confirmed` means the defect reproduced here and a
+repair landed with a test that fails without it (named in the row). Ledger row IDs in
+`pr8-body.md` are in brackets; rows added this round are prefixed `PR8-R4-`.
+
+### 7.1 The plan of this round (recorded first, so a replaced session inherits it)
+
+| # | Mechanism decided | Where |
+|---|---|---|
+| 1 | One head rule for both paths: `integrate::authorized_head(started, events)` — the log's latest `task_merged.merged_sha`, else the recorded base — carried into `IntegrationRequest` and compared by `decide` before the exact-base decision; `ensure_recorded_integration_ref` calls the same function. The live engine keeps its event list current through the one `emit` funnel both writers use. | `integrate.rs`, `emit.rs`, `run.rs`, `recover.rs` |
+| 2 | The runtime says what a stop or a removal established: `stop`/`remove` answer `Settled::{ProcessGone, RemovalInProgress}`; the daemon's removal-in-progress diagnostic normalizes to `RemovalInProgress`, which `cancel_reached` treats as no evidence (view and intent retained, fate `Unresolved`). The fake routes an armed diagnostic through the production normalizers. | `runtime.rs`, `container.rs`, `exec.rs`, `fake.rs`, every runtime double |
+| 3 | The topology run enters its lock's cleanup scope wherever it spawns host processes under the lock: `TopologyRun::step`, the resume chain around the probes, and creation's P4. The scope no longer borrows the lock (it is owned by the step that entered it). | `rundir.rs`, `run.rs`, `recover.rs`, `create.rs` |
+| 4 | `reclaim_staging` prunes the pin through `prune_pin` at the proposal `merge_verification_started` recorded, refusing any other SHA after the terminal is durable. | `integrate.rs` |
+| 5 | `start_container` reports whether `docker start` was attempted; a refusal at the funnel's `Before` phase leaves the launch at `Created`, so the fate is `NeverStarted`. | `container.rs`, `exec.rs` |
+| 6 | Both review doubles run a process through the Runner in the workspace they were handed, so the recording runners see each reviewer's checkout, HEAD and path; the isolation oracles assert the HEAD is the recorded proposal and the path is the reviewer's own snapshot slot, never staging and never the gate's snapshot. | `scaffold.rs`, `recover/tests.rs`, `integrate/tests.rs` |
