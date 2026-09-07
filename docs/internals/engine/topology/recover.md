@@ -1221,16 +1221,21 @@ the fold is poisoned and the next resume repeats from (a0).
 
 (c) the recorded Runner by inspection, then its probes.
 
-## `reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
+## `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
 
-`T-PROPOSAL`'s residue reclaim, before the namespace check that would
-otherwise refuse it. A cherry-pick killed before or after it wrote its
-objects leaves a `merge/s<seq>` staging worktree and can leave an orphan
-`prepared/<seq>` pin, neither belonging to a live transaction. This removes
-both — the staging worktree with force, the pin expected-old at what it names
-— skipping the staging and pin a live transaction still owns, so
-[`finish_integration`] resolves those. It precedes `refuse_unexpected_refs`
-because an orphan pin *is* an unexpected ref until it is reclaimed.
+`T-PROPOSAL`'s residue reclaim and the accounting of every `prepared/<seq>`
+the log pinned, before the namespace check. A cherry-pick killed before or
+after it wrote its objects leaves a `merge/s<seq>` staging worktree and can
+leave the provisional orphan `prepared/<next_seq>`; a kill between
+`task_merged` and the pin's deletion leaves a resolved sequence's pin. This
+removes the staging with force, prunes a resolved pin expected-old at the
+proposal its record names, reclaims exactly the orphan at the next
+sequence, and *checks* the open transaction's pin against its record and
+keeps it — returning it for the namespace check's expected set. Anything
+else under `prepared/` is not accounted for by the log and is what the check
+refuses, untouched. The reviews of `3414dc58` found this step deleting every
+pin it did not recognise, the still-Prepared transaction's and a
+substituted one included (`pr8-triage.md` C2).
 
 ## `finish_integration(&mut certified, seams.manager, &mut context)?;`
 
@@ -1376,9 +1381,12 @@ closure), never abandoned".
   clobbering.
 * A **`VerificationStarted`** transaction is settled
   `merge_verification_interrupted`, its `prepared/<seq>` pin deleted
-  expected-old and its staging worktree reclaimed, and the candidate
-  re-verifies under a new sequence. `Authorized::from_fold` returns `None` for
-  it — this build no longer refuses that `None`, it interrupts.
+  expected-old at the proposal the record names and its staging worktree
+  reclaimed, and the candidate re-verifies under a new sequence.
+  `Authorized::from_fold` returns `None` for it — this build no longer
+  refuses that `None`, it interrupts. The pin was checked against its record
+  by [`reclaim_stale_residue`] before any append; a substituted pin refused
+  there, so nothing here deletes a ref the log did not authorize.
 
 Takes `&mut PreflightCertified` and the run's `WorkspaceManager`, because it
 is a step-(f) emitter and a writer of the integration ref, reachable from the
@@ -1389,21 +1397,29 @@ same place the live append would have been.
 A refusal (a third SHA on the CAS, a symbolic or checked-out ref), the
 append-error protocol's report, or a Git error.
 
+## `fn pinned_sequences(`
+
+The pins the log accounts for: every stale-clean
+`merge_verification_started` in the proven prefix, with the pin it named and
+the proposal it was created at. A fast or already-present sequence pins
+nothing. This is the record every pin decision below is made against —
+authority comes from the record, never from what a ref happens to name when
+it is read.
+
 ## `fn reclaim_stale_residue(`
 
-`T-PROPOSAL`'s residue reclaim. Every `merge/s<seq>` staging worktree and
-every `prepared/<seq>` pin that no live transaction owns is removed — the
-worktree with force, the pin expected-old at what it names — leaving the
-proposal objects for Git. The staging and pin a live transaction still holds
-are skipped: [`finish_integration`] resolves those. It runs before the
-namespace check because an orphan pin is an unexpected ref until reclaimed.
-
-## `fn live_prepared_pin(`
-
-The `prepared/<seq>` pin a live stale verification holds, if the open
-transaction is a stale-clean one. The namespace check adds it to the expected
-set — it keeps the proposal reachable while the transaction resolves — and
-[`reclaim_stale_residue`] skips it for the same reason.
+Four dispositions, each cited in its own doc comment: staging residue no
+live transaction owns is reclaimed with force (T-PROPOSAL a', a); a resolved
+sequence's pin is pruned expected-old at its recorded proposal and refuses
+at any other SHA (INV-17); the open transaction's pin — a verification's or
+a prepared publication's — must name its recorded proposal (T-VERIFY's "pin
+SHA differs from record") and is kept, cleanup never touching a resumably
+open resource (INV-15); with no transaction open, exactly
+`prepared/<next_seq>` is the provisional orphan T-PROPOSAL (b) names.
+Expected-old deletion at whatever a ref names proves only that nothing
+moved it since the read; it does not establish that the value read was
+authorized, which is why the old form of this step — delete everything but
+the verifying pin — was wrong.
 
 ## `pub fn finish_promotions(`
 

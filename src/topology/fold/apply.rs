@@ -305,6 +305,8 @@ impl RunState {
                 expected_head: prepared.expected_head.clone(),
                 proposed_sha: prepared.proposed_sha.clone(),
                 satisfies: prepared.satisfies.clone(),
+                disposition: prepared.disposition,
+                prepared_ref: prepared.prepared_ref.clone(),
             },
         });
     }

@@ -961,11 +961,13 @@ pub fn run_recovery_order(
         warnings,
     };
 
-    // T-PROPOSAL residue: a cherry-pick killed before or after writing its
-    // objects leaves a staging worktree and possibly an orphan `prepared/<seq>`
-    // pin, neither belonging to a live transaction. Reclaim them before the
-    // namespace check runs, so the check verifies nothing unexpected remains.
-    reclaim_stale_residue(&certified, seams.manager, &mut context)?;
+    // T-PROPOSAL residue and the pins the log accounts for: staging worktrees
+    // no live transaction owns are reclaimed with force, a resolved sequence's
+    // pin is pruned at the proposal it recorded, the open transaction's pin is
+    // checked against its record and kept, and exactly the provisional orphan
+    // `prepared/<next_seq>` is reclaimed. Before the namespace check, so that
+    // check refuses whatever the log does not account for — untouched.
+    let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;
 
     {
         let fold = fold_of(&certified);
@@ -984,10 +986,10 @@ pub fn run_recovery_order(
         expected.push(fold.started().map_or_else(String::new, |started| {
             started.integration_ref.as_str().to_owned()
         }));
-        // A live stale verification's pin is expected: it keeps the proposal
-        // reachable while the transaction resolves.
-        if let Some(pin) = live_prepared_pin(&run_id, fold) {
-            expected.push(pin.0);
+        // The open transaction's pin is expected: it keeps the proposal
+        // reachable while the transaction resolves, verifying or prepared.
+        if let Some(pin) = &live_pin {
+            expected.push(pin.0.clone());
         }
         seams
             .manager
@@ -1059,27 +1061,23 @@ pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError
 /// path uses, issued only now that the stable-prefix barrier of step (a1) has
 /// proven the `merge_prepared` line durable, so a CAS is never issued on a
 /// merely replay-visible authorization. A `VerificationStarted` transaction is
-/// settled `merge_verification_interrupted`, its pin deleted expected-old and
-/// its staging worktree reclaimed, and the candidate re-verifies under a new
-/// sequence.
+/// settled `merge_verification_interrupted`, its pin deleted expected-old at
+/// the proposal the record names and its staging worktree reclaimed, and the
+/// candidate re-verifies under a new sequence.
+///
+/// The pin of either transaction was checked against its record by
+/// [`reclaim_stale_residue`] before any append; a substituted pin refused
+/// there, so nothing here deletes a ref the log did not authorize.
 ///
 /// # Errors
 ///
-/// A refusal (a third SHA on the CAS, a symbolic or checked-out ref), the
-/// append-error protocol's report, or a Git error.
+/// A refusal (a third SHA on the CAS, a symbolic or checked-out ref, a pin at
+/// another SHA), the append-error protocol's report, or a Git error.
 pub fn finish_integration(
     certified: &mut PreflightCertified,
     manager: &WorkspaceManager,
     context: &mut EmitContext<'_>,
 ) -> Result<(), UpstrokeError> {
-    let run_id = fold_of(certified)
-        .started()
-        .ok_or_else(|| UpstrokeError::Refused {
-            message: "the proven prefix has no run".to_owned(),
-        })?
-        .run_id
-        .clone();
-
     use crate::topology::fold::TransactionClass;
     let Some(transaction) = fold_of(certified).transaction() else {
         return Ok(());
@@ -1088,37 +1086,46 @@ pub fn finish_integration(
     match &transaction.class {
         TransactionClass::Prepared { .. } => {
             let authorized =
-                crate::engine::topology::integrate::Authorized::from_fold(fold_of(certified), &run_id)?
+                crate::engine::topology::integrate::Authorized::from_fold(fold_of(certified))?
                     .ok_or_else(|| UpstrokeError::Refused {
-                        message: "the proven prefix records a Prepared transaction the recovery                                   could not read as an authorization"
+                        message: "the proven prefix records a Prepared transaction the recovery \
+                                  could not read as an authorization"
                             .to_owned(),
                     })?;
             let mut journal = RecoveryJournal { certified, context };
             crate::engine::topology::integrate::publish(&mut journal, manager, authorized)?;
         }
-        TransactionClass::VerificationStarted { basis, .. } => {
-            let pin = matches!(
-                basis,
-                crate::topology::events::VerificationBasis::StaleClean { .. }
-            )
-            .then(|| crate::engine::topology::integrate::prepared_pin_ref(&run_id, sequence));
+        TransactionClass::VerificationStarted {
+            basis,
+            proposed_sha,
+            ..
+        } => {
+            let pin = match basis {
+                crate::topology::events::VerificationBasis::StaleClean { prepared_ref } => {
+                    Some((prepared_ref.clone(), proposed_sha.clone()))
+                }
+                crate::topology::events::VerificationBasis::AlreadyPresent => None,
+            };
             emit(
                 certified,
                 context,
                 TopologyEventBody::MergeVerificationInterrupted {
                     data: crate::topology::events::MergeVerificationInterrupted {
                         sequence,
-                        detail: "the coordinator that started this verification did not survive                                  it; recovery step (f) settles it interrupted and the candidate                                  re-verifies under a new sequence"
+                        detail: "the coordinator that started this verification did not survive \
+                                 it; recovery step (f) settles it interrupted and the candidate \
+                                 re-verifies under a new sequence"
                             .to_owned(),
                     },
                 },
             )?;
             let staging = crate::engine::topology::integrate::staging_slot(sequence);
-            if let Some(pin) = &pin {
-                crate::engine::topology::integrate::prune_pin_if_present(
-                    manager,
+            if let Some((pin, proposed)) = &pin {
+                crate::engine::topology::integrate::prune_pin(
                     context.hooks,
+                    manager,
                     pin,
+                    proposed,
                 )?;
             }
             manager.remove_worktree(context.hooks.effects(), &staging)?;
@@ -1128,43 +1135,73 @@ pub fn finish_integration(
     Ok(())
 }
 
-/// The `prepared/<seq>` pin a live stale verification holds, if the open
-/// transaction is a stale-clean one.
-fn live_prepared_pin(run_id: &str, fold: &TopologyFold) -> Option<GitRef> {
-    use crate::topology::fold::TransactionClass;
-    let transaction = fold.transaction()?;
-    match &transaction.class {
-        TransactionClass::VerificationStarted {
-            basis: crate::topology::events::VerificationBasis::StaleClean { .. },
-            ..
-        } => Some(crate::engine::topology::integrate::prepared_pin_ref(
-            run_id,
-            transaction.sequence,
-        )),
-        _ => None,
-    }
+/// A stale-clean verification the log started: its sequence, the pin the
+/// record names, and the proposal that pin was created at.
+struct PinnedSequence {
+    sequence: SequenceId,
+    pin: GitRef,
+    proposed: CommitSha,
 }
 
-/// Reclaim the staging residue and orphan prepared pins of a killed
-/// cherry-pick (T-PROPOSAL a', a and b): every `merge/<seq>` staging worktree
-/// and every `prepared/<seq>` pin that no live transaction owns is removed with
-/// force, the proposal objects then left to Git.
+/// Every `prepared/<seq>` the log accounts for, from the proven prefix's
+/// `merge_verification_started` records with a stale-clean basis. A fast or
+/// already-present sequence pins nothing and is not here.
+fn pinned_sequences(events: &[TopologyEvent]) -> Vec<PinnedSequence> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::MergeVerificationStarted { data } => match &data.basis {
+                crate::topology::events::VerificationBasis::StaleClean { prepared_ref } => {
+                    Some(PinnedSequence {
+                        sequence: data.sequence,
+                        pin: prepared_ref.clone(),
+                        proposed: data.proposed_sha.clone(),
+                    })
+                }
+                crate::topology::events::VerificationBasis::AlreadyPresent => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Reclaim what the log does not need and check what it does, before the
+/// namespace check: T-PROPOSAL (a', a, b) residue, and every `prepared/<seq>`
+/// the log accounts for.
+///
+/// * Every `merge/<seq>` staging worktree no live transaction owns is removed
+///   with force, the proposal objects then left to Git (R27).
+/// * A resolved sequence's pin is pruned expected-old at the proposal its
+///   `merge_verification_started` recorded; a pin at any other SHA refuses
+///   (INV-17: substituted refs refuse) and is left as it is.
+/// * The open transaction's pin — a verification's or a prepared publication's
+///   — is required to name its recorded proposal and is kept: T-VERIFY's
+///   "pin SHA differs from record" refuses before any settlement, and
+///   `invariants[INV-15]`'s cleanup never touches a resumably open resource.
+/// * With no transaction open, exactly `prepared/<next_seq>` is the
+///   provisional orphan T-PROPOSAL (b) names, reclaimed expected-old at what
+///   it names.
+///
+/// Anything else under `prepared/` is not accounted for by the log and is
+/// refused by the namespace check that follows, untouched
+/// (`expected_failures_refusals`: "orphan pin outside next sequence").
+///
+/// Returns the open transaction's pin for the namespace check's expected set.
 fn reclaim_stale_residue(
     certified: &PreflightCertified,
     manager: &WorkspaceManager,
     context: &mut EmitContext<'_>,
-) -> Result<(), UpstrokeError> {
-    let run_id = fold_of(certified)
+) -> Result<Option<GitRef>, UpstrokeError> {
+    let fold = fold_of(certified);
+    let run_id = fold
         .started()
         .ok_or_else(|| UpstrokeError::Refused {
             message: "the proven prefix has no run".to_owned(),
         })?
         .run_id
         .clone();
-    let live_staging = fold_of(certified)
-        .transaction()
-        .map(|transaction| crate::engine::topology::integrate::staging_slot(transaction.sequence));
-    let live_pin = live_prepared_pin(&run_id, fold_of(certified));
+    let open = fold.transaction().map(|transaction| transaction.sequence);
+    let live_staging = open.map(crate::engine::topology::integrate::staging_slot);
 
     for slot in manager.intents()? {
         if matches!(slot, crate::workspace_manager::Slot::Staging { .. })
@@ -1175,23 +1212,48 @@ fn reclaim_stale_residue(
         }
     }
 
-    let namespace = format!(
-        "{}/{run_id}/prepared/",
-        crate::engine::topology::candidate::RUN_REF_ROOT
-    );
-    for (refname, object) in manager.refs_under(&namespace)? {
-        let pin = GitRef(refname);
-        if Some(&pin) == live_pin.as_ref() {
-            continue;
+    let mut live_pin = None;
+    for pinned in pinned_sequences(events_of(certified)) {
+        if Some(pinned.sequence) == open {
+            if let Some(found) = manager.direct_ref_target(pinned.pin.as_str())? {
+                if found != pinned.proposed.0 {
+                    return Err(
+                        crate::engine::topology::integrate::Refusal::PinSubstituted {
+                            sequence: pinned.sequence.0,
+                            refname: pinned.pin.0,
+                            found,
+                            expected: pinned.proposed.0,
+                        }
+                        .into(),
+                    );
+                }
+            }
+            live_pin = Some(pinned.pin);
+        } else {
+            crate::engine::topology::integrate::prune_pin(
+                context.hooks,
+                manager,
+                &pinned.pin,
+                &pinned.proposed,
+            )?;
         }
-        manager.delete_ref_expected_old(
-            context.hooks.effects(),
-            crate::topology::effects::RefSite::DeletePreparedPin,
-            pin.as_str(),
-            &object,
-        )?;
     }
-    Ok(())
+
+    if open.is_none() {
+        let next = fold.next_sequence().ok_or_else(|| UpstrokeError::Refused {
+            message: "the proven prefix has no run".to_owned(),
+        })?;
+        let orphan = crate::engine::topology::integrate::prepared_pin_ref(&run_id, next);
+        if let Some(found) = manager.direct_ref_target(orphan.as_str())? {
+            manager.delete_ref_expected_old(
+                context.hooks.effects(),
+                crate::topology::effects::RefSite::DeletePreparedPin,
+                orphan.as_str(),
+                &found,
+            )?;
+        }
+    }
+    Ok(live_pin)
 }
 
 pub fn finish_promotions(

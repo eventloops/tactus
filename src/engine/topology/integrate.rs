@@ -161,6 +161,18 @@ pub enum Refusal {
         found: String,
         expected: String,
     },
+
+    #[error(
+        "refusing to resume sequence {sequence}: its pin `{refname}` is at {found} and the \
+         verification recorded the proposal {expected}; a substituted ref is neither adopted nor \
+         deleted, and the transaction stays open until the pin names its record again"
+    )]
+    PinSubstituted {
+        sequence: u32,
+        refname: String,
+        found: String,
+        expected: String,
+    },
 }
 
 impl From<Refusal> for UpstrokeError {
@@ -350,7 +362,7 @@ impl Authorized {
     /// # Errors
     ///
     /// A refusal when the run has not started.
-    pub fn from_fold(fold: &TopologyFold, run_id: &str) -> Result<Option<Self>, UpstrokeError> {
+    pub fn from_fold(fold: &TopologyFold) -> Result<Option<Self>, UpstrokeError> {
         let Some(transaction) = fold.transaction() else {
             return Ok(None);
         };
@@ -358,6 +370,8 @@ impl Authorized {
             expected_head,
             proposed_sha,
             satisfies,
+            disposition,
+            prepared_ref,
         } = &transaction.class
         else {
             return Ok(None);
@@ -366,10 +380,14 @@ impl Authorized {
             .started()
             .ok_or_else(|| refused("the proven prefix records a transaction and no run"))?;
         let candidate = &transaction.candidate;
-        // A fast publication proposes the candidate commit itself and neither
-        // pinned nor staged anything; every other disposition did both, and
-        // what it left is pruned after the ref moves.
-        let staged = *proposed_sha != candidate.commit_sha;
+        // A fast publication staged nothing; a stale-clean or already-present
+        // one ran in `merge/s<seq>` and the fold retains which it was, because
+        // the SHAs alone cannot say: an already-present publication at the
+        // candidate's own commit has `proposed_sha == candidate.commit_sha`
+        // and a staging worktree all the same (`pr8-triage.md`, crash 5).
+        // The pin is the one the record names — `None` for fast and
+        // already-present, which pin nothing.
+        let staged = *disposition != PreparedDisposition::Fast;
         Ok(Some(Self {
             sequence: transaction.sequence,
             key: candidate.key,
@@ -378,7 +396,7 @@ impl Authorized {
             satisfies: satisfies.clone(),
             lease_release: lease_release(fold, candidate),
             integration_ref: started.integration_ref.clone(),
-            pin: staged.then(|| prepared_pin_ref(run_id, transaction.sequence)),
+            pin: prepared_ref.clone(),
             staging: staged.then(|| staging_slot(transaction.sequence)),
         }))
     }
@@ -557,32 +575,6 @@ pub fn prune_pin(
         RefSite::DeletePreparedPin,
         pin.as_str(),
         &found,
-    )
-}
-
-/// Delete a prepared pin expected-old at whatever it names, if it is present.
-///
-/// The interrupt path does not carry the proposal sha, and a pin present at
-/// resume is the one a stale verification left; deleting it expected-old at its
-/// own target is the expected-old delete R12 asks for, tolerant of an absent
-/// pin a prior resume already pruned.
-///
-/// # Errors
-///
-/// A Git error.
-pub fn prune_pin_if_present(
-    manager: &WorkspaceManager,
-    hooks: &mut dyn TopologyHooks,
-    pin: &GitRef,
-) -> Result<(), UpstrokeError> {
-    let Some(target) = manager.direct_ref_target(pin.as_str())? else {
-        return Ok(());
-    };
-    manager.delete_ref_expected_old(
-        hooks.effects(),
-        RefSite::DeletePreparedPin,
-        pin.as_str(),
-        &target,
     )
 }
 

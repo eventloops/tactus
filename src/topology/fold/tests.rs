@@ -7671,6 +7671,8 @@ fn grid_state(
                         expected_head: sha("base"),
                         proposed_sha: sha("commit-2-0"),
                         satisfies: vec![MID],
+                        disposition: PreparedDisposition::Fast,
+                        prepared_ref: None,
                     },
                 });
             }

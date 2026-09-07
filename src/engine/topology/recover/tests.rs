@@ -5785,11 +5785,9 @@ fn alpha_candidate_prepared(
     }
 }
 
-/// Plant a fast integration transaction: the candidate objects and refs, the
-/// integration ref at the base, and the log through `merge_prepared(fast)` with
-/// no `task_merged` — the exact durable state a crash after the stable-prefix
-/// barrier but before the compare-and-swap leaves.
-fn plant_prepared_fast(fixture: &Fixture) -> PlantedTransaction {
+/// Plant a queued candidate for ALPHA on the base: its objects and refs, the
+/// integration ref at the base, and the log through `task_candidate_created`.
+fn plant_queued_candidate(fixture: &Fixture) -> PlantedTransaction {
     use crate::workspace_manager::fixture::git;
     let (commit, tree) = alpha_commit(fixture);
     let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, ALPHA, GEN);
@@ -5826,26 +5824,6 @@ fn plant_prepared_fast(fixture: &Fixture) -> PlantedTransaction {
                     candidate: candidate.clone(),
                 },
             },
-            TopologyEventBody::MergePrepared {
-                data: Box::new(crate::topology::events::MergePrepared {
-                    sequence: crate::topology::events::SequenceId(0),
-                    disposition: crate::topology::events::PreparedDisposition::Fast,
-                    expected_head: fixture.base_sha.clone(),
-                    proposed_sha: commit.clone(),
-                    key: ALPHA,
-                    generation: GEN,
-                    candidate_sha: commit.clone(),
-                    candidate_ref: names.candidate_ref.clone(),
-                    prepared_ref: None,
-                    verification_source:
-                        crate::topology::events::VerificationSource::CandidatePrepared {
-                            key: ALPHA,
-                            generation: GEN,
-                        },
-                    verification: None,
-                    satisfies: vec![ALPHA],
-                }),
-            },
         ],
     );
     PlantedTransaction {
@@ -5853,6 +5831,40 @@ fn plant_prepared_fast(fixture: &Fixture) -> PlantedTransaction {
         commit,
         tree,
     }
+}
+
+/// The `merge_prepared(fast)` of sequence 0 for a planted candidate at the
+/// base.
+fn fast_prepared(fixture: &Fixture, planted: &PlantedTransaction) -> TopologyEventBody {
+    TopologyEventBody::MergePrepared {
+        data: Box::new(crate::topology::events::MergePrepared {
+            sequence: crate::topology::events::SequenceId(0),
+            disposition: crate::topology::events::PreparedDisposition::Fast,
+            expected_head: fixture.base_sha.clone(),
+            proposed_sha: planted.commit.clone(),
+            key: ALPHA,
+            generation: GEN,
+            candidate_sha: planted.commit.clone(),
+            candidate_ref: planted.candidate.candidate_ref.clone(),
+            prepared_ref: None,
+            verification_source: crate::topology::events::VerificationSource::CandidatePrepared {
+                key: ALPHA,
+                generation: GEN,
+            },
+            verification: None,
+            satisfies: vec![ALPHA],
+        }),
+    }
+}
+
+/// Plant a fast integration transaction: the candidate objects and refs, the
+/// integration ref at the base, and the log through `merge_prepared(fast)` with
+/// no `task_merged` — the exact durable state a crash after the stable-prefix
+/// barrier but before the compare-and-swap leaves.
+fn plant_prepared_fast(fixture: &Fixture) -> PlantedTransaction {
+    let planted = plant_queued_candidate(fixture);
+    append_events(fixture, &[fast_prepared(fixture, &planted)]);
+    planted
 }
 
 fn ref_target(fixture: &Fixture, refname: &str) -> Option<String> {
@@ -6156,11 +6168,28 @@ fn plant_staging_intent(fixture: &Fixture, sequence: u32) {
         .expect("plant a staging intent");
 }
 
+/// Write a staging intent for `sequence` and add its worktree at `head`
+/// through the manager: the residue a live stale sequence leaves.
+fn plant_staging_worktree(fixture: &Fixture, sequence: u32, head: &str) -> PathBuf {
+    plant_staging_intent(fixture, sequence);
+    let manager = fixture.manager();
+    let mut hooks = HarnessTopologyHooks::new(harness()).recording_durability();
+    manager
+        .add_worktree(
+            hooks.effects(),
+            &crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(
+                sequence,
+            )),
+            head,
+        )
+        .expect("plant a staging worktree")
+}
+
 /// Plant an interrupted stale-clean verification: the candidate on the base,
 /// the integration head moved past it, the cherry-pick proposal pinned under
-/// `prepared/0`, a staging intent, and the log through
-/// `merge_verification_started` with no terminal — the state a crash mid-verify
-/// leaves.
+/// `prepared/0`, the staging worktree at the proposal with its intent, and the
+/// log through `merge_verification_started` with no terminal — the state a
+/// crash mid-verify leaves.
 fn plant_stale_verification(
     fixture: &Fixture,
 ) -> (crate::topology::events::CandidateRef, CommitSha, GitRef) {
@@ -6217,7 +6246,7 @@ fn plant_stale_verification(
         &fixture.repo_root,
         &["update-ref", pin.as_str(), proposal.as_str()],
     );
-    plant_staging_intent(fixture, 0);
+    plant_staging_worktree(fixture, 0, proposal.as_str());
 
     let candidate = crate::topology::events::CandidateRef {
         key: ALPHA,
@@ -6526,13 +6555,19 @@ fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue()
         None,
         "the proposal pin was pruned"
     );
+    let staging =
+        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(0));
     assert!(
-        !fixture.manager().intents().expect("intents").contains(
-            &crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(
-                0
-            ))
-        ),
+        !fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&staging),
         "the staging intent was reclaimed"
+    );
+    assert!(
+        !fixture.manager().slot_path(&staging).exists(),
+        "the staging worktree itself was removed, not only its intent"
     );
 
     let fold = {
@@ -6546,11 +6581,11 @@ fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue()
 }
 
 #[test]
-fn a_resume_reclaims_orphan_staging_and_an_orphan_prepared_pin_with_no_transaction() {
-    // No integration transaction is open, but a cherry-pick that was killed
-    // before it recorded anything left a staging worktree, and a resume that
-    // died between pinning and recording left an orphan prepared pin. Both are
-    // residue and recovery reclaims them.
+fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {
+    // T-PROPOSAL (a', a, b) with no transaction open: a cherry-pick killed
+    // before anything was recorded left `merge/s0` and, killed between the pin
+    // and `merge_verification_started`, the exact orphan `prepared/<next_seq>`.
+    // Both are reclaimed; the proposal object is left to Git.
     let fixture = Fixture::healthy("finish-orphan");
     let orphan_commit = commit_on(
         &fixture,
@@ -6561,17 +6596,17 @@ fn a_resume_reclaims_orphan_staging_and_an_orphan_prepared_pin_with_no_transacti
     );
     let orphan_pin = crate::engine::topology::integrate::prepared_pin_ref(
         RUN_ID,
-        crate::topology::events::SequenceId(3),
+        crate::topology::events::SequenceId(0),
     );
     crate::workspace_manager::fixture::git(
         &fixture.repo_root,
         &["update-ref", orphan_pin.as_str(), orphan_commit.as_str()],
     );
+    let staging = plant_staging_worktree(&fixture, 0, orphan_commit.as_str());
     plant_staging_intent(&fixture, 7);
-
     assert!(
-        ref_target(&fixture, orphan_pin.as_str()).is_some(),
-        "the orphan pin exists"
+        ref_target(&fixture, orphan_pin.as_str()).is_some() && staging.exists(),
+        "the fixture left the orphan pin and the staging worktree"
     );
 
     let harness = harness();
@@ -6584,15 +6619,363 @@ fn a_resume_reclaims_orphan_staging_and_an_orphan_prepared_pin_with_no_transacti
     assert_eq!(
         ref_target(&fixture, orphan_pin.as_str()),
         None,
-        "the orphan prepared pin was deleted so the next sequence can take the name"
+        "the orphan pin at the next sequence was deleted so the sequence can take the name"
     );
     assert!(
-        fixture.manager().intents().expect("intents").is_empty(),
-        "the orphan staging intent was reclaimed"
+        fixture.manager().intents().expect("intents").is_empty() && !staging.exists(),
+        "the staging residue was reclaimed with force"
+    );
+    assert!(
+        crate::workspace_manager::fixture::git_out(
+            &fixture.repo_root,
+            &["cat-file", "-e", orphan_commit.as_str()]
+        )
+        .status
+        .success(),
+        "the proposal object is Git's once unreferenced, never deleted by recovery"
     );
     assert!(
         merged_sequences(&fixture).is_empty() && interrupted_sequences(&fixture).is_empty(),
         "no transaction was open, so no terminal was appended"
+    );
+}
+
+#[test]
+fn a_resume_refuses_a_prepared_pin_outside_the_sequences_the_log_pinned() {
+    // `expected_failures_refusals`: "orphan pin outside next sequence". With
+    // the next sequence at 0, `prepared/3` is a ref the log never accounts for:
+    // recovery refuses it, before any append, and leaves it exactly as found.
+    let fixture = Fixture::healthy("orphan-outside");
+    let pin = crate::engine::topology::integrate::prepared_pin_ref(
+        RUN_ID,
+        crate::topology::events::SequenceId(3),
+    );
+    let (object, _) = alpha_commit(&fixture);
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &["update-ref", pin.as_str(), object.as_str()],
+    );
+    let before = fixture.log_bytes();
+
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let (outcome, _) = resume_holding(&fixture, &harness, &given);
+    let text = message(&outcome.expect_err("prepared/3 is not the next sequence, 0"));
+    assert!(
+        text.contains(pin.as_str()),
+        "the refusal names the unexpected ref: {text}"
+    );
+    assert_eq!(
+        ref_target(&fixture, pin.as_str()).as_deref(),
+        Some(object.as_str()),
+        "a ref recovery refuses is never deleted"
+    );
+    assert_eq!(fixture.log_bytes(), before, "refused before any append");
+}
+
+#[test]
+fn a_resume_refuses_a_substituted_verification_pin_before_settling_it() {
+    // T-VERIFY's refusal condition: "pin SHA differs from record". A writer
+    // moved `prepared/0` away from the proposal the verification recorded.
+    // Expected-old deletion at what the ref *now* names would prove only that
+    // nothing moved it since the read; authority comes from the record, and
+    // the record disagrees, so recovery refuses — before the interrupted
+    // terminal, and without touching the ref.
+    let fixture = Fixture::healthy("substituted-pin");
+    let (_candidate, _head, pin) = plant_stale_verification(&fixture);
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &["update-ref", pin.as_str(), fixture.base_sha.as_str()],
+    );
+    let before = fixture.log_bytes();
+
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let (outcome, _) = resume_holding(&fixture, &harness, &given);
+    let text = message(&outcome.expect_err("a pin that differs from its record refuses"));
+    assert!(
+        text.contains(fixture.base_sha.as_str()) && text.contains(pin.as_str()),
+        "the refusal names the pin and what it found: {text}"
+    );
+    assert_eq!(
+        ref_target(&fixture, pin.as_str()).as_deref(),
+        Some(fixture.base_sha.as_str()),
+        "the substituted pin is neither adopted nor deleted"
+    );
+    assert!(
+        interrupted_sequences(&fixture).is_empty() && fixture.log_bytes() == before,
+        "refused before the interrupted terminal, before any append"
+    );
+    assert!(
+        fixture.manager().intents().expect("intents").contains(
+            &crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(
+                0
+            ))
+        ),
+        "the open transaction's staging is resumably open and untouched"
+    );
+}
+
+/// The `merge_prepared(stale_clean)` that authorizes the planted stale
+/// verification's publication.
+fn stale_clean_prepared(
+    candidate: &crate::topology::events::CandidateRef,
+    head: &CommitSha,
+    proposal: &CommitSha,
+    pin: &GitRef,
+) -> TopologyEventBody {
+    TopologyEventBody::MergePrepared {
+        data: Box::new(crate::topology::events::MergePrepared {
+            sequence: crate::topology::events::SequenceId(0),
+            disposition: crate::topology::events::PreparedDisposition::StaleClean,
+            expected_head: head.clone(),
+            proposed_sha: proposal.clone(),
+            key: candidate.key,
+            generation: candidate.generation,
+            candidate_sha: candidate.commit_sha.clone(),
+            candidate_ref: candidate.candidate_ref.clone(),
+            prepared_ref: Some(pin.clone()),
+            verification_source: crate::topology::events::VerificationSource::Verification {
+                sequence: crate::topology::events::SequenceId(0),
+            },
+            verification: Some(passed_verification()),
+            satisfies: vec![ALPHA],
+        }),
+    }
+}
+
+fn passed_verification() -> crate::topology::events::VerificationRecord {
+    crate::topology::events::VerificationRecord {
+        verdict: crate::topology::events::VerificationVerdict::Passed,
+        gates_passed: true,
+        reviews: Vec::new(),
+        detail: "the integration verification passed".to_owned(),
+    }
+}
+
+#[test]
+fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {
+    // T-PREPARED: `merge_prepared(stale_clean)` is durable and the ref has been
+    // moved to a third SHA. Publication refuses, the transaction stays open,
+    // and its pin — a resumably open resource the cleanup rule forbids
+    // touching — is still there for the resume that will complete it.
+    let fixture = Fixture::healthy("prepared-pin-kept");
+    let (candidate, head, pin) = plant_stale_verification(&fixture);
+    let proposal = CommitSha(ref_target(&fixture, pin.as_str()).expect("the pinned proposal"));
+    append_events(
+        &fixture,
+        &[stale_clean_prepared(&candidate, &head, &proposal, &pin)],
+    );
+    let staging =
+        crate::engine::topology::integrate::staging_slot(crate::topology::events::SequenceId(0));
+
+    // What the resume will read back is exactly what the live sequence
+    // authorized: a stale-clean publication with its pin and its staging.
+    {
+        let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+        let fold = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
+        let recovered = crate::engine::topology::integrate::Authorized::from_fold(&fold)
+            .expect("read")
+            .expect("merge_prepared authorized a publication");
+        assert_eq!(
+            recovered,
+            crate::engine::topology::integrate::Authorized {
+                sequence: crate::topology::events::SequenceId(0),
+                key: ALPHA,
+                expected_head: head.clone(),
+                proposed_sha: proposal.clone(),
+                satisfies: vec![ALPHA],
+                lease_release: crate::topology::events::MergeLeaseRelease::Candidate {
+                    key: ALPHA,
+                    generation: GEN,
+                },
+                integration_ref: fixture.started.integration_ref.clone(),
+                pin: Some(pin.clone()),
+                staging: Some(staging.clone()),
+            }
+        );
+    }
+
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            fixture.base_sha.as_str(),
+        ],
+    );
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let (outcome, _) = resume_holding(&fixture, &harness, &given);
+    let text = message(&outcome.expect_err("a third SHA under the integration ref refuses"));
+    assert!(text.contains("third SHA"), "{text}");
+    assert_eq!(
+        ref_target(&fixture, pin.as_str()).as_deref(),
+        Some(proposal.as_str()),
+        "the still-authorized proposal kept its pin"
+    );
+    assert!(
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&staging)
+            && fixture.manager().slot_path(&staging).exists(),
+        "the still-open transaction kept its staging worktree"
+    );
+    assert!(merged_sequences(&fixture).is_empty());
+}
+
+#[test]
+fn a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses_it_elsewhere() {
+    // A kill between `task_merged` and the pin's deletion leaves a pin for a
+    // resolved sequence. It is pruned expected-old at the proposal the
+    // verification recorded, and at any other SHA it refuses and stays.
+    for substituted in [false, true] {
+        let fixture = Fixture::healthy(if substituted {
+            "resolved-pin-substituted"
+        } else {
+            "resolved-pin-pruned"
+        });
+        let (candidate, head, pin) = plant_stale_verification(&fixture);
+        let proposal = CommitSha(ref_target(&fixture, pin.as_str()).expect("the pinned proposal"));
+        append_events(
+            &fixture,
+            &[
+                stale_clean_prepared(&candidate, &head, &proposal, &pin),
+                TopologyEventBody::TaskMerged {
+                    data: crate::topology::events::TaskMerged {
+                        sequence: crate::topology::events::SequenceId(0),
+                        merged_sha: proposal.clone(),
+                        satisfies: vec![ALPHA],
+                        lease_release: crate::topology::events::MergeLeaseRelease::Candidate {
+                            key: ALPHA,
+                            generation: GEN,
+                        },
+                    },
+                },
+            ],
+        );
+        crate::workspace_manager::fixture::git(
+            &fixture.repo_root,
+            &[
+                "update-ref",
+                fixture.started.integration_ref.as_str(),
+                proposal.as_str(),
+            ],
+        );
+        if substituted {
+            crate::workspace_manager::fixture::git(
+                &fixture.repo_root,
+                &["update-ref", pin.as_str(), fixture.base_sha.as_str()],
+            );
+        }
+
+        let outcome = resume_with_real_refs(&fixture, &harness());
+        if substituted {
+            let text = message(&outcome.expect_err("a resolved pin at another SHA refuses"));
+            assert!(
+                text.contains(pin.as_str()) && text.contains(fixture.base_sha.as_str()),
+                "{text}"
+            );
+            assert_eq!(
+                ref_target(&fixture, pin.as_str()).as_deref(),
+                Some(fixture.base_sha.as_str()),
+                "the substitution stays visible rather than being deleted"
+            );
+        } else {
+            outcome.expect("a resolved sequence's pin at its recorded proposal is pruned");
+            assert_eq!(
+                ref_target(&fixture, pin.as_str()),
+                None,
+                "the pin of a published sequence was pruned"
+            );
+        }
+        assert_eq!(merged_sequences(&fixture), vec![0]);
+    }
+}
+
+#[test]
+fn a_resume_completes_an_already_present_publication_at_the_candidate_commit_and_reclaims_its_staging()
+ {
+    // The head was moved onto the candidate's own commit, so the stale path
+    // found an empty cherry-pick and authorized `already_present` with
+    // `expected_head == proposed_sha == candidate.commit_sha`. Inferring "fast"
+    // from those SHAs would leak the staging worktree; the fold retains the
+    // disposition, so recovery reclaims it after the no-op swap.
+    let fixture = Fixture::healthy("already-present-at-candidate");
+    let planted = plant_queued_candidate(&fixture);
+    crate::workspace_manager::fixture::git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            planted.commit.as_str(),
+        ],
+    );
+    let staging = plant_staging_worktree(&fixture, 0, planted.commit.as_str());
+    append_events(
+        &fixture,
+        &[
+            TopologyEventBody::MergeVerificationStarted {
+                data: crate::topology::events::MergeVerificationStarted {
+                    sequence: crate::topology::events::SequenceId(0),
+                    candidate: planted.candidate.clone(),
+                    basis: crate::topology::events::VerificationBasis::AlreadyPresent,
+                    expected_head: planted.commit.clone(),
+                    proposed_sha: planted.commit.clone(),
+                },
+            },
+            TopologyEventBody::MergePrepared {
+                data: Box::new(crate::topology::events::MergePrepared {
+                    sequence: crate::topology::events::SequenceId(0),
+                    disposition: crate::topology::events::PreparedDisposition::AlreadyPresent,
+                    expected_head: planted.commit.clone(),
+                    proposed_sha: planted.commit.clone(),
+                    key: ALPHA,
+                    generation: GEN,
+                    candidate_sha: planted.commit.clone(),
+                    candidate_ref: planted.candidate.candidate_ref.clone(),
+                    prepared_ref: None,
+                    verification_source:
+                        crate::topology::events::VerificationSource::Verification {
+                            sequence: crate::topology::events::SequenceId(0),
+                        },
+                    verification: Some(passed_verification()),
+                    satisfies: vec![ALPHA],
+                }),
+            },
+        ],
+    );
+
+    let harness = harness();
+    resume_with_real_refs(&fixture, &harness).expect("record the already-present publication");
+    assert_eq!(merged_sequences(&fixture), vec![0]);
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str()),
+        "the ref did not move"
+    );
+    assert_eq!(
+        cas_integration_entries(&harness),
+        1,
+        "the validation-only swap ran once, expected-old at the head"
+    );
+    assert!(
+        !fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .iter()
+            .any(|slot| matches!(slot, crate::workspace_manager::Slot::Staging { .. }))
+            && !staging.exists(),
+        "recovery read the disposition rather than inferring fast, and reclaimed the staging"
     );
 }
 

@@ -301,6 +301,26 @@ Retained here because CAS recovery (`transaction_fault_matrix[T-FAST]` and
 the transaction means the recovery reads the value the fold authorized
 rather than re-deriving it from the event list a second time.
 
+## `pub enum TransactionClass` › `disposition: PreparedDisposition,`
+
+Which of the three shapes authorized the publication, retained for the same
+reason as `expected_head`: recovery has to know what the transaction left
+behind, and the SHAs cannot say. A fast publication staged nothing; a
+stale-clean or already-present one ran in `merge/s<seq>`, and an
+already-present publication at the candidate's own commit — the head moved
+onto it, the cherry-pick was empty — has `proposed_sha == candidate.commit_sha`
+exactly as a fast one does while still owning a staging worktree. Inferring
+"fast" from that equality leaked the staging (`pr8-triage.md`, crash 5).
+
+## `pub enum TransactionClass` › `prepared_ref: Option<GitRef>,`
+
+The `prepared/<seq>` pin the record names — `Some` for stale-clean, `None`
+for fast and already-present, which pin nothing. Recovery prunes it after
+`task_merged` expected-old at `proposed_sha`, and the namespace check keeps
+it expected while the publication is owed; a pin derived from the sequence
+number rather than read off the record would be a second spelling of the
+same name.
+
 ## `pub struct Transaction {`
 
 The one unresolved integration transaction, if there is one.

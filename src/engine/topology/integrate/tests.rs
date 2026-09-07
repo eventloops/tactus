@@ -644,16 +644,9 @@ fn a_recovered_authorization_is_the_live_one_and_completes_through_the_same_publ
     let candidate = run.queue_candidate(ALPHA);
     let request = IntegrationRequest::from_fold(run.emitter.fold(), &candidate).expect("request");
     let manager = run.fixture.manager.clone();
-    let run_id = run
-        .emitter
-        .fold()
-        .started()
-        .expect("started")
-        .run_id
-        .clone();
 
     assert_eq!(
-        Authorized::from_fold(run.emitter.fold(), &run_id).expect("read"),
+        Authorized::from_fold(run.emitter.fold()).expect("read"),
         None,
         "nothing is authorized before merge_prepared"
     );
@@ -664,7 +657,7 @@ fn a_recovered_authorization_is_the_live_one_and_completes_through_the_same_publ
     let decided = decide(&manager, &request).expect("decide");
     let live = prepare_fast(&mut run, &request, decided.head).expect("prepared");
 
-    let recovered = Authorized::from_fold(run.emitter.fold(), &run_id)
+    let recovered = Authorized::from_fold(run.emitter.fold())
         .expect("read")
         .expect("merge_prepared authorized a publication");
     assert_eq!(
@@ -679,7 +672,7 @@ fn a_recovered_authorization_is_the_live_one_and_completes_through_the_same_publ
     assert_eq!(published.merged_sha, candidate.commit_sha);
     assert_eq!(run.head().as_deref(), Some(candidate.commit_sha.as_str()));
     assert_eq!(
-        Authorized::from_fold(run.emitter.fold(), &run_id).expect("read"),
+        Authorized::from_fold(run.emitter.fold()).expect("read"),
         None,
         "a completed publication authorizes nothing further"
     );

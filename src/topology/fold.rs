@@ -444,6 +444,8 @@ pub enum TransactionClass {
         expected_head: CommitSha,
         proposed_sha: CommitSha,
         satisfies: Vec<TaskKey>,
+        disposition: PreparedDisposition,
+        prepared_ref: Option<GitRef>,
     },
 }
 
