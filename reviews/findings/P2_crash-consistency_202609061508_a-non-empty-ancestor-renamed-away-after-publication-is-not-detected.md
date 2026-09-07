@@ -58,13 +58,14 @@ and `standards/SWEEP.md`:
   publication and before the final barriers; the injectable flush is the seam. It must witness that
   the call cannot return durable success unless the file is still at the requested path with its
   ancestor entries flushed.
-- Correct the record in the same change. `docs/internals/connect.md` (the `fn
-  flush_created_entries(` section) and the `src/connect.rs` row in `standards/SWEEP.md` still carry
-  the sentence review 4 disproved — that a non-empty directory cannot be replaced by anything short
-  of deleting the file — and PR #189's durability account is written to the contract this defect
-  breaks. All three are rewritten to whatever contract the repair establishes. They were left
-  standing deliberately: PR #189's review budget was spent, and a prose correction pushed after the
-  last pass would be a change no review covered.
+- Correct the record in the same change. The `flush_created_entries` section of
+  `docs/internals/connect.md` still carries the sentence review 4 disproved, that a non-empty
+  directory cannot be replaced by anything short of deleting the file; the `src/connect.rs` row in
+  `standards/SWEEP.md` carries the same premise as "only the published file pins the chain"; and
+  PR #189's durability account is written to the contract this defect breaks. All three are
+  rewritten to whatever contract the repair establishes. They were left standing deliberately:
+  PR #189's review budget was spent, and a prose correction pushed after the last pass would be a
+  change no review covered.
 
 Until then the honest statement, which PR #189's body makes in its Summary banner and its Risk and
 rollback section, is that a non-empty ancestor renamed away between the publication and the final
