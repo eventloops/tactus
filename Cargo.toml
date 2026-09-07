@@ -2,8 +2,9 @@
 name = "upstroke"
 # 0.1.0 because §21's definition of done was actually met, on 2026-08-10: a
 # five-task plan ran unattended against a scratch repository through every one
-# of its five criteria and the kill/resume test — `acceptance/RESULT.md` is the
-# evidence, including the three engine defects that run found. 0.0.1 was the
+# of its five criteria and the kill/resume test — the acceptance write-up, kept
+# in the repository history, is the evidence, including the three engine defects
+# that run found. 0.0.1 was the
 # crates.io name reservation and never claimed to be more.
 #
 # The 0.1.0 published to crates.io says "on a real repository" here, which is
@@ -13,22 +14,23 @@ name = "upstroke"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-license = "AGPL-3.0-only"
+license = "Apache-2.0"
 description = "Headless orchestration engine for AI coding agents — the conductor, not an instrument"
-repository = "https://github.com/eventloops/upstroke"
+repository = "https://github.com/sourcemaps/upstroke"
 readme = "README.md"
 keywords = ["ai", "agents", "orchestration", "automation", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-# Internal working documents: useful in the repo, noise in the published
-# crate. Fixtures stay — the parser tests are fixture-driven. `docs/` is the
-# GitHub Pages source, so it is a website rather than part of the library.
+# Exclude working records, automation, and the Pages entry point and domain.
+# Module notes under docs/internals stay in the crate with the source they
+# document. Parser fixtures stay because the tests read them.
 exclude = [
     "reviews/",
     ".github/",
     ".upstroke/",
     ".testagent/",
     "acceptance/",
-    "docs/",
+    "docs/index.html",
+    "docs/CNAME",
     "scripts/",
 ]
 
@@ -86,6 +88,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_IO",
     "Win32_System_JobObjects",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }
 

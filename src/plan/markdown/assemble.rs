@@ -1,40 +1,34 @@
-//! Assembly: ids, kinds, dependencies, artifacts.
-//!
-//! The last step, and the only one that mints IR. Explicit `id=` values are
-//! reserved before any slug is derived, so a derived id never collides with
-//! one an author wrote; duplicate explicit ids are left intact for `validate`
-//! to report. An absent `depends=` chains a task to its predecessor in
-//! document order, and `depends=` with no value breaks that chain
-//! deliberately. Kinds fall back to a keyword heuristic over the title.
-//!
-//! The sink of the DAG: fed by [`super::drafts`] and [`super::hints`], read by
-//! nothing but the adapter itself.
+//! Extended notes: `docs/internals/plan/markdown/assemble.md`
 
 use super::drafts::Draft;
 use super::hints::push_unique;
 use crate::ir::{Artifact, ArtifactId, Task, TaskId, TaskKind};
 
 pub(super) fn assemble(drafts: Vec<Draft>) -> Vec<Task> {
-    // Reserve explicit ids first so derived slugs never collide with them.
-    // Explicit duplicates are left intact for validation to report.
-    let mut taken: Vec<String> = drafts
+    let annotated: Vec<_> = drafts
+        .into_iter()
+        .map(|draft| {
+            let ann = draft.annotation();
+            (draft, ann)
+        })
+        .collect();
+    let mut taken: Vec<String> = annotated
         .iter()
-        .filter_map(|d| d.annotation().id.clone())
+        .filter_map(|(_, ann)| ann.id.clone())
         .collect();
     let mut previous_id: Option<TaskId> = None;
-    let mut tasks = Vec::with_capacity(drafts.len());
-    for draft in drafts {
-        let ann = draft.annotation();
-        let id = match ann.id.clone() {
+    let mut tasks = Vec::with_capacity(annotated.len());
+    for (draft, ann) in annotated {
+        let id = match ann.id {
             Some(explicit) => explicit,
             None => unique_slug(&draft.title, &mut taken),
         };
         let kind = ann.kind.unwrap_or_else(|| heuristic_kind(&draft.title));
-        let depends_on: Vec<TaskId> = match &ann.depends {
+        let depends_on: Vec<TaskId> = match ann.depends {
             Some(ids) => ids.iter().map(|s| TaskId::from(s.as_str())).collect(),
-            None => previous_id.clone().into_iter().collect(),
+            None => previous_id.take().into_iter().collect(),
         };
-        let mut path_hints = ann.paths.clone();
+        let mut path_hints = ann.paths;
         for hint in &draft.hints {
             push_unique(&mut path_hints, hint);
         }
@@ -125,8 +119,6 @@ fn heuristic_kind(title: &str) -> TaskKind {
     }
 }
 
-/// Artifacts come from `out=` annotations; a bare plan with a Design task
-/// defaults to a conventions brief produced by the first one (§9).
 pub(super) fn collect_artifacts(tasks: &mut [Task], warnings: &mut Vec<String>) -> Vec<Artifact> {
     let mut artifacts: Vec<Artifact> = Vec::new();
     for task in tasks.iter() {

@@ -1,132 +1,368 @@
-//! The bounded pipe drain: read a child's stdout and stderr into shared
-//! buffers that can be snapshotted without joining the reader threads.
+//! Extended notes: `docs/internals/agent/proc/drain.md`
+
+//! Bounded output capture with a joined nonblocking pipe worker.
 //!
-//! This is the half of process supervision that has nothing to do with
-//! processes. It reads bytes from something that implements [`Read`], keeps at
-//! most a caller-supplied number of them, records whether it had to drop any,
-//! and hands back what arrived within a caller-supplied grace. Nothing here
-//! spawns, signals, waits on or contains a child; the supervisor in the parent
-//! module owns all of that and calls in here twice per run.
+//! The reader retains at most the byte limit while draining excess output.
+//! WouldBlock parks for a finite interval; consecutive Interrupted results
+//! have a fixed retry bound. Other read errors and invalid counts publish a
+//! typed failure. The caught region includes pipe teardown, so success follows
+//! close and a panic becomes ReaderPanicked.
 //!
-//! **Why the buffer is shared and the thread is not joined.** A pipe read
-//! blocks until the last *write* handle closes, and on both platforms a handle
-//! can outlive the process the funnel started: a Windows grandchild that
-//! inherited it, or a Unix orphan that escaped its group. Joining such a reader
-//! is waiting on a process nobody owns. So the reader accumulates into an
-//! `Arc<Mutex<Vec<u8>>>`, and [`Drain::collect`] waits only for the grace it
-//! was given before snapshotting the buffer and walking away. An abandoned
-//! reader owns its own handle and exits when the last writer closes.
+//! The supervisor and worker share capture and limit state because the
+//! supervisor inspects output while the child runs. Capture's mutex protects
+//! bytes and their published verdict together and never spans a pipe operation.
+//! The worker's separate release flag arbitrates cancellation. At the grace,
+//! collection releases and joins the worker before taking its capture. Drop
+//! also releases and joins. A live escaped writer cannot make a nonblocking
+//! poll wait for more input. Only observed EOF means ended; release means the
+//! retained prefix is partial even when the worker finishes before collection.
 //!
-//! **Why the limit is enforced by the reader and not by the supervisor.** The
-//! supervisor notices a run has exceeded its output allowance by polling
-//! [`drain_limit_exceeded`], and it can only do that if the readers have kept
-//! reading — a reader that stopped at the limit would fill the pipe buffer and
-//! block the child, which is the deadlock this whole module exists to avoid.
-//! So the readers drain past the limit forever and simply stop *retaining*.
-//! Bytes above the allowance are counted as dropped and discarded.
-//
-// PROCESS FUNNEL child module. `src/agent/proc.rs` is in the funnel section of
-// `effects/allowlist.toml` and opens with an inner
-// `#![allow(clippy::disallowed_methods, disallowed_types, disallowed_macros)]`.
-// A Rust lint level is scoped by the MODULE TREE and not by the file, so this
-// file would inherit all three in silence -- that is `PR6-LANEF-004`, measured
-// twice in the Container subtree and answered for the Process funnel's first
-// out-of-line child in `src/agent/proc/test_support/readiness.rs`.
-//
-// This module reaches no denied primitive at all: pipes arrive as an opaque
-// `R: Read`, so it names no `std::process::Command`, opens no file and prints
-// nothing. It therefore states the STRONGEST posture rather than the inherited
-// one, and needs no `effects/allowlist.toml` row of its own -- a denial is not
-// an allowance and nothing here has to be reviewed as an exception.
-// `runner::container::tests::every_child_module_of_the_container_funnel_states_\
-// its_own_lint_level` is the census that requires this attribute to exist, and
-// it derives its domain from the funnel list rather than from a written-out set
-// of files, which is why this file joined that domain by being created.
+//! The owned pipe boundary excludes arbitrary blocking Read implementations.
+//! Worker settlement needs scheduling and finite local operations, never an
+//! external peer's cooperation. Normal collection returns every published
+//! failure after settlement. An uncollected drop joins and records its failure
+//! in the invocation's retained FailureReport instead of losing the error on
+//! an early return. A caller retains that observer before starting a sibling.
+//!
 #![deny(
     clippy::disallowed_methods,
     clippy::disallowed_types,
     clippy::disallowed_macros
 )]
 
-use std::io::Read;
+use std::fmt;
+use std::io::ErrorKind;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// How long to keep draining pipes after the process is gone. Normally EOF is
-/// immediate; the grace only caps the pathological case of an orphaned
-/// grandchild still holding a write handle.
-pub(super) const DRAIN_GRACE_EXIT: Duration = Duration::from_secs(2);
-pub(super) const DRAIN_GRACE_KILL: Duration = Duration::from_millis(500);
-/// Per stream. Readers continue draining after this point so the child cannot
-/// block on a full pipe while the supervisor notices and terminates its tree.
-pub(super) const OUTPUT_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+use super::pipe_io::PollRead;
+use super::worker::{FailureReport, POLL_INTERVAL, Worker};
+use thiserror::Error;
 
-/// A pipe reader whose buffer can be snapshotted without joining the thread,
-/// so an orphan holding the write end can never stall the supervisor.
+pub(super) const INTERRUPTED_RETRIES: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stream {
+    Stdout,
+    Stderr,
+}
+
+impl Stream {
+    fn thread_name(self) -> &'static str {
+        match self {
+            Self::Stdout => "drain-stdout",
+            Self::Stderr => "drain-stderr",
+        }
+    }
+}
+
+impl fmt::Display for Stream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+pub(super) enum DrainError {
+    #[error("starting the {stream} reader thread: {source}")]
+    Start {
+        stream: Stream,
+        source: std::io::Error,
+    },
+    #[error("reading {stream}: {source}")]
+    Read {
+        stream: Stream,
+        source: std::io::Error,
+    },
+    #[error("reading {stream}: interrupted {interruptions} times in a row")]
+    Interrupted {
+        stream: Stream,
+        interruptions: usize,
+    },
+    #[error("the {stream} reader was told {reported} bytes filled a {capacity}-byte buffer")]
+    OverlongRead {
+        stream: Stream,
+        reported: usize,
+        capacity: usize,
+    },
+    #[error("the {stream} reader thread panicked")]
+    ReaderPanicked { stream: Stream },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Captured {
+    pub(super) text: String,
+    pub(super) limited: bool,
+    pub(super) ended: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct CapturedBytes {
+    pub(super) bytes: Vec<u8>,
+    pub(super) limited: bool,
+    pub(super) ended: bool,
+}
+
+#[derive(Default)]
+struct Capture {
+    bytes: Vec<u8>,
+    verdict: Option<Result<ReadEnd, DrainError>>,
+}
+
+enum ReadEnd {
+    Eof,
+    Released,
+}
+
+struct Published;
+
+fn publish_failure(capture: &Mutex<Capture>, error: DrainError) -> Published {
+    capture
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .verdict = Some(Err(error));
+    Published
+}
+
 pub(super) struct Drain {
-    buf: Arc<Mutex<Vec<u8>>>,
+    stream: Stream,
+    capture: Arc<Mutex<Capture>>,
     limited: Arc<AtomicBool>,
-    handle: thread::JoinHandle<()>,
+    worker: Worker,
+    report: FailureReport,
+}
+
+fn read_into<R: PollRead>(
+    stream: Stream,
+    pipe: &mut R,
+    limit: usize,
+    capture: &Mutex<Capture>,
+    limited: &AtomicBool,
+    released: &AtomicBool,
+) -> Result<ReadEnd, Published> {
+    let mut chunk = [0u8; 8192];
+    let mut interrupted = 0_usize;
+    loop {
+        if released.load(Ordering::SeqCst) {
+            return Ok(ReadEnd::Released);
+        }
+        let outcome = pipe.try_read(&mut chunk);
+        let cancelled = released.load(Ordering::SeqCst);
+        let read = match outcome {
+            Err(source)
+                if !matches!(
+                    source.kind(),
+                    ErrorKind::Interrupted | ErrorKind::WouldBlock
+                ) =>
+            {
+                return Err(publish_failure(
+                    capture,
+                    DrainError::Read { stream, source },
+                ));
+            }
+            Ok(read) if read > chunk.len() => {
+                return Err(publish_failure(
+                    capture,
+                    DrainError::OverlongRead {
+                        stream,
+                        reported: read,
+                        capacity: chunk.len(),
+                    },
+                ));
+            }
+            _ if cancelled => return Ok(ReadEnd::Released),
+            Ok(0) => return Ok(ReadEnd::Eof),
+            Ok(read) => read,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                interrupted = 0;
+                thread::park_timeout(POLL_INTERVAL);
+                continue;
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {
+                interrupted += 1;
+                if interrupted > INTERRUPTED_RETRIES {
+                    return Err(publish_failure(
+                        capture,
+                        DrainError::Interrupted {
+                            stream,
+                            interruptions: interrupted,
+                        },
+                    ));
+                }
+                continue;
+            }
+            Err(source) => {
+                return Err(publish_failure(
+                    capture,
+                    DrainError::Read { stream, source },
+                ));
+            }
+        };
+        interrupted = 0;
+        let Some(bytes) = chunk.get(..read) else {
+            return Err(publish_failure(
+                capture,
+                DrainError::OverlongRead {
+                    stream,
+                    reported: read,
+                    capacity: chunk.len(),
+                },
+            ));
+        };
+        let mut guard = capture.lock().unwrap_or_else(PoisonError::into_inner);
+        let remaining = limit.saturating_sub(guard.bytes.len());
+        let retained = remaining.min(bytes.len());
+        guard.bytes.extend(bytes.iter().take(retained));
+        if retained < bytes.len() {
+            limited.store(true, Ordering::SeqCst);
+        }
+    }
 }
 
 impl Drain {
-    pub(super) fn start<R: Read + Send + 'static>(mut pipe: R, limit: usize) -> Self {
-        let buf = Arc::new(Mutex::new(Vec::new()));
-        let writer = Arc::clone(&buf);
+    pub(super) fn start<R: PollRead>(
+        stream: Stream,
+        pipe: R,
+        limit: usize,
+    ) -> Result<Self, DrainError> {
+        let capture = Arc::new(Mutex::new(Capture::default()));
         let limited = Arc::new(AtomicBool::new(false));
-        let reader_limited = Arc::clone(&limited);
-        let handle = thread::spawn(move || {
-            let mut chunk = [0u8; 8192];
-            loop {
-                match pipe.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        let mut guard = match writer.lock() {
-                            Ok(guard) => guard,
-                            Err(poisoned) => poisoned.into_inner(),
-                        };
-                        let remaining = limit.saturating_sub(guard.len());
-                        let retained = remaining.min(n);
-                        guard.extend_from_slice(&chunk[..retained]);
-                        if retained < n {
-                            reader_limited.store(true, Ordering::SeqCst);
-                        }
-                    }
+        let reader = (Arc::clone(&capture), Arc::clone(&limited));
+        let worker = Worker::spawn(stream.thread_name(), move |released| {
+            let (capture, limited) = reader;
+            let after_unwind = Arc::clone(&capture);
+            let outcome = catch_unwind(AssertUnwindSafe(move || {
+                let mut pipe = pipe;
+                let ended = read_into(stream, &mut pipe, limit, &capture, &limited, released);
+                drop(pipe);
+                (ended, capture)
+            }));
+            match outcome {
+                Ok((Ok(ended), capture)) => {
+                    capture
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .verdict
+                        .get_or_insert(Ok(ended));
                 }
+                Ok((Err(Published), _capture)) => {}
+                Err(_payload) => publish_panic(&after_unwind, stream),
             }
-        });
-        Self {
-            buf,
+        })
+        .map_err(|source| DrainError::Start { stream, source })?;
+        Ok(Self {
+            stream,
+            capture,
             limited,
-            handle,
-        }
+            worker,
+            report: FailureReport::default(),
+        })
     }
 
-    fn limit_exceeded(&self) -> bool {
+    pub(super) fn limit_exceeded(&self) -> bool {
         self.limited.load(Ordering::SeqCst)
     }
 
-    /// Wait up to `grace` for EOF, then snapshot whatever arrived. A reader
-    /// abandoned here exits on its own when the last write handle closes.
-    pub(super) fn collect(self, grace: Duration) -> (String, bool) {
-        let deadline = Instant::now() + grace;
-        while !self.handle.is_finished() && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(20));
-        }
-        if self.handle.is_finished() {
-            let _ = self.handle.join();
-        }
-        let snapshot = match self.buf.lock() {
-            Ok(guard) => guard.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        };
-        (
-            String::from_utf8_lossy(&snapshot).into_owned(),
-            self.limited.load(Ordering::SeqCst),
-        )
+    pub(super) fn failure_report(&self) -> FailureReport {
+        self.report.clone()
     }
+
+    pub(super) fn collect(self, grace: Duration) -> Result<Captured, DrainError> {
+        let CapturedBytes {
+            bytes,
+            limited,
+            ended,
+        } = self.collect_bytes(grace)?;
+        let text = String::from_utf8(bytes)
+            .unwrap_or_else(|invalid| String::from_utf8_lossy(invalid.as_bytes()).into_owned());
+        Ok(Captured {
+            text,
+            limited,
+            ended,
+        })
+    }
+
+    pub(super) fn collect_bytes(self, grace: Duration) -> Result<CapturedBytes, DrainError> {
+        self.collect_with_wait(grace, || thread::sleep(Duration::from_millis(20)))
+    }
+
+    fn collect_with_wait(
+        mut self,
+        grace: Duration,
+        mut wait: impl FnMut(),
+    ) -> Result<CapturedBytes, DrainError> {
+        let stream = self.stream;
+        let started = Instant::now();
+        loop {
+            let decided = self
+                .capture
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .verdict
+                .is_some();
+            if decided || started.elapsed() >= grace {
+                break;
+            }
+            wait();
+        }
+        let torn_down = self
+            .worker
+            .settle()
+            .then_some(DrainError::ReaderPanicked { stream });
+        let (bytes, verdict) = {
+            let mut capture = self.capture.lock().unwrap_or_else(PoisonError::into_inner);
+            (std::mem::take(&mut capture.bytes), capture.verdict.take())
+        };
+        let ended = match (verdict, torn_down) {
+            (Some(Err(error)), _) => return Err(error),
+            (_, Some(error)) => return Err(error),
+            (Some(Ok(ReadEnd::Eof)), None) => true,
+            (None | Some(Ok(ReadEnd::Released)), None) => false,
+        };
+        Ok(CapturedBytes {
+            bytes,
+            limited: self.limited.load(Ordering::SeqCst),
+            ended,
+        })
+    }
+}
+
+impl Drop for Drain {
+    fn drop(&mut self) {
+        let panicked = self.worker.settle();
+        let error = self
+            .capture
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .verdict
+            .take()
+            .and_then(Result::err);
+        match (error, panicked) {
+            (Some(error), true) => self.report.record(format!(
+                "{error}; {} worker also panicked during settlement",
+                self.stream
+            )),
+            (Some(error), false) => self.report.record(error),
+            (None, true) => self.report.record(DrainError::ReaderPanicked {
+                stream: self.stream,
+            }),
+            (None, false) => {}
+        }
+    }
+}
+
+fn publish_panic(capture: &Mutex<Capture>, stream: Stream) {
+    capture
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .verdict
+        .get_or_insert(Err(DrainError::ReaderPanicked { stream }));
 }
 
 pub(super) fn drain_limit_exceeded(stdout: &Option<Drain>, stderr: &Option<Drain>) -> bool {
@@ -136,197 +372,625 @@ pub(super) fn drain_limit_exceeded(stdout: &Option<Drain>, stderr: &Option<Drain
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicUsize;
+    use std::collections::VecDeque;
+    use std::io;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
-    use super::*;
+    use super::{Captured, Drain, DrainError, INTERRUPTED_RETRIES, Stream, drain_limit_exceeded};
 
-    /// A pipe that yields what it is sent and reaches EOF only when every
-    /// sender is gone.
-    ///
-    /// The in-process stand-in for the case this module exists for: a write
-    /// handle still held by something the funnel does not own, so the reader
-    /// blocks and no amount of waiting on it will return. `std::io::pipe` would
-    /// say it more directly and is Rust 1.87; this crate's MSRV is 1.85 and CI
-    /// pins it.
-    struct HeldOpen {
-        rx: std::sync::mpsc::Receiver<Vec<u8>>,
-        pending: Vec<u8>,
+    const BOUND: Duration = Duration::from_secs(10);
+
+    enum Step {
+        Bytes(Vec<u8>),
+        Interrupted,
+        Fail(io::ErrorKind),
+        Overlong,
+        Panic,
     }
 
-    impl Read for HeldOpen {
-        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-            if self.pending.is_empty() {
-                let Ok(next) = self.rx.recv() else {
-                    return Ok(0);
-                };
-                self.pending = next;
+    struct Scripted {
+        steps: VecDeque<Step>,
+        hold_drop: Option<mpsc::Receiver<()>>,
+        drop_entered: Option<mpsc::Sender<()>>,
+        panic_on_drop: bool,
+    }
+
+    impl Scripted {
+        fn new(steps: impl IntoIterator<Item = Step>) -> Self {
+            Self {
+                steps: steps.into_iter().collect(),
+                hold_drop: None,
+                drop_entered: None,
+                panic_on_drop: false,
             }
-            let taken = out.len().min(self.pending.len());
-            out[..taken].copy_from_slice(&self.pending[..taken]);
-            self.pending = self.pending.split_off(taken);
-            Ok(taken)
         }
     }
 
-    fn held_open() -> (std::sync::mpsc::Sender<Vec<u8>>, HeldOpen) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        (
-            tx,
-            HeldOpen {
-                rx,
-                pending: Vec::new(),
+    impl super::PollRead for Scripted {
+        fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.steps.pop_front() {
+                None => Ok(0),
+                Some(Step::Bytes(mut bytes)) => {
+                    let rest = bytes.split_off(bytes.len().min(buf.len()));
+                    if !rest.is_empty() {
+                        self.steps.push_front(Step::Bytes(rest));
+                    }
+                    for (slot, byte) in buf.iter_mut().zip(&bytes) {
+                        *slot = *byte;
+                    }
+                    Ok(bytes.len())
+                }
+                Some(Step::Interrupted) => Err(io::Error::from(io::ErrorKind::Interrupted)),
+                Some(Step::Fail(kind)) => Err(io::Error::new(kind, "scripted failure")),
+                Some(Step::Overlong) => Ok(buf.len() + 1),
+                Some(Step::Panic) => panic!("scripted reader panic"),
+            }
+        }
+    }
+
+    impl Drop for Scripted {
+        fn drop(&mut self) {
+            if let Some(entered) = &self.drop_entered {
+                let _ = entered.send(());
+            }
+            if let Some(hold) = &self.hold_drop {
+                let _ = hold.recv_timeout(BOUND);
+            }
+            assert!(
+                !self.panic_on_drop,
+                "scripted panic while dropping the pipe"
+            );
+        }
+    }
+
+    fn text(bytes: &str) -> Step {
+        Step::Bytes(bytes.as_bytes().to_vec())
+    }
+
+    enum Feed {
+        Bytes(Vec<u8>),
+        ReleaseThenInterrupt(std::sync::Arc<super::AtomicBool>),
+    }
+
+    struct Held {
+        feeds: mpsc::Receiver<Feed>,
+        entered: mpsc::Sender<()>,
+        announced: bool,
+    }
+
+    impl super::PollRead for Held {
+        fn try_read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if !self.announced {
+                let _ = self.entered.send(());
+                self.announced = true;
+            }
+            let feed = self.feeds.try_recv();
+            if !matches!(feed, Err(mpsc::TryRecvError::Empty)) {
+                self.announced = false;
+            }
+            match feed {
+                Err(mpsc::TryRecvError::Empty) => Err(io::ErrorKind::WouldBlock.into()),
+                Err(mpsc::TryRecvError::Disconnected) => Ok(0),
+                Ok(Feed::ReleaseThenInterrupt(flag)) => {
+                    flag.store(true, super::Ordering::SeqCst);
+                    Err(io::ErrorKind::Interrupted.into())
+                }
+                Ok(Feed::Bytes(chunk)) => {
+                    assert!(chunk.len() <= buf.len(), "the test sends chunks that fit");
+                    for (slot, byte) in buf.iter_mut().zip(&chunk) {
+                        *slot = *byte;
+                    }
+                    Ok(chunk.len())
+                }
+            }
+        }
+    }
+
+    fn held(limit: usize) -> (Drain, mpsc::Sender<Feed>, mpsc::Receiver<()>) {
+        let (feeds, receiver) = mpsc::channel();
+        let (entered, announcements) = mpsc::channel();
+        let drain = Drain::start(
+            Stream::Stdout,
+            Held {
+                feeds: receiver,
+                entered,
+                announced: false,
+            },
+            limit,
+        )
+        .expect("a reader thread");
+        (drain, feeds, announcements)
+    }
+
+    fn start(steps: impl IntoIterator<Item = Step>, limit: usize) -> Drain {
+        Drain::start(Stream::Stdout, Scripted::new(steps), limit).expect("a reader thread")
+    }
+
+    fn ended(text: &str, limited: bool) -> Captured {
+        Captured {
+            text: text.to_owned(),
+            limited,
+            ended: true,
+        }
+    }
+
+    type Collected = (Result<Captured, DrainError>, Duration);
+
+    fn collect_elsewhere(
+        drain: Drain,
+        grace: Duration,
+    ) -> super::super::worker::testing::JoinedReceiver<Collected> {
+        super::super::worker::testing::JoinedReceiver::spawn(
+            drain.worker.release_token(),
+            move || {
+                let started = Instant::now();
+                let captured = drain.collect(grace);
+                (captured, started.elapsed())
             },
         )
     }
 
-    /// The bound is the caller's, not this module's.
-    ///
-    /// `OUTPUT_LIMIT_BYTES` is what the funnel's public entry passes; every
-    /// primitive here takes the allowance as an argument, and a suite that only
-    /// ever drove the default would not notice a reader that ignored the
-    /// argument and used the constant instead. The row at the allowance exactly
-    /// is the off-by-one: retaining all of it is not an overrun.
+    fn reader_stopped(entered: &mpsc::Receiver<()>) -> bool {
+        matches!(
+            entered.recv_timeout(BOUND),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        )
+    }
+
     #[test]
-    fn a_drain_retains_the_callers_allowance_and_reports_the_rest_dropped() {
-        for (limit, written, retained, limited) in [
-            (0_usize, 4_u64, 0_usize, true),
-            (3, 4, 3, true),
-            (4, 4, 4, false),
-            (16, 4, 4, false),
-            (16, 0, 0, false),
-        ] {
-            let drain = Drain::start(std::io::repeat(b'x').take(written), limit);
-            let (text, reported) = drain.collect(Duration::from_secs(5));
-            assert_eq!(
-                (text.len(), reported),
-                (retained, limited),
-                "limit {limit} over {written} bytes"
-            );
-        }
+    fn collect_returns_what_the_pipe_delivered_before_end_of_stream() {
+        let drain = start([text("hello "), text("world")], 1 << 20);
+        let captured = drain.collect(BOUND).expect("a complete stream");
+        assert_eq!(captured, ended("hello world", false));
     }
 
-    /// A reader that counts what it hands over.
-    ///
-    /// Without it a drain that stopped at its allowance is indistinguishable
-    /// from one that drained past it: both retain exactly the allowance and
-    /// both report the overrun. What separates them is how many bytes left the
-    /// pipe, so that is what is measured.
-    struct Counted<R> {
-        inner: R,
-        consumed: Arc<AtomicUsize>,
-    }
-
-    impl<R: Read> Read for Counted<R> {
-        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
-            let taken = self.inner.read(out)?;
-            self.consumed.fetch_add(taken, Ordering::SeqCst);
-            Ok(taken)
-        }
-    }
-
-    /// Above the allowance the reader keeps *reading* and stops *retaining*.
-    ///
-    /// This is the property the design turns on: a reader that returned at the
-    /// limit would leave the pipe full and the child blocked on a write the
-    /// supervisor is waiting to outlive. Driven over more than one 8 KiB chunk,
-    /// because a single-chunk fixture cannot tell the two apart, and the
-    /// overrun is not a multiple of the chunk.
     #[test]
-    fn a_drain_past_its_allowance_reads_to_the_end_of_the_pipe() {
-        let written = 8192 * 3 + 17;
-        let consumed = Arc::new(AtomicUsize::new(0));
-        let drain = Drain::start(
-            Counted {
-                inner: std::io::repeat(b'y').take(u64::try_from(written).expect("a small fixture")),
-                consumed: Arc::clone(&consumed),
-            },
-            100,
-        );
-        let (text, limited) = drain.collect(Duration::from_secs(10));
-        assert_eq!(text.len(), 100, "more than the allowance was retained");
-        assert!(limited, "the dropped bytes were not reported");
+    fn the_limit_keeps_exactly_limit_bytes_and_reports_only_a_dropped_byte() {
+        let exact = start([text("abcd"), text("efghij")], 10);
         assert_eq!(
-            consumed.load(Ordering::SeqCst),
-            written,
-            "the reader stopped at its allowance instead of draining to EOF, which is the \
-             full-pipe deadlock this module exists to avoid"
+            exact.collect(BOUND).expect("a complete stream"),
+            ended("abcdefghij", false)
+        );
+        let over = start([text("abcd"), text("efghijkl")], 10);
+        assert_eq!(
+            over.collect(BOUND).expect("a complete stream"),
+            ended("abcdefghij", true)
+        );
+        let none = start([text("a")], 0);
+        assert_eq!(
+            none.collect(BOUND).expect("a complete stream"),
+            ended("", true)
         );
     }
 
-    /// The overrun is observable *before* the snapshot, which is what lets the
-    /// supervisor terminate a tree while its pipes are still open.
-    ///
-    /// [`drain_limit_exceeded`] is polled from the supervision loop, so it has
-    /// to answer while the reader is still running. Both arms are driven and
-    /// the empty case is asserted, so a predicate that answered `true`
-    /// unconditionally could not pass.
     #[test]
-    fn the_supervisor_sees_an_overrun_while_the_pipe_is_still_open() {
-        assert!(!drain_limit_exceeded(&None, &None));
-        for stderr_side in [false, true] {
-            let (tx, pipe) = held_open();
-            let drain = Some(Drain::start(pipe, 4));
-            let (stdout, stderr) = if stderr_side {
-                (None, drain)
-            } else {
-                (drain, None)
-            };
-            tx.send(b"0123456789".to_vec())
-                .expect("the reader is running");
-            let mut polls = 0;
-            while !drain_limit_exceeded(&stdout, &stderr) && polls < 500 {
-                thread::sleep(Duration::from_millis(10));
-                polls += 1;
+    fn interrupted_reads_are_retried_up_to_the_bound_and_the_stream_read_on() {
+        let mut steps = vec![text("before")];
+        steps.extend((0..INTERRUPTED_RETRIES).map(|_| Step::Interrupted));
+        steps.push(text("after"));
+        let drain = start(steps, 1 << 20);
+        assert_eq!(
+            drain.collect(BOUND).expect("a complete stream"),
+            ended("beforeafter", false)
+        );
+    }
+
+    #[test]
+    fn one_interruption_past_the_bound_ends_the_reader_with_a_named_failure() {
+        let mut steps = vec![text("before")];
+        steps.extend((0..=INTERRUPTED_RETRIES).map(|_| Step::Interrupted));
+        steps.push(text("never"));
+        let drain = start(steps, 1 << 20);
+        let error = drain.collect(BOUND).expect_err("a signal storm");
+        match &error {
+            DrainError::Interrupted {
+                stream,
+                interruptions,
+            } => {
+                assert_eq!(
+                    (*stream, *interruptions),
+                    (Stream::Stdout, INTERRUPTED_RETRIES + 1)
+                );
             }
-            assert!(
-                drain_limit_exceeded(&stdout, &stderr),
-                "the overrun was never reported while the pipe was open \
-                 (stderr_side={stderr_side})"
-            );
-            // The writer is still open, so this really is the mid-run answer.
-            tx.send(b"more".to_vec())
-                .expect("the reader is still running");
-            drop(tx);
+            other => panic!("a signal storm was reported as {other:?}"),
+        }
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "reading stdout: interrupted {} times in a row",
+                INTERRUPTED_RETRIES + 1
+            )
+        );
+    }
+
+    #[test]
+    fn a_byte_between_interruptions_restarts_the_bound() {
+        let mut steps = Vec::new();
+        for _ in 0..2 {
+            steps.extend((0..INTERRUPTED_RETRIES).map(|_| Step::Interrupted));
+            steps.push(text("x"));
+        }
+        let drain = start(steps, 1 << 20);
+        assert_eq!(
+            drain.collect(BOUND).expect("a complete stream"),
+            ended("xx", false)
+        );
+    }
+
+    #[test]
+    fn a_read_that_fails_is_reported_and_not_read_as_end_of_stream() {
+        let drain = start(
+            [
+                text("before"),
+                Step::Fail(io::ErrorKind::Other),
+                text("never"),
+            ],
+            1 << 20,
+        );
+        let error = drain.collect(BOUND).expect_err("a failed read");
+        match &error {
+            DrainError::Read { stream, source } => {
+                assert_eq!(*stream, Stream::Stdout);
+                assert_eq!(source.kind(), io::ErrorKind::Other);
+            }
+            other => panic!("a failed read was reported as {other:?}"),
+        }
+        assert_eq!(error.to_string(), "reading stdout: scripted failure");
+    }
+
+    #[test]
+    fn a_failure_decided_before_the_grace_is_seen_even_if_the_thread_has_not_finished() {
+        let (release, hold) = mpsc::channel::<()>();
+        let (entered, failed) = mpsc::channel();
+        let mut pipe = Scripted::new([text("before"), Step::Fail(io::ErrorKind::Other)]);
+        pipe.hold_drop = Some(hold);
+        pipe.drop_entered = Some(entered);
+        let drain = Drain::start(Stream::Stdout, pipe, 1 << 20).expect("a reader thread");
+        failed
+            .recv_timeout(BOUND)
+            .expect("the failure was published before pipe teardown began");
+        assert!(
+            !drain.worker.is_finished(),
+            "the test holds teardown after publication"
+        );
+        assert!(matches!(
+            drain.capture.lock().expect("capture").verdict,
+            Some(Err(DrainError::Read { .. }))
+        ));
+        drop(release);
+        let result = collect_elsewhere(drain, Duration::ZERO);
+        let outcome = result.recv_timeout(BOUND);
+        let (captured, _) = outcome.expect("collect returned");
+        match captured {
+            Err(DrainError::Read { stream, source }) => {
+                assert_eq!(stream, Stream::Stdout);
+                assert_eq!(source.kind(), io::ErrorKind::Other);
+            }
+            other => panic!("a failure decided before the grace was reported as {other:?}"),
         }
     }
 
-    /// A reader still holding an open pipe is abandoned at the grace, not
-    /// joined: the supervisor returns what arrived rather than waiting on a
-    /// handle nobody owns.
-    ///
-    /// The claim is structural, not a stopwatch. The test *terminating* is what
-    /// says `collect` did not join — a join here would never return — and the
-    /// send afterwards is what says the reader was left running rather than
-    /// having quietly reached EOF, which would make the fixture prove nothing.
     #[test]
-    fn collect_returns_at_the_grace_with_a_writer_still_open() {
-        let (tx, pipe) = held_open();
-        let drain = Drain::start(pipe, OUTPUT_LIMIT_BYTES);
-        // Trailing whitespace and a byte no encoding produces: what a child
-        // wrote is what is returned, `U+FFFD` for the invalid byte and not one
-        // byte else. A snapshot that tidied its edges would lose a newline an
-        // agent's protocol depends on.
-        tx.send(b"partial \n\xff \n".to_vec())
-            .expect("the reader is running");
-        let (text, limited) = drain.collect(Duration::from_millis(500));
-        assert_eq!(text, "partial \n\u{FFFD} \n");
-        assert!(!limited);
-        tx.send(b"more".to_vec())
-            .expect("the reader thread was joined or gone, so nothing held the pipe open");
-        drop(tx);
+    fn a_read_that_misreports_its_count_is_a_failure_and_not_a_panic() {
+        let drain = start([text("before"), Step::Overlong], 1 << 20);
+        match drain.collect(BOUND) {
+            Err(DrainError::OverlongRead {
+                stream,
+                reported,
+                capacity,
+            }) => {
+                assert_eq!(stream, Stream::Stdout);
+                assert_eq!((reported, capacity), (8193, 8192));
+            }
+            other => panic!("an overlong count was reported as {other:?}"),
+        }
     }
 
-    /// The graces the funnel passes are two, and they are ordered.
-    ///
-    /// A killed tree is given less than one that exited, because there is
-    /// nothing left to wait for. Pinned as values as well as ordered: a repair
-    /// that made both the same would keep the ordering claim true by collapsing
-    /// the distinction it is about.
     #[test]
-    fn the_two_graces_the_funnel_passes_are_distinct_and_ordered() {
-        assert!(DRAIN_GRACE_KILL < DRAIN_GRACE_EXIT);
-        assert_eq!(DRAIN_GRACE_EXIT, Duration::from_secs(2));
-        assert_eq!(DRAIN_GRACE_KILL, Duration::from_millis(500));
-        assert_eq!(OUTPUT_LIMIT_BYTES, 16 * 1024 * 1024);
+    fn a_reader_that_panics_is_a_named_failure() {
+        let drain = start([text("before"), Step::Panic], 1 << 20);
+        match drain.collect(BOUND) {
+            Err(DrainError::ReaderPanicked { stream }) => assert_eq!(stream, Stream::Stdout),
+            other => panic!("a panicking reader was reported as {other:?}"),
+        }
+    }
+
+    struct CancelOnPoll {
+        cancel: mpsc::Receiver<std::sync::Arc<super::AtomicBool>>,
+        panic: bool,
+    }
+
+    impl super::PollRead for CancelOnPoll {
+        fn try_read(&mut self, _bytes: &mut [u8]) -> io::Result<usize> {
+            match self.cancel.try_recv() {
+                Ok(flag) => {
+                    flag.store(true, super::Ordering::SeqCst);
+                    assert!(!self.panic, "finite reader panic");
+                    Err(io::Error::other("finite read failure"))
+                }
+                Err(mpsc::TryRecvError::Empty) => Err(io::ErrorKind::WouldBlock.into()),
+                Err(mpsc::TryRecvError::Disconnected) => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    fn a_read_failure_that_races_release_is_reported() {
+        let (cancel, receiver) = mpsc::channel();
+        let drain = Drain::start(
+            Stream::Stdout,
+            CancelOnPoll {
+                cancel: receiver,
+                panic: false,
+            },
+            64,
+        )
+        .expect("reader");
+        cancel
+            .send(drain.worker.release_token())
+            .expect("finite poll");
+        let error = drain
+            .collect(BOUND)
+            .expect_err("release cannot hide a returned read error");
+        assert!(matches!(error, DrainError::Read { .. }));
+        assert!(error.to_string().contains("finite read failure"));
+    }
+
+    #[test]
+    fn a_dropped_reader_adds_its_failure_to_the_primary_error() {
+        for panic in [false, true] {
+            let (cancel, receiver) = mpsc::channel();
+            let drain = Drain::start(
+                Stream::Stdout,
+                CancelOnPoll {
+                    cancel: receiver,
+                    panic,
+                },
+                64,
+            )
+            .expect("reader");
+            let report = drain.failure_report();
+            cancel
+                .send(drain.worker.release_token())
+                .expect("finite poll");
+            let started = Instant::now();
+            while !drain.worker.is_finished() {
+                assert!(started.elapsed() < BOUND, "finite reader finished");
+                thread::yield_now();
+            }
+            drop(drain);
+            let error = super::super::finish_pipe_reports::<()>(
+                Err(crate::error::UpstrokeError::Agent {
+                    message: "primary supervision failure".to_owned(),
+                }),
+                [None, Some(report), None],
+            )
+            .expect_err("both failures remain observable")
+            .to_string();
+            assert!(error.contains("primary supervision failure"));
+            assert!(error.contains(if panic {
+                "panicked"
+            } else {
+                "finite read failure"
+            }));
+        }
+    }
+
+    #[test]
+    fn a_panic_while_the_pipe_is_dropped_is_the_verdict_and_not_a_success() {
+        let mut pipe = Scripted::new([text("before")]);
+        pipe.panic_on_drop = true;
+        let drain = Drain::start(Stream::Stdout, pipe, 1 << 20).expect("a reader thread");
+        match drain.collect(BOUND) {
+            Err(DrainError::ReaderPanicked { stream }) => assert_eq!(stream, Stream::Stdout),
+            other => panic!("a panic while dropping the pipe was reported as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn collect_waits_for_the_stream_to_end_and_returns_what_arrived_by_then() {
+        let (drain, feeds, entered) = held(1 << 20);
+        entered.recv_timeout(BOUND).expect("the first read");
+        let (waiting, observed_wait) = mpsc::channel();
+        let (resume, continue_wait) = mpsc::channel::<()>();
+        let result = super::super::worker::testing::JoinedReceiver::spawn(
+            drain.worker.release_token(),
+            move || {
+                drain.collect_with_wait(BOUND, || {
+                    let _ = waiting.send(());
+                    let _ = continue_wait.recv_timeout(BOUND);
+                })
+            },
+        );
+        observed_wait
+            .recv_timeout(BOUND)
+            .expect("collect waited for the still-open stream");
+        feeds
+            .send(Feed::Bytes(b"late".to_vec()))
+            .expect("the reader is waiting");
+        drop(feeds);
+        drop(resume);
+        let captured = result
+            .recv_timeout(BOUND)
+            .expect("collect returned")
+            .expect("a complete stream");
+        drop(result);
+        assert_eq!(captured.bytes, b"late");
+        assert!(
+            captured.ended,
+            "the stream ended before collection finished"
+        );
+        assert!(!captured.limited, "the bytes fit within the allowance");
+    }
+
+    #[test]
+    fn collect_releases_a_reader_whose_writer_never_closes_once_the_grace_expires() {
+        let (drain, feeds, entered) = held(1 << 20);
+        entered.recv_timeout(BOUND).expect("the first read");
+        feeds
+            .send(Feed::Bytes(b"partial".to_vec()))
+            .expect("the reader is waiting");
+        entered.recv_timeout(BOUND).expect("the second read");
+
+        let grace = Duration::from_millis(100);
+        let result = collect_elsewhere(drain, grace);
+        let outcome = result.recv_timeout(BOUND);
+        let (captured, waited) = match outcome {
+            Ok(returned) => returned,
+            Err(timeout) => {
+                drop(feeds);
+                panic!("collect outlived its grace: {timeout:?}");
+            }
+        };
+        assert_eq!(
+            captured.expect("a partial stream is not a failure"),
+            Captured {
+                text: "partial".to_owned(),
+                limited: false,
+                ended: false,
+            }
+        );
+        assert!(
+            waited >= grace,
+            "collect returned before its grace: {waited:?}"
+        );
+
+        assert!(feeds.send(Feed::Bytes(b"orphan".to_vec())).is_err());
+        assert!(
+            reader_stopped(&entered),
+            "a released reader read again instead of stopping"
+        );
+    }
+
+    #[test]
+    fn a_released_reader_stops_at_an_interruption_too() {
+        let (drain, feeds, entered) = held(1 << 20);
+        entered.recv_timeout(BOUND).expect("the first read");
+        feeds
+            .send(Feed::ReleaseThenInterrupt(drain.worker.release_token()))
+            .expect("live reader");
+        assert!(
+            reader_stopped(&entered),
+            "release preceded interruption handling"
+        );
+        let result = collect_elsewhere(drain, Duration::ZERO);
+        let outcome = result.recv_timeout(BOUND);
+        drop(feeds);
+        let (captured, _) = outcome.expect("collect returned");
+        assert!(
+            !captured.expect("a partial stream is not a failure").ended,
+            "the stream was taken as ended while the writer was open"
+        );
+    }
+
+    #[test]
+    fn a_released_reader_cannot_report_eof_before_its_capture_is_taken() {
+        let (drain, _feeds, entered) = held(1 << 20);
+        entered.recv_timeout(BOUND).expect("the reader is blocked");
+        drain
+            .worker
+            .release_token()
+            .store(true, super::Ordering::SeqCst);
+        assert!(reader_stopped(&entered), "the released reader stopped");
+        let started = Instant::now();
+        while !drain.worker.is_finished() {
+            assert!(started.elapsed() < BOUND, "the reader published its result");
+            thread::yield_now();
+        }
+        let captured = drain
+            .collect(Duration::ZERO)
+            .expect("release returns the available capture");
+        assert!(
+            !captured.ended,
+            "release was reported as EOF while the writer remained open"
+        );
+        assert!(captured.text.is_empty(), "released bytes were not retained");
+    }
+
+    #[test]
+    fn dropping_a_drain_without_collecting_it_releases_its_reader() {
+        let (drain, feeds, entered) = held(1 << 20);
+        entered.recv_timeout(BOUND).expect("the first read");
+        let dropped = super::super::worker::testing::JoinedReceiver::spawn(
+            drain.worker.release_token(),
+            move || drop(drain),
+        );
+        let outcome = dropped.recv_timeout(BOUND);
+        drop(feeds);
+        outcome.expect("drop settled the nonblocking worker with its writer still live");
+        assert!(
+            reader_stopped(&entered),
+            "a dropped drain's reader read again instead of stopping"
+        );
+    }
+
+    #[test]
+    fn limit_exceeded_is_visible_while_the_reader_still_runs() {
+        let (drain, feeds, entered) = held(4);
+        entered.recv_timeout(BOUND).expect("the first read");
+        feeds
+            .send(Feed::Bytes(b"12345".to_vec()))
+            .expect("the reader is waiting");
+        entered.recv_timeout(BOUND).expect("the second read");
+        assert!(
+            drain.limit_exceeded(),
+            "five bytes into a four-byte allowance"
+        );
+        let stdout = Some(drain);
+        assert!(drain_limit_exceeded(&stdout, &None));
+        assert!(drain_limit_exceeded(&None, &stdout));
+        assert!(!drain_limit_exceeded(&None, &None));
+
+        drop(feeds);
+        let Some(drain) = stdout else {
+            panic!("the drain was placed in the option two statements ago");
+        };
+        assert_eq!(
+            drain.collect(BOUND).expect("a complete stream"),
+            ended("1234", true)
+        );
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_are_decoded_lossily_rather_than_dropped() {
+        let drain = start([Step::Bytes(vec![b'a', 0xff, b'b'])], 1 << 20);
+        assert_eq!(
+            drain.collect(BOUND).expect("a complete stream"),
+            ended("a\u{FFFD}b", false)
+        );
+    }
+
+    #[test]
+    fn byte_collection_preserves_non_utf8_and_limits_the_original_bytes() {
+        let bytes = vec![b'a', 0xff, 0, 0xc3, 0xa9];
+        let complete = start([Step::Bytes(bytes.clone())], bytes.len())
+            .collect_bytes(BOUND)
+            .expect("the original bytes");
+        assert_eq!(complete.bytes, bytes);
+        assert!(!complete.limited);
+        assert!(complete.ended);
+
+        let limited = start([Step::Bytes(bytes)], 4)
+            .collect_bytes(BOUND)
+            .expect("a bounded byte capture");
+        assert_eq!(limited.bytes, [b'a', 0xff, 0, 0xc3]);
+        assert!(limited.limited, "the final byte exceeded the allowance");
+        assert!(limited.ended, "the limit does not replace EOF");
+    }
+
+    #[test]
+    fn the_stderr_label_names_the_thread_and_the_error() {
+        let drain = Drain::start(
+            Stream::Stderr,
+            Scripted::new([Step::Fail(io::ErrorKind::BrokenPipe)]),
+            1 << 20,
+        )
+        .expect("a reader thread");
+        let error = drain.collect(BOUND).expect_err("a failed read");
+        assert_eq!(error.to_string(), "reading stderr: scripted failure");
+        assert_eq!(Stream::Stderr.thread_name(), "drain-stderr");
+        assert_eq!(Stream::Stdout.thread_name(), "drain-stdout");
     }
 }

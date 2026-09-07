@@ -1,6 +1,15 @@
-# Standing finding ledger
+# Standing finding ledger, to 2026-09-04
 
 Every review finding across every slice, with its disposition and whether it has recurred.
+
+> **Closed to new sections, and emptied of its open rows.** A finding recorded after 2026-09-04 is
+> its own file under `reviews/findings/`, which ends the merge conflicts this single file caused.
+> Every row that was still open has moved there too, under the same `id`, so `ls` on that directory
+> is the whole outstanding queue and this file is the resolved history. No section is renumbered —
+> source comments and design sections cite these sections by number — and the dated narrative and
+> audit sections are left as their authors wrote them, so a row migrated out of §2 or out of a
+> sweep's ledger table is still described where it was first derived. See
+> `reviews/findings/README.md`.
 Accumulative and append-only. This file is **an input to every review**, not a record written
 after one.
 
@@ -107,73 +116,29 @@ a sound finding whose *fix* had a hole, caught only by a later independent pass.
 
 ## 2. Open — carried deliberately, with an owner
 
+The seventy rows here that were still open are files under `reviews/findings/` now, found by `id`
+(`grep -rl 'id: PR7-STD-CONTAINER-EXEC-UNBOUNDED' reviews/findings/`). What is left below is the
+rows this section resolved in place: repaired, struck, closed, or settled as a deviation the owner
+accepted. The heading keeps its number and its name because both are cited elsewhere.
+
 | ID | What | Owner | Why it is open |
 |---|---|---|---|
-| PR5-VERIFY-CLAUSE-NARROWER-THAN-STATED | `slice_contract.proof_tests[8]` says each of **eight** synthetic residue elements "classifies Internal, **fails `Worktree.Verify`**, and forced removal succeeds", and `command_internal_sub_effects` says the same of its synthetic evidence. For **two** of them — `UnreferencedObject` and `TemporaryObjectFile` — the suite asserts `Worktree.Verify` **passes**, and the implementation (`element_breaks_quiescence`, `src/workspace_manager.rs:2802`) says so on purpose. Twelve of the frozen 24 (site, element) pairs satisfy the clause and twelve cannot | project owner — **for the G2 erratum list** | **The behaviour is right and the sentence is over-general; recorded because an unrecorded live sentence the behaviour does not satisfy is a defect until an owner rules.** Both elements live in the *shared object store*, are R27 ("Git's"), and are left by ordinary Git use — every amended commit leaves an unreferenced object. A `Worktree.Verify` that consulted the object store would fail on essentially every worktree in every real repository, and `decisions.workspace_candidates.generation` requires a quiescent worktree to be **reusable**; forcing the clause would make `OpenNoAttempt` reuse impossible and the tabled recovery non-convergent. Measured rather than argued (PR5-CONF-006, Fable PR5-CONF-003): Sol predicted a survivor and the flip of `element_breaks_quiescence` is **KILLED** — the partition is pinned hard in both directions. What it is pinned *against* is the implementation's own `const fn`, which is the reason this row exists rather than a repair: the suite cannot both hold the packet's sentence and hold the behaviour. **Not repairable in this slice** — the alternative is failing quiescence for every innocent worktree — and the erratum wanted is one clause on `proof_tests[8]` naming the two object-store elements as exceptions |
-| PR3-ATTEMPT-SHAPE | Whether `AttemptSettlement` can represent the frozen atomic `attempt_finished` incl. the allowance decision | project owner | Turns on whether `finding_dispositions[].design_changes` and `transaction_fault_matrix` impose field requirements on event shapes. `decisions.tests_acceptance.seam_tests[14]` is live and names `attempt_finished{Retained, Retry{resume:true}}`. Forward constraint on PR7/PR11  **RULED 2026-08-25, and the concrete form is sharper than the line above — appended, not rewritten.** The question is not whether `AttemptSettlement` has room; it is **whether the allowance decision is derived or carried**. `attempt_finished` records `SettlementTransition` (`Succeeded`, `Retry`, `Escalated{rung}`, `Deferred{defers,reason}`, `Parked{question}`, `Failed{halts_run,reason}`) and **nothing saying whether the attempt consumed one of the rung's `attempts_per`**, while the schema-4 fold carries no `attempts_on_rung` — `GenerationFold.attempts` is the highest attempt *number started*, which restarts at an escalation. The legacy engine keeps `LadderState` in memory and never replays it; a resume has only the log. **Owner ruling: DERIVED, not explicit.** The wire does not change — a recorded conclusion beside the recorded fact it derives from is an internal-disagreement channel inside one event, which is `predicted_region`'s disease relocated into the wire. **One named total function over `SettlementTransition`, engine-side this slice**, on the ladder's side because `next_step` is its sole consumer, pinned by the one-implementation census; the house template is `GenerationLease::expected` ("Total, and the whole of the rule"). Relocating the rule onto the vocabulary type, and whether the fold should validate allowance on replay the way `check_attempt_started` validates a binding, are **G2-pass items** — no new logic enters `src/topology/**` this slice. **Live citations, per cell, and they are thin**: `transaction_fault_matrix[7]` (T-FAILED) `durable_state` names the "allowance decision" among what becomes durable and its `resume_action` ends "**never re-decide**"; `transaction_fault_matrix[2]` (T-ATTEMPT) gives interruption — "append `attempt_interrupted` (unknown spend, **allowance refunded**...)"; and `decisions.coordinator_integration.dispositions` gives the only "**no attempt burned**" in the packet — measured, one occurrence in every live key — for an Infrastructure→Deferred **merge verification**, which is an analogy to the attempt path rather than a statement about it. `Retained`, `Retry`, `Escalated` and `Failed` have **no direct citation** and are implemented on the owner's stated presumption that they spend. **`Parked` the repository cannot decide**, and it returns as a follow-up owner question rather than being hard-coded either way  **`Parked` resolved 2026-08-25 by legacy precedent, which overrides the proposed default.** The check asked for — can the legacy engine park an attempt, and what does its ladder count — has an operative answer, so `invariants_preserved[1]` decides it. `ladder::next_step` reaches `AskHuman` by **four** paths that do not agree: `NeedsHuman` (*"the code was never judged, so **nothing is spent** and nothing escalates"*); `ReviewInputTooLarge`/`ReviewInputOpaque` (*"The worker ran, so the attempt **is spent** and must stay in the ledger"*); an outage at `max_defers`, whose sibling comment refuses to "burn attempts on a run that never got a verdict"; and chain exhaustion, reached only once `attempts_on_rung >= attempts_per`, so the retries already spent them. **So a park never spends *by being a park*.** The legacy rule is that an attempt spends iff **the worker ran and produced work to judge** — `NeedsHuman` is the agent declining to work, an outage is no completed run, and `ReviewInput*` is a completed run whose diff could not be judged, which still spends. **Consequence for the derivation, and it refines part 2 of the ruling**: the total function cannot key on `SettlementTransition` alone, because `Parked` is not one cell — it is four, separated by `AttemptRecord.failure`. It stays derived and the wire still does not change, because `attempt_finished` carries **both** the record and the settlement, so a replaying resume has everything the function needs. The function is total over the *event*, not over the transition. **G2 erratum stands**: the packet states none of this — its only attempt-path allowance citations are interruption and, by analogy, a merge-verification deferral — and the pass should give it the cell  **G2 ERRATUM TEXT, 2026-08-25 — the exact wording the pass should carry into the packet, so the erratum inherits the rule and not four examples.** The rule: *"An attempt spends one of its rung's `attempts_per` iff the worker ran and produced work to judge."* And the design's own words for the cell that decides it, from `engine::attempt::review_failure`: *"§12: the reviewer declined to judge and asked for a person. That is **not a rejection of the code**, so it **must not spend an attempt or escalate** — it parks the task and asks."* The second is the citation the first is derived from, and both belong in the packet: the rule alone would let a later reader re-litigate the boundary, and the citation alone would leave them to induce the rule from one case. Landed as `ladder::spends_allowance`, total over `FailureKind` — the exhaustive match immediately caught two variants the author had not seen, `Interrupted` and `Declined`, which a default arm would have answered silently in the direction that costs an operator a rung. `Interrupted` is the one cell the packet already states, and it agrees: T-ATTEMPT's "allowance refunded" and the variant's own doc ("hands the task back to the scheduler still on the same rung") are two independent sources with one answer |
 | PR5-MACOS-CLIPPY-NEVER-RUN | `cargo clippy` still runs on **no macOS runner**, so the five `#[cfg(target_os = "macos")]` regions in the crate are outside the effect denylist's reach on every job CI runs — the Windows half of exactly this hole is `PR5-CONF-014`, repaired this round by the `lint (windows)` job. The denylist is rustc-resolved, so it denies precisely what the compiler compiled | project owner / the slice that next opens `.github/workflows/ci.yml` | **Measured, and the measurement is why the gate was not simply added.** Cross-compiled clippy from this Linux box is **clean at `-D warnings` for both darwin targets** — `cargo clippy --target x86_64-apple-darwin` and `--target aarch64-apple-darwin`, `--all-targets --all-features`, rc=0 (`logs/repair3/macos-cross-clippy.log`, `macos-arm-cross-clippy.log`). That is evidence and not a native run: this project has no macOS guest, and the standing rule here is that a mutation quoted in a review is a Linux mutation until it has run on the platform it is about. Adding an unmeasured gate is how `PR5-CONF-014` got a red CI in the first place. **One thing the cross-run did find and this row carries forward**: both darwin targets emit `warning: \`libc::pipe2\` does not refer to a reachable function` — a denied path that resolves on Linux and not on macOS, which is the "a denial that enforces nothing" class `clippy.toml`'s own header warns about, and which `every_denied_path_this_host_can_resolve_does_resolve` cannot see from a Linux host |
-| PR5-ANSWER-MODULE-COLUMN | `effect_sites.json` ships `"module": "src/interaction.rs"` for `Answer.StageWrite`, `Answer.PublishRename` and `Answer.Ingest`; the `AnswerSite::` literals are at `src/rundir.rs:899`, `:912` and `:934` and nowhere else. The column is `EffectSiteId::module()`, generated from `src/topology/effects.rs` | PR6/PR7 implementer (the slice that next opens `src/topology/effects.rs`) | **The artifact's claim is corrected; the column is not, and cannot be from here.** `effects/funnel-modules.json` is generated beside `effect_sites.json` from the tree's own answer, carries every site and names the three that disagree, and is compared byte-for-byte — so a gate report now carries the correction alongside the claim. The column itself lives in a file frozen under the owner ruling of 2026-08-20, and moving the three funnel bodies to satisfy it is the other thing a slice may not do: they close over `rundir`'s private `funnel`/`RunDirHooks`, and `mechanism` (2) is the packet's own placement. Sol ruled this a low defect (`PR5-CONF-018`) and Fable a preference; the disagreement is over whether a false `module` column matters when enforcement is unchanged, and it is narrow either way — both files are allowlisted funnel modules and `interaction.rs`'s delegations are denied as wrappers |
-| PR3-RUNNER-DIGEST | The packet contradicts itself: `decisions.task_registry.validation_at_fold` requires the container image digest "when Container"; `INV-23` has it "when reported" | project owner | A Container run whose runtime reports no manifest digest is legitimate under one reading and refused under the other. PR3 implemented INV-23 consistently across A1 and A2 and said so per refusal |
-| PR3-REG-001-CONDITIONAL | `A3-REG-001` is equivalent *for the current inventory*, because every constructible site exposes zero or one observable order | PR4-PR10 implementer | It becomes live debt the moment any site exposes more than one observable order. Conditional debt, not closed |
-| PR3-BEFORE-PHASE-SCOPE | Before-phase rows name the site's own artifact, not the transaction's whole durable prefix — so `Worktree.Add/Before` is empty although R9 already holds the intent | PR7–PR10 implementer | Chosen deliberately by repair round 4, documented on the type and asserted as a test so it reads as a decision rather than an omission. The repair itself names it as the largest remaining place a finding could live, in either direction |
 | PR3-COMMIT-AUTHORSHIP | PR3's commit will be authored `Cameron Lambert <cameronlambert84@gmail.com>` (the repo-local git config) while the five commits beneath it on `codex/parallelism-design` are `upstroke <upstroke@upstroke.local>` | project owner | Cosmetic and unenforced: no CI gate checks authorship and CONTRIBUTING has no sign-off requirement. The repo already carries four identities in normal use (Cameron Lambert 72, upstroke 46, t 46, GitHub noreply 14). Left as configured rather than silently changed; overriding is one `git -c` flag if preferred |
-| PR3-CONTAINER-START-ROW | `Container.Start → Present` is the least obvious row in the semantics table | PR6/PR7 implementer | Flagged by repair round 4 as the row most worth a second opinion |
-| PR3-FRAMEWORK-SILENT-1 | Non-releasing removals leave `rows: []` — the packet fixes the pruning case (R27) but says nothing about removals with no objects to release | PR7–PR10 implementer | Derived by applying the pruning reading: the row that accounted for what was removed no longer holds it. After stays distinguishable from Before by artifact (`Removed` vs `Nothing`) and by action |
-| PR3-FRAMEWORK-SILENT-2 | Read-only sites' After phase leaves nothing | PR7–PR10 implementer | Derived from the packet's "performs no effect", not stated by it |
-| PR3-FRAMEWORK-SILENT-3 | `Container.Stop` is `Referenced` (only `Remove` ends a container); `Lock.ProbeCleanupExclusive` is `Referenced` | PR7–PR10 implementer | R17 accounts for the hold while held and is process-local OS state the kernel releases at death |
-| PR3-FRAMEWORK-SILENT-4 | `Event.OpenLog`'s `Create` and `TruncateTornTail`: kill → `NextOpenConverges`, error-return → `RefuseResumably` | PR7–PR10 implementer | The packet elaborates only `SyncPrefix`, giving one action in both modes; this table gives one action in both modes by the same shape |
-| PR3-FRAMEWORK-SILENT-5 | Windows and Unix containment kills get distinct actions (`AmbientHandleTerminates`, `ReaperSettlesGroup`) though the packet's residue answer is "none" for both | PR7–PR10 implementer | The mechanisms the packet states are different, and a table that merged them would survive a swap |
-| PR3-REPORT-DOUBLE-NAME | `RunDir.WriteReport` and the `Report` group both name `report.json`, so ST-07 will demand two hook executions for one write | project owner | Found by A3, implemented as written and reported |
 | PR4-SPAWN-SITE-PROBE-CONTEXT | `Process.Spawn` is one site with one adjacency (`After(AttemptStarted)`) and one fault row (`T-ATTEMPT`), but PR4 routes five roles through it and two — `Probe(Shell)` and `Probe(Agent)` — are `RunnerPreflight`, ordered at **P4**, before P6's `run_started`. A crash prefix at a probe spawn is effect-before-`run_started` (T-RUNSTART fresh, T-RESUME on resume) while the site it is filed under says event-before-effect in T-ATTEMPT. ST-07 evidence over `Process.Spawn` therefore does not cover the probe prefixes | PR6/PR7 implementer | **Cannot be repaired in this slice.** The site enum, its adjacency and its fault row are `src/topology/effects.rs` — PR3's, frozen at review — and a probe context would be a *new variant* of an inventory `decisions.effect_site_inventory` enumerates. Raised as `PR4-SEAMS-001`. What is deferred is the **site variant** — a probe-specific semantic context, its adjacency and its fault row — and that stays deferred. `runner::tests::the_spawn_site_files_every_role_under_one_context_and_the_count_says_which` transcribes the site's adjacency and fault row from PR3, classifies all five roles, and asserts that exactly **2** spawn outside the context the site names, so the gap cannot grow without failing. **That count is not a discharge of the hook obligation and this entry no longer claims it is** (corrected in round 4, `PR4-CONF-002`): counting that two roles fall outside the site's declared context proves the mismatch exists; it does not prove the containment hooks execute on those roles, and a `HostRunner::run` passing `NoHooks` for `Probe(_)` left the whole suite green. The hooks *firing on both probe paths, observed and fault-injected at runtime*, is PR4's by `scope` and `proof_tests[3]`, was never deferrable, and is now held for all five roles by `runner::host::tests::every_role_reaches_the_containment_points_of_this_platform` and `runner::host::tests::a_fault_armed_at_any_containment_point_stops_any_role`. Recorded here because that test's own doc comment says this file carries it **OWNER RULING, 2026-08-20: the frozen files stay frozen.** PR4 does not change `src/topology/effects.rs` or DESIGN.md:222. This is an **accepted deviation**, not an open question and not a defect to be repaired in this slice: the repair requires editing a file an earlier slice froze, and a slice may not quietly redesign what it implements. **Revisit at G2** if it is raised repeatedly there. Under the authority rule this is now settled — a reviewer may still append a challenge in §3, but only with evidence the ruling did not consider, and 'a live passage is violated' is not new evidence: that is the fact the ruling was made about. |
-| PR4-REG-001-STILL-EQUIVALENT | `PR3-REG-001-CONDITIONAL` becomes live debt the moment any site exposes more than one observable order | PR4–PR10 implementer | **Re-checked, still conditional.** The same test asserts `Process.Spawn.observable_orders() == [EventBeforeEffect]` — one order — so the order-free registry key stays equivalent for the one site this slice uses. Not closed; re-measured |
-| PR4-R28-NEXT-COORDINATOR-UNWITNESSED | `src/rundir.rs`'s next-coordinator cleanup-hold check is unwitnessed from both ends. Two withheld-catalogue mutations survive the whole suite: `PR4-WIN-073` turns the `cleanup::is_held` / exclusive-probe would-block branch from refusal into continuation (`src/rundir.rs:383-396`, `:713-747`), and `PR4-WIN-074` replaces the immediate refusal with a polling loop that waits for the hold to release and then continues. Neither is caught, because **no test starts a coordinator while a surviving reaper actually holds R28** | PR5–PR7 implementer (the slice that owns `rundir`) | **Out of PR4's scope, deliberately.** Packet keys: `decisions.resource_accounting.rows[R28].lifecycle.held` and `invariants[17].recovery` (INV-18). PR4's `slice_contract.owned_resources` names **R22, R4 and RunnerPolicy** and its `scope` does not include `src/rundir.rs`, so the refusal these two attack belongs to another slice's ledger. What PR4 does own of R28 is the *reaper's* side, and that is now witnessed: `agent::proc::termination::tests::the_reapers_cleanup_hold_is_shared_between_overlapping_invocations` pins the hold as shared (`PR4-WIN-072`), and `agent::proc::tests::every_unix_containment_point_is_measured_against_its_own_operation` asserts that at `Spawn.ReaperStarted` an exclusive probe of the live lease is already refused. Recorded rather than dropped so the coordinator half is visible as owed |
-| PR4-DESIGN-ROLE-SCOPED-ENV | **A wording ambiguity inside one paragraph of DESIGN.md.** :260 says the runner *"supplies role-scoped `HOME`, `PATH`, and credential locations"*; :262-264, three lines later, says *"Probe and execution compose the **same** base, mounts, reserved values, and overlay, so pre-flight certifies the environment that will actually spend."* Probe and execution are **different roles**, so a per-role `HOME` or `PATH` value makes pre-flight certify an environment the attempt will not run in — the second sentence constrains how the first must be read | project owner | Raised by the independent final confirmation as `PR4-CONF-001`, which read :260 alone. PR4 resolved it by scoping **credential locations** by role while `HOME`/`PATH` stay the host boundary's own, and grounded that in :263, packet :331-333 and :341-342 — the only reading that satisfies both sentences. Two pre-existing tests already enforced the second sentence by name, so the alternative reading would have required deleting a guard on the passage it implements. **Recorded rather than closed** because the ambiguity is in the source document, not in the code, and the same shape as `PR3-RUNNER-DIGEST`. If the owner reads :260 as requiring per-role values, PR4's disposition is the thing to revisit, and it is a design change rather than a repair |
 | PR4-PROGRAM-PATH-NOT-UNICODE | **A conflict between two frozen passages, not a bug in a function.** DESIGN.md:222 freezes `struct CommandSpec { program: String, … }`. `bin::Invocation::spec` therefore refuses a resolved agent-binary path that is not valid Unicode — legal on Unix, where a path is bytes — where pre-PR4 `Command::new(&self.path)` carried the `PathBuf` through unchanged and that installation ran. So `invariants_preserved[1]` ("legacy engine behavior unchanged") is **unsatisfiable given the frozen shape**: the value cannot be represented at all, and both available behaviours fail. The alternative, `to_string_lossy`, replaces each invalid byte with `U+FFFD`, so the runner spawns a path that names *nothing* and the run dies at `execvp`/`CreateProcess` pointing at a path the operator never wrote | project owner | Raised by the third independent final confirmation as `PR4-CONF-007`. **Cannot be repaired inside PR4**: the repair that restores the old behaviour is widening `CommandSpec.program` to an `OsString`, and that is a change to DESIGN.md:222, not to `Invocation::spec`. The slice chose to fail **at the boundary that cannot represent the value** — naming the path, saying why, and never mistakable for a missing installation — rather than at the spawn; the function's own doc comment records that choice and its rejected alternative. `agent::bin::tests::a_program_path_a_string_cannot_carry_is_refused_by_name` documents the chosen behaviour and was deliberately **not** changed in repair round 6: changing it would be resolving an owner question inside a repair round. Third packet-level conflict of this slice, alongside `PR3-RUNNER-DIGEST` and `PR4-DESIGN-ROLE-SCOPED-ENV`, and the same shape as both — the resolution is a design decision **OWNER RULING, 2026-08-20: the frozen files stay frozen.** PR4 does not change `src/topology/effects.rs` or DESIGN.md:222. This is an **accepted deviation**, not an open question and not a defect to be repaired in this slice: the repair requires editing a file an earlier slice froze, and a slice may not quietly redesign what it implements. **Revisit at G2** if it is raised repeatedly there. Under the authority rule this is now settled — a reviewer may still append a challenge in §3, but only with evidence the ruling did not consider, and 'a live passage is violated' is not new evidence: that is the fact the ruling was made about. |
 | PR4-PROGRAM-PATH-NOT-UNICODE-CLOSED | **Supersedes the row above; that row is left as written, per this file's append-only rule.** The question — whether a non-Unicode agent path is representable or refused at the boundary — is **closed as not reproducible in production**. | project owner | **Closed, not repaired: there is nothing to repair.** The premise was that a resolved agent-binary path reaches `CommandSpec.program` and is refused there. It cannot. `Invocation::at`, the constructor that takes a path, is `#[cfg(test)]` and says so in its own doc — *"Production's only constructor is `Invocation::named`, whose argument is a bare CLI name"* — and both its call sites are inside test modules. `Invocation::named` takes a `&str`, so `Invocation::spec`'s `to_str()` cannot return `None` for anything production builds. `runner/mod.rs` states that **a `String` was always wide enough** for a bare name, and `runner/host.rs` splits `PATH` with `std::env::split_paths` over an `OsStr` and joins the name to each entry, so a CLI installed under a non-UTF-8 directory is found and executed today and the resolution is never written back into the field. The conflict `CODING_STANDARDS.md` §1 records between `DESIGN.md:222` and §8 dissolves for the same reason: §8 governs paths, and this field holds a name. **`DESIGN.md:222` is unchanged**, the widening scheduled to the G2 pass's W4 is withdrawn, and `a_program_path_a_string_cannot_carry_is_refused_by_name` **stays** — it guards a state production cannot construct, which is what makes adding a path-valued constructor safe later. Reasoning and rejected alternatives: `decisions/2026-08-25-commandspec-program-stays-string.md`. Found by the frontier review of `1de9131`, whose two predecessors had each refuted a different attempt to re-ground the widening. |
 | PR4-ADAPTER-RESOLVES-ON-THE-HOST | Adapters resolve the agent CLI on the coordinator host and put the absolute host path in `CommandSpec.program`, so a boundary with its own filesystem is never asked what it has | PR6 implementer | **Ruled hardening, not a defect** — the full entry, its live passages and what breaks at PR6 are in the hardening-rule table below. Listed here too because §4's rule is mechanical: a round that names a surviving mutation and does not repair it files it here in the same commit, with an owner. The live-passage test is `agent::built_program_tests::an_adapters_program_is_the_coordinator_hosts_and_the_boundary_supplies_none` |
 | ~~PR4-MAIN-WIRING-UNWITNESSED~~ | — | — | **DEFERRAL WITHDRAWN as invalid; repaired in round 8.** See `PR4-CONF-008` in §1. The round-6 deferral rested on *when the finding arrived* relative to that round's fixed scope — a **process** reason. Scope was never the issue: PR4's `scope` names "on Windows the process joins one ambient kill-on-close Job Object at write-command startup (refusal with diagnostic if it cannot)" and `expected_failures_refusals[1]` names the refusal, and the CLI is the entry point they describe. A process reason cannot defer a contract obligation, and this row no longer claims it can |
-| PR5-CAPACITY-NOT-A-TOPOLOGY-RESOURCE | Whether agent-model **capacity** — the provider window a worker or reviewer spends against — is a resource the parallelism topology *brokers*, or ambient state it discovers by failing. Today it is ambient. The three ceilings are parsed, validated and carried (`src/config.rs:439-447`), and two of them already say "acted on by the topology engine", but none of them is a *provider* budget: they bound how many attempts run at once, not how much window remains to spend. The only capacity feedback the engine has is retrospective — `capacity::retire_signals` marks a pool exhausted **after** an attempt came back `RateLimited` (`src/capacity.rs:376`), and the ladder then defers without spending an attempt (`ladder::rate_limits_defer_without_spending_an_attempt`). Nothing admits work *against* a budget, and no topology row models a permit | project owner | **Deferred to PR11 deliberately, not overlooked.** Three reasons, in ascending weight. (1) **The packet is frozen and the freeze is the method.** A capacity permit is a new row in a frozen contract. The owner ruling of 2026-08-20 held the line on `PR4-PROGRAM-PATH-NOT-UNICODE` and `PR4-DESIGN-ROLE-SCOPED-ENV` — two findings that violate *live passages* — rather than edit a frozen file. Amending the packet for a finding that violates no live passage, while those two stay accepted deviations, is the inconsistency a reviewer sees first. (2) **There is nothing yet to model it in.** PR11 is where the coordinator brokers concurrency; a permit is that same shape, so building one before the broker exists means inventing a second mechanism PR11 must then reconcile or discard. The ledger already places it there: `PR3-LIMITS-SCHEDULING`'s disposition rests on live `decisions.resource_accounting` naming `max_per_agent` and `max_per_pool` "process-lifetime ephemeral scheduler state" — a permit is that same kind of state, so it belongs in the scheduler PR11 builds and not in the frozen durable contract. (3) **The data to specify it does not exist.** DESIGN.md:656 (§23.2) records what the first real runs measured, and the capacity side of that is a single usage-limit event across five slices — not a distribution a fault row can be written against. **What is worth doing before PR11, and touches nothing frozen:** (a) make capacity exhaustion *distinguishable in the record at the launcher* — inside the engine `FailureKind::RateLimited` is classified and durable, but an agent invoked outside it that hits a provider limit and one that dies leave the same trace, which is why ruling limits out after the PR4 deaths took a transcript grep rather than a query; (b) carry provider identity as configuration rather than an ambient credential file — needed anyway for the cross-vendor reviewer, and the same seam `PR4-DESIGN-ROLE-SCOPED-ENV` names from the environment side (`CREDENTIAL_LOCATIONS`, DESIGN.md:260). Both produce the measurement (3) is missing, so PR11 can specify against evidence instead of intuition. Forward constraint on PR11, carried the way `PR3-ATTEMPT-SHAPE` is |
 
-| PR5-C-FSYNC-UNOBSERVABLE | **Deleting the `sync_all()` call in `events::log::sync_log_file` is undetectable by any test on this machine.** An fsync has no user-space observable effect: the ledger entry the suite reads would still be written, the byte length would still be the filesystem's own answer, and only a power loss could tell the difference. Every `SyncPrefix` test therefore proves that the funnel *reached* the sync and *recorded* it, not that the data reached the platter | PR7–PR11 implementer (the slice that owns the two-crash proof) | **Carried, not hidden.** The residual boundary is stated on the function itself (`src/events/log.rs:934`) rather than left for a reviewer to discover, and the mitigation that *is* possible is taken: the sync and its ledger entry are **one call**, because with them written as two statements a mutation that moves the `SyncPrefix` consult to *between* them puts the injection after the syscall and before the only thing that can see it — measured surviving the suite. Fused, the only place the consult can move to is after the record, where `an_injected_sync_failure_at_open_names_syncprefix_and_hands_out_no_handle` kills it. The packet names the test that would close this for real — `transaction_fault_matrix[T-PREPARED].test`'s `unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing` — and it needs a coordinator, a CAS and a simulated power loss, none of which are PR5's |
 | ~~PR5-R1-PROCESS-START-CENSUS-UNSTRIPPED~~ | — | — | **CLOSED by PR7's census repair.** All four whole-tree censuses — `every_production_runner_request_is_built_by_its_roles_builder`, `every_production_process_start_is_classified`, `write_command_containment_has_one_join_site_and_one_mint` and `every_production_command_spec_payload_is_classified` — now count over `effects::production_code`, which blanks comments **and** string literals, so a doc comment naming a needle can no longer change an expected number. Every expected count was re-derived over code: `src/agent/proc.rs`'s `run_with_timeout` row went 8 → 5 (three of the eight were doc comments, so deleting two sentences bought a real ninth entry point), and the `src/effects.rs` row was deleted outright because its only `Command::new(` is inside a `DENIAL_FIXTURES` string. The class remains `PR4-CENSUS-COMMENT-ORACLE`; what closed this instance was moving the blanking into the shared region rather than into each census |
-| PR5-R1-CFG-TEST-SHRINKS-THE-DOMAIN *(re-scoped: `externally_reachable_fns` only)* | `effects::production_region` cuts a file at its **first** `#[cfg(test)]`, so a test-only item placed among production items removes every item below it from the **wrapper-classification** domain — silently, and `mechanism` (3)'s "every pubfn of a legacy or shared module is classified" would then be true of a domain nobody drew. Measured: adding `Invocation::at` inside `impl Invocation` took five of `src/agent/bin.rs`'s functions out of the census. **Scope as of PR7:** `effects::externally_reachable_fns` and the three censuses in `src/runner/container/exec.rs` are what still read the truncating region; the four whole-tree censuses no longer do | PR7+ implementer (the slice that owns `effects::externally_reachable_fns`) | **Two of three parts closed; the third is what this row now is.** (1) The instance is repaired: the constructor lives in a `#[cfg(test)] impl` block below every production item, so `src/agent/bin.rs` is whole again, and the shrink was **loud** — `every_externally_reachable_fn_of_a_legacy_or_shared_module_is_classified` reported the five functions as "invented". (2) The *prohibition* half is closed: PR7 gave the four whole-tree censuses `effects::production_code`, which removes each `#[cfg(test)]` **item** in place instead of truncating, so a mid-file test item no longer takes the rest of the file out of those, and `effects::tests::every_production_region_that_stops_early_stops_at_a_module` pins by name the ten files whose truncating region still stops at something that is not a module. (3) What is **not** closed: `externally_reachable_fns` still calls `production_region`, so those same ten files have a classification domain that ends at their first `#[cfg(test)]`, and six modules have an empty one. Moving it to `production_code` re-derives every classification entry by hand and is a change to the generated inventories, which PR7 does not own |
-| PR5-C-LEGACY-APPEND-ERROR-CENSUS | `production_effect` promises "the legacy engine's handling of a returned append error is unchanged — it reports and stops". `events::log::tests::the_legacy_engine_reports_and_stops_on_a_returned_append_error` proves it as a **source census** (the error branch returns, emits nothing, and the engine has exactly one append call site), not as a behavioural test | PR7 implementer, or whichever lane plumbs an observer through `engine::Harness` | **Boundary stated rather than hidden**, on the test's own doc comment. The legacy engine opens its own `EventLog` through `EventLog::open` and takes no observer, so no test can make one of its appends fail without threading hooks through `engine::Harness` — a file PR5 lane C does not own and a change with reach far beyond this claim. What *is* checkable locally is the property the promise rests on: the error branch returns and appends nothing, so the handle poisoning this slice adds is unobservable to it. A behavioural version becomes cheap the moment the coordinator takes an `EventHooks`, which is what the append-error protocol needs anyway |
-| PR5-R2-WIN-NON-SURROGATE-REPARSE | `PR5-WORKSPACE-006`. `validate_execution_root_chain`'s Windows arm checks the raw `FILE_ATTRIBUTE_REPARSE_POINT` attribute as well as `FileType::is_symlink()`, and only the raw check covers the **non-surrogate** tags — dedup, placeholder, LX symlink, appexec. Every fixture builds its reparse point with `cmd /C mklink /J`, and Rust's `is_symlink()` answers true for `IO_REPARSE_TAG_MOUNT_POINT` because a junction is a name-surrogate tag, so omitting the attribute check is behaviour-neutral for the only shape any fixture constructs. Measured twice: the mutation SURVIVED both the pre-repair and the post-repair guest runs, with both junction tests running and passing | PR6/PR7 implementer (the slice that next owns Windows containment) | **Carried because the distinguishing fixture cannot be built by the guest's test user.** Two of the four non-surrogate tags need a privilege it lacks (dedup and placeholder are filesystem-feature reparse points, not user-creatable), and the other two need WSL or an app-execution alias installed on the runner. A fixture that faked the attribute would be testing the fixture. What holds today is the surrogate half, on both platforms, by `a_junction_below_the_private_root_refuses_the_execution_root` and `a_managed_base_or_private_root_that_is_itself_a_link_refuses_before_any_effect`. The live passage is `slice_contract.expected_failures_refusals[0]` — "symlink/junction on the chain" — which names exactly the shape that *is* covered |
-| PR5-R2-SNAPSHOT-INPUT-COMMIT-DEAD | `PR5-WORKSPACE-024` and `PR5-WORKSPACE-025`. `SnapshotInput::Commit` is constructed **nowhere** in the tree, so `create_integration_snapshot`'s "check out the proposal or head commit and create no object" arm never executes and turning it into an unconditional commit-tree synthesis changes nothing any test runs; and `add_snapshot` has two callers in two different tests with two different fixtures, so no fixture ever holds a gate snapshot and a reviewer snapshot alive **together** and `ExactSnapshotStore::create` caching one snapshot for every role and attempt is invisible. `SnapshotName::review` is constructed nowhere either | PR6/PR7 implementer (the slice that first requests two snapshots) | **Carried: the caller does not exist yet, and inventing one inside a repair round is inventing the orchestration.** Both entries need a *second live request* — an integration snapshot from a proposal commit, and a gate snapshot plus a reviewer snapshot alive at once across two attempts — which is the gate/review orchestration PR5's `scope` stops before. The live passages are `workspace_candidates.snapshots`: "integration snapshots check out the proposal or head commit and create no object" and "one snapshot for the gate set and one fresh snapshot per reviewer, never reused across roles or attempts". Recorded rather than dropped so the first slice that builds a reviewer snapshot knows it inherits an unmeasured claim |
-| PR5-R2-IDUNREAD-BEFORE-THE-PARSE | `PR5-WORKSPACE-045`. `commit_tree` consults `IdUnread` before parsing the child's printed id, and the three `IdUnread` tests all run against a child that succeeds and prints a well-formed id — so moving the point *after* the parse changes nothing they can see | PR6/PR7 implementer | **Carried: not constructible through the funnel.** The distinguishing fixture is a commit-tree child that writes its object and then prints a **malformed** id, and the child is real `git commit-tree`, which always prints a valid one. Nothing stubs the child or injects its stdout, and adding a stdout seam to a production Git invocation to test the ordering of a hook is a larger change than the claim. The live passage is `effect_site_inventory.identity`'s R27 clause. What *is* held is that the point fires exactly once, before `After`, and that a kill there leaves a GC-owned object nothing adopts |
-| PR5-R2-WORKTREE-LOCK-RETENTION | `PR5-RUNDIR-070`. The physical worktree lock is taken before the startup census and held for the whole run (`coordinator.rs:93` fresh, `resume.rs:108` on resume, both `let _worktree_lock = …` to end of scope). Dropping the guard immediately after the census is invisible: the two lease tests take a competing lease **first** and then check the run refuses, which exercises acquisition, not retention | PR6/PR7 implementer (the slice that can pause a run) | **Carried: the killing assertion needs a paused run and nothing in the suite pauses one.** "While run A is paused after census but before termination, a second write command for run B in the same physical worktree is refused; it succeeds only after run A releases its guard" needs a run held open across a second command — a coordinator seam PR5 does not own. `run_creation`'s "only then takes the physical worktree lock … holding it across the startup census and the whole run" is the live passage. Same shape as `PR4-R28-NEXT-COORDINATOR-UNWITNESSED`: a lifetime claim about a guard, unwitnessed because no fixture holds two coordinators |
-| PR5-R2-LEGACY-ENGINE-APPEND-FAILURE | `PR5-EVENTS-054` and `PR5-EVENTS-055`. `Run::emit` swallowing an `EventLog::append` error into `self.warnings` and returning `Ok(())`, and deleting the partial-report construction from `drain_and_report`'s error branch, both survive the whole suite — because no test ever makes a legacy append fail **inside a live `Run`**. Every append-failure fixture operates on an `EventLog` directly | PR7 implementer, or whichever lane plumbs an observer through `engine::Harness` | **Carried, and it is the behavioural half of `PR5-C-LEGACY-APPEND-ERROR-CENSUS` above.** The engine opens its own `EventLog` through `EventLog::open` and takes no observer, and its run directory is created with a generated run id, so neither an injected failure nor a prepared path (a `/dev/full` symlink, which is what made `PR5-EVENTS-044` measurable in the Event lane) can be aimed at it from outside. The live passage is `production_effect` — "the legacy engine's handling of a returned append error is unchanged: it reports and stops" — and the source census that stands in for it is already filed. Both become cheap the moment the coordinator takes an `EventHooks` |
-| PR5-R2-OBJECT-GROUP-TAKES-NO-SITE | `PR5-WORKSPACE-048`. All six Object-group APIs hard-code their `ObjectSite` internally — `candidate_stage`, `candidate_write_tree`, `snapshot_commit_tree`, `candidate_commit_tree`, `proposal_cherry_pick`, `repair_materialize` — while the Ref group takes `site: RefSite`. `manager` says every effect "goes through typed funnel APIs that take a typed site", so the asymmetry is real rather than an artefact of the measurement, and no compile fixture probes it | project owner | **Carried: widening six public signatures and every caller is a design change, not a repair-round edit.** Recorded as `NOT_PRESENT` by the re-measurement — there is no parameter to delete — but the absence is the finding. The tree already owns the mechanism that would prove it: `rundir.rs`'s `build_refusals()` compiles six fixtures against this crate's rlib and asserts rustc's own error **codes** (E0061, E0308, E0451/E0603/E0063, E0599, E0382) against a control that must compile. It has no Object-group case because there is nothing yet to refuse. If the owner reads `manager` as requiring the parameter, the repair is mechanical and the harness is waiting |
-| PR7-WRAPPERS-EMPTY-DOMAIN | `effects::externally_reachable_fns` consults the truncating `production_region`, so for `engine/{attempt,coordinator,resume}.rs` and three siblings cut at a `#[cfg(test)] use` the **classification domain is empty**. Production `pub`-declared functions in classified modules are unclassified — 40 externally-reachable names and 20 `pub` fns across the six modules, and a **working bypass was demonstrated**: a `pub(super) fn` below the cut, called from a live topology module, passes clippy and the whole suite | project owner — **the post-v0.2 pass over PR3's layer** | **Carried: the repair is shared enforcement machinery whose blast radius is every classified module**, which is the shape that made PR5 round 7 a revert. `mechanism` (3)'s guarantee that a topology module cannot reach an effect through a legacy wrapper **does not hold** today, and that is a live-passage failure, not hardening — it is recorded here rather than repaired because the change is to the classifier every other module's enforcement depends on, and PR7 already spent two rounds on this file. Recorded **with its measurement and its bypass** so the next slice inherits evidence rather than a rumour. This is the **fourth and fifth** occurrence of `PR5-R1-CFG-TEST-SHRINKS-THE-DOMAIN` (§4): PR7 repaired the two census instances by giving `production_code` a comment-and-string blanker, and this one is the same root cause in the function the blanker does not serve |
-| PR7-NARROWED-SURFACE-19-UNCALLED | **Nineteen items in `engine::topology` have no caller at all — not in production, not in a test — and `pub` was what kept the compiler from saying so.** Narrowing `engine::topology` to `pub(crate)` (the frontier review of `75da796`, finding 1) made rustc report **328 items** dead in a lib build, which is what `production_effect = "none"` means and is silenced by `#![cfg_attr(not(test), allow(dead_code))]` in `engine/topology.rs` and `engine/assembly.rs`. **Nineteen survive that gate**, being dead in the *test* build too, and each now carries its own `#[allow(dead_code)]` naming this row: `attempt.rs` `key`; `candidate.rs` `base`; `emit.rs` `discharging`, `wrote_nothing`; `seams.rs` `harness` ×2; `startup.rs` `into_parts`, `lock` ×2, `locked`; `recover.rs` `reader` ×3, `owner` ×2, `bytes` ×2; `run.rs` `PartlyImplemented`, `owes`, `warnings`, `defer_round`. Counted at `610106b` | **PR8/PR12, or whichever slice next opens these modules** | **This is the slice's own most-recurrent class, found by the compiler rather than by a reviewer, and two entries were already known.** `pr7/STATE.md` records "`PartlyImplemented` has no inhabitants", and S5 round 6 recorded that a doc cited `LoopBranch::owes`, "which has zero call sites" — both stood because the `pub` surface made every item externally reachable in principle, so `dead_code` never fired. Seven review rounds and a withheld mutation catalogue did not find the other seventeen; one visibility change did. **Not deleted here, and the reason is that each is a judgement.** Several are typestate accessors that exist so a proven value can be taken apart (`bytes`, `owner`, `reader`, `into_parts`) and the tree argues for keeping some of them on their own docs; `PartlyImplemented` is a variant the ladder may yet construct. Deleting nineteen items across seven files at the end of a repair round, each needing its own reading, is the shape PR5's round 7 was reverted for. **What is enforced meanwhile**: the allows are per item, not per module, so a *new* uncalled item is still an error at `-D warnings`, and this row is the list a future reader diffs against |
-| PR7-MACOS-PROCESS-GROUP-FLAKE | **`runner::host::tests::every_role_reaches_the_containment_points_of_this_platform` fails intermittently on `test (macos-latest)` and nowhere else**, asserting *"review: the child did not lead its own process group, so the pre-exec containment step did not run for this role"* — `left: [false]`, `right: [true]`, at `src/runner/host.rs:5565` **as it stands at `75da796`**. **Measured over the last 20 CI runs on this branch, 13 of which completed a macOS job: 11 success, 2 failure** — and then a **third sample at the same sha**: `gh run rerun 32999498916 --failed` re-ran only the failed jobs of `75da796`'s run, without a push, and `test (macos-latest)` **passed**, taking the run to 9/9 success. So the tally is 12 success / 2 failure over 14 completed macOS jobs, and one head has now produced both outcomes with the tree byte-identical, which is what makes it a flake rather than a defect in the head. Both failures are this test, at `cca1276` (14:00) and `75da796` (18:24) on 2026-08-26; every other completed macOS job on the branch back to `f6ed9f1` passed. The Linux, Windows and both other MSRV legs pass in the same runs, and the guest and this box never reproduce it. **Not caused by the diff it appeared on**: `d17bcf2..75da796` is `reviews/FINDINGS.md`, a new review record, and two doc-comment stampings in `run.rs` and `run/tests.rs` — nothing that can reach a process group | **project owner / whichever slice next opens `src/runner/host.rs`** | **Recorded with its rate rather than described, and not chased in this slice.** The assertion is that the spawned child leads its own process group after the pre-exec step; a macOS runner under load losing that for one role out of a grid, twice in thirteen, is either a real race in `pre_exec` ordering or a runner-side artifact, and **this session cannot tell those apart** — it has no macOS host, and the two observations are CI logs. **What a repair would need first** is a way to reproduce: a macOS runner the slice can drive, or a CI job that runs this one test in a loop and reports a rate. Adding either is out of scope here and neither is a `src/` change. §12 is the precedent for carrying a flake with numbers; `PR5-MACOS-CLIPPY-NEVER-RUN` in §2 is the standing observation that this project has no macOS host at all, which is the same gap one gate over |
-| PR7-WIN-READ-RACING-BOUND-TOO-SHORT | **A production retry bound in `container.rs::read_racing` is too short on Windows, and the concurrent-census race tests are how it shows.** *Retitled 2026-08-26 on the frontier review's judgement: this row said "flake" and the reviewer's answer is that it "describes a real production retry-bound defect in `read_racing`, not merely a flaky test — calling it a flake understates the category". That is right, and the distinction is not cosmetic: a flake is triaged by re-running, a bounded retry that is too short for its platform is triaged by changing the bound. The tests are the symptom; the bound is the defect.* `container.rs`'s `read_racing` returns `Ok(None)` for `NotFound` — the Unix answer when a competing reclaimer removed the record — and for **any other** IO error spins `RACING_ACCESS_ATTEMPTS = 64` times on `std::thread::yield_now()` before letting the error escape. Its own doc reasons *"clears when the winner's own call returns, so this is a handoff rather than a wait, and `yield_now` is what it costs"*, which holds where the window is one syscall. On Windows a competing open returns **`PermissionDenied` (os error 5)** for as long as the winner holds the handle — its whole open/read/close cycle — and under full-suite load on a 16-vCPU guest, 64 yields can fit inside that. **Measured at `d17bcf2`, four full-suite guest runs: two green, two red, and two *different* tests** — so it is a class, not one flaky test. (1) `concurrent_reclaimers_converge`: `the resuming incarnation refused instead of converging: Err(Io { path: …\\upstroke-census-converge-9-2440-ThreadId(4407)\\containers\\upstroke-…intent, source: Os { code: 5, kind: PermissionDenied } })`. (2) `a_fresh_and_a_resuming_census_race_one_container_and_converge`, panicking at the `a racer refused instead of converging` assertion in `a_fresh_and_a_resuming_census_race_one_container_and_converge` (`census/tests.rs:4618` **at `4247255`** — named as well as cited, because a line number is a claim about a version). **The errno for (2) was not captured at the time** — `win-iter.sh` writes every run to one `/tmp/win-iter.log` and the next run overwrote it — so (2) stood as a presumption of the same cause rather than a measurement of it. **It is now measured.** At `049342c` (2026-08-27), the fourth full-suite run of that head reproduced (2) exactly — `[round 6] a racer refused instead of converging: failed to read …\\…intent: Access is denied. (os error 5)` at `census/tests.rs:4618` — with the log preserved this time, at `~/tactus-artifacts/pr7/win-failure-049342c-run4-iter.log`. **`PermissionDenied`, the same errno as (1) and (3): the presumption is discharged and both tests are one cause.** The capture is owed to `win-full.sh` copying the iteration log per run, a one-line fix made after this row's own evidence loss happened a second time, an hour earlier in the same session. In isolation `concurrent_reclaimers_converge` passes **3 of 3**, so it is load-dependent. **Third occurrence, at `8a163fd` (2026-08-26): the same test, the same `"refused instead of converging"` assertion at `census/tests.rs:1623`, on the first full-suite guest run; it passed in isolation immediately after and the full-suite re-run was green (1669 + 10, 0 failed).** **Fourth occurrence, at `049342c` (2026-08-27): the same test, the same assertion at `census/tests.rs:1623`, on the first of three full-suite guest runs — `the resuming incarnation refused instead of converging: … Os { code: 5, kind: PermissionDenied, message: "Access is denied." }`, quoted from a read of `/tmp/win-iter.log` during the run and **not preserved on disk**, because the two runs after it overwrote the shared log. That is the same evidence loss this row already records for occurrence (2), repeated; `win-full.sh` now copies the iteration log per run, which does not help this one. The quote is at `~/tactus-artifacts/pr7/win-failure-049342c.md` with its provenance stated. The two runs after it were green (1687 + 0 across three binaries), and a fourth run reproduced the row's *other* test.** At `049342c` the rate was **2 red of 4**, one of each test. Cumulative guest rate: **5 red of 10 full-suite runs**, across three heads and two distinct tests — every failure the same assertion, and now every *captured* errno the same `PermissionDenied`. The rate is carried here rather than smoothed away — it is a bounded retry that is too short for its platform, and it is triaged by changing the bound | **PR6's owner, or whichever slice next opens the Container funnel** — `read_racing` arrived in `919a728` (PR6 lane C), so this is `pre_existing` for PR7 | **Carried with its repair fork stated, rather than repaired here, and the reason is precedent.** This is production code on a first-class target and the bound is deliberate, so the fork is the owner's to pick, not mine to guess at the end of a repair round.  The retry policy is documented production behaviour in a funnel, its bound is deliberate (*"Bounded rather than timed, for the reason `TERMINATION_OBSERVATIONS` is: a wait with no bound turns 'this path cannot be removed' into 'this write command never returns'"*), and a late change to shared concurrency infrastructure is the exact shape PR5's round 7 was reverted for. **What a repair would have to decide**, so the next owner does not re-derive it: whether `PermissionDenied` joins `NotFound` as an immediate *already-gone* answer (it is not the same claim — a permission error can be a real one), or whether the spin becomes a short bounded backoff, which keeps the bound the doc argues for while making each attempt cost more than a yield. **The measurement to demand of any repair** is the one above run to a rate: this is roughly 2 in 4 full-suite runs and 0 in 3 isolated ones, and a repair that is only measured in isolation has not been measured. §12 is the precedent for carrying a flake with its numbers rather than a description |
-| PR7-SCRATCH-FIXTURE-LEAK | `src/rundir.rs`'s `scratch` calls `remove_dir_all` at **creation**, keyed by `{tag}-{pid}` — §16 records it in full. PR7 is the slice that pays for it: the suite grew from 1385 tests to **1644**, and the leak scales with the suite | project owner / whichever slice owns shared test infrastructure | **Carried, unchanged in disposition from §16 and now with a second measurement.** The build box reached **19% of 58.5M inodes**; sweeping leaked fixture directories returned it to **12%** — on the order of **4.1 million inodes** that were leaked test fixtures, roughly a third of everything in use. `df -h` read 31% throughout. Held out of this slice for the reason §16 gives — the repair is a judgement call across 60+ call sites in shared test infrastructure, the PR5-round-7 shape — and mitigated out of tree by a sweeper with a 30-minute age floor so it cannot race a running suite. **PR7 raises the urgency rather than the difficulty**: parallel execution multiplies the fixture count per wall-clock hour. **2026-08-26: on Windows this stopped being a disk problem and became a correctness one.** The guest suite at `5e309a0` returned **16 failures** — fourteen in `engine::topology::emit::tests` and two in `settle::tests` — every one of them `assert!(bytes.is_empty(), "a fresh run has no prefix")` at `emit/tests.rs:324`. The same guest, minutes later, was **green at `040a100`** (1651 + 10, 0 failed), so it is not a regression in the diff. `emit/tests.rs`'s `run_paths` keys its scratch on `{tag}-{pid}-{n}` and **Windows recycles pids**: `%TEMP%` held **11,395** leaked `upstroke-*` directories, and grouping the `upstroke-emit-*` ones by their pid component gave six previous processes with 25-34 directories each. A run that draws a recycled pid finds its "fresh" fixture already populated and fails on the emptiness assertion. Sweeping `%TEMP%` to zero and re-running the same head is the control. **What this changes about the row**: the Linux symptom is inode exhaustion and is mitigated out of tree by a sweeper; the Windows symptom is a **fresh-run fixture that is not fresh**, it is indistinguishable from a real defect in the reviewed head, and no sweeper prevents it — the fix is that a fixture root includes something a recycled pid cannot supply, or removes its own directory at creation the way `rundir::scratch` does. Recorded here rather than repaired for the reason the row already gives: 60+ call sites in shared test infrastructure |
-| PR7-P3A-CREATOR-RETAINS | A creator that errors at exactly P3a has no owner record, so `prove_private_half_ownership` mints no `PrivateHalfProof`; the creator therefore removes **neither** half, and the startup census retains and reports both. The packet's deletion boundary is satisfied, but an operator sees two retained directories where the failing step created one usable pair | PR7/PR12 implementer | **Accepted risk, and the alternative is worse.** ST-19 tables this shape as content-free by ordering — nothing has been written into either half at P3a — and `creator_error_at_p3a_retains_both_halves_and_reports_them` covers both windows, so the behaviour is asserted rather than incidental. Removing the retention needs a second constructor for `PrivateHalfProof`, and that type's **single-constructor property is compile-fail-tested**: the proof exists precisely so that no path can delete a private half without having proved it owns it. Trading a compile-time guarantee for a tidier failure directory is the wrong direction, and the retained pair is reported, not silent |
-| PR7-CREATEINTEGRATION-ORDER-BACKWARDS | `src/topology/effects.rs:1696` says `RefSite::CreateIntegration => Adjacent::Before(DurableEvent::RunStarted)`, and `Adjacent::Before` is documented three lines above as *"the effect is designed to be durable **before** the append is"*. `decisions.pr_sequence[8].slice_contract.side_effect_vs_event_ordering` says **"run_started before integration ref"**, and P8 creates the ref after P6 appends. The registry states this site's order axis backwards | project owner — **the post-v0.2 pass over PR3's layer** | **Carried by owner ruling, 2026-08-24: recorded clearly and revisited once v0.2 is complete.** Not cosmetic — `Adjacent` "decides `EffectSiteId::observable_orders`, which is what the registry's order axis ranges over", so for a `fault_row: t_runstart` site the fault-injection registry demands evidence for `effect_before_event`, an ordering the production code never produces, and never demands `event_before_effect`, the one it does. **Why nothing caught it:** the only test over the value is `the_observable_orders_are_the_ones_the_adjacency_admits`, which checks that `observable_orders` agrees with `adjacent` — a function used as its own oracle, §4's class, so it is green for either value. Measured: flipping the token fails exactly two tests, `effects::tests::the_checked_in_effect_sites_json_is_what_the_enums_generate` and `topology::effects::tests::every_site_carries_the_row_fault_row_scope_and_adjacency_the_design_gives_it`, both transcriptions of the same claim. The edit is one token; the consequence is that G2 evidence for this site is owed against the other order. `src/topology/effects.rs` is the file `ff0490a` names by name |
-| PR7-FOLD-ACCESSORS-IN-PR3-LAYER | `src/topology/fold.rs` is **+1196 / −13 at `2378c83`** (`git diff <merge-base>...HEAD --numstat -- src/topology/fold.rs`). **Twice restated, and the second time by a reviewer rather than by me.** It read +628/−0 and "nine accessors" until 2026-08-24, then +777/−11; the frontier review of `75da796` measured +1196/−13 and observed that a disclosure row whose own number is stale is the disclosure failing — twice over, since the correction that fixed the first staleness introduced the second. **The number now carries the sha it was taken at**, per §22's rule, because that is the only form of it that does not decay: this file grows whenever the slice adds a fold test, and a figure with no sha reads as current forever. Disclosed here rather than left for a reviewer to find, because it is PR3's file and the slice is large enough that a footprint this size can stop being visible to the person making it | project owner — **adjudicated 2026-08-24, see §3**; the deferred work is the G2 PR3-layer pass | **Accepted as a disclosed deviation through `3362f65`.** Measured split at head: **561 lines of tests**, **152 comment and blank lines** in the production region, and **64 lines of production code**. That code is **eleven `pub fn` readers** — `ready`, `ready_retry`, `pipeline_held`, `pipeline_reservable`, `structurally_admissible`, `integration_admissible`, `run_is_ending`, `backoff_pending`, `predicted_region`, `frozen_rung_binding`, `questions_open` — nine of them one-line delegations to an existing private `RunState` predicate with a poison guard, plus **one line of changed behaviour**: `&& self.pipeline_reservable()` in `integration_admissible`, which is `PR7-INTEGRATION-NO-ENTITLEMENT`'s repair. The **11 deletions** are not behaviour either: four are one re-wrapped `use` block, and seven are the body of the *test* helper `frozen_binding`, which repeated the reader's composition and now delegates to it — so the reader sits under the whole existing attempt corpus. No variant added, no type widened, nothing else deleted, which is not the shape `ff0490a` forbade. **`frozen_rung_binding` is deliberately half of the fold's rule**: it returns the frozen rung's binding and not the human-override arm, because no override is constructible while the answer-ingest branch is unimplemented and because `matches_override` checks only agent, model and effort — leaving `tier` and `pinned` for a caller to choose unchallenged. Collapsing it to a full delegation is **W2 of the pass**. It is also the **last fold reader outside that pass**: the standing rule this slice proposed was rejected |
 | TASK-DISPATCHED-REGION-UNVALIDATED | **The fold accepts any predicted region a `task_dispatched` carries.** `check_dispatched` matches on `(&dispatched.lease, entry.lineage)` — the lease's **shape** only, Predicted-versus-InheritedLineage and their pairing with the entry — and never compares the `paths` inside `LeaseGrant::Predicted` against `predicted_region(entry)`. `apply_dispatched` then grants **whatever region the event carried**: `LeaseGrant::Predicted { paths } => (GenerationLease::Own, Some(paths.clone()))`. So the fold admits a dispatch on one region and the lease table holds another, and the lease table's is the one every later overlap check consults. **The asymmetry is the finding**: one event over, `check_attempt_started` refuses a divergent *binding* with `FoldError::BindingMismatch` — a refusal present since PR3 — so the same class of disagreement is caught for the binding and not for the region | project owner — **the G2 PR3-layer pass, W1** | **Recorded, not repaired: the repair is a fold-side refusal, and `src/topology/**` is closed to this slice by the 2026-08-24 adjudication (§3).** Measured on this box at `3c09f6e`, 2026-08-24, both halves run: with the divergent derivation restored **and** the regression assertion removed, the full suite is **1661 passed / 0 failed** — every gate, census and fold test is indifferent; with the assertion restored, **exactly one test fails**, `the_driver_takes_over_from_the_recovery_order_and_steps`. **That is the whole of the protection, and it is a convention rather than a guarantee.** `84a3978` made the driver read `TopologyFold::predicted_region` instead of deriving its own, which fixes the instance; the class stays open, because nothing stops the next caller — or a later slice's second writer — from constructing a `task_dispatched` the fold will accept and the lease table will honour. The class fix is `check_dispatched` comparing the carried region against the one it admitted on, exactly as `check_attempt_started` already does for the binding. Live at the first width above `max_parallel = 1`, where two tasks holding non-overlapping-by-construction regions edit the same files; invisible below it |
 | PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE | **A one-shot environmental measurement scheduling a race.** `sampled_git_add_and_write_tree_child_kills_every_residue_classified_and_recovered` measures one `git` duration in a probe worktree, then aims all sixteen kills as fractions of it — sleep `budget * (run+1)/9`, kill. The probe is the **first** invocation in a fresh worktree, so it pays for a cold filesystem cache and, on Windows, an antivirus scan of files it has just seen created. Its number is therefore inflated relative to the runs it schedules, every kill lands after its child has exited, and the harness samples the residue its commands left when they **finished**. No seed, and the whole variance is one measured duration | **fixed in PR7** | **Fixed in slice, not carried, and the reason is the answer to "does it block merge-readiness": an intermittently red required leg is not a gate — it trains re-running reds, which is how a real regression hides.** Two occurrences, `test (windows-latest)` at `b07b8cc` and its re-run, on a commit that changed **one line of a Markdown file**; `3362f65` was green on the same leg. The assertion was right both times — it refuses to pass vacuously when nothing died — so the defect was the schedule, never the code under test. **Repair, O(1) and not a per-run re-measure** (which would double git invocations in a ~700s leg to fix a defect living in the first one): discard a warm-up probe and take the **median of the next three**, keeping the fractional schedule; and make the test assert its premise — at least one kill landed mid-run — recalibrating from the durations the runs **actually took** and retrying **once**, bounded, before failing hard. `KillableGitChild::exited` was added for that, because wall time to the reap includes the scheduled sleep and would report an over-long schedule back as the duration it should have been: **measured, the first version of this fix inherited exactly the error it existed to correct.** Guard: the vacuity refusal is unchanged and now states what it has already ruled out. Mutations — an inflated probe (×50) is rescued by the retry; `KillableGitChild::kill` made a no-op still fires the vacuity refusal, so self-healing cannot mask a kill that does not land. **Evidence on the platform that failed**: 10 consecutive guest runs, 10 pass / 0 fail, 21.9–22.5s with no outlier. A Linux-only green would have closed this falsely — it did: the first repair passed on Linux and failed on the guest, killing at 40.3ms against a 48.5ms rung because the poll broke out early and killed there || PR7-CANDIDATE-TREE-UNVERIFIED | **A resume has no recorded tree to check the candidate against.** DESIGN.md §15 has `candidate_prepared` record the complete attempt/base/commit/tree identity "so resume adopts only the judged object", and the event does carry `tree_sha` — but `TaskFold`'s `PreparedCandidate` keeps `candidate`, `base_sha` and `paths`, so by the time `recovery_for` classifies an unfinished promotion the tree is gone. `verify_object` therefore checks what survives replay: that the object is a **commit** and that its parent is the generation's recorded base. A commit with the right parent and a **different tree** passes | project owner — **the G2 PR3-layer pass**, alongside `TASK-DISPATCHED-REGION-UNVALIDATED` | **Recorded rather than repaired, because closing it is a fold field and `src/topology/**` is closed to this slice by the 2026-08-24 adjudication (§3).** This row exists because the repair it accompanies stopped short of the claim rather than overstating it: `SETTLE-CANDIDATE-OBJECT-NOT-VERIFIED` found `verify_object` asking only `object_exists`, which is `cat-file -e <sha>^{}` and so answers **true for a tree or a blob**, and the repair added the parent comparison and its two witnesses (`promotion_refuses_an_object_that_is_not_the_judged_candidate`, both mutation halves killed). What the parent check cannot see is a same-parent, different-tree object, and no reachable path produces one today — the only writer of a candidate commit is `write_candidate_commit`, from the judged tree. It becomes live the moment a second writer exists, which is the same width `TASK-DISPATCHED-REGION-UNVALIDATED` names. The repair is one field on `PreparedCandidate` and one comparison, and it is cheap **in the pass** and a frozen-file change here. **FIXED 2026-08-26.** The frontier re-review of `c2c0294` raised it as finding B with the argument that carried `PR7-FEEDBACK-NOT-DURABLE-IN-SCHEMA-4` — a ledger disposition does not amend the sole living authority — and the owner ruled: **Class B, per-instance approval granted**, quoted with its measured split in §3. `PreparedCandidate` retains `tree_sha` (**+20/−0** on the frozen file: 18 doc lines, 2 of code), `verify_object` compares the commit's tree against it, and `promotion_refuses_a_commit_on_the_base_whose_tree_was_never_judged` builds a real same-parent different-tree commit, asserts both pre-existing checks pass on it so the refusal cannot be an earlier one, and asserts the refusal with no queue position taken and no candidates ref created. Nothing serde-visible moves. The prediction in this row — that it "becomes live the moment a second writer exists" — is no longer load-bearing: the check does not depend on who wrote the commit |
 | PR7-FEEDBACK-NOT-DURABLE-IN-SCHEMA-4 | **§11.4's accumulated brief cannot survive a resume, because schema 4's wire has nowhere to put it.** The legacy schema-3 events carry it outright — `LadderRetry` and `LadderEscalated` each hold `summary` **and** `detail`, and `Progress::feedback` is rebuilt by replaying them. Schema 4 records `attempt_finished{AttemptRecord, SettlementTransition}`, and `FailureRecord` is `{kind, origin, reason}` with **no detail**, while no `SettlementTransition` variant has a feedback field at all. So the gate-log tail and the reviewer's `required_changes` — the two things §11.4 exists to send back — are process-local in schema 4 and in no other schema. A run that crashes mid-ladder resumes and tells its next worker nothing about the attempts before the crash | project owner — **the G2 pass**, with `TASK-DISPATCHED-REGION-UNVALIDATED` and `PR7-CANDIDATE-TREE-UNVERIFIED` | **Recorded, not repaired: the repair is a wire field and `src/topology/**` is closed to this slice by the 2026-08-24 adjudication.** This row is the half that the in-process repair could not reach. S5 round 2 found (`contract`, `seams`, `attempt`, independently) that the driver accumulated §11.4's brief inside `Retained`, which `settle::retry` produces only for a resumable same-rung retry **with** a session — so every escalation and every sessionless retry, meaning every Copilot attempt (`DESIGN.md:452`), dispatched with an empty brief even *within one process*. That half is fixed: the brief is per **task**, every judged failure adds to it, and both dispatch arms read it. What is left is the durability, and it is a real behaviour difference from the engine schema 4 replaces — worth stating plainly rather than as a footnote, because `invariants_preserved[1]` is the standing rule and this is the one place the new engine is **less** capable than the old one. **The shape of the fix is already decided by precedent, which is why it is cheap in the pass and a frozen change here**: `attempt_finished` already carries the record beside the settlement, so a `detail: Option<String>` on `FailureRecord` is a pure addition of exactly the `#[serde(default)]` kind `AttemptRecord::pool` and `AttemptRecord::usage` already are — a log written before it folds to the state it always did, and `SCHEMA_VERSION` does not move. **FIXED 2026-08-26, measured at `bd3b9cd`.** The frontier review of `75da796` held that a ledger disposition cannot waive a live passage and the owner agreed: fork 1 was authorised as **Class C** with its ceremony (`decisions/2026-08-26-durable-retry-feedback.md`, and the per-instance approval in §3). `FailureRecord` carries `detail`, `classify::attempt_record` writes it, and the driver's brief is now derived from the log by `Brief::replay` rather than accumulated by the live path alone — one step, two callers, applied as it will be read back (§15's "one fold, not two"). Four witnesses, each with a mutation that kills it and leaves the others green; the table is in §22b |
-| PR7-STEP-D-LINEAGE-ARM-UNWITNESSED | **Recovery step (d) handles `LeaseDisposition::LineageHeld` and no test can reach that arm.** Catalogue entry `PR7-PIPELINE-008` adds `if lease == LineageHeld { continue; }` to `settle_interrupted`'s loop and the whole suite stays green. The loop is **already correct** — this is a coverage gap, not a defect | PR8 implementer (the slice that gives the merge queue a repair to spawn) | **Carried with a condition sharper than the one the catalogue implies, and measured.** `LineageHeld` is produced only by `GenerationLease::InheritedLineage`, which only a **repair task** holds, and a repair task exists only after a `task_spawned` carrying `Origin::MergeRepair`. Measured over `effects::production_code`: the only `TaskSpawned {` constructions in the tree are the frozen layer's own definitions (`topology/events.rs`, `topology/fold.rs`) and `engine/topology/scaffold.rs`, which is `#[cfg(test)]`. **No production path in this slice spawns a repair**, so the arm is unreachable by construction rather than by width — PR8's merge queue is what makes it live, not PR11's parallelism. **Why it is carried rather than witnessed**: the fixture would have to seed a `task_spawned` whose `FrozenSpawn.entry` is a registry entry derived outside the fold — the scaffold's `spawn_repair` reads the live registry to build one, and `Damage::extra` is assembled before any fold exists. That is a different construction from the sibling gap `PR7-PIPELINE-010`, which **was** repaired in-slice this round (`Damage::two_tasks`, `steps_d_and_e_reach_every_generation_not_the_first`) because it was the loop-versus-first shape a second task settles |
-| R3-SEAMS-006-ATT003-REPAIRED-POSTHOC | **Refuted as described, with a residual question that is not the same claim.** Sol's independent `seams` read, round 3: "a first reviewer whose Runner returns an error -> `run_review` reports `invocations: 0` -> the post-hoc loop performs no registration or cancellation", concluding R4 is not held on the error path. **Inspected `src/review.rs:786-797`, the `runner.run(&request)` match arm inside `run_review`'s invocation loop** — the item, the file and the lines, per §4's refutation rule. That arm does **not** return `Err`: it returns `Ok(unavailable_after_error("review process failed", error, cost, invocation - 1, last_path))`. So `judge` receives an outcome, the reconciliation **does** run, and it registers `invocation - 1` = 0 for a first pass. The described mechanism — an `Err` bypassing the loop — does not occur | project owner, if the residual is worth a row of its own | **The residual, stated separately because it is a different claim and I nearly repaired the wrong one.** `unavailable_after_error`'s `invocation - 1` is "how many invocations *completed*", and a Runner error means none did — but the Runner may have **spawned** a process before failing. Whether a spawned-and-unreportable process belongs in the ledger is a real question about `permits.protocol`'s "registered exactly once"; it is not the question Sol asked, and the answer is not obviously yes, since registering one that never started is the opposite failure and is the reason the reconciliation is post-hoc at all. **What was almost shipped**: an error arm in `judge` registering and cancelling the pass, written against Sol's description before its reachability was checked. It compiled, the suite stayed green, and a witness built for it **failed** — `judge` returned `Ok` — which is what surfaced the refutation. Reverted rather than kept: an arm whose reachability is unestablished is the same defect as a function with no production caller, filed one commit earlier as this slice's most recurrent class |
 | PR7-G2-W1-SUCCESS-IGNORES-THE-FROZEN-PLAN | **A candidate is admitted whose configured primary reviewer never ran.** `AttemptRecord::is_successful` asks `failure.is_none()` and `all()` over the passes *present on the record*, and never compares them with the task's frozen `FrozenReviews`. A `candidate_prepared` carrying a lone passed `second-opinion` — or an empty list — is therefore successful at the door: the fold charges the rung, enters `Promoting`, and permits `task_candidate_created` for a tree no required reviewer approved. Found by the `cfa1be8` review, round 6, as its first P1 | project owner — **the G2 PR3-layer pass, W1** | **Recorded, not repaired.** The repair is a fold-side check taking `(record, frozen)`, because the predicate needs the plan and `AttemptRecord` does not carry it — a fourth Class B change to a door already holding three per-instance approvals, proposed at the end of a sixth repair round. The standing stop condition forbids exactly that. Round 6 did fix the *outcome* half — `Failed` and `Unavailable` are refused, with witnesses that kill their mutations — so what is open is the *presence* half. §22e |
 | PR7-G2-W1-RETAINED-ARM-UNGUARDED | **The settlement door's `Retained` arm asks neither question the `Closed` arm asks.** It checks the epoch and stops, so a current-epoch retained settlement may carry a record with `failure: None`, every review passing, and an attempt number that is not the envelope's. `AttemptRecord::is_failed` has **no caller anywhere in the tree**. `scaffold.rs:1293` already emits a retained record with `failure: None` and no reviews, so the missing check is demonstrated in-tree. Every one of round 6's four new refusal witnesses constructs `Closed`, which is why the arm is undriven. Found by the `cfa1be8` review, round 6 | project owner — **the G2 PR3-layer pass, W1** | **Recorded, not repaired**, and its first decision is a design question rather than a mechanical fix: a retained attempt is *unsettled*, so requiring its record to say "failed" may be the wrong assertion — the alternative is that a retained record makes no success claim at all, and `is_failed` is deleted rather than given a caller. That choice also disposes of the unused-public-API half of round 6's finding 4. §22e |
 | PR7-G2-W1-PROBE-PAIR-NOT-OBLIGED | **Handing a probe the ledger and slots as arguments does not oblige it to use them.** An implementation may run its processes through a pair of its own and let creation's closing balance inspect the supplied one, which is the same disagreement `PR7-RR4-BALANCE-CHECKED-AGAINST-THE-WRONG-LOCKS` described one shape earlier. `ContainerProbes` already ignores both arguments while running a real shell process. Deleting `ledger()`/`slots()` from the trait was correct and is kept; what is false is the **signature-level guarantee**, which `create.rs`'s own doc retracts and then restates two paragraphs later — the fourth assertion of a claim refuted three times | project owner — **the G2 PR3-layer pass, W1** | **Recorded, not repaired, and the claim is retracted without replacement.** The structural repair is for the caller to build the registration wrapper from its own pair and hand the probe that, so there is nothing else to register through — a change to the pre-flight seam, which is not a thing to attempt at the end of round 6. **What is true today, without a guarantee attached**: `RunnerProbes` is production's only implementation, it uses the pair it is handed, the balance reads that same pair, and the three implementations that ignore the arguments are test doubles. §22e |
-| PR7-R4-CLAIMS-UNVERIFIED | **Eight claims written into commit messages and doc comments of the round-3 repairs are false, and each is one `grep` from disproof.** Round 4 — five lenses over the six commits `0cd2001..040a100`, scoped to that diff alone — returned **27 findings, every one inside it**, on a head green on Linux (1702/0), the Windows guest (1651+10) and CI (10/10). The eight: (1) `an_ending_run_reaches_closure` cited as an existing test whose scoping gap justified a new witness — **the test does not exist**, the name occurs once, in that doc comment; (2) the pool census described as asserting "what actually failed" — it inspects `attempt.rs`/`settle.rs` while the defect was `pool: None` in `run.rs`, and restoring the pre-repair state leaves the whole suite green; (3) "no driver fixture can reach the arm", given as the structural reason a source census was necessary — `the_retaining_incarnation_retries_in_place` reaches it; (4) `AttemptPlans::pool_for` said to give the pool rule "one production implementation" — `capacity::pool_for` has three call sites in `assembly.rs`; (5) the ending witness said to cover "**every** arm" — three of six; (6) the pre-clean repair presented as complete — one of its two callers; (7) the packet-clause census said to have "would have caught… `Spend::replay`" — not among its eleven entries; (8) a fixture said to make two behaviours "not both pass" — its implementer and reviewer share `AGENT`, so both pass, and the mutation measured as killed died for the wrong reason | project owner — **the claims protocol a fresh session carries** | **Recorded as a ledger correction, not repaired by history surgery.** The commit messages are pushed history and the owner's instruction is that they are corrected here, citing the table, exactly as `80a141b`'s false refutation was. The full table with per-claim citations is `~/tactus-artifacts/pr7/s5/r4/FALSIFICATION-TABLE.md`; the raw lens outputs are beside it. **Three confirmed code defects accompany the claims and are open**: `expected_refs`'s census entry is satisfied by a substring collision (all four `expected_refs(` matches in `workspace_manager.rs` are `refuse_unexpected_refs(`; genuine calls zero); the pre-clean fix is half-applied, leaving the stranger-killing path live at `census/tests.rs:3645`; and `an_ending_run_offers_no_work_from_any_arm` covers three of six arms with `Integrate` in the gap. **What is not in doubt**: rounds 1-3 closed real defects — the E6 promotion stall, a resumed run that forgot its spend, and a path traversal from plan-authored input where the legacy engine sanitised and the extraction did not — and those repairs are behaviourally sound. Round 4 challenged the *claims about* several witnesses, not the fixes beneath them. **The pattern, stated once**: prose asserted at the moment of writing became the evidence for the work it described, and nothing earlier in the chain checks a claim made in a commit message — which is the artifact a reviewer trusts most. **The table itself is now in this file, verbatim, as §19**, with each of the eight disproofs re-run at `cca1276` and its command recorded beside its result — including one place the table over-reached, corrected there under the same rule |
-| PR40-PROGRAM-PUBLIC-ADAPTER-SEAM | **The `CommandSpec.program` closure is scoped to this repository's adapters and does not reach the crate's public construction seam.** `decisions/2026-08-25-commandspec-program-stays-string.md` closes `PR4-PROGRAM-PATH-NOT-UNICODE` on the evidence that `Invocation::at` is `#[cfg(test)]` and `Invocation::named` takes a `&str`, so no adapter *in this repository* puts a path in the field. That audit does not reach `AgentAdapter`, which is public: `src/lib.rs` declares `pub mod agent`, `src/agent/mod.rs:194` declares `pub trait AgentAdapter` whose `build` returns a data-only `CommandSpec`, and `src/engine/mod.rs:83` declares `pub fn run_with(opts, adapters: &dyn AdapterSource)`. Failure sequence: a downstream crate implements `AgentAdapter` -> it is configured with a Unix agent path whose bytes are not valid UTF-8, such as `/opt/agent-\xff/claude` -> `build` must place that path in `program: String` -> `to_str()` returns `None` and the boundary refuses, or `to_string_lossy()` substitutes `U+FFFD` -> the run refuses with a diagnostic naming no missing installation, or the runner spawns a path that names a different file. `agent::bin::tests::a_program_path_a_string_cannot_carry_is_refused_by_name` guards `Invocation` and places no constraint on a direct `CommandSpec` construction | project owner, carried by G2 W4 | **Accepted as real and deferred, not fixed — owner disposition 2026-08-29.** Found by the frontier review of `7cf4f9971e2b4a8712ca7afa11e129c734921173`, verdict CHANGES_REQUIRED. Deferred deliberately: the repair is a decision about whether the public adapter seam may carry a path at all, which is a question about the shipped API rather than a defect in the documents this pull request lands, and W4 is the venue that owns `CommandSpec.program`. **Revisit at G2 W4**, and sooner if an adapter outside this repository is written against `AgentAdapter`, or if a path-valued adapter or configuration input is added. Until then the closure this pull request lands is to be read as scoped to this repository's adapters, never as a statement about the type |
 | PR4-PROGRAM-PATH-NOT-UNICODE-CLOSED-NARROWED | **Supersedes `PR4-PROGRAM-PATH-NOT-UNICODE-CLOSED` above; that row is left exactly as written, per this file's append-only rule.** The superseded row says the premise "cannot" hold, and that the `CODING_STANDARDS.md` §1 conflict "dissolves for the same reason: §8 governs paths, and this field holds a name". That is a claim about the type, and it is wider than the evidence. The evidence establishes only that no constructor in this repository puts a path in the field. The boundary is path-capable by contract: `src/runner/host.rs:828` turns on whether `program` is a name for the boundary to resolve rather than a location to use as given, and hands a location to `Command` byte for byte; and the retained test at `src/agent/bin.rs:496` asserts `/usr/local/bin/claude` in `fine.program`. Failure sequence for the uncorrected wording: an implementer reads the standing ledger -> takes "this field holds a name" as the field's contract -> converts a path-valued input with `to_string_lossy()` on the ground that §8 does not govern this field -> a non-Unicode installation is silently renamed rather than refused. The claim that binds is the one `decisions/2026-08-25-commandspec-program-stays-string.md` carries: every route this repository takes puts a bare name in the field, so the conflict has no reachable instance today, and §8 governs the field the moment a path-valued input exists | project owner | **Correction appended rather than applied in place — owner disposition 2026-08-29.** Raised as a P2 by the frontier review of `7cf4f9971e2b4a8712ca7afa11e129c734921173`, which found the final narrowing had reached the decision record, its index entry and the pass proposal but not this file. Closed by this row. Read the two rows together: the disposition of `PR4-PROGRAM-PATH-NOT-UNICODE` is unchanged and remains closed as not reproducible in production, and it is this row's scope statement that binds. See also `PR40-PROGRAM-PUBLIC-ADAPTER-SEAM` |
-| PR40-CHARTER-BINDS-A-PROPOSAL | **Two live passages disagree about whether a proposal can bind, and this pull request lands both.** `proposals/README.md:22` states the folder contract — "**DESIGN.md remains the only living authority for product design.** A proposal binds nothing." `decisions/2026-08-24-pr3-layer-freeze-charter.md:169` states the opposite for one proposal: `proposals/2026-08-24-v0.2-g2-pr3-layer-pass.md` "is the pass's plan; it binds when this record lands and cites it". The only `DESIGN.md` edit this pull request makes records sequencing and links to the plan; it does not carry the plan's content. Failure sequence: the G2 pass opens -> one implementer reads `DESIGN.md` as the sole living authority and inherits only that the PR3-layer pass precedes PR8 -> another reads the charter, treats the proposal as binding, and inherits W1 through W10 with their exit criteria -> the two build to different scopes, and each can correctly cite a governing document against the other. Compounding: `decisions/README.md:17` makes a landed record immutable, so after merge the charter's sentence can be superseded by a dated appended section or a successor record but never edited | project owner, carried by the documentation-authority pass | **Accepted as real and deferred, not fixed — owner disposition 2026-08-29.** Found by the frontier review of `7cf4f9971e2b4a8712ca7afa11e129c734921173`, verdict CHANGES_REQUIRED. Deferred deliberately: the repair is a ruling about how a charter may confer authority on a plan, which reaches `proposals/README.md`, `decisions/README.md` and `DESIGN.md` together, and is wider than the documents this pull request lands. **Revisit in the documentation-authority pass**, and sooner if any slice cites the proposal as binding. Until that ruling, `DESIGN.md` governs, the proposal binds nothing, and the charter's sentence is to be read as scheduling the pass rather than as conferring authority on the plan |
-| PR7-STD-PRIVATE-ROOT-LEXICAL-COMPARE | The explicit private-root comparison falls back to lexical equality on every canonicalization error (`src/engine/topology/recover.rs`) | project owner | **Raised by the standards review of `3e5212d98b20e2cf72d2fc3982746c7e87de4034` and routed here rather than to the cleanliness sweep.** It cites §14's MUST-tagged fail-closed bullet — *"Security-sensitive comparisons and decisions MUST fail closed on malformed, contradictory, or unavailable evidence; availability fallbacks must not silently grant more authority."*, on a security boundary. `CODING_STANDARDS.md` §1 grades evidence to requirement strength: a SHOULD deviation needs a concrete reason in the code, a MUST deviation needs *"an explicit, reviewed change to this standard or to the controlling design—not an ad hoc exception"*. The in-code rationale that discharged the rejected lossy-path SHOULD findings cannot discharge this one. **Open** until the owner rules the boundary adequate as designed, amends the standard, or schedules the repair. Enforcement map row **§14 security and trust boundaries** (mechanism: behavioural/security tests; the active effect denylist; pull-request review), status *review-only where no named test or denial is cited* — none is cited, so **review-only**. **Canonical fields, because `MAINTAINING.md`'s nine-column contract governs *pull-request* ledgers and this table's schema is its own four columns:** severity **P2**; provenance **pre_existing** (the site predates the standard); category **security-trust**; failure sequence — the two `normalize` calls are independent and each falls back only for the path that failed to canonicalize -> canonicalization of the **recorded** root fails, transiently or on a mount that refuses it, so that side degrades from an identity to a spelling while the explicit root canonicalizes normally -> the comparison is then between a resolved path and a spelling, so an explicit root that merely spells the same is accepted and one that resolves to the same place through a symlink is refused -> the decision reaches the opposite verdict from the one it exists to reach, in the direction of granting rather than refusing, on evidence that was unavailable **On salvage, corrected.** An earlier revision said each row is *"salvageable by hash per W10.4"*. W10.4 is a non-binding clause of a **Decided proposal**, and what it authorises is salvaging a prior review's output where the **whole reviewed file** is byte-identical since that review's sha, re-deriving otherwise. It says nothing about region-level salvage and does not authorise it. The digest below is recorded for a narrower purpose that stands on its own: **relocating this row's site inside a file that has moved**, which a line number cannot survive. It is not offered as W10.4 compliance and does not exempt this row from re-derivation if the file changes. **Region 1 of 2** — the decision site, the `--private-root` comparison itself, `3e5212d` `recover.rs` 338-342: `5289194ca998e04b98b33aba06400b2abab199a6fdce2c9737693e326f6990c5`. **Region 2 of 2** — its documented rationale and the `normalize` helper it justifies, 460-470: `74cb133ae3a953d0c6a7e7dcf8c25c445203f0cbe52f457c309645e4963b555f`. **Grounds corrected 2026-08-28.** An earlier revision of this row said the cluster cites §8. Five of the seven cite §14; the owner corrected the grounds and the routing conclusion is unchanged, because §14 is MUST-tagged too. |
-| PR7-STD-OWNER-RECORD-LEXICAL-AUTH | Owner-record public-directory authentication falls back to lexical spelling when canonical evidence is unavailable (`src/engine/topology/recover.rs`) | project owner | **Raised by the standards review of `3e5212d98b20e2cf72d2fc3982746c7e87de4034` and routed here rather than to the cleanliness sweep.** It cites §14's MUST-tagged fail-closed bullet — *"Security-sensitive comparisons and decisions MUST fail closed on malformed, contradictory, or unavailable evidence; availability fallbacks must not silently grant more authority."*, on a security boundary. `CODING_STANDARDS.md` §1 grades evidence to requirement strength: a SHOULD deviation needs a concrete reason in the code, a MUST deviation needs *"an explicit, reviewed change to this standard or to the controlling design—not an ad hoc exception"*. The in-code rationale that discharged the rejected lossy-path SHOULD findings cannot discharge this one. **Open** until the owner rules the boundary adequate as designed, amends the standard, or schedules the repair. Enforcement map row **§14 security and trust boundaries** (mechanism: behavioural/security tests; the active effect denylist; pull-request review), status *review-only where no named test or denial is cited* — none is cited, so **review-only**. **Canonical fields, because `MAINTAINING.md`'s nine-column contract governs *pull-request* ledgers and this table's schema is its own four columns:** severity **P2**; provenance **pre_existing** (the site predates the standard); category **security-trust**; failure sequence — the record is written while a spelling denotes one directory -> that spelling is later retargeted to another, by replacing a symlink or a mount, while the run id, repo key and incarnation still match -> the filesystem then refuses to canonicalize the public directory, so `canonical_display` returns the spelling on both the recorded and the live side -> string equality authenticates the **new** directory against the old directory's owner record, and the disagreement refusal never fires. The retarget step is stated because equal spellings alone do not establish two directories, and an earlier revision of this row jumped straight from the canonicalization failure to the conclusion **On salvage, corrected.** An earlier revision said each row is *"salvageable by hash per W10.4"*. W10.4 is a non-binding clause of a **Decided proposal**, and what it authorises is salvaging a prior review's output where the **whole reviewed file** is byte-identical since that review's sha, re-deriving otherwise. It says nothing about region-level salvage and does not authorise it. The digest below is recorded for a narrower purpose that stands on its own: **relocating this row's site inside a file that has moved**, which a line number cannot survive. It is not offered as W10.4 compliance and does not exempt this row from re-derivation if the file changes. **Region 1 of 2** — the decision site, the owner-record public-directory check, `3e5212d` `recover.rs` 632-634: `a332d47443baaa6c12f1f74ee47e06a6b654e16a6bbbd731261d1de46971fb75`. **Region 2 of 2** — its documented rationale and the `canonical_display` helper it justifies, 751-758: `1366553bf35fea1422476857aa79e3b8ac7c76e7e77011c01e84efcea7d0abb1`. **Grounds corrected 2026-08-28.** An earlier revision of this row said the cluster cites §8. Five of the seven cite §14; the owner corrected the grounds and the routing conclusion is unchanged, because §14 is MUST-tagged too. |
-| PR7-STD-PRIVATE-ROOT-NO-CONTAINMENT | The recorded private-root locator is accepted without absolute-path or symlink/reparse-point containment validation (`src/engine/topology/recover.rs`) | project owner | **Raised by the standards review of `3e5212d98b20e2cf72d2fc3982746c7e87de4034` and routed here rather than to the cleanliness sweep.** It cites §8's MUST-tagged containment bullet — *"Path containment checks MUST account for `..`, absolute paths, symlinks/reparse points, and platform-specific prefixes as appropriate to the security boundary. Lexical normalization alone does not prove filesystem containment."*, on a security boundary. `CODING_STANDARDS.md` §1 grades evidence to requirement strength: a SHOULD deviation needs a concrete reason in the code, a MUST deviation needs *"an explicit, reviewed change to this standard or to the controlling design—not an ad hoc exception"*. The in-code rationale that discharged the rejected lossy-path SHOULD findings cannot discharge this one. **Open** until the owner rules the boundary adequate as designed, amends the standard, or schedules the repair. Enforcement map row **§§8–9 filesystem, persistence, and processes** (mechanism: behavioural tests; platform CI; the active effect denylist). Containment is not among the automated parts that row names and this finding cites no test or denial, so **review-only**. **Canonical fields, because `MAINTAINING.md`'s nine-column contract governs *pull-request* ledgers and this table's schema is its own four columns:** severity **P2**; provenance **pre_existing** (the site predates the standard); category **security-trust**; failure sequence — a recorded locator names `<R>/runs/<run_id>` where a component is a symlink out of `<R>` -> `authorized_root` checks components lexically, rejecting `..` and requiring the two trailing names, and resolves no link -> the derived root is accepted -> locking and reclamation operate under a root outside the containment boundary the record was supposed to prove **On salvage, corrected.** An earlier revision said each row is *"salvageable by hash per W10.4"*. W10.4 is a non-binding clause of a **Decided proposal**, and what it authorises is salvaging a prior review's output where the **whole reviewed file** is byte-identical since that review's sha, re-deriving otherwise. It says nothing about region-level salvage and does not authorise it. The digest below is recorded for a narrower purpose that stands on its own: **relocating this row's site inside a file that has moved**, which a line number cannot survive. It is not offered as W10.4 compliance and does not exempt this row from re-derivation if the file changes. **Region** — `authorized_root` with the doc comment and in-line rationale that justify the lexical check, `3e5212d` `recover.rs` 418-458: `b9fd86d19d22b096130ecdee08427816852a062a59f0a0df64b854e95fd10483`. |
-| PR7-STD-QUESTION-PAYLOAD-COMPONENT | The question-payload write boundary interpolates an unvalidated component into an authoritative path (`src/rundir.rs`) | project owner | **Raised by the standards review of `3e5212d98b20e2cf72d2fc3982746c7e87de4034` and routed here rather than to the cleanliness sweep.** It cites §14's opening MUST — *"Code MUST validate them before granting filesystem, process, git, capacity, or state-transition authority"*, persisted run data being named there as a trust-boundary input, on a security boundary. `CODING_STANDARDS.md` §1 grades evidence to requirement strength: a SHOULD deviation needs a concrete reason in the code, a MUST deviation needs *"an explicit, reviewed change to this standard or to the controlling design—not an ad hoc exception"*. The in-code rationale that discharged the rejected lossy-path SHOULD findings cannot discharge this one. **Open** until the owner rules the boundary adequate as designed, amends the standard, or schedules the repair. Enforcement map row **§14 security and trust boundaries** (mechanism: behavioural/security tests; the active effect denylist; pull-request review), status *review-only where no named test or denial is cited* — none is cited, so **review-only**. **Canonical fields, because `MAINTAINING.md`'s nine-column contract governs *pull-request* ledgers and this table's schema is its own four columns:** severity **P2**; provenance **pre_existing** (the site predates the standard); category **security-trust**; failure sequence — a component reaches `write_question_payload` from persisted or model-authored input -> it is interpolated into `questions.join(format!("{component}.json"))` with no validation -> a component containing a separator or `..` escapes the questions directory -> a write lands outside the run directory the funnel is supposed to bound **On salvage, corrected.** An earlier revision said each row is *"salvageable by hash per W10.4"*. W10.4 is a non-binding clause of a **Decided proposal**, and what it authorises is salvaging a prior review's output where the **whole reviewed file** is byte-identical since that review's sha, re-deriving otherwise. It says nothing about region-level salvage and does not authorise it. The digest below is recorded for a narrower purpose that stands on its own: **relocating this row's site inside a file that has moved**, which a line number cannot survive. It is not offered as W10.4 compliance and does not exempt this row from re-derivation if the file changes. **Region** — `write_question_payload` with its doc comment and the join it performs, `3e5212d` `rundir.rs` 819-831: `0f0459b9b9e906df032ec7c988288be68764a99b2f16ee37d4d106c7b60a05f6`. **Grounds corrected 2026-08-28.** An earlier revision of this row said the cluster cites §8. Five of the seven cite §14; the owner corrected the grounds and the routing conclusion is unchanged, because §14 is MUST-tagged too. |
-| PR7-STD-ANSWER-STAGING-COMPONENT | The answer staging boundary uses an unvalidated component as part of its write path (`src/rundir.rs`) | project owner | **Raised by the standards review of `3e5212d98b20e2cf72d2fc3982746c7e87de4034` and routed here rather than to the cleanliness sweep.** It cites §14's opening MUST — *"Code MUST validate them before granting filesystem, process, git, capacity, or state-transition authority"*, persisted run data being named there as a trust-boundary input, on a security boundary. `CODING_STANDARDS.md` §1 grades evidence to requirement strength: a SHOULD deviation needs a concrete reason in the code, a MUST deviation needs *"an explicit, reviewed change to this standard or to the controlling design—not an ad hoc exception"*. The in-code rationale that discharged the rejected lossy-path SHOULD findings cannot discharge this one. **Open** until the owner rules the boundary adequate as designed, amends the standard, or schedules the repair. Enforcement map row **§14 security and trust boundaries** (mechanism: behavioural/security tests; the active effect denylist; pull-request review), status *review-only where no named test or denial is cited* — none is cited, so **review-only**. **Canonical fields, because `MAINTAINING.md`'s nine-column contract governs *pull-request* ledgers and this table's schema is its own four columns:** severity **P2**; provenance **pre_existing** (the site predates the standard); category **security-trust**; failure sequence — a component reaches `stage_answer` from persisted or model-authored input -> it is interpolated into `answers.join(format!("{component}.json.partial"))` with no validation -> a component containing a separator or `..` escapes the answers directory -> the writer-owned residue lands outside the run directory and no reader's ignore rule covers it **On salvage, corrected.** An earlier revision said each row is *"salvageable by hash per W10.4"*. W10.4 is a non-binding clause of a **Decided proposal**, and what it authorises is salvaging a prior review's output where the **whole reviewed file** is byte-identical since that review's sha, re-deriving otherwise. It says nothing about region-level salvage and does not authorise it. The digest below is recorded for a narrower purpose that stands on its own: **relocating this row's site inside a file that has moved**, which a line number cannot survive. It is not offered as W10.4 compliance and does not exempt this row from re-derivation if the file changes. **Region** — `stage_answer` with its doc comment and the join it performs, `3e5212d` `rundir.rs` 916-927: `fcb6df369b997f817a786bd69da731a676fbd2cac91a53421fc5bc5aea659db9`. **Grounds corrected 2026-08-28.** An earlier revision of this row said the cluster cites §8. Five of the seven cite §14; the owner corrected the grounds and the routing conclusion is unchanged, because §14 is MUST-tagged too. |
-| PR7-STD-OWNERSHIP-PROOF-UNCANONICAL | The private-half ownership proof falls back to an uncanonicalized public path when canonicalization evidence is unavailable (`src/rundir.rs`) | project owner | **Raised by the standards review of `3e5212d98b20e2cf72d2fc3982746c7e87de4034` and routed here rather than to the cleanliness sweep.** It cites §14's MUST-tagged fail-closed bullet — *"Security-sensitive comparisons and decisions MUST fail closed on malformed, contradictory, or unavailable evidence; availability fallbacks must not silently grant more authority."*, on a security boundary. `CODING_STANDARDS.md` §1 grades evidence to requirement strength: a SHOULD deviation needs a concrete reason in the code, a MUST deviation needs *"an explicit, reviewed change to this standard or to the controlling design—not an ad hoc exception"*. The in-code rationale that discharged the rejected lossy-path SHOULD findings cannot discharge this one. **Open** until the owner rules the boundary adequate as designed, amends the standard, or schedules the repair. Enforcement map row **§14 security and trust boundaries** (mechanism: behavioural/security tests; the active effect denylist; pull-request review), status *review-only where no named test or denial is cited* — none is cited, so **review-only**. **Canonical fields, because `MAINTAINING.md`'s nine-column contract governs *pull-request* ledgers and this table's schema is its own four columns:** severity **P2**; provenance **pre_existing** (the site predates the standard); category **security-trust**; failure sequence — the marker is written while a spelling denotes one public directory -> that spelling is later retargeted to another while the remaining recorded fields still match -> canonicalization of the public directory then fails, so the proof falls back to the uncanonicalized path and renders it lossily -> the comparison is spelling against spelling, the private half is treated as this run's, and the retain-on-disagreement path never fires. The retarget step is stated because equal spellings alone do not establish two directories **On salvage, corrected.** An earlier revision said each row is *"salvageable by hash per W10.4"*. W10.4 is a non-binding clause of a **Decided proposal**, and what it authorises is salvaging a prior review's output where the **whole reviewed file** is byte-identical since that review's sha, re-deriving otherwise. It says nothing about region-level salvage and does not authorise it. The digest below is recorded for a narrower purpose that stands on its own: **relocating this row's site inside a file that has moved**, which a line number cannot survive. It is not offered as W10.4 compliance and does not exempt this row from re-derivation if the file changes. **Region 1 of 2** — the proof's documented contract through the fallback, the lossy rendering and the disagreement comparison they feed, `3e5212d` `rundir.rs` 1451-1595: `c4256e0a23cc312185222314f3af0f1d1cf353f7c8720cf0e07178d9082bba5f`. **Region 2 of 2** — the **write side's** rationale, which is where the deliberateness of the paired fallback is actually argued, `3e5212d` `create.rs` 1983-1995: `4500bb448c7bd33285f4d72c9d40366334a65098c35e46ccd4d448bf4b0bfd37`. An earlier revision hashed only the read side's fallback, so an edit to either rationale left the digest verifying while this row's documented-site claim became false — the third time a region on this row covered less than the row claims, and the reason every region is now quoted with what it covers. **Grounds corrected 2026-08-28.** An earlier revision of this row said the cluster cites §8. Five of the seven cite §14; the owner corrected the grounds and the routing conclusion is unchanged, because §14 is MUST-tagged too. |
-| PR7-STD-CONTAINER-LEXICAL-CONFINEMENT | Confinement uses a lexical prefix comparison as its entire filesystem-containment decision (`src/runner/container/exec.rs`) | project owner | **Raised by the standards review of `3e5212d98b20e2cf72d2fc3982746c7e87de4034` and routed here rather than to the cleanliness sweep.** It cites §8's MUST-tagged containment bullet — *"Path containment checks MUST account for `..`, absolute paths, symlinks/reparse points, and platform-specific prefixes as appropriate to the security boundary. Lexical normalization alone does not prove filesystem containment."*, on a security boundary. `CODING_STANDARDS.md` §1 grades evidence to requirement strength: a SHOULD deviation needs a concrete reason in the code, a MUST deviation needs *"an explicit, reviewed change to this standard or to the controlling design—not an ad hoc exception"*. The in-code rationale that discharged the rejected lossy-path SHOULD findings cannot discharge this one. **Open** until the owner rules the boundary adequate as designed, amends the standard, or schedules the repair. Enforcement map row **§§8–9 filesystem, persistence, and processes** (mechanism: behavioural tests; platform CI; the active effect denylist). Containment is not among the automated parts that row names and this finding cites no test or denial, so **review-only**. **Canonical fields, because `MAINTAINING.md`'s nine-column contract governs *pull-request* ledgers and this table's schema is its own four columns:** severity **P2**; provenance **pre_existing** (the site predates the standard); category **security-trust**; failure sequence — a mount source reaches a withheld path through a symlink or a differently-spelled prefix -> `violations` decides containment with `withheld.starts_with(source)` and resolves nothing -> the mount is judged not to hand the container a withheld path -> the container is given the public log or the repository root and the confinement claim is false **On salvage, corrected.** An earlier revision said each row is *"salvageable by hash per W10.4"*. W10.4 is a non-binding clause of a **Decided proposal**, and what it authorises is salvaging a prior review's output where the **whole reviewed file** is byte-identical since that review's sha, re-deriving otherwise. It says nothing about region-level salvage and does not authorise it. The digest below is recorded for a narrower purpose that stands on its own: **relocating this row's site inside a file that has moved**, which a line number cannot survive. It is not offered as W10.4 compliance and does not exempt this row from re-derivation if the file changes. **Region** — `violations` with its doc comment and the `starts_with` that is the whole check, `3e5212d` `exec.rs` 316-332: `2c7edcd309cca055fb992a25c73504f197fe17a5e5e04fffd611ff4f417e81f4`. |
-| PR7-STD-CONTAINER-EXEC-UNBOUNDED | The Docker subprocess primitive has no timeout or cancellation protocol and captures both streams without a pre-allocation bound (`src/runner/container.rs`) | project owner | **Raised by the standards review of `3e5212d98b20e2cf72d2fc3982746c7e87de4034`, filed to the sweep work-list as a §9 observation, and routed here from PR41 second review record `reviews/2026-08-28-pr41-frontier-review-788c714.md`, whose first finding identified the misclassification.** It cites **§9's MUST** — *"Every subprocess integration MUST define and test: … timeout, cancellation, and descendant-process cleanup"* — and the same section's requirement that stdout/stderr size behaviour be defined and tested. `CODING_STANDARDS.md` §1 refuses an ad hoc in-code exception for a MUST, and the site's doc comment argues only about **stream separation** — it says nothing about timeout, cancellation or bounds — so there is no rationale to weigh even at SHOULD strength. Enforcement map row **§§8–9 filesystem, persistence, and processes** (mechanism: behavioural tests; platform CI; the active effect denylist); subprocess timeout and capture bounds are not among the automated parts that row names and this finding cites no test or denial, so **review-only**. **Canonical fields, because `MAINTAINING.md`'s nine-column contract governs *pull-request* ledgers and this table's schema is its own four columns:** severity **P2**; provenance **pre_existing**; category **liveness**; failure sequence — `docker logs` hangs or emits unbounded output -> `Command::output` waits with no timeout and allocates complete stdout and stderr buffers before returning -> the runner's later truncation runs only after those vectors exist, so it bounds the log and not the capture -> a container operation blocks the runner indefinitely or drives it toward OOM, and no cancellation path exists to stop it. **Region** — `exec_streams` with the doc comment that is its whole stated rationale, `3e5212d` `container.rs` 1516-1547: `8998739ca68035a8f8e538a3f8c0783835664bbf69ba395d03318322063f6c5f`. The digest is recorded to relocate the site inside a file that has moved; it is not a W10.4 salvage claim and does not exempt this row from re-derivation. **Why it is here and not in the sweep:** the sweep is for SHOULD-level conformance; §1 sends a MUST deviation to an owner, which is the same test that routed the other seven. |
-| PR43-MACOS-PROC-SIGNAL-FINGERPRINT | One macOS run of `agent::proc::tests::a_blocked_terminal_signal_still_wakes_a_suspended_host` reached the monitor's terminating path with `PENDING_TERMINATION == SIGTERM` and exited 143 instead of completing cleanly; the writer and reason are unresolved, and no rate has been measured | project owner / the slice that next opens `src/agent/proc.rs`, once a controlled macOS environment can measure it | **Open as an unexplained observation, not classified as a flake or regression.** Durable provenance and the exact matching boundary are in `reviews/2026-08-28-macos-proc-signal-single-failure.md`: test name, assertion site and the status form `exit status: 143` (not signal termination). Run `33162906210`, attempt 1, at `c3e5b20`; one failed and one green attempt are visible, but that opportunistic pair is not promoted to a rate. Several writers can store SIGTERM, including reaper-cleanup and the SIGCONT guard fallback, so a matching red remains unresolved until its writer and reason are established. This row fulfills the record's deferred §2 commitment after the PR #42 serialization boundary; it does not strengthen the record's causal claim. |
-| PR43-WINDOWS-TOPOLOGY-KILL-FINGERPRINT | One Windows run produced two topology kill-test failures together: a `git worktree prune` ran outside a repository after snapshot-add kill, and the retry helper exited 101 where the parent required an abort; whether they share a cause is unresolved, and no rate has been measured | project owner / the slice that next opens the Windows topology kill harness | **Open as one unexplained run, not classified as a flake or regression.** Durable provenance, byte-exact assertion sites and the limits of the Windows abort oracle are in `reviews/2026-08-28-windows-topology-kill-single-failure.md`. Run `33169116985`, attempt 1, at `02b7399`; one of three same-source Windows jobs failed, an opportunistic observation rather than a designed rate. Exit 101 identifies a panic but discarded child output cannot show why, and the prune failure does not prove which process removed or invalidated the repository. This row fulfills the companion record's deferred §2 commitment after the PR #42 serialization boundary without merging the two messages into a guessed mechanism. |
 
 
 ## 3. Challenges to settled entries
@@ -870,6 +835,7 @@ back is visible as a fact rather than a feeling.
 | PR5-C-FOLD-PATH-UNCENSUSED | PR5/C | `INV-02`'s stable-prefix portion makes the barrier "the **only** fold source for a topology write command", and nothing asserted it. A second, barrier-free `pub fn fold_without_barrier(path, inputs)` beside `establish_stable_prefix` passed every test | `events::log::tests::the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold`: a crate-wide census requiring `TopologyFold::replay(` and `TopologyFold::parse_log(` to appear **exactly once** in production, both inside `establish_stable_prefix`. It carries its own control (`TopologyFold` is named in the production half of exactly three files), because a census whose regions collapse counts zero and reads as "nobody does this" | invariant stated in prose, asserted nowhere |
 | PR5-C-KILL-MODE-NEVER-EXECUTED | PR5/C | `effect_site_inventory.scope` requires every parent-side sub-effect point to be "observed **executed** at least once by the suite in every injection mode the point supports", and `fault_injection_registry.structure` tables kill entries for `Written` (two shapes), `Synced`, `Create`, `TruncateTornTail` and `SyncPrefix`. Lane C had asserted only that the funnel *offers* those coordinates. No test had ever let one fire | A subprocess helper (`events::log::tests::event_funnel_kill_helper`, the idiom `src/agent/proc.rs` already uses) and three tests: `every_kill_point_the_inventory_declares_has_a_case_and_no_case_is_invented` derives the point set from `EventSite::ALL × sub_effects() × modes()` and pins six cells over five points; `a_kill_at_each_open_point_leaves_the_shape_the_packet_tables`; `a_kill_at_each_append_point_leaves_the_shape_the_packet_tables`. The child's death is checked, not assumed — not `success()`, no `panicked at` on stderr, and on Unix `signal() == SIGABRT` | "supports injection" proved as reachability, never as execution |
 | PR5-C-PRODUCTION-SOURCES-HANDLIST | PR5/C | `runner::tests::production_sources()` cut each file at its first **inline** `#[cfg(test)]` and then excluded exactly one whole-file test module **by name** (`src/engine/tests.rs`). A file the crate declares as `#[cfg(test)] mod tests;` has no inline marker to cut at, so the whole of it counted as *production*. The moment lane C added `src/events/log/tests.rs` and `premove.rs`, `every_production_process_start_is_classified` and `every_production_command_spec_payload_is_classified` both failed — and had they instead been *silently* satisfied, two censuses whose whole purpose is "every production process start is classified" would have been measuring test code | `whole_file_test_modules()` derives the exclusion set from the `#[cfg(test)] mod <name>;` declarations themselves, with a control assertion that `src/engine/tests.rs` is in the derived set (a derivation that found nothing would silently count every test file as production — the failure it replaces). Witness: making the derivation return an empty set fails four `runner::tests` | a census exclusion maintained by hand |
+| W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM | W1/W2 | On macOS CI the test binary died with `(signal: 15, SIGTERM: termination signal)` and no diagnostic, and the death landed on whichever tests were mid-flight — so it was attributed to innocent tests and read as a flake in a different subsystem each time. **Five instances across four pull requests that touch none of the named subsystems**, two of them visible only in attempt 1 of a rerun-in-place: #97 `9807f48` run `33674393240`; #103 `4517caa` run `33691549623`; #104 `ae59f2d` run `33741105025`; #108 `5b67179` run `33763282946`; #104 `94f8c27` run `33773356014`. **The group-kill hypothesis this finding carried is refuted**: no kill path signals a group that can include the harness, and cargo — in the same process group — survived both deaths and printed its error. What actually happens: the harness's own supervisor arms a **process-wide `SIGTERM`** when a freshly forked cleanup reaper has not said READY within 2 s and then does not acknowledge CANCEL within a further 2 s, and the monitor re-raises it; every container-exec fixture runs `git` through the host runner and every host-runner spawn enters one process-wide launch gate, so a stalled launch froze the module and the arm refused every waiter in one tick — which is why **a named burst with no summary is the signature**, not a counter-signature | **PR #115, merged at `046f17d`**, one file, three changes: the READY-timeout path kills and reaps the late reaper and fails that launch with an ordinary `Err`; `Reaper::cancel` reads until `OK` or EOF instead of judging the first byte; and **every arm site writes one async-signal-safe line to fd 2 naming itself** (`upstroke: fail-closed SIGTERM armed: …`), so the next occurrence is evidence rather than an absence. At `ae2a58f`, after M6's split, `arm_fail_closed_termination` is at `src/agent/proc.rs:2076` with five arm sites at `:1671`, `:2010`, `:2131`, `:2173`, `:2295`. **Guard**: `agent::proc::tests::a_late_reaper_fails_its_launch_without_arming_termination` (`src/agent/proc.rs:4635`), driven through the subprocess helper at `:4562`; **reverting either behavioural change fails it**. Eight-command baseline ALL 8 PASS at `741364b`; CI run `33780942121` green on every leg, macOS `1800 passed; 0 failed`. **What one green run does not prove**: it is consistent with the fix and with luck alike — the evidence that counts is the shape staying absent, and the fd-2 line if it returns. **Recurrence test**: a macOS death carrying that fd-2 line is this row returning; a macOS death without it is something new and gets its own ID | a measurement apparatus that reports about something other than what it was pointed at — the same class as `PR4-CI-ENVIRONMENT-ASSUMPTIONS`. **Two reading errors kept it hidden and both are the same shape**: a rollup shows only the latest run at a SHA, and a run row shows only its latest attempt, so two of the five instances were invisible to every "enumerate the runs" check. **And one categorisation error kept the fifth out**: it was ruled out of this row by searching for the marks of an ordinary failure, finding none, and concluding "not this" — ruling out a signature by the absence of other things instead of by searching for the one line that defines it. See §43 |
 
 ### What the recurrence data says so far
 
@@ -3540,3 +3506,3082 @@ under `decisions/2026-08-20-review-invalidation-scope.md`; both SHAs are recorde
 | PR73-LEXICAL-CLOSURE-001 | P2 | 0a28c1ab57ae07da151a96393c94f94b14205885 / src/agent/proc/test_support/readiness.rs:303 | a function-value alias of std::fs::remove_file is added inside the site-6 expected statement -> Clippy emits multiple matching diagnostics in that statement -> the single expectation suppresses all of them -> the six-site expectation count and lexical call census remain green | pre_existing | security-trust | whole-file allowance predates PR #72; per-site expectation placement is at 0a28c1ab57ae07da151a96393c94f94b14205885; comparison head 0f05b456fa226f9f83332aa88c152909d8cf850c | File-level deny plus six single-call expectations are a narrowed improvement; until hardening there is exactly one denied path per expected statement and no aliases or function values under an expectation; narrow the claim to site count and two pub GovernedAllow fields | deferred |
 | PR73-LEXER-DIVERGENCE-001 | P3 | 0a28c1ab57ae07da151a96393c94f94b14205885 / src/effects.rs:1096 | a Unicode XID identifier or macro name reaches the ASCII-only scanner -> word and macro_at do not consume the Rust token as one unit -> the scanner can refuse valid code or walk a macro body as source items -> the pinned whole-file test-module oracle is the current backstop | pre_existing | correctness | scanner origin predates PR #72; behavior is identical at comparison head 0f05b456fa226f9f83332aa88c152909d8cf850c | Pinned whole-file inventory catches the measured test-only invention; governed sources remain ASCII outside comments and strings; blanked-view ASCII census is queued; syn and proc-macro2 remain reserved; a third lexer-class recurrence triggers migration adjudication | deferred |
 | PR73-LINT-SEMANTICS-001 | P3 | 0a28c1ab57ae07da151a96393c94f94b14205885 / src/effects.rs:2868 | cfg_attr carries a governed lint level -> the direct-attribute reader ignores the conditional attribute -> its reported level can differ from rustc effective lint level -> every_allow or funnel-child census is the current refusing backstop | pre_existing | correctness | direct-attribute reader predates PR #72; identical blindness at comparison head 0f05b456fa226f9f83332aa88c152909d8cf850c | every_allow census, restatement refusal, and rustc fixture table cover the measured active-allow and inactive-deny cases; cfg_attr carrying a governed lint remains forbidden; reader remains direct-attribute-only | deferred |
+
+## 30. 2026-08-31 PR #64 successor slice 1 — token-carried scratch-tree authority
+
+This append-only section records the first successor slice implementing the owner's
+2026-08-30 two-token deletion-authority decision. Implementation head
+`24830622530ae3998771dcebc39d51811730af2e` is based on green integration
+`f7fe2c3be232ea6de98299b6500b6369648a344e`. `PrivateHalfProof` and its twelve
+fail-closed conjuncts remain unchanged. The new `ScratchTreeOwnership` exists only
+under `cfg(test)`, binds the exact root acquired by an exclusive create, and adds no
+production effect site or census row. The root-owned ledger append follows the
+implementation commit so its final commit is intentionally recorded outside this
+self-referential section.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR64-CLEANUP-003-SCRATCH-PRECLEAN | P2 | 24830622530ae3998771dcebc39d51811730af2e / src/rundir.rs:3612 | a test helper derives a predictable scratch path -> it discards the result of recursive pre-clean -> an occupied root can be deleted before the fixture establishes ownership -> another test or process loses content it owns | pre_existing | correctness | the helper predates PR #64 and is byte-identical at base f7fe2c3be232ea6de98299b6500b6369648a344e | ScratchTreeOwnership authority landed and is witnessed: acquire creates a ULID-named root with a non-recursive exclusive create, refuses occupied or undecidable roots, and never pre-cleans; occupied and undecidable mutation witnesses fail if pre-clean is restored. The legacy scratch helper is not migrated in this head; slice 2 moves its callers onto the new authority | deferred |
+| PR64-CLEANUP-003-P5B-SCOPE | P3 | 24830622530ae3998771dcebc39d51811730af2e / src/topology/effects.rs:1997 | the P5b identity says no path deletes the private half without qualification -> the test build gains a second deletion authority -> a reader treats the sentence as covering test-owned scratch trees -> either the sentence or the authorized mechanism appears to violate the other | introduced_by_feature | docs-contract | the unqualified sentence predates PR #64; the second test-only authority is introduced by this successor | The two leased boundary locations now state the run-lifecycle scope and name the sole test-build exception; conjunct 12 and PrivateHalfProof are unchanged. A committed-bearing scratch tree is retained as PossiblyCommitted by the private-half proof and reclaimed only by its scratch token | fixed |
+| PR64-CLEANUP-003-RECLAIM-SILENCE | P3 | 24830622530ae3998771dcebc39d51811730af2e / src/rundir.rs:3165 | a guard reclaim fails on a non-unwinding path -> failure is only printed -> the suite remains green while a tree leaks -> repeated failures can exhaust build-host inodes | introduced_by_feature | correctness | a measured implementation mutation replacing the normal-path panic with the unwind arm's report left every other witness green | The normal path raises and names the tree, while an already-unwinding path reports without double panic; dedicated witnesses cover normal failure, suppressed unwind failure, and reclaim on both normal return and unwind | fixed |
+
+The exact implementation full suite ran through the globally serialized build wrapper:
+library 1,787 passed with 34 ignored, CLI 8 passed, and the example target had no
+tests. The fresh exact-head independent review and hosted checks remain required;
+this section grants neither review nor merge authority.
+
+## 31. 2026-08-31 PR #77 exact-head review — bounded scratch-authority repair
+
+This append-only section records the sole independent review of exact head
+`7db77d92a7bc7a9d80bea788453acfbf90a0eaa3` and the same-implementor bounded
+repair at `aa7a8ff6cf4d31bf76827a2048a504c0693e3269`. It does not rewrite the
+slice-1 dispositions in section 30. The earlier Windows gate failure and these
+review findings belong to the same reviewed implementation lineage and count as
+one unsuccessful exact-head attempt under the standing convergence policy.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR77-SCRATCH-UNWIND-REPORT-PANICS | P2 | 7db77d92a7bc7a9d80bea788453acfbf90a0eaa3 / src/rundir.rs:3159 | an original panic unwinds through the scratch guard -> reclaim fails -> the unwind arm invokes an infallible-printing macro -> stderr reporting fails and panics -> the destructor double-panics and aborts, losing the original diagnosis | introduced_by_feature | correctness | 24830622530ae3998771dcebc39d51811730af2e / PR64-CLEANUP-003-RECLAIM-SILENCE | Repair aa7a8ff uses a fallible reporter whose result is explicitly matched; a deterministic reporter-failure witness proves simultaneous reclaim and report failure remains suppressed during unwind, while the non-unwinding reclaim failure still panics | fixed |
+| PR77-SCRATCH-ULID-WITNESS-ABSENT | P2 | 7db77d92a7bc7a9d80bea788453acfbf90a0eaa3 / src/rundir.rs:2991 | ULID generation is replaced by a process ID or constant -> existing fixtures use distinct tags or bypass public naming -> all prior witnesses remain green -> two acquisitions for the same tag can collide instead of producing fresh roots | introduced_by_feature | correctness | 24830622530ae3998771dcebc39d51811730af2e | Repair aa7a8ff adds a same-parent, same-tag witness that requires distinct roots and ULID-shaped basenames; the PID and constant destructive mutations fail only this new witness, proving it closes the prior evidence gap | fixed |
+| PR77-DECISION-EFFECT-SITES-PATH | P3 | 7db77d92a7bc7a9d80bea788453acfbf90a0eaa3 / decisions/2026-08-30-test-scratch-tree-ownership.md:14 | the decision cites effects/effect_sites.json -> that tracked path does not exist -> a maintainer cannot follow the claimed unchanged-inventory evidence to its authority file | introduced_by_feature | docs-contract | 24830622530ae3998771dcebc39d51811730af2e | Repair aa7a8ff corrects both references to the tracked root-level effect_sites.json; the artifact blob and its 70-total/14-RunDir census remain unchanged from the base | fixed |
+
+The review explicitly preserved the owner-deferred
+`PR64-CLEANUP-003-SCRATCH-PRECLEAN` slice-2 migration as non-blocking residue.
+The repaired exact head still requires the globally serialized full suite, fresh
+exact-head review, and hosted gates; this ledger append grants neither review nor
+merge authority.
+
+## 32. 2026-08-31 PR #64 successor slice 2 — emit scratch fixtures spend token authority
+
+This append-only section records the second successor slice under the owner's
+2026-08-30 scratch-tree authority decision and controlling addendum. Implementation
+head `6555870ef62bef5f8de5b598496783466646a092` is based directly on green
+integration `82874ef70dd4acf074cbf1453e28651d78af4db3`. The root-owned ledger
+append follows that implementation commit, so the final reviewed SHA is recorded
+in the PR body rather than self-referentially here. The old PR #64 branch remains
+historical input only and is not replayed or merged.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR64-CLEANUP-003-SCRATCH-PRECLEAN | P2 | 6555870ef62bef5f8de5b598496783466646a092 / src/engine/topology/emit/tests.rs:276 | an emit fixture derives a predictable process-and-counter root -> it recursively pre-cleans that root while discarding the result -> a recycled process identity or overlapping fixture can make another owner's tree reachable -> setup deletes content before proving exclusive ownership | pre_existing | correctness | PR64-CLEANUP-003-SCRATCH-PRECLEAN / slice-1 section 30 deferred this caller migration | Emit fixtures now acquire a previously nonexistent ULID-named root through ScratchTreeOwnership before any fallible run-tree construction; Arc clones share one non-Clone token owner; the last holder spends the token through remove_scratch_tree. Occupied-root, partial-construction, return, unwind, shared-lifetime, confirmed-absence, normal-failure, suppressed-failure, and Windows drop-order witnesses are live. The five required destructive mutations each kill only its assigned witness. No RemovePublicHusk call, ancestor-targeted production funnel, raw deletion, predictable root, pre-clean, forged proof, or discarded reclaim result remains in emit/tests.rs | fixed |
+
+## 33. 2026-08-31 PR #78 exact-head review — scratch-fixture authority correction
+
+This append-only correction records the sole review of exact head
+`17dbf7adbfaefc964ebdedbbcce200350d9ab72a` and the same-implementor repair
+`02b64604477c28b3ce24ed86a53cc5c81b916960`. It does not rewrite section 32:
+that section incorrectly reused the legacy pre-clean ID for a distinct emit-local
+helper. The original `rundir::tests::scratch` hazard remains deferred, while the
+emit helper's actual predictable-root and missing-reclamation defect is fixed under
+its own stable ID.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR78-EMIT-UNWIND-REPORT-LOST | P2 | 17dbf7adbfaefc964ebdedbbcce200350d9ab72a / src/engine/topology/emit/tests.rs:235 | an ordinary assertion panics -> the last Scratch holder drops -> real reclamation fails -> the failure is parked only in an OwnedTree-local slot -> field destruction drops the sole token and message -> the tree leaks while the original panic reports no cleanup failure | introduced_by_feature | correctness | 6555870ef62bef5f8de5b598496783466646a092 | Repair 02b6460 routes the unwind arm through the scratch subsystem's fallible reporter before touching the witness slot and explicitly suppresses reporter failure; a no-observer witness proves the report remains externally visible, while injected witnesses recover, rearm, release guards, and only then assert | fixed |
+| PR78-SCRATCH-REMOVER-SEAM-AUTHORITY | P2 | 17dbf7adbfaefc964ebdedbbcce200350d9ab72a / src/rundir.rs:3081 | any crate test receives a generic remover callback -> it ignores the token path or deletes an ancestor -> it returns success without deleting the token root -> the only token is consumed -> API construction no longer confines reclamation to the owned root | introduced_by_feature | security-trust | 6555870ef62bef5f8de5b598496783466646a092 | Repair 02b6460 keeps Remover, remove_scratch_tree_with, guarded_with, and Reporter module-private and exposes only a pathless refusal operation whose private stateless remover always returns PermissionDenied and whose return type has no success case | fixed |
+| PR78-LEDGER-PRECLEAN-FALSE-CLOSURE | P2 | 17dbf7adbfaefc964ebdedbbcce200350d9ab72a / reviews/FINDINGS.md:3600 | section 30 defers the predictable pre-clean in rundir tests -> section 32 attributes that sequence to the distinct emit helper -> the legacy helper remains byte-present -> the reused stable ID is marked fixed -> maintainers receive a false closure of a live deletion hazard | introduced_by_feature | docs-contract | PR64-CLEANUP-003-SCRATCH-PRECLEAN | This append-only section restores the original row to deferred and records the emit-local repair under PR64-EMIT-SCRATCH-PREDICTABLE-LEAK; the PR body uses the same corrected separation | fixed |
+| PR64-CLEANUP-003-SCRATCH-PRECLEAN | P2 | 17dbf7adbfaefc964ebdedbbcce200350d9ab72a / src/rundir.rs:3834 | rundir tests derive a predictable process root -> they discard recursive pre-clean failure -> an occupied root can contain another owner's data -> setup removes that data before acquiring token-carried authority | pre_existing | correctness | PR64-CLEANUP-003-SCRATCH-PRECLEAN | The slice-1 token authority and slice-2 emit migration do not change this legacy helper. It remains assigned to the separately bound startup, recover, and create migration follow-up; reopen when that collision set receives an exact-base lease, and require occupied-root preservation plus no pre-clean or discarded cleanup result | deferred |
+| PR64-EMIT-SCRATCH-PREDICTABLE-LEAK | P2 | 17dbf7adbfaefc964ebdedbbcce200350d9ab72a / src/engine/topology/emit/tests.rs:96 | an emit fixture derives a process-and-counter root without exclusive acquisition -> fixtures never reclaim the root -> process identity reuse or repeated runs encounter stale content -> tests fail as fresh-run assumptions collide and temporary trees accumulate | pre_existing | correctness | PR7-SCRATCH-FIXTURE-LEAK | Repair 02b6460 acquires a previously nonexistent ULID root before fallible construction, shares one non-Clone token through Arc, and spends it on final drop; 17 original tests retain names and semantics, 9 ownership and failure witnesses pass, and ten repetitions leave the observed temporary-entry count unchanged | fixed |
+
+## 34. 2026-08-31 PR #78 Fable convergence — external unwind-report oracle
+
+This append-only section records the fresh review of exact repaired head
+`4099d57b24c8b7d2dd44aeb3e3b24272eacf1a9c`. That review was the lane's
+second unsuccessful reviewed attempt, so the standing convergence policy froze
+the branch and prohibited another ordinary repair. Fable 5 authored the bounded
+convergence repair at `6a217865f978b5319007c55c269fb48e26823dc3` without
+reopening the settled scratch-deletion authority or widening the three-file lease.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|---|
+| PR78-EMIT-UNWIND-REPORT-ORACLE | P2 | 4099d57b24c8b7d2dd44aeb3e3b24272eacf1a9c / src/engine/topology/emit/tests.rs:2575 | external stderr reporting is removed -> the unwinding arm sets its own delivered record -> the in-process observer and no-observer witnesses still pass -> a failed scratch reclaim again loses its cleanup report while the evidence claims the reporter is fixed | introduced_by_feature | correctness | PR78-EMIT-UNWIND-REPORT-LOST / repair 02b64604477c28b3ce24ed86a53cc5c81b916960 | Fable repair 6a21786 moves delivery observation outside the process: rundir scratch-tree witnesses spawn the exact emit test, capture its real fd 2, assert one correctly shaped report, assert silence for a successful unwind reclaim, and on Linux route fd 2 to /dev/full to prove a real write failure is suppressed without replacing the original panic. Five destructive mutations, including removing the stderr write and removing the reporter call, each turn the assigned oracle red and are absent from the committed tree | fixed |
+
+## 35. 2026-08-31 G2 checkpoint — the full-ledger audit `decisions/2026-08-25-checkpoint-merges.md` ordered
+
+This append-only section is the **full-ledger audit** the checkpoint record
+requires before a candidate is cut. It rewrites no historical row and reopens no
+disposition. It is measured at candidate head
+`50ed8c86ec60164011bfd393066c4c3696d3865b`, and its rule is
+**latest-disposition-wins**: where a row in §2 has been repaired, closed or
+superseded by a later section, the later disposition is the live one and §2's
+text stands as history.
+
+The audit is mechanical. Row counts come from the file, not from a prior
+summary, and every count below is reproducible from `reviews/FINDINGS.md` at
+this head.
+
+### The recount, and one structural defect it found
+
+§2's table occupies lines 112–176 (line 136 is blank). That is **64 physical
+table lines** — but **65 logical rows**, because one line carries two.
+
+**Line 156 joins two ledger rows with `||`.** It holds
+`PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE` and then, after a doubled pipe,
+`PR7-CANDIDATE-TREE-UNVERIFIED`. Split on `|`, that line has **11 fields where
+every other row in the table has 6**. The consequence is not cosmetic: in
+rendered Markdown a `||` produces an empty cell and the second row's content
+spills into the first row's columns, so **`PR7-CANDIDATE-TREE-UNVERIFIED` is
+invisible as a row to anyone reading the rendered ledger**, and any line-based
+count of §2 under-counts by exactly one.
+
+This is §4's own shape — a measurement present in the file that no reader is
+positioned to act on. It is recorded here rather than repaired in place, because
+this file is append-only whatever the width of the edit, and the same route
+§27 and §28 took. **The row's disposition is unaffected**: its own text carries
+`FIXED 2026-08-26`, and it is dispositioned as repaired below.
+
+### The normalized totals
+
+| Bucket | Rows |
+|---|---:|
+| §2 logical rows | **65** |
+| — struck in place (withdrawn, historical) | 2 |
+| **Live rows carried into this audit** | **63** |
+| — **repaired**, by a later disposition | 8 |
+| — **closed, not owed** | 3 |
+| — **carried**, with a named venue, a re-opening trigger and required evidence | 52 |
+
+8 + 3 + 52 = 63. **Every live row lands in exactly one bucket**, which is the
+condition the checkpoint record states.
+
+The two struck rows are `~~PR4-MAIN-WIRING-UNWITNESSED~~` (line 134, deferral
+withdrawn as invalid, repaired in round 8) and
+`~~PR5-R1-PROCESS-START-CENSUS-UNSTRIPPED~~` (line 138, closed by PR7's census
+repair). They are already withdrawn in place and are not re-dispositioned here.
+
+### Repaired — 8 rows whose §2 text is now history
+
+| ID | Where the repair is recorded | What discharges it |
+|---|---|---|
+| `PR5-MACOS-CLIPPY-NEVER-RUN` | §3, 2026-08-28, "fired, and is REPAIRED" | Verified live at this head: `.github/workflows/ci.yml:113` defines `lint (macos)`, and it is wired into the aggregate in all three places — `merge-gate.needs` (`:152`), `LINT_MACOS_RESULT` (`:161`), and the loop that decides the aggregate's exit |
+| `PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE` | Its own §2 owner cell reads **fixed in PR7** | Warm-up probe discarded, median of the next three, premise asserted, bounded single retry. Ten consecutive guest runs green |
+| `PR7-CANDIDATE-TREE-UNVERIFIED` | In-row, `FIXED 2026-08-26`; per-instance Class B approval in §3 | `PreparedCandidate` retains `tree_sha`; `verify_object` compares the commit's tree against it; a same-parent different-tree commit is refused by a dedicated witness. **This is the row hidden by the `||` join above** |
+| `PR7-FEEDBACK-NOT-DURABLE-IN-SCHEMA-4` | In-row, `FIXED 2026-08-26, measured at bd3b9cd`; §22b; `decisions/2026-08-26-durable-retry-feedback.md` | `FailureRecord` carries `detail`; the brief is derived from the log by `Brief::replay`. Four witnesses, each with a mutation that kills it and leaves the others green |
+| `TASK-DISPATCHED-REGION-UNVALIDATED` | §26, implementation-fixed at `185e392` | Dispatch validation derives the predicted region from the frozen fold state and refuses a divergent event-carried region |
+| `PR7-G2-W1-SUCCESS-IGNORES-THE-FROZEN-PLAN` | §26, implementation-fixed at `c0ec940` | Candidate success is judged against the task's frozen review plan; a partial or empty recorded pass set cannot satisfy the door |
+| `PR7-G2-W1-RETAINED-ARM-UNGUARDED` | §26, implementation-fixed at `46780ea`, review repair `d895dd5` | The retained arm validates record/envelope identity and refuses a record whose public predicate says successful |
+| `PR7-G2-W1-PROBE-PAIR-NOT-OBLIGED` | §26, implementation-fixed at `6c6cb3d`, review repair `d895dd5` | Probe registration authority is structural and accounted; the execution seam is sealed and P4 verifies the granted capability recorded each probe |
+
+#### The W1 double-count, reconciled explicitly
+
+Four rows appear **twice** in this file with opposite dispositions, and a naive
+count of open rows counts each of them twice:
+
+| ID | §2 (early) | §26 (later) |
+|---|---|---|
+| `TASK-DISPATCHED-REGION-UNVALIDATED` | line 155 — "Recorded, not repaired" | line 3473 — implementation-fixed at `185e392` |
+| `PR7-G2-W1-SUCCESS-IGNORES-THE-FROZEN-PLAN` | line 160 — "Recorded, not repaired" | line 3474 — implementation-fixed at `c0ec940` |
+| `PR7-G2-W1-RETAINED-ARM-UNGUARDED` | line 161 — "Recorded, not repaired" | line 3475 — implementation-fixed at `46780ea` |
+| `PR7-G2-W1-PROBE-PAIR-NOT-OBLIGED` | line 162 — "Recorded, not repaired" | line 3476 — implementation-fixed at `6c6cb3d` |
+
+**§26's disposition is the live one for all four.** The §2 text stands as the
+record of why each was recorded rather than repaired at the time — the
+`src/topology/**` closure of the 2026-08-24 adjudication, and round 6's stop
+condition — and it is correct history. It is not an open obligation, and the
+audit counts each of these rows once, as repaired.
+
+The residual §22e entries for the same three W1 rows (lines 3268–3270) describe
+the repair *shape* that was then implemented in §26. They are superseded by
+§26 and are likewise not counted as open.
+
+### Closed, not owed — 3 rows
+
+The `PR4-PROGRAM-PATH-NOT-UNICODE` family is three §2 rows because each closure
+and narrowing was **appended as a new row** rather than moving the old one, which
+is this file's rule. All three are closed.
+
+| ID | Rationale |
+|---|---|
+| `PR4-PROGRAM-PATH-NOT-UNICODE` | Closed as **not reproducible in production** by `decisions/2026-08-25-commandspec-program-stays-string.md`. Every production route puts a bare CLI name in `CommandSpec.program`; `DESIGN.md:222` is unchanged and the W4 widening is withdrawn |
+| `PR4-PROGRAM-PATH-NOT-UNICODE-CLOSED` | "Closed, not repaired: there is nothing to repair." `Invocation::at`, the only constructor taking a path, is `#[cfg(test)]` and both call sites are in test modules; `Invocation::named` takes a `&str`, so `to_str()` cannot return `None` for anything production builds |
+| `PR4-PROGRAM-PATH-NOT-UNICODE-CLOSED-NARROWED` | Owner disposition 2026-08-29: the final narrowing had reached the decision record, its index entry and the pass proposal but not this file. "Closed by this row"; it is this row's scope statement that binds |
+
+**A note the count depends on:** these three are one finding, recorded three
+times. Read as three open rows they overstate the ledger's debt by two.
+
+### Carried — 52 rows, each with a venue, a trigger and required evidence
+
+Every carried row already names an owner in §2; none is ownerless. What this
+audit adds is a **venue class** with an explicit re-opening trigger and the
+evidence a repair must produce, so a row cannot be deferred to nobody — the
+failure `PR5-MACOS-CLIPPY-NEVER-RUN` was reopened for.
+
+| Class | Venue / owner | `shrinks_when` | Re-opening trigger | Required evidence for the repair |
+|---|---|---|---|---|
+| **V1** | The G2 PR3-layer pass | the pass lands and `src/topology/**` reopens under a Class-B approval | the G2 pass opens `src/topology/**` | a fold-side refusal with a red-first witness **and** a mutation the witness kills, both halves recorded |
+| **V2** | The project owner, for the G2 erratum list or a ruling | the owner writes the erratum clause or rules the question | the owner takes up the erratum list | the packet clause the ruling amends, quoted in the record, **plus** a test pinning the ruled behaviour |
+| **V3** | A file- or behaviour-triggered successor slice — the owner clause names the path *and the change*, not merely opening the file | the named slice changes the named path or behaviour | a slice changes that path/behaviour; **incidental contact does not fire it** (the clause restated 2026-08-27 for `PR5-RD-002`) | a red-first witness on the named path, a killed mutation, and — for the platform rows — a reproduction on the platform that failed, never a Linux-only green |
+| **V4** | A numbered future slice implementer (PR8, PR6/PR7, PR7–PR11, …) | that slice opens | the named slice opens | the slice's own per-head ceremony, with the row named in its ledger |
+| **V5** | The project owner, undirected | the owner rules | an owner ruling, or new evidence admissible under §"The authority rule" | a concrete failure sequence **and** a surviving mutation, as §"The authority rule" requires of any challenge |
+| **V6** | The post-v0.2 pass over PR3's layer | v0.2 completes and the pass opens | the post-v0.2 pass opens | as V1 |
+
+**The bar for every class is the same in one respect**: a deferral by the named
+owner, to nobody, is not a disposition. If a trigger fires and the owner declines,
+the decline is recorded as a new row with a **new** named successor — never as
+silence.
+
+The 52 rows, with their class and the owner text §2 gives them:
+
+| ID | Class | Venue / owner as recorded in §2 |
+|---|:---:|---|
+| `PR5-VERIFY-CLAUSE-NARROWER-THAN-STATED` | V2 | project owner — for the G2 erratum list |
+| `PR3-ATTEMPT-SHAPE` | V5 | project owner |
+| `PR5-ANSWER-MODULE-COLUMN` | V3 | PR6/PR7 implementer (the slice that next opens src/topology/effects.rs) |
+| `PR3-RUNNER-DIGEST` | V5 | project owner |
+| `PR3-REG-001-CONDITIONAL` | V4 | PR4-PR10 implementer |
+| `PR3-BEFORE-PHASE-SCOPE` | V4 | PR7–PR10 implementer |
+| `PR3-COMMIT-AUTHORSHIP` | V5 | project owner |
+| `PR3-CONTAINER-START-ROW` | V4 | PR6/PR7 implementer |
+| `PR3-FRAMEWORK-SILENT-1` | V4 | PR7–PR10 implementer |
+| `PR3-FRAMEWORK-SILENT-2` | V4 | PR7–PR10 implementer |
+| `PR3-FRAMEWORK-SILENT-3` | V4 | PR7–PR10 implementer |
+| `PR3-FRAMEWORK-SILENT-4` | V4 | PR7–PR10 implementer |
+| `PR3-FRAMEWORK-SILENT-5` | V4 | PR7–PR10 implementer |
+| `PR3-REPORT-DOUBLE-NAME` | V5 | project owner |
+| `PR4-SPAWN-SITE-PROBE-CONTEXT` | V4 | PR6/PR7 implementer |
+| `PR4-REG-001-STILL-EQUIVALENT` | V4 | PR4–PR10 implementer |
+| `PR4-R28-NEXT-COORDINATOR-UNWITNESSED` | V3 | PR5–PR7 implementer (the slice that owns rundir) |
+| `PR4-DESIGN-ROLE-SCOPED-ENV` | V5 | project owner |
+| `PR4-ADAPTER-RESOLVES-ON-THE-HOST` | V4 | PR6 implementer |
+| `PR5-CAPACITY-NOT-A-TOPOLOGY-RESOURCE` | V5 | project owner |
+| `PR5-C-FSYNC-UNOBSERVABLE` | V3 | PR7–PR11 implementer (the slice that owns the two-crash proof) |
+| `PR5-R1-CFG-TEST-SHRINKS-THE-DOMAIN *(re-scoped: externally_reachable_fns only)*` | V3 | PR7+ implementer (the slice that owns effects::externally_reachable_fns) |
+| `PR5-C-LEGACY-APPEND-ERROR-CENSUS` | V3 | PR7 implementer, or whichever lane plumbs an observer through engine::Harness |
+| `PR5-R2-WIN-NON-SURROGATE-REPARSE` | V3 | PR6/PR7 implementer (the slice that next owns Windows containment) |
+| `PR5-R2-SNAPSHOT-INPUT-COMMIT-DEAD` | V3 | PR6/PR7 implementer (the slice that first requests two snapshots) |
+| `PR5-R2-IDUNREAD-BEFORE-THE-PARSE` | V4 | PR6/PR7 implementer |
+| `PR5-R2-WORKTREE-LOCK-RETENTION` | V3 | PR6/PR7 implementer (the slice that can pause a run) |
+| `PR5-R2-LEGACY-ENGINE-APPEND-FAILURE` | V3 | PR7 implementer, or whichever lane plumbs an observer through engine::Harness |
+| `PR5-R2-OBJECT-GROUP-TAKES-NO-SITE` | V5 | project owner |
+| `PR7-WRAPPERS-EMPTY-DOMAIN` | V6 | project owner — the post-v0.2 pass over PR3's layer |
+| `PR7-NARROWED-SURFACE-19-UNCALLED` | V3 | PR8/PR12, or whichever slice next opens these modules |
+| `PR7-MACOS-PROCESS-GROUP-FLAKE` | V3 | project owner / whichever slice next opens src/runner/host.rs |
+| `PR7-WIN-READ-RACING-BOUND-TOO-SHORT` | V3 | PR6's owner, or whichever slice next opens the Container funnel — read_racing arrived in 9 |
+| `PR7-SCRATCH-FIXTURE-LEAK` | V3 | project owner / whichever slice owns shared test infrastructure |
+| `PR7-P3A-CREATOR-RETAINS` | V4 | PR7/PR12 implementer |
+| `PR7-CREATEINTEGRATION-ORDER-BACKWARDS` | V6 | project owner — the post-v0.2 pass over PR3's layer |
+| `PR7-FOLD-ACCESSORS-IN-PR3-LAYER` | V1 | project owner — adjudicated 2026-08-24, see §3; the deferred work is the G2 PR3-layer pas |
+| `PR7-STEP-D-LINEAGE-ARM-UNWITNESSED` | V3 | PR8 implementer (the slice that gives the merge queue a repair to spawn) |
+| `R3-SEAMS-006-ATT003-REPAIRED-POSTHOC` | V2 | project owner, if the residual is worth a row of its own |
+| `PR7-R4-CLAIMS-UNVERIFIED` | V2 | project owner — the claims protocol a fresh session carries |
+| `PR40-PROGRAM-PUBLIC-ADAPTER-SEAM` | V2 | project owner, carried by G2 W4 |
+| `PR40-CHARTER-BINDS-A-PROPOSAL` | V2 | project owner, carried by the documentation-authority pass |
+| `PR7-STD-PRIVATE-ROOT-LEXICAL-COMPARE` | V5 | project owner |
+| `PR7-STD-OWNER-RECORD-LEXICAL-AUTH` | V5 | project owner |
+| `PR7-STD-PRIVATE-ROOT-NO-CONTAINMENT` | V5 | project owner |
+| `PR7-STD-QUESTION-PAYLOAD-COMPONENT` | V5 | project owner |
+| `PR7-STD-ANSWER-STAGING-COMPONENT` | V5 | project owner |
+| `PR7-STD-OWNERSHIP-PROOF-UNCANONICAL` | V5 | project owner |
+| `PR7-STD-CONTAINER-LEXICAL-CONFINEMENT` | V5 | project owner |
+| `PR7-STD-CONTAINER-EXEC-UNBOUNDED` | V5 | project owner |
+| `PR43-MACOS-PROC-SIGNAL-FINGERPRINT` | V3 | project owner / the slice that next opens src/agent/proc.rs, once a controlled macOS environ |
+| `PR43-WINDOWS-TOPOLOGY-KILL-FINGERPRINT` | V3 | project owner / the slice that next opens the Windows topology kill harness |
+
+### Recurrence classes — §4 reviewed at the same sitting
+
+The checkpoint record requires §4's recurrence classes to be reviewed for
+structural guards at the same sitting as the ledger audit. §4 carries **18
+classes**. Each is given a guard verdict below:
+
+- **mechanical** — a named artifact in this tree fails if the class recurs;
+- **partial** — a mechanism catches part of the class, and the uncovered part is named;
+- **convention** — a written rule with no mechanical enforcement.
+
+| # | Class | Occurrences | Guard | The guard, or what is missing |
+|---:|---|---|:---:|---|
+| 1 | A surviving mutation named in a round's own prose and carried nowhere durable | 2 | convention | §4's own adopted rule: a round that names a surviving mutation and does not repair it appends it to §2 **in the same commit**, and a deferral must quote the passage that makes it out of scope. Nothing enforces this but a reader |
+| 2 | A boundary drawn narrower than the packet's sentence | 2 | convention | This file's "boundary rule" preamble |
+| 3 | A fix that introduced a new defect | 5 | partial | Repair rounds now require a red-first witness and a killed mutation per repair, which catches the introduced defect **when the repair is witnessed**. It does not catch a defect introduced outside the witnessed seam — which is how three of the five arrived |
+| 4 | Tests satisfied by a correlated field rather than the named one | 11 (PR2) + 11 (PR3/A1) + 2 (PR4) | partial | Withheld mutation catalogues, measured per slice. A catalogue is a measurement taken at a head, not a standing gate; a green suite proves tests pass, not that they still detect |
+| 5 | A guarantee proved for the variant that was looked at | 4 | convention | Totality by exhaustive match is the house style; no artifact requires it |
+| 6 | The thing that was supposed to prove it never ran | 2 | partial | `test-docs-consistency.sh` C3 pins the set of `.github/scripts/test-*.sh` files **equal** to the set the CI lint job invokes, both directions, which closes the shell-gate half. The `compile_fail` fixture half — a fixture no command executes — has no equivalent |
+| 7 | A source census fooled by a comment | 5 | mechanical | `every_production_process_start_is_classified` (`src/runner/mod.rs:1540`) and `every_production_runner_request_is_built_by_its_roles_builder` (`:1463`); and §27's replacement of substring matching with a YAML-1.2 structural oracle, `the_workflow_parser_rejects_duplicate_keys_and_reads_on_as_a_string` (`src/effects/tests.rs:1513`) and `the_workflow_shape_oracle_refuses_every_escape_the_ledger_names` (`:1563`) |
+| 8 | An enforcement artifact no gate validates | 2 | mechanical | `every_allowlist_entry_carries_its_justification_and_names_a_real_file` (`src/effects/tests.rs:898`) and `every_allow_of_a_governed_lint_is_module_level_and_in_the_allowlist` (`:507`) |
+| 9 | An element of a packet-named sequence with no implementation at all | 2 | convention | Sequence coverage is read, not gated |
+| 10 | `git checkout <path>` discarding uncommitted work while mutation-testing | 2 | convention | A session hazard. The standing mitigation is to restore from a disposable copy, never the live worktree |
+| 11 | An item inserted into a file re-targeting the doc comment above it | 11 at `51cfc01`, derived not maintained | convention | Found by derivation at one head; nothing maintains it |
+| 12 | A mutation whose anchor `cargo fmt` had moved, reported as a surviving mutation | 2 | convention | Pre-flight the anchors on a disposable copy before the measuring run, which is fail-fast |
+| 13 | An accumulator's witness proves the accumulation and not the read | 4 | convention | The rule is to assert the value the event carries, not the accumulator's reset |
+| 14 | A function used as its own expected-value oracle | 5 (PR3/A1) | convention | — |
+| 15 | A grid bounded short of its required domain | 8 (PR3/A1) | convention | — |
+| 16 | Omitted packet-required fields | 7 (PR3/A1) | convention | — |
+| 17 | A refutation that inspected the wrong item of that name | 1 | convention | Below the two-occurrence threshold §4 sets for a signal about the method; carried because it is recorded |
+| 18 | A command quoted as evidence becomes part of its own input | 4 | convention | All four introduced by the claims-protocol commits of 2026-08-26 |
+
+**Status, stated plainly: 2 of 18 classes are mechanically guarded, 3 are
+partially guarded, and 13 rest on convention.** That is the honest shape of the
+recurrence defence at this candidate, and it is the number a panel should weigh
+rather than the count of classes alone. The two mechanical guards are both in
+the effects/census layer, which is the layer that has had the most recurrence
+pressure — the guards followed the failures, which is the right order, but it
+means the eleven classes with no mechanical guard are the ones that have not yet
+cost enough to earn one.
+
+**No class is closed by this audit.** §4 is a watch list; a class leaves it by
+being guarded, not by being reviewed.
+
+### Reconciliation against the P1A ledger input
+
+The P1A read-only pass reported **64** early §2 rows, **2** struck, and **four**
+stale W1 rows later fixed. Re-derived at `50ed8c86`:
+
+| Quantity | P1A | This audit | Why they differ |
+|---|---:|---:|---|
+| §2 rows | 64 | **65** | P1A counted physical table lines. Line 156 carries two logical rows joined by `||`; the second, `PR7-CANDIDATE-TREE-UNVERIFIED`, is invisible to a line-based count and to a rendered read |
+| Struck rows | 2 | 2 | agrees |
+| Rows whose live disposition is *repaired* | 4 | **8** | P1A named the four W1 rows of §26. Four more carry a terminal disposition elsewhere: `PR5-MACOS-CLIPPY-NEVER-RUN` (§3), `PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE` (own owner cell), `PR7-CANDIDATE-TREE-UNVERIFIED` (in-row) and `PR7-FEEDBACK-NOT-DURABLE-IN-SCHEMA-4` (in-row, §22b) |
+| Rows closed, not owed | — | 3 | the `PR4-PROGRAM-PATH-NOT-UNICODE` family, one finding recorded three times |
+| Rows genuinely carried | — | **52** | 65 − 2 struck − 8 repaired − 3 closed |
+
+P1A's figures were correct for what they measured; the deltas are what a
+mechanical re-derivation at the candidate head adds, and both are recorded so
+neither has to be taken on trust.
+
+### What this audit does not do
+
+- It does **not** attest. The three-model panel is a separate obligation
+  (`decisions/2026-08-25-checkpoint-merges.md`), untouched by this section.
+- It does **not** run the suite. No claim here depends on a test result produced
+  during assembly.
+- It does **not** reopen any disposition, and it edits no historical row. The
+  `||` defect on line 156 is recorded, not repaired, for exactly that reason.
+- It does **not** claim a reviewer reread the candidate diff.
+
+Companion records: `decisions/2026-08-31-g2-checkpoint-promotion.md`,
+`reviews/2026-08-31-g2-gate-report.md`,
+`reviews/2026-08-31-g2-first-parent-coverage.md`.
+
+## 36. 2026-08-31 G2 checkpoint — the serialized suite result, and what it does not settle
+
+Append-only. This section records one measurement and changes **no disposition**
+in §35 or anywhere above it.
+
+Root ran the globally serialized suite at the exact committed candidate head
+`50a84acd3ebf5f0ecffc35a7a5b4ea68960310f9`:
+
+| Fact | Value |
+|---|---|
+| Command | `upstroke-build cargo test --all-targets --all-features` |
+| Exit status | `rc=0`, fresh compile |
+| Library | 1801 passed, 0 failed, 34 ignored |
+| Binary (`main`) | 8 passed, 0 failed |
+| Example | 0 tests |
+| Docker | live daemon, Docker server 29.7.2; the `real_docker_*` tests used it and passed |
+| Platform | Linux, this host only |
+
+§35 said of itself that it ran no suite and that no claim in it depended on a
+test result. That remains true of §35. This section is the separate measurement,
+recorded beside it rather than folded into it.
+
+**What it settles about the ledger: very little, and that is the honest reading.**
+
+- **No carried row fired.** 0 failed, so no §35 carried row was observed firing
+  on Linux in this run.
+- **That is not evidence of absence.** A green suite proves the tests passed, not
+  that they still detect — the standing lesson behind the withheld-mutation
+  catalogues in §4 class 4. None of the 52 carried rows is closed, narrowed, or
+  re-dated by this result, and none of their re-opening triggers fired.
+- **The platform-rated rows are untouched.** `PR7-MACOS-PROCESS-GROUP-FLAKE`,
+  `PR7-WIN-READ-RACING-BOUND-TOO-SHORT` and `PR43-*` are macOS and Windows rows.
+  A Linux run cannot observe them, and a Linux green is exactly the false
+  closure `PR5-MACOS-CLIPPY-NEVER-RUN` was reopened for. Their rates stand as
+  recorded.
+- **The intermittent rows keep their rates.** One green run is one observation
+  against rates measured over many; §12's precedent is that a rate not recorded
+  when observed is a rate destroyed by the run that clears it. Nothing here
+  revises a rate in either direction.
+
+**The recurrence classes are unmoved.** §35's verdict — 2 of 18 mechanically
+guarded, 3 partial, 13 convention-only — is a statement about what artifacts
+exist, not about whether a run passed. A class leaves §4 by being guarded.
+
+**The `||` defect on line 156 is unrepaired**, deliberately, and this section
+does not touch it either.
+
+Companion record: `reviews/2026-08-31-g2-gate-report.md`, "The serialized gate run".
+
+## 37. 2026-08-31 G2 checkpoint — the public schema-4 write path, carried
+
+Append-only. This section adds **one carried row** to the ledger under the
+owner's binding amendment 1a of 2026-08-31
+(`decisions/2026-08-31-inertness-premise-behavioural.md`). It changes no
+disposition in §35 or §36 and repairs nothing.
+
+The row exists because the owner ruled that prose in a decision record is not
+enough: **the panel must find this triaged in the ledger rather than discover
+it.** It is a *carried* row, not a defect report — the behavioural inertness
+condition is satisfied at the candidate head, and this row records the exact
+shape of what inertness does **not** cover, so nobody later mistakes the
+premise for a stronger one.
+
+### The carried row
+
+| ID | What | Owner | Why it is open |
+|---|---|---|---|
+| `SCHEMA4-PUBLIC-WRITE-PATH-UNGATED` | **A library consumer can durably write schema-4 state through the checked funnel, using public API only, with no write-side activation check.** The path is three explicit topology choices: construct `RunStarted4 { schema: TOPOLOGY_SCHEMA, … }` — **25 fields, all `pub`, no `#[non_exhaustive]`** (`src/topology/events.rs:600`); check it with `TopologyLine::round_trip` (`src/events/log.rs:1242`); open the funnel with `EventLog::open` (`:466`) and commit it with `append_topology(site_for(&body), …)` (`:796`, `:1064`). `append_topology` delegates straight to `append_topology_hooked` (`:809`) and applies no ceiling test; **`TOPOLOGY_ACTIVATION` and `MAX_READABLE_SCHEMA` appear nowhere in `src/events/log.rs`** — activation gates *reading* only. The resulting log is state the same binary's own resume refuses by name, `SchemaRefusal::TopologyLogUnreadable` (`src/topology/schema.rs:338`, raised at `:241`) | project owner — **the PR12 activation slice** | **Carried, not repaired, and the premise it qualifies is unchanged.** Inertness is *behavioural* and holds: production's only `run_started` mint stamps schema 3 (`src/engine/coordinator.rs:164`), no CLI arm reaches the topology coordinator (`engine::topology` is `pub(crate)`, `src/engine/mod.rs:61`), the read ceiling is 3 by four const assertions evaluated in the ordinary build (`src/topology/schema.rs:98-101`), and `check_upgrade_transition` refuses every path into schema 4. **What this row denies is the stronger guarantee, not the premise**: a released library cannot be prevented from *creating* a schema-4 log, and never could — the legacy funnel already accepts any `pub u32` in `RunStarted.schema` (`src/events/mod.rs:315`), and plain `std::fs` binds no downstream crate at all. Log bytes are untrusted input and the code has always treated them so. **Repairing this is out of scope for the promotion by owner ruling**: narrowing `src/topology/` to `pub(crate)` would break `EventSite` in public log signatures and the frozen `compile_fail` doctests pinned to their failure reasons, report the whole topology tree dead under `-D warnings`, and produce a new candidate head that re-runs the suite, the eight gate artifacts and the 66-unit coverage map — to buy a guarantee `std::fs` refutes. A write-side inactivity guard in `append_topology` would strengthen a guarantee beyond PR7's frozen packet, which is managed debt and not an in-slice repair |
+
+### Venue, trigger and required evidence
+
+Recorded in §35's carried-row form so the row is auditable the same way the
+other 52 are.
+
+| Field | Value |
+|---|---|
+| **Class** | V4 — a numbered future slice implementer |
+| **Venue / owner** | project owner — the **PR12 activation slice** |
+| **`shrinks_when`** | the activation slice lands, **or** a visibility narrowing is scheduled |
+| **Re-opening trigger** | PR12 opens, or any slice schedules a narrowing of `src/topology/**` or the event funnel's public surface |
+| **Required evidence for the repair** | a write-side refusal with a red-first witness **and** a killed mutation; **plus** an accounting of the legacy funnel's unvalidated `RunStarted.schema` field, because a guard on the schema-4 path alone leaves the schema-3 path accepting any `u32` and the guarantee would still not hold |
+
+### What this row does not do
+
+- It does **not** reopen the inertness condition of
+  `decisions/2026-08-25-checkpoint-merges.md`. That condition is behavioural and
+  is satisfied at `50ed8c86`.
+- It does **not** authorize a visibility change. The owner ruled explicitly that
+  no visibility change to the code is authorized in this promotion.
+- It does **not** change the §35 totals as they were audited. §35's 52 carried
+  rows are the normalization of §2 at the time of the audit; this is a
+  **53rd carried row**, opened after it by owner amendment, and is counted
+  separately rather than folded back into a table it was not part of.
+
+Companion records: `decisions/2026-08-31-inertness-premise-behavioural.md`,
+`reviews/2026-08-31-g2-gate-report.md` ("Inert by default" §4).
+
+## 38. 2026-08-31 PR #80 exact-head review — the full-ledger projection, completed
+
+Append-only. This section repairs the completeness defect the sole review of
+`e174d086efc71b8c837ed22e61f29f706ef9dacd` found in §35, and records that
+review's four dispositions. It rewrites no historical row.
+
+**§35's audit was not full, and the review was right.** §35 projected §2's 65
+logical rows and stopped there, while live deferred rows sat in other sections it
+never counted — including **all four `PR73-*` rows** (§29, lines 3539–3542) and
+**`PR64-CLEANUP-003-SCRATCH-PRECLEAN`** (§33, line 3617). §35's claim that
+"every live row" was categorized was therefore false, and the checkpoint
+record's obligation 2 was **overstated as discharged**. It is discharged here.
+
+The omission had teeth: `PR64-CLEANUP-003-SCRATCH-PRECLEAN` is the live sequence
+in which the predictable scratch helper meets another process's occupied root,
+recursively pre-cleans it before acquiring ownership, and deletes that process's
+content. An audit that does not count it is an audit that would let it through.
+
+### The canonical domain, stated before the counts
+
+**A canonical row is a markdown table row in this file whose first cell is a
+stable finding ID.** That domain is mechanically enumerable and is what the
+projection covers. Derived at this head:
+
+- **284** canonical row instances, over **197 distinct stable IDs**.
+- Physical lines carrying two logical rows are split on `||` (line 156), and
+  cells naming several IDs with `·` are expanded to one row each.
+- **Latest-disposition-wins**: for each ID, the instance at the greatest line
+  number is the live one. §35's own restatement table is excluded as a
+  restatement, not a source.
+
+**Completeness is asserted over this domain and no wider one.** Owner clauses
+that live in prose rather than a table row are *not* canonical rows; four exist
+and are named at the end of this section so they are not invisible.
+
+### The projection over all 197 canonical IDs
+
+| Terminal disposition | IDs |
+|---|---:|
+| **repaired** | 94 |
+| **carried** | 75 |
+| **settled** (§1, not re-raisable without new evidence) | 17 |
+| **closed, not owed** | 9 |
+| **struck** (withdrawn in place) | 2 |
+| **total** | **197** |
+
+94 + 75 + 17 + 9 + 2 = 197. **Every canonical ID has exactly one terminal
+disposition**, and the sum is the enumeration, not an estimate.
+
+Six IDs whose disposition cell carried no mechanical keyword were ruled by hand
+against their own prose and are listed for audit:
+`PR5D-PROOF-TESTS-COUNT` → closed ("recorded, no owner needed");
+`PR7-WIN-READ-RACING-BOUND-TOO-SHORT-TERMINOLOGY` → closed (a terminology
+correction, disposition unchanged); and `PR7-R3-ATTEMPT-002-REVIEWERS-TAKE-NO-SLOT`,
+`PR7-R3-ATTEMPT-004-NO-TRANSCRIPT-NO-GATE-LOG`,
+`PR7-R3-SETTLE-LADDER-POSITION-RUNG-HALF`,
+`PR7-R3-CONTRACT-004-UNRESOLVED-INDEX-REFUSAL-UNREACHABLE` → carried.
+
+### The 75 carried rows, by origin
+
+| Originating section | Carried |
+|---|---:|
+| §2 | 49 |
+| §15 — the six that need adjudication | 6 |
+| §20 — PR7 S5 rounds 3 and 4 | 5 |
+| "The hardening rule" | 4 |
+| §29 — PR #73 owner adjudication | 4 |
+| §8 — PR5 lane D | 2 |
+| §24, §25, §27, §33, §37 — one each | 5 |
+| **total** | **75** |
+
+**Why §2 shows 49 here and 52 in §35.** §35 counted §2 rows; this projection
+counts *IDs*, and five §2 IDs have a later instance elsewhere that wins:
+`TASK-DISPATCHED-REGION-UNVALIDATED`, `PR7-G2-W1-SUCCESS-IGNORES-THE-FROZEN-PLAN`,
+`PR7-G2-W1-RETAINED-ARM-UNGUARDED` and `PR7-G2-W1-PROBE-PAIR-NOT-OBLIGED` resolve
+to §26 (repaired), and `PR4-ADAPTER-RESOLVES-ON-THE-HOST` resolves to the
+hardening rule (carried, counted there). §35's 52 minus the three §2-carried IDs
+that move out is 49. The two figures are consistent; they count different things,
+and this one is the full-ledger figure.
+
+### The 26 carried rows §35 missed, each with venue, trigger and evidence
+
+| ID | Section | Line |
+|---|---|---|
+| `PR4-INVOCATION-CONSTRUCTIBLE` | §The hardening rule | L842 |
+| `PR4-CENSUS-COMMENT-ORACLE` | §The hardening rule | L843 |
+| `PR4-ADAPTER-RESOLVES-ON-THE-HOST` | §The hardening rule | L844 |
+| `PR4A-SPAWN-WITHOUT-AMBIENT` | §The hardening rule | L845 |
+| `PR5D-ROW-MAPPING-REFUSAL-UNFIXTURED` | §8 | L927 |
+| `PR5D-TOOLBOX-DISCARDS-CLIPPY-OUTPUT` | §8 | L929 |
+| `PR5-RUNDIR-030` | §15 | L1417 |
+| `PR5-EVENTS-020` | §15 | L1418 |
+| `PR5-WORKSPACE-068` | §15 | L1419 |
+| `PR5-WORKSPACE-070` | §15 | L1420 |
+| `PR5-EVENTS-051` | §15 | L1421 |
+| `PR5-WORKSPACE-003` | §15 | L1422 |
+| `PR7-R4-LOOP-004` | §20 | L2175 |
+| `PR7-R3-ATTEMPT-002-REVIEWERS-TAKE-NO-SLOT` | §20 | L2207 |
+| `PR7-R3-ATTEMPT-004-NO-TRANSCRIPT-NO-GATE-LOG` | §20 | L2209 |
+| `PR7-R3-SETTLE-LADDER-POSITION-RUNG-HALF` | §20 | L2211 |
+| `PR7-R3-CONTRACT-004-UNRESOLVED-INDEX-REFUSAL-UNREACHABLE` | §20 | L2212 |
+| `PR7-R3-ATTEMPT-003-RESIDUE-DISCARD-UNREACHED` | §24 | L3430 |
+| `PR47-PUBLIC-PROCESS-API-REMOVED` | §25 | L3459 |
+| `CI-CFG-UNSHIPPED-UNIX-REGION` | §27 | L3494 |
+| `PR73-TARGET-INVENTORY-001` | §29 | L3539 |
+| `PR73-LEXICAL-CLOSURE-001` | §29 | L3540 |
+| `PR73-LEXER-DIVERGENCE-001` | §29 | L3541 |
+| `PR73-LINT-SEMANTICS-001` | §29 | L3542 |
+| `PR64-CLEANUP-003-SCRATCH-PRECLEAN` | §33 | L3617 |
+| `SCHEMA4-PUBLIC-WRITE-PATH-UNGATED` | §37 | L3955 |
+
+Venue, trigger and required evidence for each, in §35's carried-row form:
+
+| Group | Rows | Venue / owner | `shrinks_when` | Re-opening trigger | Required evidence |
+|---|---|---|---|---|---|
+| **Hardening** | `PR4-INVOCATION-CONSTRUCTIBLE`, `PR4-CENSUS-COMMENT-ORACLE`, `PR4-ADAPTER-RESOLVES-ON-THE-HOST`, `PR4A-SPAWN-WITHOUT-AMBIENT` | the named implementer slice (PR5–PR7, PR7, PR7/PR12) | that slice lands the hardening | the named slice opens | a witness that fails without the hardening, plus a killed mutation. These strengthen a guarantee beyond the frozen packet, so they are **managed debt, not in-slice repairs** |
+| **PR5 lane D** | `PR5D-ROW-MAPPING-REFUSAL-UNFIXTURED`, `PR5D-TOOLBOX-DISCARDS-CLIPPY-OUTPUT` | PR6/PR7 implementer; project owner (box tooling) | the fixture becomes constructible; the toolbox stops discarding Clippy output | a slice opens the row-mapping fixture, or the build wrapper is changed | a red-first fixture for the refusal; for the toolbox, a wrapper that surfaces Clippy output — a box-side fix, not a tree fix |
+| **§15 adjudication** | `PR5-RUNDIR-030`, `PR5-EVENTS-020`, `PR5-WORKSPACE-068`, `PR5-WORKSPACE-070`, `PR5-EVENTS-051`, `PR5-WORKSPACE-003` | **project owner — G2** | each is adjudicated **narrowed assertion** or **equivalent mutant** | the G2 adjudication sitting | per entry, the decision between a real detection loss and a re-expressed-prose equivalent. `PR5-EVENTS-051` **SURVIVED** and is the one repair of 38 that did not take; `PR5-WORKSPACE-003` is **Windows-only** — Linux kills it, so it needs the guest |
+| **§20 PR7 rounds** | `PR7-R4-LOOP-004`, `PR7-R3-ATTEMPT-002-REVIEWERS-TAKE-NO-SLOT`, `PR7-R3-ATTEMPT-004-NO-TRANSCRIPT-NO-GATE-LOG`, `PR7-R3-SETTLE-LADDER-POSITION-RUNG-HALF`, `PR7-R3-CONTRACT-004-UNRESOLVED-INDEX-REFUSAL-UNREACHABLE` | PR8/PR10 (closure); PR8+; project owner for the G2 erratum list | closure is implemented; the merge queue spawns a repair; the erratum is written | PR8 or PR10 opens, or the owner takes up the erratum list | a red-first witness on the arm plus a killed mutation. `PR7-R4-LOOP-004` additionally owes the **diagnostic**: an operator told "closure derives NotEnding" about a budget-stopped run is being told the wrong thing |
+| **Blocked** | `PR7-R3-ATTEMPT-003-RESIDUE-DISCARD-UNREACHED` | project owner | the packet reclassifies the pre-intent ephemeral commit | an owner packet decision | **Blocked, not deferrable by an implementer**: the packet and tests classify the commit as Git-owned R27 and require recovery to leave it. Deleting it contradicts an explicit contract |
+| **Accepted residual** | `PR47-PUBLIC-PROCESS-API-REMOVED` | project owner — a later compatibility-owned slice | that slice takes the compatibility question | a compatibility slice opens | the owner explicitly accepts the current wrapper behaviour for PR #47; **preserve as residue, not a gate blocker** |
+| **Platform scope** | `CI-CFG-UNSHIPPED-UNIX-REGION` | project owner — a platform-scope decision | a fourth Unix family is added to CI, or the region is removed | adding a BSD runner | a platform-scope decision, **not an in-slice oracle repair**. The census already requires the exact acknowledged set and fails if it changes |
+| **PR #73 deferred** | `PR73-TARGET-INVENTORY-001`, `PR73-LEXICAL-CLOSURE-001`, `PR73-LEXER-DIVERGENCE-001`, `PR73-LINT-SEMANTICS-001` | project owner — owner-adjudicated deferrals of 2026-08-30 | each named guard is widened: the walk covers workspace members; aliases under an expectation are forbidden; a blanked-view ASCII census lands; `cfg_attr` handling is added | a workspace member or path dependency is added; a third lexer-class recurrence; an inventory-pin edit | the recorded restriction becomes the trigger. All four are `pre_existing` and identical at comparison head `0f05b456`; each keeps its named backstop until repaired |
+| **Scratch pre-clean** | `PR64-CLEANUP-003-SCRATCH-PRECLEAN` | project owner — the bound **startup, recover and create migration** follow-up | that collision set receives an exact-base lease | the migration slice opens | occupied-root **preservation**, and **no pre-clean and no discarded cleanup result**. §32 marked this fixed by reusing the ID for a distinct emit helper; §33 corrected that to deferred, and it stays deferred here |
+| **Schema-4 write path** | `SCHEMA4-PUBLIC-WRITE-PATH-UNGATED` | project owner — the PR12 activation slice | the activation slice lands, or a visibility narrowing is scheduled | PR12 opens, or a narrowing is scheduled | a write-side refusal with a red-first witness and a killed mutation, **plus** an accounting of the legacy funnel's unvalidated `RunStarted.schema` |
+
+### The four prose owner clauses, named so they are not invisible
+
+Outside the canonical row domain, four paragraphs carry an owner clause with no
+table row. They are **not** counted in the 197 and are listed so a later audit
+does not rediscover them as omissions: §3's dependency clause (line 237), §12's
+pre-existing-flake clause (line 1118), §18's two clauses (lines 1784, 1815), and
+§20's `effects::census_domain` clause (line 2241). Giving each a canonical row is
+work for the next ledger pass, not for this repair.
+
+### The PR #80 review's own four dispositions
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR80-LEDGER-AUDIT-NOT-FULL | P1 | e174d086efc71b8c837ed22e61f29f706ef9dacd / reviews/FINDINGS.md:3633-3679 | §35 projects only §2's rows -> live deferred rows in other sections are never counted -> the audit claims every live row is categorized -> the checkpoint's obligation 2 is reported discharged while `PR64-CLEANUP-003-SCRATCH-PRECLEAN` and four `PR73-*` rows are untriaged -> the predictable scratch helper pre-cleans another process's occupied root and deletes its content | introduced_by_feature | correctness | 50a84acd3ebf5f0ecffc35a7a5b4ea68960310f9 / §35 | This section projects all 197 canonical IDs across the whole ledger — 94 repaired, 75 carried, 17 settled, 9 closed, 2 struck — with the domain stated before the counts and completeness asserted only over it. The 26 carried rows §35 missed each receive venue, trigger and required evidence | fixed |
+| PR80-CHECKPOINT-ORDER-REVERSED | P1 | e174d086efc71b8c837ed22e61f29f706ef9dacd / decisions/2026-08-31-g2-checkpoint-promotion.md:11-23 | the record declares the candidate cut at `50ed8c86` -> the same record admits the gate has not passed and artifacts are missing -> the controlling order (gate and artifacts first, then the cut) is reversed -> an immutable decision is narrowed with no successor ruling; and the audit postdates `50ed8c86`, so that commit cannot carry it | introduced_by_feature | docs-contract | 50a84acd3ebf5f0ecffc35a7a5b4ea68960310f9 | `50ed8c86` is restated as the **pre-assembly baseline**, not a cut candidate; the candidate becomes the integration landing head after this evidence lands and the outstanding artifacts and gates complete. `2026-08-25-checkpoint-merges.md` remains controlling and unnarrowed; the third addendum and the gate report's "What `50ed8c86` is" carry the correction, and the owed artifacts are restated | fixed |
+| PR80-COVERAGE-EXEMPTION-INVENTED | P1 | e174d086efc71b8c837ed22e61f29f706ef9dacd / reviews/2026-08-31-g2-first-parent-coverage.md:30 | the map treats `decisions/`, `proposals/`, `docs/`, root Markdown and ignore files as review-exempt -> `2026-08-20-review-invalidation-scope.md` authorises exactly `reviews/FINDINGS.md` -> units with no recorded review are counted as covered -> `59a6830`, which changed a decision plus `reviews/README.md`, is reported mapped | introduced_by_feature | docs-contract | 50a84acd3ebf5f0ecffc35a7a5b4ea68960310f9 | The exemption class is withdrawn. Class **X** now requires the unit's whole diff to be exactly `reviews/FINDINGS.md`, verified per unit (11 units, 12 commits). Class **M** requires every delta file to be byte-identical to the merged-in parent **and** that parent to be an ancestor of `origin/master` (2 units). Residue rises from 7 units to **18 units / 19 commits**, including `59a6830`, three master-forward merges carrying merge-authored conflict resolution, and the 14 pre-PR-regime commits. Totals re-derived: 33 S + 2 B + 2 M + 11 X + 18 R = 66 units, 418 commits | fixed |
+| PR80-PANEL-TEXT-STALE | P2 | e174d086efc71b8c837ed22e61f29f706ef9dacd / reviews/2026-08-31-g2-gate-report.md:59-62 | the gate report says panel membership is unsettled -> the same head adopts `2026-08-31-panel-seats.md` -> a current gate artifact asserts two contradictory states -> a reader cannot tell which is live | introduced_by_feature | docs-contract | e174d086efc71b8c837ed22e61f29f706ef9dacd | The gate report now states that membership is **settled and ratified** and that **no seat has run**, naming the three seats with their invocation guards. The promotion record's second addendum carries an in-place supersession marker pointing at its third addendum. No other sentence claims membership is unsettled | fixed |
+
+Companion records: `reviews/2026-08-31-g2-first-parent-coverage.md`,
+`reviews/2026-08-31-g2-gate-report.md`,
+`decisions/2026-08-31-g2-checkpoint-promotion.md` (third addendum).
+
+## 39. 2026-08-31 PR #80 second exact-head review — the projection made reproducible, and the labels closed
+
+Append-only. This section repairs the three P1 findings the sole review of
+`ada79bd76c791a6faac18f850929fbbd8cd7b237` returned, corrects §38's
+arithmetic by re-deriving it, and records the review's dispositions. It
+rewrites no historical row and reopens no disposition.
+
+### Reading rule for the labels in §§35–37
+
+§35 says "measured at candidate head" (line 3637; likewise its prose at
+lines 3847, 3871 and 3882), §36 "at the exact committed candidate head"
+(line 3893), §37 "satisfied at the candidate head" (line 3947). Per the
+promotion record's third addendum: `50ed8c86` is the **pre-assembly
+baseline**, `50a84acd…` the **committed evidence head**, and no candidate
+has been cut. Those sections stand as written under this file's append-only
+rule; this paragraph is the reading rule a later auditor applies. ("Candidate"
+in the product sense — the merge queue's prepared candidates,
+`PR7-CANDIDATE-TREE-UNVERIFIED` — is a different word and is untouched.)
+
+### The canonical-row domain, restated so a script can hold it
+
+§38's domain rule was not reproducible as stated: applied literally, its
+`||` split fires inside code spans (lines 102, 105 and 3864 carry a literal
+`||` in backticks) and its "first cell is a stable ID" admits prose cells
+that merely mention an id. The rules that close both holes:
+
+- **R1.** A physical table line is any line whose stripped form starts with
+  `|` and is not a separator row.
+- **R2.** A line splits into two logical rows at a `||` occurring **outside
+  backtick spans**, and only if **both** halves independently satisfy R3.
+  Exactly one line in this file splits: line 156.
+- **R3.** A logical row is **canonical** iff its first cell — after
+  stripping strikethrough, emphasis, backticks, and a trailing parenthetical
+  annotation such as `(a)` or `*(re-scoped: …)*` — consists **entirely** of
+  one finding id or a `·`-separated list of finding ids, an id matching
+  `^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$`.
+- **R4.** A `·` list expands to one instance per id at the same line.
+- **R5.** Restatement tables — audit views that re-list rows owned elsewhere
+  — are excluded as sources. At this head they are exactly: §35's four view
+  tables (lines 3689–3697, 3704–3709, 3727–3731, 3759–3812) and §38's
+  missed-rows listing (lines 4067–4094). §38's four-disposition table is a
+  **source** (the only instances of its `PR80-*` ids), as is the disposition
+  table at the end of this section. This section adds no other id-first-cell
+  rows, so it moves the projection by exactly its three new rows.
+- **R6.** For each id, the source instance with the greatest line number is
+  the live one (latest-disposition-wins).
+- **R7.** The winner classifies by section rule, then keyword, then an
+  explicit hand-ruled list — every hand ruling named below with its basis;
+  nothing is ruled silently.
+
+Section rules: §1 → settled; §5, §6, §7, §9, §10, §26, §31, §34 → repaired;
+"The hardening rule", §8, §15 → carried; §2 → repaired on an in-row
+`FIXED`/"fixed in PR7" marker, closed on "Closed, not repaired"/"Closed by
+this row", struck on `~~`, else carried. Elsewhere, keywords in the winning
+row: a leading bold `Carried` → carried; `Repaired`/`fixed in this slice`/
+`fixed by owner…`/`implementation-fixed` → repaired; `CLOSED`/`Closed by` →
+closed; a terminal cell `deferred` → carried; a terminal cell `fixed` →
+repaired; `accepted residual`, `blocked by packet`, or a bold `deferred`
+disposition cell → carried.
+
+Hand-ruled (complete list): `PR5-MACOS-CLIPPY-NEVER-RUN` → repaired (§3's
+dated 2026-08-28 challenge outcome; `lint (macos)` live in `ci.yml`);
+`PR4-PROGRAM-PATH-NOT-UNICODE` → closed (superseded by its `-CLOSED` and
+`-CLOSED-NARROWED` successor rows and
+`2026-08-25-commandspec-program-stays-string.md`);
+`PR5D-MSVC-CLIPPY-NEVER-RUN` → repaired (`lint (windows)` runs clippy
+natively on `windows-latest`; the deferred cross-target gate was superseded
+by the native job, and `clippy::items_after_test_module` is now a governed
+lint); `PR5-RD-001` → repaired (its row records the repair and witnesses);
+`PR5D-PROOF-TESTS-COUNT` → closed (recorded, no owner needed);
+`PR7-WIN-READ-RACING-BOUND-TOO-SHORT-TERMINOLOGY` → closed (a terminology
+correction; the disposition lives with the base id); and the four §20
+round-3 rows `PR7-R3-ATTEMPT-002-REVIEWERS-TAKE-NO-SLOT`,
+`PR7-R3-ATTEMPT-004-NO-TRANSCRIPT-NO-GATE-LOG`,
+`PR7-R3-SETTLE-LADDER-POSITION-RUNG-HALF`,
+`PR7-R3-CONTRACT-004-UNRESOLVED-INDEX-REFUSAL-UNREACHABLE` → carried (each
+names its owner in-row; no terminal keyword).
+
+### The corrected counts, and exactly what moved
+
+| Head | Distinct ids | repaired | carried | settled | closed | struck |
+|---|---:|---:|---:|---:|---:|---:|
+| `e174d086` (what §38 measured) | 197 | 94 | **77** | 17 | **7** | 2 |
+| `ada79bd7` (§38's four rows added, repaired) | 201 | 98 | 77 | 17 | 7 | 2 |
+| this head (this section's three rows added, repaired) | **204** | **101** | **77** | **17** | **7** | **2** |
+
+Confirmed by this re-derivation: §38's total of 197; repaired 94; settled
+17; struck 2; and its 26-missed-rows table — the non-§2 carried set is
+**exactly** those 26 ids. Corrected: **carried is 77, not 75, and closed is
+7, not 9.** The closed set, exhaustively: the three
+`PR4-PROGRAM-PATH-NOT-UNICODE*` rows (one finding recorded three times),
+`PR5D-PROOF-TESTS-COUNT`, `PR7-R3-EMIT-006-DEFER-ROUND-IS-A-BACKOFF-ROUND`,
+`PR7-R3-SETTLE-CAND-OBJ-REFUSAL-UNREACHABLE`, and
+`PR7-WIN-READ-RACING-BOUND-TOO-SHORT-TERMINOLOGY`. And §38's "§35's 52
+minus the three §2-carried IDs that move out is 49" is corrected to **"§35's
+52 minus one is 51"**: of the five ids §38 named, the four W1 ids sat in
+§35's *repaired* bucket, never its 52 carried, so they subtract nothing;
+only `PR4-ADAPTER-RESOLVES-ON-THE-HOST` changes origin (to the hardening
+rule). §2-origin carried is **51**, and 51 + 26 = 77. The two ids §38's
+split displaced into closed belong in carried; its grand total was right and
+its buckets were not, which is precisely why a published count must carry
+its derivation.
+
+### The prose owner clauses: five, by detector
+
+Detector: every non-table, non-heading line matching `Owner…:` (bold or
+plain, including "Owner ruling, DATE:"), then excluding clauses whose
+subject has a canonical row. Nine hits at this head; excluded: line 1413 (a
+heading), line 1366 and line 2187 (they annotate the §15 six and
+`PR7-R4-LOOP-004`, which have rows), and line 1182 (the 2026-08-27
+restatement of `PR5-RD-002`'s trigger; that id has rows and its live
+instance is §24, repaired). The row-less clauses are therefore **five**, not
+§38's "four": §3's dependency clause (line 237), §12's pre-existing-flake
+clause (line 1118), §18's two clauses (lines 1784 and 1815), and §20's
+`effects::census_domain` clause (line 2241). Giving each a canonical row
+remains work for the next ledger pass, not this repair.
+
+### The second review's three dispositions
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR80-CANDIDATE-LABEL-RECURRENCE | P1 | ada79bd76c791a6faac18f850929fbbd8cd7b237 / reviews/2026-08-31-g2-gate-report.md:76 | the head declares no candidate exists -> sibling passages still label `50ed8c86`/`50a84acd` the candidate head -> a reader convenes the panel or reuses evidence against the baseline -> the checkpoint order is re-reversed in effect | fix_regression | docs-contract | PR80-CHECKPOINT-ORDER-REVERSED | Gate-report fifth revision's terminology pass; appended errata in both decision records and the `decisions/README.md` index fix; the acceptance grep over the seven paths whose every remaining "candidate" hit is a negation, the future sense, a quotation, the branch name, or the product sense | fixed |
+| PR80-OWED-LIST-DROPS-ARTIFACT-7 | P1 | ada79bd76c791a6faac18f850929fbbd8cd7b237 / decisions/2026-08-31-g2-checkpoint-promotion.md:195 | the third addendum lists artifacts 2, 3, 4, 5 and 8 as the owed captured set -> the gate report counts six uncaptured including artifact 7's scan output -> an operator completes the shorter list and cuts a candidate without artifact 7 -> the eight-artifact precondition is violated | fix_regression | docs-contract | PR80-CHECKPOINT-ORDER-REVERSED | The fourth addendum corrects the list to 2, 3, 4, 5, 7 and 8 and names the gate report's artifact table the single enumerator, authoritative over any restatement | fixed |
+| PR80-LEDGER-PROJECTION-UNPROVEN | P1 | ada79bd76c791a6faac18f850929fbbd8cd7b237 / reviews/FINDINGS.md:4056 | §38 claims 52 minus three = 49 from a named set in which only one id moves origin -> its carried/closed split contradicts its own 26-row enumeration -> it states four prose clauses and enumerates five -> a gate relying on §38 declares the ledger discharged without a reproducible accounting | fix_regression | docs-contract | PR80-LEDGER-AUDIT-NOT-FULL | This section's domain rules R1–R7, complete hand-ruled list, and corrected counts (197 = 94+77+17+7+2 at `e174d086`; 204 = 101+77+17+7+2 here), re-derivable by any implementation of the stated rules | fixed |
+
+Companion records: `decisions/2026-08-31-g2-checkpoint-promotion.md` (fourth
+addendum), `reviews/2026-08-31-g2-gate-report.md` (fifth revision),
+`decisions/2026-08-31-inertness-premise-behavioural.md` (erratum).
+
+## 40. PR80 exact-head macOS sampler recurrence (2026-08-31)
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR80-MACOS-WORKSPACE-SAMPLER-COLD-PROBE-RECURRENCE | P2 | 2ba66b6e06fa40f9d9fe06dfd21e22517e14d2d6 / hosted run 33421539013, macOS job 99584874271, `workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered` | the workspace-manager sampler measures a one-shot probe budget -> every scheduled kill lands after its child has completed -> all 32 observations are `Completed` and no killed-child residue is sampled -> the required macOS leg refuses the vacuous run | fix_regression | platform-correctness | PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE | The refusal is correct and the failed run remains durable evidence. The candidate's `src/` tree is byte-identical to the green `50ed8c86ec60164011bfd393066c4c3696d3865b` source tree (`f8d2b1c6dff093bd1b656d639fa33762e479b7f9`), so this evidence-only slice did not change the failed code. Owner: project owner; venue: post-promotion sampler-hardening work; shrinks when the workspace-manager sampler uses the established warm-up, median, actual-duration recalibration, and bounded-retry discipline and a controlled macOS repetition demonstrates that at least one kill lands without masking the vacuity oracle | deferred |
+
+## 41. PR80 artifact-enumerator reading rule (2026-08-31)
+
+The explicit artifact membership in the historical
+`PR80-OWED-LIST-DROPS-ARTIFACT-7` row in §39 records the defect and its then
+current repair; it is not an operative enumerator. The artifact table in
+`reviews/2026-08-31-g2-gate-report.md` is the sole operative enumerator of
+artifact membership and capture state. This section introduces no new
+artifact-membership list.
+
+## 42. PR #18 G2 artifact-capture sequencing breach (2026-08-31)
+
+Append-only. The owner adjudicated panel round one at
+`47dc9a35f6e6af59160ece49570d9934a4450dec` and required this sequencing breach
+to remain visible even after its missing evidence was captured.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR18-G2-ARTIFACT-CAPTURE-AFTER-CANDIDATE-CUT | P1 | 47dc9a35f6e6af59160ece49570d9934a4450dec / `reviews/2026-08-31-g2-gate-report.md`, authoritative artifact table | the dated checkpoint decision requires all eight captured artifacts before a candidate is cut -> candidate assembly and PR #80 landing advance PR #18 to `47dc9a35` while artifacts 2, 3, 4, 5, 7 and 8 remain only oracle-passed or owed -> panel round one finds the missing captured forms as a High blocker -> the promotion cannot attest the checkpoint in the required order | fix_regression | evidence-integrity | PR80-CHECKPOINT-ORDER-REVERSED | The breach is not waived: this capture commit records the instrumented serialized run, produces and hash-pins all six missing forms, keeps the original round-one verdicts, and requires a fresh blind three-seat panel over the advanced head. Any missing capture, hash mismatch, later head movement, or non-conforming seat reopens the row. | fixed in this capture commit |
+
+## 43. 2026-09-03 W1/W2 decomposition — nineteen findings out of review: eighteen carried, one fixed
+
+Append-only. This section adds **eighteen rows to §2 and one row to §5 (Fixed)**, and changes no
+disposition above it. It repairs nothing.
+
+The rows exist because of the project owner's direction of 2026-09-02: **a review is scoped to the
+change under review.** An observation the reviewer judges pre-existing — neither introduced nor
+activated by the diff in front of it — is recorded and not fixed in that pull request. Nothing is
+discarded; each becomes its own change, reviewed on its own terms. Fifteen of the eighteen reached
+that disposition through a review pass or a steward's verification; one
+(`W1-FIXTURES-NOT-RETIRED-W0-AUTH-PART-E-UNFULFILLED`) is an owner ruling recorded so an unfulfilled
+packet clause is not mistaken for a fulfilled one, and two
+(`CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES`,
+`W2-RETIRED-DECISIONS-PATHS-CITED-AND-MISSING`) are cross-cutting observations no single review was
+positioned to make.
+
+They land in **one append** rather than per-packet edits because this file's IDs are 1:1 with
+findings and must stay mechanically re-derivable. Nineteen separate edits to §2, each arriving with
+its own head, is how that property is lost.
+
+Seven of the nineteen are the same two families, and the families are the finding:
+
+- **Derive a domain from declarations, not from names on disk.** A census whose domain is a
+  directory walk, an exact path, a file name, or a substring cannot see a `#[path]` relocation, a
+  child directory, a `cfg_attr` that applies a `cfg`, or a longer variant that swallows a shorter
+  one. Five rows: `PR101-CFG-ATTR-APPLIED-CFG-INVISIBLE-TO-THE-SCAN`,
+  `W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`,
+  `PR103-CENSUS-DOMAIN-CANNOT-DECIDE-EXCLUSIVE-TEST-REACHABILITY`,
+  `PR107-CONTAINER-LINT-CENSUS-DOMAIN-IS-A-DIRECTORY-WALK`,
+  `PR110-SITE-CENSUS-MATCHES-EFFECT-SITE-NAMES-BY-SUBSTRING`. The repository already holds the
+  pattern that resolves it correctly, and each row names it. This is the same shape as
+  `CLASS-GATE-STATED-DOMAIN-EXCEEDS-COUNTED-DOMAIN`, already in §2, seen from the domain's side
+  rather than the claim's.
+- **A test scratch directory whose name is reproducible across runs is not hermetic.** Two rows:
+  `PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED` and
+  `PR104-PRELOCK-SCRATCH-NAME-REPRODUCIBLE-ACROSS-RUNS`. The first is measured, not argued.
+
+### The evidence standard this section holds itself to
+
+This is a findings ledger, so the bar is its own subject.
+
+- **Every count below was derived twice, by two engines that must agree**, and stated per file
+  rather than as a total. `/usr/bin/grep` on the build box is ugrep 7.8.4, whose `-E` engine
+  silently under-reports — rc=0, no warning, and a plausible **low** number — so a count from it
+  alone is not evidence. Where the claim is structural rather than textual, a parser was used and
+  a second method corroborated it; a parser cannot under-report the way an engine can.
+- **A count in prose goes stale on the next commit.** Every count here is therefore bound to the
+  commit it was taken at and accompanied by the command that reproduces it, so a reader re-derives
+  rather than trusts. Where a property survives every future commit and a count does not, the
+  property is what the row states.
+- **Where a cause is unknown, the row says so and names the measurement that would settle it.**
+  The four unexplained CI observations follow `PR43-MACOS-PROC-SIGNAL-FINGERPRINT`'s wording —
+  *"open as an unexplained observation, not classified as a flake or regression"* — because a
+  mechanism nobody measured is a guess wearing a finding's clothes. Two rows in this append exist
+  precisely because a mechanism *was* guessed: one was refuted by measurement and moved to §5, and
+  one was withdrawn outright.
+
+### The ID derivation, stated so a reader can re-run it
+
+IDs in this file are 1:1 with findings and must stay mechanically re-derivable. The rule used here,
+stated rather than remembered:
+
+> `ID = <ORIGIN>-<SLUG>`
+>
+> * **`ORIGIN`** is `PR<n>` when the finding is bound to **exactly one** pull request — a review
+>   pass on #n, or an observation seen only on #n.
+> * **`ORIGIN`** is `W1` or `W2` when it is bound to **none** — a coordinator or steward finding, or
+>   a cross-branch observation seen on several pull requests. The wave is the one the finding was
+>   made in.
+> * **`ORIGIN`** is `CLASS` when the row is a class **over other rows** in this file rather than a
+>   finding at a site. Derived from the file: `CLASS-GATE-STATED-DOMAIN-EXCEEDS-COUNTED-DOMAIN` is
+>   the only prior instance and it is the only `CLASS-` ID.
+> * **`SLUG`** is the finding's title line, uppercased, every run of non-alphanumeric characters
+>   collapsed to a single `-`, leading and trailing `-` dropped.
+> * **An unexplained CI observation** additionally takes the file's existing fingerprint shape:
+>   `<ORIGIN>-<PLATFORM>-<SUBSYSTEM>-<WHAT>-FINGERPRINT`.
+
+**The fingerprint clause is read off the file, not invented.** Three rows carried it before this
+append — `PR43-MACOS-PROC-SIGNAL-FINGERPRINT`, `PR43-WINDOWS-TOPOLOGY-KILL-FINGERPRINT` and
+`PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT` — and two consequences follow, both applied:
+
+* **The platform token is the platform, not the job.** `PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT`
+  fails in the job `test (winguest)` and its ID says `WINDOWS`; the job name lives in the row's
+  `What` cell. This append's Windows row is therefore `W2-WINDOWS-RACING-REMOVAL-DELETE-PENDING`
+  and not `…-WINGUEST-…`.
+* **A third platform needs a third token, and the file had none.** `MACOS` and `WINDOWS` were the
+  only two in use. `PR107-LINUX-WORKSPACE-RESIDUE-EMPTY-GITDIR-FINGERPRINT` fails in
+  `test (ubuntu-latest)`; the token is **`LINUX`**, the platform, on the same rule that makes
+  `winguest` render as `WINDOWS`. It is stated here so the next Linux fingerprint is named the same
+  way rather than after whatever the runner image is called that quarter.
+
+**The derivation was executed against the file being appended to**, not against the state it was
+drafted from. `reviews/FINDINGS.md` moved four times on 2026-09-03 — `1f30851` (C-018's row),
+`079a346` (#104's merge), `2de71dd` (#110's merge) and `6724fb9` (#106's merge, which added
+`CLASS-GATE-STATED-DOMAIN-EXCEEDS-COUNTED-DOMAIN`). At `ae2a58f` the file holds **183 distinct
+IDs**, extracted by taking the first cell of every table row that is wholly upper-case
+alphanumerics-and-hyphens and at least five characters:
+
+    python3 - <<'PY'
+    import re
+    ids={c for l in open('reviews/FINDINGS.md',encoding='utf-8')
+           if l.startswith('|') and len(l.split('|'))>2
+         for c in [l.split('|')[1].strip().strip('`').strip()]
+         if re.fullmatch(r'[A-Z0-9][A-Z0-9-]{4,}',c)}
+    print(len(ids))
+    PY
+
+Against those 183, checked mechanically: **no proposed ID collides, none duplicates another
+proposed ID, and no proposed ID is a prefix of any ID in the union or vice versa.** The prefix check
+was run deliberately, because `PR110-SITE-CENSUS-MATCHES-EFFECT-SITE-NAMES-BY-SUBSTRING` is itself a
+prefix-collision defect and a ledger that reproduced it in its own identifiers would be a poor place
+to record it. The only prefix pairs in the union are four that already existed and are deliberate
+lineage chains (`PR4-PROGRAM-PATH-NOT-UNICODE` → `-CLOSED` → `-CLOSED-NARROWED`, and
+`PR7-WIN-READ-RACING-BOUND-TOO-SHORT` → `-TERMINOLOGY`).
+
+**Run the same command against this file and it prints 202** — 183 plus the nineteen below — which
+is the check that the rule as written reproduces the rule as applied. It was worth running: an
+earlier form of this section put the working-record `C-nnn` keys in a table's **first** cell, where
+the command counted all twenty-two of them as IDs and printed 224. The mapping table below therefore
+leads with the ledger ID and carries the working-record key second. **A derivation rule stated
+beside a table it silently mis-reads is worse than no rule**, because it reads as reproducible.
+
+**Re-derive at land time; these IDs are proposed against the head this section was written at.** F
+lands last of the W1/W2 deliverables, so `reviews/FINDINGS.md` may gain rows between this section
+being written and it landing. Re-running the command above and the collision and prefix checks is
+the whole of the re-derivation, and **withdrawal or addition elsewhere cannot move an ID here**,
+because each derives from its own origin and slug and never from a position.
+
+**Withdrawal is safe under this rule**, and that property was needed twice: each ID derives from its
+own origin and slug and never from a position, so removing a row leaves every other ID unchanged.
+Two rows were removed between the draft and this append and no ID moved.
+
+### The mapping from the working record
+
+The audit trail from the coordinator's carried-findings record to this ledger. The `C-nnn` keys are
+that record's, not this file's; they appear here so a reader holding it can follow each finding
+across, and nowhere else.
+
+| Ledger ID | Working-record key | Origin as recorded |
+|---|---|---|
+| `PR101-CFG-ATTR-APPLIED-CFG-INVISIBLE-TO-THE-SCAN` | C-001 | PR #101 pass 2 (`dbedc5f`) |
+| `W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL` | C-002 | the coordinator, verifying #100, 2026-09-02 |
+| `PR103-CONTAINER-SUBSTRATE-LIST-CHECKS-NAME-ONLY` | C-003 | PR #103 pass 3 (`dd22147`) |
+| `W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM` | C-004 | the coordinator; five instances across four pull requests — lands in **§5 (Fixed)**, not §2 |
+| `PR103-CENSUS-DOMAIN-CANNOT-DECIDE-EXCLUSIVE-TEST-REACHABILITY` | C-005 | PR #103, four passes (`1a5e7f2`, `ffb25bd`, `dd22147`, `9ee6013`) |
+| `PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED` | C-006 | PR #104 pass 1 (`ca630af`), harm measured at pass 7 (`77174ce`) |
+| `PR104-PRELOCK-SCRATCH-NAME-REPRODUCIBLE-ACROSS-RUNS` | C-007 | PR #104 pass 3 (`dbdce08`) |
+| — | C-008 | **withdrawn at source, no row** — see "What this append deliberately does not carry" |
+| `W1-FIXTURES-NOT-RETIRED-W0-AUTH-PART-E-UNFULFILLED` | C-009 | the project owner, ruling 7, 2026-09-03 |
+| `W2-EXPECTED-REFS-COUNT-STALE-AFTER-EXTRACTION` | C-010 | M4's steward, verifying #110 |
+| `PR107-CONTAINER-LINT-CENSUS-DOMAIN-IS-A-DIRECTORY-WALK` | C-011 | PR #107 pass 2 (`b5631dd`), sharpened by M4's steward, re-derived independently by #110's reviewer |
+| `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY` | C-012 | M4's steward, in a gate run at `d8f4d13` |
+| `W2-WINDOWS-RACING-REMOVAL-DELETE-PENDING` | C-013 | the winguest investigation, 2026-09-03 |
+| `PR110-SITE-CENSUS-MATCHES-EFFECT-SITE-NAMES-BY-SUBSTRING` | C-014 | PR #110 pass 1 (`bab9c0b`), confirmed independently by M4's steward |
+| `PR110-CONTAINMENT-COMMENT-STATES-A-FALSE-GUARANTEE` | C-015 | PR #110 pass 2, ruled out of scope |
+| — | C-016 | **withdrawn at source, no row.** It is `W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM`, a pre-fix instance |
+| `W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT` | C-017 | #111, #108 and #110; cross-branch |
+| `PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT` | C-018 | PR #104, second sighting on #106 — **already in §2: landed in `1f30851`, on `master` via `079a346`; not this append's to add** |
+| `PR107-WINDOWS-SETTLE-REPLAY-ALREADYSTARTED-FINGERPRINT` | C-019 | PR #107 (`9963fb0`) |
+| `PR107-LINUX-WORKSPACE-RESIDUE-EMPTY-GITDIR-FINGERPRINT` | C-020 | PR #107 (`9963fb0`) |
+| `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES` | C-021 | the coordinator, over the four rows above |
+| `W2-RETIRED-DECISIONS-PATHS-CITED-AND-MISSING` | C-022 | M6's steward, quantified by the coordinator |
+
+### The commits this section cites, and whether they still resolve
+
+Every SHA below is a claim that a commit exists. A ledger entry is permanent; a SHA in it that no ref
+reaches is a dead citation that looks live. Audited at `ae2a58f` with `git rev-parse --verify
+--quiet <sha>^{commit}` — never a bare `$?`, because `git rev-parse` echoes an unknown ref to stdout
+and errors only on stderr — and then `git merge-base --is-ancestor <sha> origin/master`:
+
+| Commits | Reachable from |
+|---|---|
+| `dbedc5f`, `ca630af`, `dbdce08`, `77174ce`, `b5631dd`, `bab9c0b`, `d8f4d13`, `9807f48`, `ae59f2d`, `4ba4149`, `94f8c27`, `5b67179`, `a5d1e14`, `6d8cdda`, `9963fb0`, `6a969a3`, `eac412b`, `c30aca0`, `9a7fc22`, `741364b`, `f1918e0`, `1cbdccd`, `1f30851`, `079a346`, `046f17d`, `2de71dd`, `ac16fff`, `17d41c9`, `ae2a58f` | **ancestors of `origin/master`** — durable |
+| `dd22147`, `9ee6013` | PR #103's branch, **closed unmerged**; preserved as `refs/backup/pr103-census-whole-file-test-domain` **on `origin`** |
+| `4517caa` | **was orphaned** — not an ancestor of #103's head, so the branch backup does not reach it; preserved as `refs/backup/pr103-4517caa-orphan` **on `origin`** |
+| `8d84057` | M3's **pre-rewrite** SHA, cited by the source record as C-011's origin; preserved as `refs/backup/w2-m3-preattrib` **on `origin`**. The post-rewrite equivalent is `b5631dd`, verified by identity rather than by a map: both name tree `7b133c60659bfd626c5b8ad08904c145b76eb1a0` and `git diff 8d84057 b5631dd` is empty |
+
+Verified against the remote rather than from a push's output:
+
+    $ git ls-remote origin 'refs/backup/*'
+    4517caa12e7f2b6903f796e8a1650ea9c58f0a18  refs/backup/pr103-4517caa-orphan
+    9ee60131aa75af25e8ea8d5cfc1f701b64fb9466  refs/backup/pr103-census-whole-file-test-domain
+    4aa3e428c70361d19b6b13ebee57109b9b046b77  refs/backup/w2-m3-preattrib
+
+Those refs sit under `refs/backup/*` rather than `refs/heads/*`, so they create no branch, appear in
+no pull-request UI and are fetched by no default refspec; they keep the objects alive and do nothing
+else.
+
+**And the durable evidence for a CI observation is the run id, not the SHA.** Every fingerprint row
+carries one, and run ids do not rot when a branch is deleted or rewritten.
+
+### Venue, trigger and required evidence
+
+Recorded in §35's carried-row form, so these eighteen are auditable the same way the fifty-two there
+are. The bar §35 states applies unchanged: **a deferral by the named owner, to nobody, is not a
+disposition.**
+
+| ID | Class | `shrinks_when` | Re-opening trigger | Required evidence for the repair |
+|---|:---:|---|---|---|
+| `PR101-CFG-ATTR-APPLIED-CFG-INVISIBLE-TO-THE-SCAN` | V3 | `scan_module_declarations` resolves a `cfg_attr` that applies a `cfg` instead of discarding it | a slice changes `scan_module_declarations` or its `cfg_attr` arm | a red-first witness over a synthetic `#[cfg_attr(all(), cfg(test))] mod …;` **and** a killed mutation; **plus** the stated-limit paragraph in `declared_whole_file_test_modules`' doc comment updated in the same change, since it currently records the hole and would then describe code that no longer has it |
+| `W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL` | V3 | the module-level domain is derived rather than listed, **or** the list's semantics are stated and executed | a slice changes `CLASSIFIED_MODULES` | a witness that a production child of a listed parent is graded without being hand-enrolled, red first; **or**, if the roll-call is kept deliberately, the decision recorded beside the list with a test that fails when a new child is unenrolled. The `TOPOLOGY_MODULES` half already shrank — `f1918e0` added the `src/workspace_manager/` prefix — and that half is not re-openable |
+| `PR103-CONTAINER-SUBSTRATE-LIST-CHECKS-NAME-ONLY` | V3 | `SUBSTRATE` requires **membership** — not a crate root, and in `cfg::WHOLE_FILE_TEST_MODULES` — rather than mere existence | a slice changes the `every_view_discard_removes_through_the_one_racing_removal` census | a red-first witness in which a listed file is production-reachable and the census refuses, **and** a killed mutation. **The repair is cheap and that is checkable**: the two guards are one `assert!` each over data the test already has |
+| `PR103-CENSUS-DOMAIN-CANNOT-DECIDE-EXCLUSIVE-TEST-REACHABILITY` | V3 | `CrateRoots` retains target kind **and** the resolver can answer "is this path declared unconditionally anywhere in the walk" | a slice changes `CrateRoots` or `declared_whole_file_test_modules`, **or** W3 takes up T3 | the reviewer's failure sequence driven red first, a killed mutation, **and** the two path-by-path oracles in `src/effects/tests/source_oracles.rs` still green — the repair must not change what `whole_file_test_modules` returns, which is what killed PR #103's round 2 |
+| `PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED` | V3 | every scratch root in `src/validate.rs` is uniquely named and RAII-reclaimed | a slice opens `src/validate.rs`'s test region | the reviewer's sentinel reproduction re-run against the repaired binary and **failing to delete the sentinel**; a killed mutation; **plus** authorization to change a frozen-legacy file, which is a separate question from the defect |
+| `PR104-PRELOCK-SCRATCH-NAME-REPRODUCIBLE-ACROSS-RUNS` | V3 | `Scratch::new` allocates a name no later run can recompute | a slice changes `src/engine/topology/prelock/tests.rs` | a red-first witness that pre-creates the computed path and shows the allocation **refusing** — it currently **adopts**, silently, because `create_private_dir` → `create_dir` → `fs::create_dir_all` succeeds on an existing directory |
+| `W1-FIXTURES-NOT-RETIRED-W0-AUTH-PART-E-UNFULFILLED` | V3 | `src/validate.rs`'s tests stop reading `fixtures/` from disk and the directory is retired | a slice takes up retirement — **blocked behind the `src/validate.rs` scratch row**, which is the same problem for all ten of that file's call sites at once | the four fixture files' content preserved byte-for-byte at their new home, a green suite, **and** `PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED` repaired first — eight review passes established that solving retirement without it produces a new temporary-directory finding per round |
+| `W2-EXPECTED-REFS-COUNT-STALE-AFTER-EXTRACTION` | V3 | the comment states the property instead of the count, or states a count that is true of the region it names | a packet holds the pin-maintenance grid lock for its own reasons | the corrected text **and** the count re-derived by a command recorded beside it over both files; a count in prose with no command beside it is how this row was created |
+| `PR107-CONTAINER-LINT-CENSUS-DOMAIN-IS-A-DIRECTORY-WALK` | V3 | the census derives its domain from module **declarations** rather than from a directory walk | a slice changes the child-lint census | a red-first witness that relocates children with `#[path]`, leaves one file per arm, and shows the census refusing; **and** a killed mutation. **By-name pinning is not the repair** — it closes the escape only for the files that happen to be pinned, and three packets each adding a name is the shape this programme keeps having to undo |
+| `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY` | V3 | the test can no longer exec a file a sibling `fork` may hold open for writing | a slice changes `src/runner/host/tests.rs`, **or** the failure recurs | **Neither of the two prescriptions this finding has carried is admissible without evidence** — see the row. Acceptable: a retry on `ETXTBSY`, or serialising the write against the harness's forking phase, **with** a demonstration that the chosen form addresses **fd inheritance across a `fork` in another thread** rather than the writing thread's own handle, which `std::fs::write` already closes |
+| `W2-WINDOWS-RACING-REMOVAL-DELETE-PENDING` | V5 | the project owner rules on the budget, or the removal path stops depending on a bounded retry | an owner ruling, or a slice opens `racing_removal` | **a Windows reproduction**, never a Linux green; a red-first witness at the named path; **and** an accounting of what the bound protects against, because raising 64 is an infrastructure decision rather than a repair |
+| `PR110-SITE-CENSUS-MATCHES-EFFECT-SITE-NAMES-BY-SUBSTRING` | V3 | the census resolves variant names instead of substring-matching them | a slice changes the site census in `src/effects/tests.rs` | a red-first witness that removes an exact shorter literal while keeping its longer partner and shows the census refusing; **and** a killed mutation. **Fix the class, not the pair**: the row enumerates every prefix collision in the tree, and repairing only the pair the reviewer named leaves the other nine |
+| `PR110-CONTAINMENT-COMMENT-STATES-A-FALSE-GUARANTEE` | V3 | the sentence is true of the code, by either route | a slice changes `src/workspace_manager/containment.rs`, `remove_intent`, `remove_execution_root` or `Slot::validate` | **either** the deletion paths routed through `contained()` with a red-first witness, **or** the sentence narrowed to what is true and naming the guard that actually applies. Whichever is chosen, the **three-state trace** in the row must be re-run afterwards: a repair that fixes a claim's referent can restore its falsity, which is how this one survived a split and a repair |
+| `W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT` | V5 | the pre-exec `setpgid` path is shown to be race-free, or the race is closed | **already fired** — twelve sightings across six branches, `master` included, 2026-09-01 to 09-03 | **a macOS reproduction** at a fixed tree, never a Linux green; a red-first witness on the pre-exec containment path; **and** an accounting of why the failing role varies across three roles, since two attempts of one run at one SHA named two different ones |
+| `PR107-WINDOWS-SETTLE-REPLAY-ALREADYSTARTED-FINGERPRINT` | V5 | the cause is established | an owner ruling, a second sighting, or new evidence admissible under §"The authority rule" | **a Windows reproduction**, never a Linux green; and the wider measurement the row names — whether these two tests build their event log deterministically on Windows at all — rather than the path-hint derivation, which `AlreadyStarted` does not touch |
+| `PR107-LINUX-WORKSPACE-RESIDUE-EMPTY-GITDIR-FINGERPRINT` | V5 | the cause is established | an owner ruling, a second sighting, or new evidence | a reproduction of a worktree registration reaching `forced removal converges` with an empty gitdir, on any platform; the row names why the Linux leg makes this the cheapest of the four to chase |
+| `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES` | V5 | the class has a stated cause, or its members are shown to be unrelated | an owner ruling, a fifth fingerprint, or a member being explained | **the lead in the row tested rather than asserted**: whether one launch-gate or reaper mechanism underlies members on three different platforms. A repair of any single member does not close this row, and closing it by explaining one member is exactly the reasoning that produced the withdrawal recorded below |
+| `W2-RETIRED-DECISIONS-PATHS-CITED-AND-MISSING` | V5 | the citations resolve, or the paths are re-pointed at where each record's substance now lives | an owner ruling, or a slice takes up the repair | the citation count driven to zero by a command recorded beside it, **and** a gate that resolves cited repository paths — without one the class recurs on the next directory retirement, which is how it arrived |
+
+### Six CI signatures — the discriminator, and the one that was misread
+
+These rows are separate **because their signatures differ**, and the discriminator is recorded so
+the next observation is classified rather than absorbed. Two entries below are not among this
+append's new rows: `PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT` is already in §2, and
+`W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM` is fixed and sits in §5. Both are here because they are the
+nearest attractors for the next red, and leaving an attractor out of a discriminator is how
+mis-filing starts.
+
+| ID | Platform | What fails | The binary | The tell |
+|---|---|---|---|---|
+| `W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM` — **§5, fixed** | macOS | nothing named, **or** a burst of named failures with no summary | **dies on a signal it armed itself** | `(signal: 15, SIGTERM: termination signal)` in cargo's error line, **zero** `test result:` lines, and dozens of orphaned copies of the test binary reaped at "Complete job". Post-repair it is **self-identifying**: each arm site writes one line to fd 2 naming itself |
+| `W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT` | macOS | `runner::host::tests::every_role_reaches_the_containment_points_of_this_platform` — **one** test | completes; prints `test result: FAILED. <n> passed; 1 failed` | twelve sightings on six branches **including `master`**; **the failing role varies across three roles**; identical tree green then red, and one run red on two attempts naming two different roles |
+| `PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT` — already in §2 | Windows (`test (winguest)`) | two `engine::topology::settle` kill tests | completes | `MalformedEntry { kind: "task_dispatched", key: 0 }` and a **trailing slash** — predicted region `src/aleph/` against hints deriving `src/aleph` |
+| `PR107-WINDOWS-SETTLE-REPLAY-ALREADYSTARTED-FINGERPRINT` | Windows (`test (winguest)`) | **the same two** `engine::topology::settle` kill tests | completes | `the log replays: AlreadyStarted`, and the string `src/aleph` appears **zero** times in the job log. Same two tests, same file, same leg, **different replay error** |
+| `PR107-LINUX-WORKSPACE-RESIDUE-EMPTY-GITDIR-FINGERPRINT` | Linux (`test (ubuntu-latest)`) | `workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered` — one test | completes | `forced removal converges: Git { message: "worktree registration …/.git/worktrees/kalpha-g1 has an empty gitdir" }` |
+| `W2-WINDOWS-RACING-REMOVAL-DELETE-PENDING` | Windows (`test (winguest)`) | `racing_removal` exhausting its 64 attempts against an R19 view directory | completes | **established, not unexplained** — a known mechanism in production code, and the only one of the six carrying a rerun licence |
+
+**The discriminator that failed, and what it cost.** On 2026-09-03 a macOS red on PR #104 at
+`94f8c27` (run `33773356014`) was ruled out of the signal-death row and given a new category of its
+own, on two grounds: *"libtest named its failures"* and *"exit 101, not a signal"*. Both are
+artefacts of the mechanism rather than counter-evidence.
+
+- A stalled launch gate refuses every waiting launch on its next tick, so each waiting test panics
+  fast and libtest prints a `FAILED` line for it; the monitor raises `SIGTERM` tens of milliseconds
+  later, before libtest reaches its summary. **A named burst with no summary is the signature**, not
+  a counter-signature.
+- `101` is **cargo's** exit code when its child dies on a signal. The binary died by `SIGTERM` and
+  the job exited 101; both are true in every instance.
+
+The ruling-out was done by searching the log for the marks of an *ordinary* failure — panic text,
+assertion text, a `test result:` line — finding none, and concluding "not this row". **A signature
+was ruled out by the absence of other things instead of by searching for the one line that defines
+it.** Re-read from the job log, with the commands beside the results:
+
+    $ gh run view 33773356014 --attempt 1 --job 100708958981 --log > mac.log
+    $ /usr/bin/grep -c 'signal: 15' mac.log                     # 1
+    $ /usr/bin/grep -c 'failures:$' mac.log                     # 0
+    $ /usr/bin/grep -c 'test result:' mac.log                   # 0
+    $ /usr/bin/grep -oP '\S+::\S+ \.\.\. FAILED' mac.log | wc -l   # 28
+    $ /usr/bin/grep -c 'Terminate orphan process' mac.log       # 46
+
+Twenty-seven of the twenty-eight are `runner::container::exec::tests` and one is `review::tests`,
+and every one falls inside a single second. **The `signal: 15` line was in the log the whole time.**
+The category invented for the residue is withdrawn; the instance belongs to the §5 row. It is
+recorded here rather than tidied away because the reasoning is the reusable part.
+
+**Three traps that point at the wrong subsystem**, every one paid for on this programme:
+
+1. **Counting `signal` in a macOS log finds it eight times, and every one is a test name.** Counting
+   occurrences rather than reading them produces a false identification in either direction. It is
+   the same instrument failure as every other on this list: an answer about a smaller or different
+   domain than the one asked about, returned in the shape of a correct answer.
+2. **A `failed to read <path>` message on the Windows removal path means a REMOVAL failed.**
+   `UpstrokeError` has one `Io` variant and one format string —
+   `#[error("failed to read {}: {source}", .path.display())]` at `src/error.rs:23` — so read, write,
+   create, sync **and remove** all render as `failed to read`. The message names the `Display` impl,
+   not the operation.
+3. **`0123456789abcdef` in those paths is the fixture constant `REPO_KEY_A`**
+   (`src/runner/container/census/tests.rs:89`), not an unset `CARGO_TARGET_DIR` slot key. It is
+   dangerous here specifically because the slot-pool contamination trap has been drilled on this
+   programme and that hex is its visual signature. The fixed-key collision also **cannot** explain a
+   CI failure: it needs two concurrent runs on one machine, and CI runs one job per machine.
+
+**The reading rule the whole family depends on: read every run at the head, and every attempt of
+every run — never the latest.** A rollup reports GREEN at a SHA with three greens and one red, and
+`gh run rerun` does not create a new run — it increments `run_attempt` on the same run id, and the
+API returns the latest attempt's conclusion by default. Both mechanisms hid instances of the §5 row.
+Enumerated per head, and per attempt within each run:
+
+    gh api "repos/eventloops/upstroke/actions/runs?head_sha=$FULL_SHA&per_page=30" \
+      --jq '.workflow_runs[] | "\(.id) \(.name) attempt=\(.run_attempt) \(.conclusion // .status)"'
+    gh api "repos/eventloops/upstroke/actions/runs/$ID/attempts/1" --jq '.conclusion'
+
+`gh run list --limit N` counts **entries**, not CI runs, and truncates without saying so; every push
+produces two workflow runs, so a window built that way looks complete and is not.
+
+### The findings in full — the eighteen §2 rows
+
+Each is written for a reader who was not here. Every line anchor is at **`ae2a58f`** and every one
+was checked to match the construct it names; **re-derive by name, not by line**, because these
+anchors have already moved twice in a day while the item names stayed put.
+
+#### `PR101-CFG-ATTR-APPLIED-CFG-INVISIBLE-TO-THE-SCAN`
+
+**What.** `scan_module_declarations` (`src/effects.rs:2207`) decides whether an attribute matters to
+a module declaration. Its `cfg_attr` arm is
+
+    "cfg_attr" if raw.contains("path") => pending_path = true,      // src/effects.rs:2282
+
+so a `cfg_attr` is significant **only when its text contains `path`**. A declaration written
+`#[cfg_attr(all(), cfg(test))] mod hidden_tests;` — which rustc applies as `#[cfg(test)]`, making
+the named file compile only under test — is therefore read as an **unconditional** declaration, and
+the file it names stays in every census's domain as production.
+
+**Failure sequence.** Add such a declaration and its file. Leave the whole-file-test-module list
+unchanged. Every set assertion still sees the old population and passes. A fixture call in that file
+then sits inside the production censuses, where it can mask the deletion of a real production call —
+which is the exact failure the skip sets exist to prevent.
+
+**Why it is open rather than repaired.** The gap predates W1 by months and no W1 or W2 diff touches
+it. Widening the scanner to *decide* `cfg_attr` predicates changes what **every** census in the
+crate scans, and a measurement change gets its own review.
+
+**Already recorded in the tree, which is why nothing here is news to a reader of the code.** The
+limit is stated in `declared_whole_file_test_modules`' doc comment (`src/effects.rs:2022-2039`),
+including the measurement that established it: *"Measured by writing one and reverting it: the
+module's own `#[test]` ran, so rustc had applied the `cfg(test)`, while
+`the_whole_file_test_modules_are_resolved_from_the_declarations_not_the_file_names` stayed green
+with the file outside the population it resolves."* A repair must update that paragraph in the same
+change, or the tree will carry a comment describing a hole it no longer has.
+
+**Related.** `PR103-CENSUS-DOMAIN-CANNOT-DECIDE-EXCLUSIVE-TEST-REACHABILITY` is the same resolver,
+two gaps further in.
+
+#### `W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`
+
+**What.** `mechanism` (3)'s classification census reads its domain from
+`CLASSIFIED_MODULES` (`src/effects.rs:968`). The consumer is
+`reachable_fns_are_classified` (`src/effects/tests/classification.rs:99`), which asserts set
+equality between the record's module keys and that constant, then reads each entry from disk. Its
+doc comment says *"The domain is **derived from the modules**, not listed: a `pub fn` added to one
+of them fails this test until somebody decides what it is."* That is true of the **function-level**
+domain and not of the **module-level** one: the list of modules is a roll-call, so a new production
+child file is graded only if somebody enrols it by hand.
+
+**Measured at `ae2a58f`, with the derivation rather than the number.** The two lists are parsed from
+the source and compared against a walk of `src/`:
+
+    python3 - <<'PY'
+    import re,os
+    src=open('src/effects.rs',encoding='utf-8').read()
+    def const(n):
+        m=re.search(r'pub const '+n+r': &\[&str\] = &\[(.*?)\n\];',src,re.S)
+        return re.findall(r'"([^"]+)"',m.group(1))
+    CLS=const('CLASSIFIED_MODULES')
+    allrs=sorted(os.path.relpath(os.path.join(d,f))
+                 for d,_,fs in os.walk('src') for f in fs if f.endswith('.rs'))
+    print([p for p in allrs if p not in CLS and os.path.dirname(p)+'.rs' in CLS])
+    PY
+
+`CLASSIFIED_MODULES` holds **56 entries and not one directory prefix**; `TOPOLOGY_MODULES`
+(`src/effects.rs:912`) holds 6, of which 4 are prefixes. **Twenty-one** `.rs` files sit under a
+directory whose `.rs` parent is listed and are not themselves listed. **Whether each ought to be
+graded is a judgement and this row does not make it** — several are test substrate the domain may
+exclude deliberately — but the mechanism is the finding: nothing fails when one is absent.
+
+**A live instance arrived while this append was being written, and it is the best evidence in the
+row.** M7 (`#123`, merged at `3af9696`) split `src/config.rs` into `parse.rs` and `read.rs`. The two
+children carry **nine `pub(super)` functions** — `read_runner`, `refuse_legacy_container_selection`,
+`parse_role_effort`, `parse_budgets`, `parse_gates`, `parse_engine`, `parse_interaction`,
+`read_repo_config`, `read_pools`. Derived rather than assumed: **none of the nine was a `pub*` item
+of `src/config.rs` before the split**, and the parent's own reachable surface is unchanged at twenty
+either side, so nothing *left* the graded domain — **new reachable surface entered the crate outside
+it**.
+
+They count. `externally_reachable_fns` decides visibility with `declares_visibility`, whose whole
+test is
+
+    rest.ends_with("pub") || rest.ends_with("pub(crate)") || rest.ends_with("pub(super)")
+
+so a `pub(super) fn` is exactly what this census exists to force somebody to classify. Because
+`src/config/parse.rs` and `src/config/read.rs` are not in the roll-call, **nothing requires it and
+nothing fails**.
+
+**This is not an accusation against M7, and reading it as one would miss the point.** Three splits
+before it — `m3-rundir`, `m5-host`, `m6-proc` — enrolled their children and each cited this finding
+by its working-record key while doing so. M7 did not. **Neither choice can be called wrong, because
+the criterion is nowhere stated**: the tree says only that the list is hand-maintained. And the
+incentive runs one way — enrolling a child obliges a classification row for every reachable item in
+it, while not enrolling one costs nothing and is checked by nothing. **A roll-call whose membership
+rule lives in whoever last remembered it will diverge, and here it took four splits.**
+
+**Half of this finding is fixed, and the fix is why the rest is worth stating precisely.**
+`TOPOLOGY_MODULES` is matched with `str::starts_with`, and as recorded it named
+`src/workspace_manager.rs` — a file — so the split's children fell outside the ban. `f1918e0` (#110)
+added the `src/workspace_manager/` prefix and that half misses nothing today. The two lists are
+matched differently on purpose, and the tree now says so at `src/effects.rs:903-911`: prefix
+matching is right for a ban, and wrong for a roll-call whose entries are **read as source files**,
+because a directory would name nothing. So the repair for the surviving half is not "add a prefix";
+it is to derive the module domain or to state and execute the roll-call's semantics.
+
+**The tree already names this finding.** The `m3-rundir`, `m5-host` and `m6-proc` blocks inside
+`CLASSIFIED_MODULES` each say, in nearly the same words, that *"`C-002` is the standing finding that this
+roll-call is hand-maintained rather than derived, and it is not this split's to repair."* Three
+splits enrolled their children correctly and each said why. That is the roll-call working — by
+somebody remembering.
+
+**Related.** The stated-domain-versus-counted-domain shape is
+`CLASS-GATE-STATED-DOMAIN-EXCEEDS-COUNTED-DOMAIN`, already in §2; this is the same shape in the
+domain a gate *reads* rather than the one it counts.
+
+#### `PR103-CONTAINER-SUBSTRATE-LIST-CHECKS-NAME-ONLY`
+
+**What.** `every_view_discard_removes_through_the_one_racing_removal`
+(`src/runner/container/tests.rs:4883`) is a source census over `src/runner`, and it excludes
+out-of-line test substrate by name through a `SUBSTRATE` const (`:4888`, six entries). The only
+assertion over that list is
+
+    assert_eq!(excluded, SUBSTRATE.len(),
+      "a file named in SUBSTRATE is not in the tree, so the exclusion is stale");   // :4931
+
+— a check that each name **is met**, not that each name **is still test substrate**. A file named in
+it that later becomes production-reachable — compiled as a Cargo target, or declared unconditionally
+by a production parent — stays excluded, and nothing notices.
+
+**Failure sequence.** Add an `[[example]]` target whose `src_path` is a listed file, give it a
+`#[cfg(not(test))] main` that reaches a governed primitive, and the census skips it. No assertion in
+that test can see it.
+
+**Why it is open.** Byte-identical before and after PR #103 and not activated by it.
+
+**The comparison this row used to make is withdrawn, and the withdrawal is the point.** An earlier
+statement said PR #103 *"closes the same gap in its own new list"* — entries must not be crate roots
+and must be members of `cfg::WHOLE_FILE_TEST_MODULES` — making the newer list strictly better
+guarded than the precedent it copied. **PR #103 was closed unmerged.** That list never landed, so
+the comparison has no second term. The finding itself is intact and re-verified at `ae2a58f`; only
+the sentence about a sibling was wrong, and it was wrong in the specific way this whole append
+exists to prevent: **text describing code that does not exist.** The two guards remain the shape of
+the repair; they are simply not implemented anywhere.
+
+#### `PR103-CENSUS-DOMAIN-CANNOT-DECIDE-EXCLUSIVE-TEST-REACHABILITY`
+
+**What.** Two independent gaps in `census_domain`, each established by a separate frontier pass, and
+both live on `master`:
+
+1. **Target kind is discarded.** `CrateRoots` (`src/effects.rs:1742`) keeps a `package_dir` and a
+   `BTreeSet<PathBuf>` of roots and nothing else; its doc comment states the choice outright —
+   *"Kinds are **not** filtered."* Cargo compiles a `[[test]]` target with `cfg(test)` on, so such a
+   root can be exclusively test code, but nothing downstream can tell it from a `[[bin]]` or
+   `[[example]]` root. A guard that treats "is a root" as "is production" is wrong for test targets;
+   one that ignores roots is wrong for production ones. PR #103 was rejected once for each
+   direction.
+2. **Non-test declarations are ignored.** `declared_whole_file_test_modules`
+   (`src/effects.rs:2050`) skips every declaration that is not test-only —
+   `if !declaration.test_only { continue; }` (`:2076`) — so membership proves *"some test declaration resolves
+   here"* and never *"only test declarations reach here"*.
+
+**Failure sequence** (the reviewer's, at `9ee6013`): `src/topology/probe.rs` declares
+`#[cfg(test)] mod fixture;`; `probe/fixture.rs` calls `crate::rundir::public_dir`; a binary root
+`probe/bin.rs` declares `mod fixture;` unconditionally and calls it. The fixture is
+production-reachable through the bin, but the resolver records only the test-only declaration, and
+the bin — not the fixture — is the Cargo root. Any census skipping on this basis misses the caller,
+silently.
+
+**Why it matters now, and why it is not confined to a closed pull request.** Two shipped censuses
+derive their skip sets from this resolver at `ae2a58f`, both adopted under `PR7-R5-ATT-001` — **an attestation key carried in the source, not a row in this file**; it resolves at `src/effects/tests/source_oracles.rs:1569`, `src/runner/mod.rs:1456`, `src/events/log/tests.rs:3412` and twice in `src/engine/topology/recover/tests.rs`, and a reader should not look for a ledger row of that name — **an attestation key carried in the source, not a row in this file**; it resolves at `src/effects/tests/source_oracles.rs:1569`, `src/runner/mod.rs:1456`, `src/events/log/tests.rs:3412` and twice in `src/engine/topology/recover/tests.rs`, and a reader should not look for a ledger row of that name:
+`runner::tests::production_sources_by_path` (`src/runner/mod.rs:1458`) and the fold census in
+`src/events/log/tests.rs:3414`. Both carry the blind spot today.
+
+**The shape of the repair, recorded so whoever takes it need not re-derive it.** Retain target kind
+in `CrateRoots`, and add a query for "is this path declared unconditionally anywhere in the walk".
+Neither changes what `whole_file_test_modules` *returns*, so the two path-by-path oracles in
+`src/effects/tests/source_oracles.rs` that killed PR #103's round 2 stay satisfied.
+
+**Downstream.** W1's T3 — extracting `src/topology/registry.rs`'s test module — is deferred behind
+this repair; that extraction is what needed the skip in the first place.
+
+#### `PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED`
+
+**What.** Every temporary directory in `src/validate.rs`'s test region is derived from
+`env::temp_dir().join(format!("upstroke-validate-<tag>-{}", process::id()))` — a **predictable**
+path, created with `create_dir_all` (which accepts an existing directory), stored as a bare
+`PathBuf`, and **never reclaimed**. `scratch_root` (`:403`) additionally runs
+
+    let _ = fs::remove_dir_all(&dir);       // src/validate.rs:405
+
+against that predictable path *before* creating it, so it deletes whatever a previous run or another
+process left there, and discards the error while doing so.
+
+**Measured at `ae2a58f`, two engines agreeing per file:** `src/validate.rs` has **12**
+`env::temp_dir()` sites, **12** `create_dir_all` lines and **0** `impl Drop`.
+`standards/12_standards_tests.md:16` requires *"unique temporary directories with RAII cleanup"* —
+the clause moved out of `CODING_STANDARDS.md` when #116 split the standards, and it is the same
+clause.
+
+**The harm is measured, not argued.** PR #104's pass-7 reviewer pre-created
+`$TMPDIR/upstroke-validate-sample-<pid>/foreign-sentinel` and ran `sample_plan_renders_expected_table`
+against the exact-head binary. The test **passed**, and:
+
+    sentinel=deleted
+    replacement_plan=present
+
+So the unowned `remove_dir_all` silently deleted foreign content and leaked its replacement. Every
+earlier statement of this finding described a possible sequence; that is a demonstrated one.
+
+**Failure sequence, for the half that is not yet demonstrated.** A previous run leaves the directory
+behind; after PID reuse `create_dir_all` accepts it. If a plan name is now a directory the suite
+panics; if it is a symlink, `fs::write` follows it and truncates the target. Two PID namespaces
+sharing a temp mount can hold the same PID concurrently, so one process can read a file while
+another rewrites it.
+
+**Why it is open.** Byte-identical before and after PR #104 and not activated by it; the reviewer
+said so explicitly and kept it out of the verdict, which turned on the newly introduced instance of
+the same pattern. That instance no longer exists: owner ruling 7 reverted `src/validate.rs` to
+`origin/master` entirely, so the file is back to the ten pre-existing instances with none of the
+repair. **The repair and its scaffolding are gone; the pattern they were built beside is what
+remains.**
+
+**Related.** `PR104-PRELOCK-SCRATCH-NAME-REPRODUCIBLE-ACROSS-RUNS` is the same class in the
+precedent this file was told to copy, and `W1-FIXTURES-NOT-RETIRED-W0-AUTH-PART-E-UNFULFILLED` is
+blocked behind this row.
+
+#### `PR104-PRELOCK-SCRATCH-NAME-REPRODUCIBLE-ACROSS-RUNS`
+
+**What.** `Scratch::new` (`src/engine/topology/prelock/tests.rs:200`) names its root
+
+    "upstroke-prelock-{tag}-{}-{:?}", std::process::id(), std::thread::current().id()
+
+Every component resets when the process does, so the name is **reproducible across runs**. A killed
+run leaves a root behind; a later run that reuses the pid and gets the same thread id computes the
+same path — and the allocator **adopts** it silently rather than refusing:
+`create_private_dir` (`src/rundir.rs:634`) → `create_dir` (`:575`) → `fs::create_dir_all`, which
+succeeds on an existing directory.
+
+**Why it is open.** Byte-identical across PR #104 and not called by it. The reviewer said so
+explicitly and kept it out of the verdict.
+
+**Why it is worth recording anyway, and this is the substance.** This is the precedent PR #104 was
+told to copy, on the strength of its measured success against leaking — 5050 `upstroke-prelock-*`
+roots had accumulated by 2026-08-30 and none since, a fact its own doc comment records at
+`src/engine/topology/prelock/tests.rs:181`. **It is a good precedent for reclamation and it carries
+a defect in allocation**, and the packet that copied it inherited the defect along with the virtue.
+Copying a precedent copies its weaknesses; the fix belongs with whoever owns that file.
+
+**Related.** `PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED` — the same allocation
+weakness, ten times over, in the file that copied this one.
+
+#### `W1-FIXTURES-NOT-RETIRED-W0-AUTH-PART-E-UNFULFILLED`
+
+**What.** W0-AUTH **Part E** said: retire `fixtures/` and inline the corpus. **`fixtures/`
+survives** — `bare-plan.md`, `cyclic-plan.md`, `sample-plan.md`, `steps-plan.md`. This row exists so
+an unfulfilled packet clause is not later read as a fulfilled one.
+
+**What PR #104 as landed did achieve, re-derived at `ae2a58f`.** Every **runtime** fixture read
+outside `src/validate.rs` is gone. `src/plan/mod.rs` takes the corpus at **compile time** —
+`BARE_PLAN` (`:82`), `SAMPLE_PLAN` (`:87`), `STEPS_PLAN` (`:91`), each an `include_str!` — and
+`src/plan/markdown.rs` and `src/topology/registry.rs` (`:3123-3125`) consume those constants;
+neither reads a fixture path any more, and `src/plan/markdown.rs`'s `fn fixture` helper, which built
+the path as `Path::new("fixtures").join(name)` and so was invisible to a `fixtures/` search, is
+gone. **`src/validate.rs` is the one remaining runtime reader, with 10 call sites**, all of the form
+`opts("fixtures/<name>.md")`. `cyclic-plan.md` is the one file with no compile-time constant; its
+only consumer is `src/validate.rs:739`.
+
+**Why it stopped there.** `src/validate.rs` is frozen-legacy, and every attempt to give its tests a
+corpus on disk produced a new finding about temporary-directory ownership — five across four repair
+rounds, then three more at pass 8. Owner ruling 7 reverted the file entirely rather than ship the
+ninth.
+
+**What is owed.** A future change may retire `fixtures/` properly, from a base that is not eight
+passes deep. It needs `src/validate.rs`'s tests to stop reading from disk, which means solving the
+scratch-directory problem for that file — which is
+`PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED`'s problem for all ten of its call
+sites at once. **Doing that row first makes retirement straightforward**, and doing it second is
+what produced eight passes.
+
+#### `W2-EXPECTED-REFS-COUNT-STALE-AFTER-EXTRACTION`
+
+**What.** `production_calls`' doc comment (`src/effects.rs:1370`) asserts *"Measured on this tree:
+`workspace_manager.rs` carries four occurrences of the substring `expected_refs(`"*, and then
+reasons from that number — *"one of the four survives into `production_code`'s region, and it is the
+definition line of `refuse_unexpected_refs`"*. **The root file carries one.** The other three moved
+to `src/workspace_manager/tests.rs` when W1 extracted the test region.
+
+**Derived at `ae2a58f`, two engines per file:**
+
+| file | occurrences of `expected_refs(` |
+|---|---:|
+| `src/workspace_manager.rs` | **1** |
+| `src/workspace_manager/tests.rs` | **3** |
+| every other file under `src/workspace_manager/` | 0 |
+
+**The number is right about the subsystem and wrong about the file it names**, which is precisely
+why nobody caught it: a reader who recounts across the directory reproduces "four" and moves on.
+
+**Why it is open.** Already stale before W2 began — W1's extraction caused it, and no W2 packet
+causes or worsens it. The steward who proposed it checked both directions before doing so.
+
+**What the repair must not be.** Another count. `src/effects.rs` is in the pin-maintenance set, so
+this edit takes the grid lock and belongs to whichever packet next holds it for its own reasons;
+whoever makes it should state the **property** the comment needs — that a substring needle is
+satisfied by a longer identifier, which is the point the sentence exists to make — rather than
+re-measure a number that the next extraction will falsify again.
+
+#### `PR107-CONTAINER-LINT-CENSUS-DOMAIN-IS-A-DIRECTORY-WALK`
+
+**What.** The child-lint census in `src/runner/container/tests.rs` derives its domain by walking each
+funnel's directory: `const FUNNELS` (`:3146`), then `let arm = walk(&directory);` (`:3170`), `walk`
+being the recursive reader at `:2971`. **A `#[path]` relocation is invisible to a directory walk by
+construction**, so a child moved out of the directory is never graded, and every control still
+passes.
+
+**The controls, and why each one survives the escape.** M4 closed the reviewer's aggregate-floor
+escape at `660e9e1` by replacing `assert!(with_children >= 2)` with
+`assert_eq!(with_children, FUNNELS.len())` (`:3183`) and adding a per-arm
+`assert!(!arm.is_empty())` (`:3171`) inside the loop — stated over the class, so every future funnel
+root inherits it. Those repairs are on `master` and they are correct. They do not reach this
+variant: relocate all but one file of an arm and the directory still exists, the arm is still
+non-empty, `with_children` is unchanged, the union floor `children.len() >= 9` (`:3196`) is still
+met by the files named individually, and the sixteen by-name assertions still find their sixteen.
+
+**The bound, derived at `ae2a58f` rather than asserted:**
+
+    python3 - <<'PY'
+    import os,re
+    F=["src/runner/container.rs","src/agent/proc.rs","src/runner/host.rs",
+       "src/rundir.rs","src/workspace_manager.rs"]
+    src=open('src/runner/container/tests.rs',encoding='utf-8').read()
+    region=src[src.index('const FUNNELS: [&str; 5]'):src.index('let mut missing = Vec::new();')]
+    named={m for m in re.findall(r'"(src/[A-Za-z0-9_/]+\.rs)"',region)} - set(F)
+    walked=sorted(os.path.join(d,x).replace('\\','/')
+                  for f in F for d,_,fs in os.walk(f[:-3]) for x in fs if x.endswith('.rs'))
+    print(len(walked), len(named), len([w for w in walked if w not in named]))
+    PY
+
+**38 walked children, 16 named individually, 22 named by nothing but the walk.** Relocating the 22
+with `#[path]`, minus one file kept in each arm that would otherwise empty, leaves **20 files
+ungraded with every assertion in the test still green** — the union is 18, over the floor of 9;
+`with_children` is 5; no arm is empty; all 16 named files are present.
+
+**Why by-name pinning is not the answer.** Pinning another child by name catches this only if the
+pinned file happens to be one of the relocated ones. It is a partial mitigation, not a closure — and
+the count of pinned names has already gone 1 → 6 → 16 across three packets, each adding its own,
+which is the shape this programme keeps having to undo.
+
+**The prescription, so a repair need not re-derive it: derive the domain from the module
+declarations rather than from a directory walk.** The repository already has the pattern and it is
+the precedent to cite —
+`the_whole_file_test_modules_are_resolved_from_the_declarations_not_the_file_names`, whose body is in
+`src/effects/tests/source_oracles.rs`, resolves exactly this way for exactly this reason.
+
+**Why it is open rather than repaired.** Pre-existing at `1cbdccd`: relocating eleven Container
+children and leaving one already passed the floor with Process and Host present. Neither M3's nor
+M4's split activates it and neither makes it worse. A mechanism change to a census gets its own
+review.
+
+**Two independent derivations.** #110's reviewer reached the walk-based-domain blind spot from the
+same `#[path]`-plus-decoy reasoning M4's steward had sent earlier, without seeing it — which raises
+confidence in the finding and in the prescription alike.
+
+**Related.** `W1-CLASSIFIED-MODULES-IS-A-HAND-MAINTAINED-ROLL-CALL`,
+`PR103-CENSUS-DOMAIN-CANNOT-DECIDE-EXCLUSIVE-TEST-REACHABILITY`, and
+`CLASS-GATE-STATED-DOMAIN-EXCEEDS-COUNTED-DOMAIN` already in §2.
+
+#### `W2-HOST-TESTS-WRITE-THEN-EXEC-ETXTBSY`
+
+**What.** `an_empty_path_entry_never_reaches_the_workspaces_own_copy_of_a_bare_name`
+(`src/runner/host/tests.rs:7179`) writes an executable into a workspace through `marker_shim`
+(`:5329`) and immediately spawns it. In a gate run at `d8f4d13` the spawn failed with
+
+    "an empty entry before a real installation: a raw spawn: Text file busy (os error 26)"
+
+— **ETXTBSY**: a concurrently-forking thread in the same process still held a write descriptor to
+that file when `execve` ran. That is the textbook **write-then-exec race under a parallel harness**,
+a concurrency failure rather than a logic one. The quoted text is the test's own panic format,
+`"{what}: a raw spawn: {error}"`, with `what` the first row of its table.
+
+**Not caused by any W2 packet, and the two functions travelled through three splits unchanged.**
+Both are byte-identical from the W2 base to `ae2a58f` — hashed by extracting each function's body
+and digesting it, rather than by reading a diff:
+
+    fn marker_shim                    1cbdccd = 2de71dd = 17d41c9 = ae2a58f
+                                      sha256 f666ed741cb5b533b942c7f41635f0bc3c16c36050f17a92feb12175b4ee5381 (701 bytes)
+    fn an_empty_path_entry_…          1cbdccd = ae2a58f
+                                      sha256 098f21e8ec2e784665a39bdcb4bc317a4a43f1c4232f8dba9db55886480058ec (4489 bytes)
+
+M5 split `src/runner/host.rs` and M6 split `src/agent/proc.rs` in that window; **the race travelled
+with the file unchanged.**
+
+**Why it is open.** Pre-existing, not reproducible on demand, and fixing it inside a split packet
+would put a concurrency change in a refactor's diff.
+
+**Both prescriptions this finding has carried are refuted, and that is the most useful thing in this
+row.** It was first written as *"an explicit `drop(file)` plus `sync_all`"*. The writer is
+`std::fs::write`, which **already drops its handle before returning**, so that closes nothing still
+open. The window the finding correctly diagnoses is **fd inheritance across a `fork` running in
+another harness thread**: a concurrently-forking thread holds a descriptor at `execve` time even
+though the writing thread has closed its own. The replacement prescription — write to a temporary
+name and rename into place — was then also carried, and it does not survive either: a `fork` that
+inherits the descriptor inherits it regardless of what the path is called, and the rename changes
+the name rather than the open-file table. **What a repair must demonstrate is that it addresses fd
+inheritance across a `fork` in another thread**, not that it closes the writer's own handle. A retry
+on `ETXTBSY`, or serialising the write against the harness's forking phase, are candidates; neither
+has been measured.
+
+**Why it matters more than "a flake".** *"Passes most of the time"* is exactly how this class
+survives, and the failure lands on whichever test happens to be spawning — so it is **misattributed
+by construction**, the same property that made `W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM` sit
+unrecognised across four instances.
+
+#### `W2-WINDOWS-RACING-REMOVAL-DELETE-PENDING`
+
+**What.** `racing_removal` (`src/runner/container.rs:1437`) retries a removal
+`RACING_ACCESS_ATTEMPTS` times — `pub const RACING_ACCESS_ATTEMPTS: usize = 64` (`:404`) — and then
+returns `UpstrokeError::Io`. On the Windows guest it exhausts that budget against an R19 view
+directory under **delete-pending** semantics, at roughly **2%** of runs on a 16-vCPU guest. **It is a
+defect in production code**, not in the harness or the build box.
+
+**What it is not.** Not concurrency and not Docker. The guest has no Docker, and its jobs never
+overlap: 123 executions, **zero** overlaps. The contention hypothesis this programme carried through
+W1 — including by the coordinator — is wrong, and this row supersedes every earlier
+characterisation.
+
+**Two traps, both of which point at the wrong subsystem.**
+
+1. **`failed to read <path>` means a REMOVAL failed.** `UpstrokeError::Io` has one `Display` —
+   `#[error("failed to read {}: {source}", .path.display())]`, `src/error.rs:23` — so read, write,
+   create, sync and remove all render the same way. The message names the `Display` impl, not the
+   operation.
+2. **`0123456789abcdef` in those paths is the fixture constant `REPO_KEY_A`**
+   (`src/runner/container/census/tests.rs:89`), **not** an unset `CARGO_TARGET_DIR` slot key. It is
+   dangerous here specifically because the slot-pool contamination trap has been drilled on this
+   programme and that hex is its visual signature.
+
+**How to tell it from a compile break.** Three Windows legs failing together — `lint (windows)`,
+`msrv (windows-latest)`, `test (winguest)` — is a **compile error**; that is what a `cfg`-gated
+unused import produced on #110. **`test (winguest)` alone, on a `racing_removal` signature, is this
+race.**
+
+**Disposition detail.** A rerun on this signature is legitimate, disclosed as such — it is the only
+one of the six CI signatures in this section carrying that licence, and it has it because the
+mechanism is established rather than because the failure is inconvenient. **Raising the 64 is not
+the fix**, and it is an infrastructure decision for the project owner rather than a packet's to
+make.
+
+**Supersedes** the "winguest container-census races" line carried in earlier state records and its
+pairing with the macOS signal death. Those are a different platform and a different mechanism.
+
+#### `PR110-SITE-CENSUS-MATCHES-EFFECT-SITE-NAMES-BY-SUBSTRING`
+
+**What.** `every_site_the_inventory_declares_has_a_funnel_that_names_it_or_is_recorded_absent`
+(`src/effects/tests.rs:2625`) decides that a funnel names a site by plain substring containment:
+
+    let variant = format!("{group}Site::{}", site.variant());
+    if source.contains(&variant) {                                  // src/effects/tests.rs:2677
+
+so **a longer variant satisfies a search for a shorter one**. `WorktreeSite::RemoveExecutionRoot`
+(`src/workspace_manager.rs:747`) satisfies a search for `WorktreeSite::Remove`.
+
+**Failure sequence.** Remove the exact `WorktreeSite::Remove` literal while keeping
+`RemoveExecutionRoot`. The census stays green and the removed site goes unnoticed.
+
+**The exposure is a class, not a pair, and it is enumerable.** Every group's funnel module is the
+same for all its sites (`FunnelGroup::module()`, `src/topology/effects/vocab.rs:79`), so a
+within-group prefix collision is a same-file collision. Parsing the variant lists out of
+`src/topology/effects/sites.rs` and testing each pair at `ae2a58f` gives **ten collision pairs over
+six shorter variants in four groups**:
+
+| group | the shorter variant | is satisfied by |
+|---|---|---|
+| `WorktreeSite` | `Add` | `AddStaging` |
+| `WorktreeSite` | `Remove` | `RemoveExecutionRoot`, `RemoveIntent`, `RemoveStaging`, `RemoveStagingIntent` |
+| `WorktreeSite` | `RemoveStaging` | `RemoveStagingIntent` |
+| `SnapshotSite` | `Remove` | `RemoveIntent` |
+| `ContainerSite` | `Remove` | `RemoveIntent` |
+| `EventSite` | `Append` | `AppendFirst`, `AppendInformational` |
+
+**None of the six is masked today**, which is why this is carried rather than repaired: each shorter
+variant is still present as an exact literal — not merely as a substring — in its own funnel module,
+measured by counting matches not followed by an identifier byte. So the collisions have nothing to
+hide, yet.
+
+**Why it is open.** Pre-existing, and not activated by #110: the exact `WorktreeSite::Remove`
+literal is still present at `src/workspace_manager.rs:396`. Verified by the steward before proposing
+it.
+
+**A note on a number this finding retired.** #110's body evidenced "eleven effect sites" and
+under-counted, because Slot's mapping methods name twelve distinct variants. The count was stripped
+under ruling 10; **the finding survives that, because the census weakness is independent of whether
+any body quotes a number.**
+
+**Related.** The same "match names on disk rather than resolve them" family as
+`PR103-CENSUS-DOMAIN-CANNOT-DECIDE-EXCLUSIVE-TEST-REACHABILITY` and
+`PR107-CONTAINER-LINT-CENSUS-DOMAIN-IS-A-DIRECTORY-WALK`.
+
+#### `PR110-CONTAINMENT-COMMENT-STATES-A-FALSE-GUARANTEE`
+
+**The claim.** `src/workspace_manager/containment.rs:83`:
+
+> every deletion **in this subsystem** goes through
+> [`WorkspaceManager::contained`](super::WorkspaceManager::contained), which compares **canonical**
+> paths, so a resolved link cannot carry a removal outside the root.
+
+**It is FALSE — not stale.** Recorded in those words deliberately: *"pre-existing, referent
+updated"* reads as a bookkeeping nit, and this is a false containment assertion sitting in a
+security comment.
+
+**Every deletion in the subsystem's production region, at `ae2a58f`:**
+
+| site | enclosing fn | through `contained()`? | what actually provides containment |
+|---|---|:---:|---|
+| `fs::remove_dir_all` `:478` (windows), `:506` (unix) | `remove_tree_once_handles_close` | **no** | nothing of its own — a private helper that deletes whatever path its caller hands it |
+| `fs::remove_dir` `:760`, `:766` | `remove_execution_root` | **no** | fixed literal components joined onto `self.execution_root`, after `revalidate()`. Its own `# Errors` line says *"The containment refusals"* |
+| `fs::remove_file` `:842` | `remove_intent` | **no** | `slot.validate()` → `safe_component` |
+| helper call `:1216` | `remove_worktree` | **yes** (`:1215`) | `contained()`, as documented |
+| `fs::remove_file` `:1232` | `remove_worktree`, the `locked` file | **no** | `revalidate_removal` binding the admin directory |
+| helper call `:1256` | `remove_worktree`, the admin tree | **no** | `registration_still_names`, checked immediately before |
+
+**One of six goes through `contained()`.** `contained()` has exactly one production call site in the
+whole subsystem: `src/workspace_manager.rs:1215`.
+
+**What actually provides the containment, which the comment does not name.** `Slot::validate`
+(`src/workspace_manager/naming.rs:189`) calls `safe_component` (`:136`), which rejects any name that
+is not ASCII alphanumerics, `-` and `_`. So the subsystem is safe on the `remove_intent` path — **by
+a different mechanism than the one documented.** That is the hazard, not a harmless imprecision: a
+future refactor that removes or weakens `safe_component`, or adds a deletion path reaching
+`fs::remove_file` without `validate`, will be reading a comment promising a canonical-path guard
+that does not run there.
+
+**The `Slot::Staging` arm is not a gap — looked at, safe by construction.** `Staging { sequence: u64 }`
+holds no string, so `validate` returns early (`naming.rs:192`) and there is nothing for
+`safe_component` to reject; the reconstruction path parses `merge.s<rest>` with
+`rest.parse::<u64>()`, so even a hostile intent filename cannot produce a Staging component that is
+not `s<digits>`. Recorded rather than left open, because an unchased flag inside a carried finding
+invites either an afternoon re-deriving it or a "fix" that validates a `u64` — a guard that cannot
+fire.
+
+**Which sharpens the finding.** The real guard is load-bearing on two of three arms: `Task` holds a
+caller-controlled `String` and needs it; `Snapshot` needs it **at use**, because
+`SnapshotName(rest.to_owned())` takes the string unvalidated at construction and containment survives
+only because `validate()` re-checks later; `Staging` has nothing to validate. **So the documented
+guard is the real one on none of the arms**, and removing `safe_component` in the belief that
+`contained()` covers deletion costs `Task` and `Snapshot` their containment.
+
+**The three-state trace, which is why nobody caught it.**
+
+| state | the sentence says | true? |
+|---|---|---|
+| base `1cbdccd` | every deletion **in this module** — the parent | **FALSE** |
+| after the split | every deletion **in this module** — the child | **vacuous**; the child has zero deletions |
+| after repair r1 | every deletion **in this subsystem** | **FALSE again** |
+
+**A split can make a false claim vacuous, and repairing the referent makes it false again.** Neither
+the split nor the repair was wrong — the reviewer's finding correctly asked for the referent to be
+fixed — and the packet still shipped a false sentence it did not write. At any single state it looks
+like either a pre-existing defect or a clean repair; only the trace shows it. The parenthetical the
+repair added (*"This module performs no deletion of its own"*) is true and is not the problem: the
+sentence it qualifies is.
+
+**Disposition.** Carried. Repairing it means either routing the deletion paths through `contained()`
+or narrowing the sentence to what is true and naming `safe_component` as the guard that applies. Not
+#110's to do — the reviewer ruled it out of scope.
+
+#### `W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT`
+
+**Open as an unexplained observation, not classified as a flake or regression.**
+
+`runner::host::tests::every_role_reaches_the_containment_points_of_this_platform` iterates every
+execution role and asserts each child led its own process group. On macOS it fails intermittently,
+on branches that do not touch `runner::host`:
+
+    assertion `left == right` failed: <role>: the child did not lead its own process group,
+      so the pre-exec containment step did not run for this role
+      left: [false]
+     right: [true]
+    test result: FAILED. 1798 passed; 1 failed; 33 ignored      <- at eac412b; the passed count tracks the head
+
+**Twelve sightings across six branches between 2026-09-01 and 2026-09-03.** The population is every
+failing `test (macos-latest)` job on every CI run of `master` and the eight W1/W2 branches, read per
+attempt rather than per run, and each sighting is confirmed by its own
+`… every_role_reaches_the_containment_points_of_this_platform ... FAILED` line — **a mention of the
+test name is not a sighting**, and counting mentions returns a different, larger set:
+
+| branch | head | run / attempt | site | failing role |
+|---|---|---|---|---|
+| `master` | `fff6abd` | `33503020178` att. 1 | `host.rs:5574:13` | `probe(claude-code)` |
+| `master` | `810f264` | `33535107935` att. 1 | `host.rs:5574:13` | `implement` |
+| `w2-m3-rundir` | `27e905e` | `33757851135` att. 1 | `host/tests.rs:4220:9` | `probe(claude-code)` |
+| `w2-m5-host` | `6a969a3` | `33774631020` att. 1 | `host/tests.rs:4227:9` | `review` |
+| `w2-m1-fold` | `eac412b` | `33775798417` att. 1 | `host/tests.rs:4220:9` | `review` |
+| `w2-m4-workspace` | `c30aca0` | `33777752620` att. 1 | `host/tests.rs:4220:9` | `probe(claude-code)` |
+| `w2-m4-workspace` | `c30aca0` | `33777752620` att. **2** | `host/tests.rs:4220:9` | `review` |
+| `w2-m5-host` | `a39b4df` | `33794294653` att. 1 | `host/tests.rs:4227:9` | `probe(claude-code)` |
+| `w2-m6-proc` | `7a404df` | `33797128022` att. 1 | `host/tests.rs:4220:9` | `implement` |
+| `w2-m5-host` | `4a2ab29` | `33797192635` att. 1 | `host/tests.rs:4227:9` | `probe(claude-code)` |
+| `master` | `17d41c9` | `33803719525` att. 1 | `host/tests.rs:4229:9` | `review` |
+| `w2-m6-proc` | `b30eba3` | `33804224405` att. 1 | `host/tests.rs:4229:9` | `probe(claude-code)` |
+
+**The four differing sites are one assertion moved by successive splits, not four assertions.** The
+two 2026-09-01 sightings are at `src/runner/host.rs:5574:13` — the location **before** W1 extracted
+the test region, verified by reading that file at `fff6abd` — and carry the identical panic message.
+`:4220`, `:4227` and `:4229` are the same line after M1, M5 and M6 in turn.
+
+**Three facts this population establishes that a smaller one did not.**
+
+1. **It fires on `master`, three times.** Not "a pull request that touches neither subsystem" — the
+   integration branch itself, most recently at `17d41c9`. No packet-level explanation survives that.
+2. **It predates W2's base commit, and the span is anchored rather than described.** The earliest
+   sighting is **2026-09-01T11:32:42Z** (run `33503020178`, the API's `created_at`, which is UTC);
+   W2's base `1cbdccd` is committed **2026-09-02T20:55:44Z**. The failure is therefore **33.4 hours
+   older than the programme's own starting point**, and older still than any packet branch.
+
+   **Both stamps are UTC, and that has to be said, because the obvious command does not print UTC
+   and two of the plausible fixes do not either.** `git log -1 --format=%ci 1cbdccd` gives
+   `2026-09-02 21:55:44 +0100` — the committer's local time with its offset — so a reader comparing
+   that bare figure against a `Z`-stamped run time computes **34.4** hours and concludes this row is
+   an hour wrong when it is not. `%cI` and `--date=iso-strict` **also** render the commit's own
+   offset and do not help; `TZ=UTC` does not override them. The two forms that do:
+
+       git log -1 --format=%ct 1cbdccd                              # 1788382544 — epoch, no timezone
+       TZ=UTC git log -1 --format=%cd --date=iso-strict-local 1cbdccd   # 2026-09-02T20:55:44+00:00
+
+   **Prefer the epoch form.** It carries no timezone to get wrong, so it cannot be misread the way
+   every rendered form above can.
+
+   This is the timestamp instance of the rule the rest of this section is built on: **a number is
+   only evidence together with the method that produced it**, because two correct methods give two
+   different-looking answers and the disagreement then looks like an error in the claim rather than
+   in the comparison. It is recorded because it happened twice in one exchange over this very row: a
+   bare local-time figure was compared against a `Z`-stamped run time and produced an apparent
+   contradiction between two correct records, and the first command written here to prevent that was
+   itself checked by running it and **did not reproduce** — it printed the `+01:00` form. A
+   reproduction command that has not been run is a claim, not a method. **The `W2-` prefix in this ID records the wave
+   the finding was made in, not when the failure began**, and a reader should not infer the latter
+   from it. *An earlier revision of this row said "by two days", which is not what those two
+   timestamps give — a span stated loosely in a section about measurements that do not reproduce.*
+3. **The failing role varies across three roles**, not two: `probe(claude-code)` six times, `review`
+   four, `implement` twice.
+
+**An earlier statement of this finding said four sightings on three branches in about two hours.**
+That was an undercount of three kinds at once, and each kind is worth naming because each is a
+separate instrument failure: sightings were collected **as packets reported them** rather than by
+enumerating the population, so `master`'s three were never in scope; the **run** rather than the
+**attempt** was the unit, so one run's second red was invisible; and the window was taken as the
+window anybody had looked at rather than as the window the runs span.
+
+**It is not diff-caused, and there are now two independent proofs.** The narrow one:
+`c30aca0`'s delta from `9a7fc22` is `reviews/`-only; `9a7fc22` was **green** (run `33776069960`,
+attempt 1) and `c30aca0` is **red** — the same tree with a markdown file added. Independently, #108
+does not touch `runner::host` at all: `git diff --stat origin/master...eac412b -- src/runner/host.rs
+src/runner/host/` is empty. **The broad one, which supersedes both: it fires on `master`.**
+
+**One run settles what the varying role means.** Run `33777752620` is red on **both attempts at the
+identical commit**, naming `probe(claude-code)` on attempt 1 and `review` on attempt 2. A
+rerun-in-place that fails again with a different role is direct evidence that **any** role can lose —
+consistent with a race in the pre-exec `setpgid` path rather than with anything specific to a role.
+It is also the reason the unit of enumeration here is the **attempt**: the API reports that run as
+one failure, and it is two. Enumerating runs rather than attempts is how this row undercounted, and
+it is the same mechanism §8b of the packet rules describes for a red hidden behind a green — here
+hiding a red behind a red, which no rule had written down.
+
+**What is not established.** Whether this is a face of `W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM` is
+**open**. The signatures differ — that row kills the binary with a signal and reaches no summary;
+this one names one test, panics cleanly, and the binary prints its `test result:` line — and they
+are deliberately not merged on family resemblance. **The repair in PR #115 makes the question answer
+itself**: if this shape stops recurring on heads containing it, it was the same defect; if it recurs
+there, it is a different one. The test runs in every macOS job, so the evidence accrues whether or
+not anyone works on it. **Merging them now would destroy exactly the evidence that settles them.**
+
+**Not attributable to any packet.** M5, M1, M4, M3 and M6 have each shown a sighting, on different
+branches, and `master` has shown three. Each packet disclosed its own with its own evidence and none
+was asked to fix it.
+
+**Member of `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES`.**
+
+#### `PR107-WINDOWS-SETTLE-REPLAY-ALREADYSTARTED-FINGERPRINT`
+
+**Open as an unexplained observation, not classified as a flake or regression.**
+
+Two `engine::topology::settle` kill tests fail together on the Windows guest with a replay error:
+
+    engine::topology::settle::tests::kill_after_failed_settlement_rematerializes_question
+      panicked at src\engine\topology\settle\tests.rs:1764:56 — the log replays: AlreadyStarted
+    engine::topology::settle::tests::retained_generation_not_continued_after_kill
+      panicked at src\engine\topology\settle\tests.rs:1807:60 — the log replays: AlreadyStarted
+    test result: FAILED. 1760 passed; 2 failed; 35 ignored
+
+Run `33785587535`, attempt 1, job `100749444333`, `test (winguest)`, at `9963fb0` on PR #107.
+`upstroke-ci` concluded failure on the back of it.
+
+**It has its own ID, deliberately, and is NOT folded into
+`PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT`.** That row is a predicted-region trailing-slash
+mismatch — `src/aleph/` against `src/aleph`, `MalformedEntry { kind: "task_dispatched", key: 0 }`.
+This is `AlreadyStarted`: a replay seeing a start event when already started, an **event-ordering**
+failure rather than a path-derivation one. **The string `src/aleph` appears zero times in this job
+log**, checked in a local copy of it. Same module, same leg, same two tests, **different assertion**.
+Folding two distinct fingerprints into one record is how a class stops being countable.
+
+**What is established, and what is not.** Established: the same two tests, in the same file, on the
+same platform, fail nondeterministically with **two different replay errors** across three sightings
+on three branches. Not established: whether one mechanism produces both errors. Recording the shared
+surface without inventing the shared cause is the discipline here, and the temptation runs the
+opposite way from the usual — two observations that share a test look far more alike than two that
+share a platform.
+
+**Nondeterministic, established by the same head passing twice and failing once**, every run
+`attempt=1` so nothing is hidden inside a row:
+
+    33784774150  9963fb0  17:28Z  success
+    33785587535  9963fb0  17:36Z  FAILURE   <- this
+    33786611538  9963fb0  17:47Z  success
+
+The red run was started by a **body edit**, not a code change: all three are the same commit.
+
+**Not a regression from the PR #115 repair.** These are kill-path tests and #107's base was the
+first to carry #115, so it had to be checked rather than assumed. **A regression would be
+deterministic; this is not** — the identical tree passed, failed, and passed again.
+
+**A lead, recorded as a lead and asserted nowhere.** Both failing tests spawn subprocesses through
+the settle kill path, and #115 established that one stalled launch gate can refuse every waiter at
+once. **Whether that mechanism reaches this failure is untested**, and the evidence above does not go
+that far.
+
+**What would settle it.** The measurement named by `PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT`
+targets path-hint derivation, which `AlreadyStarted` does not touch. The wider question is whether
+these two tests build their event log deterministically on Windows at all.
+
+**Not rerun** — no licence covers this signature. Disclosed in PR #107's body with its own evidence
+and merged under the project owner's explicit direction that it is non-blocking, never as a flake.
+
+**Member of `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES`.**
+
+#### `PR107-LINUX-WORKSPACE-RESIDUE-EMPTY-GITDIR-FINGERPRINT`
+
+**Open as an unexplained observation, not classified as a flake or regression.**
+
+    thread 'workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered'
+      panicked at src/workspace_manager/tests.rs:5691:10:
+      forced removal converges: Git { message: "worktree registration
+        /tmp/upstroke-wm-sample-add-2519-123/repo/.git/worktrees/kalpha-g1 has an empty gitdir" }
+    test result: FAILED. 1806 passed; 1 failed; 35 ignored
+
+Run `33787330192`, attempt 1, job `100755588011`, `test (ubuntu-latest)`, at `9963fb0` on PR #107.
+
+**A third platform.** Its own ID rather than folded into either Windows row: different platform,
+different subsystem, different assertion. Nondeterministic — the same commit produced two green runs
+of this leg in the same hour.
+
+**Why this one is the cheapest of the four to chase**, recorded so the choice is not re-derived: it
+is the only member on the Linux leg, which is the platform this programme's build box can reproduce
+on directly. A repair for it needs no guest and no hosted macOS runner.
+
+**Cause unknown.** The registration path reaching `forced removal converges` with an empty gitdir is
+the same shape `remove_worktree` handles deliberately elsewhere — a killed `git worktree add` can
+leave an empty `commondir`, and `src/workspace_manager.rs:1249-1258` has an arm for exactly that —
+so whether the sampler is racing that arm or hitting a different empty-gitdir path is the question,
+and it is not answered here.
+
+**Member of `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES`.**
+
+#### `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES`
+
+**This row exists because the sightings were being disclosed as if each were isolated, and that is
+exactly the shape that let `W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM` reach four instances before
+anyone counted it.** Name the class, count it, and stop re-deriving it per packet.
+
+**Members, all observed 2026-09-03:**
+
+| member | platform | surface |
+|---|---|---|
+| `W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT` | macOS | `runner::host::tests::every_role_reaches_the_containment_points_of_this_platform`, the pre-exec process-group step |
+| `PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT` — already in §2 | Windows / winguest | two `engine::topology::settle` kill tests, predicted-region trailing slash |
+| `PR107-WINDOWS-SETTLE-REPLAY-ALREADYSTARTED-FINGERPRINT` | Windows / winguest | **the same two** settle tests, `the log replays: AlreadyStarted` |
+| `PR107-LINUX-WORKSPACE-RESIDUE-EMPTY-GITDIR-FINGERPRINT` | Linux / ubuntu | `workspace_manager` residue-and-kill test, empty gitdir |
+
+**Four members, four distinct fingerprints, three platforms, three subsystems.**
+
+**On the count, because it has already been stated wrongly.** An earlier statement of this class said
+*five* fingerprints and listed a fifth macOS member. That member was withdrawn: it is
+`W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM`, a pre-fix instance, and the discriminator section above
+records how it was misfiled. **The count here is derived from the members named in the table and
+nowhere else**, which is the property that matters — a class row whose count is arithmetic on a
+withdrawn member is the same defect it exists to prevent.
+
+**What is established.**
+
+- Every member is **intermittent**: in each case the identical commit produced both green and red
+  runs, and for three of the four the green and the red are named above.
+- Every member sits in a **subprocess kill, settle, or residue** path.
+- It spans **all three CI platforms**, so it is not one bad runner.
+- It is **not caused by any one packet**: E, M1, M2, M3, M4, M5 and M6 have each shown a member on
+  different branches; one member's red-then-red pair differs from its green by a markdown file; and
+  **the macOS member fires on `master` three times and is 33.4 hours older (UTC) than W2's base
+  commit `1cbdccd`**.
+
+**Every per-member count in the source records was an undercount, and re-deriving the population is
+what showed it.** The population is every failing `test` job of every CI run on `master` and the
+eight W1/W2 branches, **enumerated per attempt** and confirmed per job by a `... FAILED` line:
+
+| member | its own record said | the population says |
+|---|---|---|
+| `W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT` | two, then three, then four sightings | **twelve**, six branches, 2026-09-01 → 09-03, three on `master` |
+| `PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT` | one run, then a second sighting | **three** — a third at `27e905e` on `w2-m3-rundir`, run `33757851135` |
+| `PR107-WINDOWS-SETTLE-REPLAY-ALREADYSTARTED-FINGERPRINT` | one | **one**, confirmed |
+| `PR107-LINUX-WORKSPACE-RESIDUE-EMPTY-GITDIR-FINGERPRINT` | one | **one**, confirmed |
+
+**Three separate instrument failures produced the undercounts, and they compound.** Sightings were
+collected as packets reported them rather than by enumerating a population, so `master`'s were never
+in scope. The **run** was the unit rather than the **attempt**, so a rerun-in-place that failed again
+was counted once. And an entry that grew by addenda — "two instances", then "a third sighting" — was
+never re-totalled, so its prose and its own table disagreed. **A count maintained by addendum is not
+a measurement**, and that is the argument for this row rather than for four independent ones.
+
+**It is not the PR #115 repair.** M4's macOS failure at `c30aca0` **predates** #115 entirely — that
+branch had not base-merged it when the failure happened. A fix cannot cause a failure that occurred
+before it landed.
+
+**Two corrections that produced this row, recorded because the reasoning outlives the conclusion.** A
+branch-specific hypothesis was built on (a) *"the only failures in the last thirty runs are on one
+head"*, which was false — a run at `c30aca0` failed inside that window and the query missed it — and
+(b) a `readiness.rs` change as a candidate mechanism, when that change is a **doc comment only** and
+cannot alter runtime behaviour. **A sample was claimed to cover more than it did, and a diff was
+cited without being read.** Catching both is what turned a wrong branch-level accusation into a
+programme-level observation.
+
+**The lead, recorded as a hypothesis and asserted nowhere.** PR #115 established that a stalled
+launch gate can refuse every waiter at once, and every member sits in a path that spawns or reaps
+subprocesses. **Whether one launch-gate or reaper mechanism underlies the class is untested**, and
+the evidence does not reach it: #115's observed effect is macOS-specific, while three of the four
+members are Windows and Linux. This is the hypothesis to test next, not a finding to disclose in any
+pull-request body.
+
+**Why the class is worth a row of its own.** A merge queue cannot drain against failures at this
+rate — every packet that goes green re-rolls the dice on its next push, and every push is followed by
+one. That is an operational fact about the queue, not only a property of four tests, and it is
+invisible from inside any single packet's disclosure.
+
+**Disposition.** Open, cause unknown. Packets disclose their own sighting with its own evidence
+**and name this row**, so a reader sees the class rather than four unrelated traps. Repairing one
+member does not close this row.
+
+#### `W2-RETIRED-DECISIONS-PATHS-CITED-AND-MISSING`
+
+**What.** PR #116 retired the `decisions/` directory. Every citation of a file in it now names a
+path that does not exist — in documentation, in CI scripts, in configuration, and **in production
+source**.
+
+**Measured at `3af9696` over the tracked tree, by two engines that agree — and measured with this
+section excluded, which has to be said or the figure does not reproduce:**
+
+    $ git ls-files -z | xargs -0 /usr/bin/grep -ohP 'decisions/[A-Za-z0-9._-]+\.md' \
+        | sort | uniq -c | sort -rn
+    # 24 distinct paths, 168 occurrences; `decisions/` is not a directory in the tree
+
+**Run that command against the file you are reading and it returns 25 and 173, not 24 and 168.** The
+difference is this section: it names four dead paths as examples, five times between them, and one of
+those — `decisions/2026-09-01-clean-base-merge-keeps-review.md` — is cited nowhere else in the tree,
+so **recording the finding created a twenty-fifth dangling path.** The figures below are the
+repository's, taken with `reviews/FINDINGS.md` at `3af9696`; including this section the same command
+returns 25 / 25 / 173 across the same 53 files.
+
+| | |
+|---|---:|
+| distinct `decisions/*.md` paths cited | **24** |
+| of those, missing from the tree | **24** — all of them |
+| total citation occurrences | **168** |
+| files carrying at least one | **53** |
+
+By file type: 131 in `.md`, **26 in `.rs`**, 4 in `.toml`, 4 in `.yml`, 3 in `.sh`. The heaviest
+single path is `decisions/README.md` at 32 occurrences, then
+`decisions/2026-08-26-durable-retry-feedback.md` at 23 and
+`decisions/2026-08-12-merge-queue-execution-topology.md` at 22. The `.rs` citations are spread over
+twenty files including `src/engine/classify.rs`, `src/engine/topology/run.rs`,
+`src/topology/effects/sites.rs` and `src/topology/fold/check_attempt.rs`; `effects/allowlist.toml`
+and `upstroke.toml` carry two each.
+
+**No gate catches it.** `test-docs-consistency.sh` passes at `ac16fff`, at `ae2a58f` and at
+`3af9696`. Nothing in
+the repository resolves a cited repository path.
+
+**The rules themselves survive; it is the citations that died — and that distinction was verified
+rather than assumed.** The clean-base merge rule this programme relies on to retain reviews across
+base merge-ins lived in `decisions/2026-09-01-clean-base-merge-keeps-review.md`, which is gone; the
+rule is restated in `DESIGN.md` and `.github/pull_request_template.md`, so it is live. A rule cited
+to a deleted file is exactly the kind of authority that evaporates on inspection, so it was checked
+before being relied on.
+
+**This is a repository-scale instance of a class this programme met three times in one day at small
+scale**, and it is the **deletion** form of it: a change invalidates prose in files it does not
+touch, and **a deletion invalidates every reference to what it deleted, including references in code
+comments nobody thinks of as documentation.**
+
+**Why it is open.** Not any packet's to repair — a packet fixes the citations in its own body and no
+more. The repository-scale repair is its own change with its own review, and the durable fix is a
+gate that resolves cited repository paths; without one, the class recurs on the next directory
+retirement, which is how it arrived.
+
+**And that gate has a requirement this row can state precisely, because this row would be its first
+finding.** A naive path-resolving gate flags all five citations above — every one a *deliberate
+naming of a dead path*, which is what a finding about dead paths is made of. So the gate needs to
+distinguish a live reference from a mention, and the cheapest form that does not invite abuse is to
+exempt a path inside a fenced block or introduced as an example, rather than to exempt a file.
+**An unimplementable repair is not a disposition**, and "resolve every cited path" is unimplementable
+until that distinction exists.
+
+### The row that goes to §5 (Fixed), not §2
+
+#### `W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM`
+
+**What was observed, for a year of reading it wrongly compressed into a day.** On macOS CI the test
+binary died with `(signal: 15, SIGTERM: termination signal)` and no diagnostic, and the death landed
+on whichever tests were mid-flight — so the failure was attributed to innocent tests and read as a
+flake in a different subsystem each time.
+
+**Five instances, on four pull requests that touch none of the named subsystems.** Two of the five
+live only in attempt 1 of a rerun-in-place, which the conclusion query hides:
+
+| # | PR / head | run | what the log says |
+|---|---|---|---|
+| 1 | #97 `9807f48` | `33674393240` att. 1 | `kill_tree_settles_the_whole_unix_group_before_it_returns` asserted, `failures:` present, `1798 passed; 1 failed`, no `signal:` line — **an assertion flake, harness alive** |
+| 2 | #103 `4517caa` | `33691549623` att. 1 | `signal: 15`, a burst of `FAILED` inside milliseconds, 0 `failures:`, 0 `test result:`, 46 orphans — **harness self-kill** |
+| 3 | #104 `ae59f2d` | `33741105025` att. 1 | identical signature to (1) — **an assertion flake**, and it was misfiled as the same shape as (2) |
+| 4 | #108 `5b67179` | `33763282946` att. 1 | `signal: 15`, 0 `test result:`, 44 orphans, `engine::tests` in flight — **harness self-kill** |
+| 5 | #104 `94f8c27` | `33773356014` att. 1 | `signal: 15`, 0 `failures:`, 0 `test result:`, 28 named `FAILED` inside one second, 46 orphans — **harness self-kill** |
+
+**Instance 5 spent a day filed under a category of its own**, on the reasoning the discriminator
+section above records; it is folded back here, and the invented category is withdrawn.
+
+**The hypothesis this row carried for a day, and why it was wrong.** The observations were read as a
+**group kill** reaching the harness's own process group. It is refuted: no kill path in the tree
+signals a group that can include the harness — every group id is the pid of a child the tree itself
+made a leader — and cargo, in the same process group, survived both deaths and printed its error,
+which excludes group delivery outright. **The ID this row carried named that mechanism, and an ID
+that asserts a mechanism is a claim like any other.**
+
+**What actually happens.** The harness's own signal supervisor arms a **process-wide `SIGTERM`**
+when a freshly forked cleanup reaper has not said READY within 2 s and then does not acknowledge
+CANCEL within a further 2 s; the monitor thread re-raises it. Every `runner::container::exec::tests`
+fixture runs `git` through the host runner, and every host-runner spawn enters one process-wide
+launch gate, so a stalled launch froze the whole module for about five seconds and the arm refused
+every waiter in the same tick. **That is why a named burst with no summary is the signature**: each
+refused waiter panics fast and libtest prints its `FAILED` line, and the signal arrives before
+libtest reaches its summary. The tests that passed through the burst are exactly the ones that build
+no fixture.
+
+**Confidence, stated rather than implied**: self-kill through the supervisor, high; the
+READY-timeout site specifically, about 7 in 10; the Darwin cost behind the slow reaper — a per-fd
+`close` loop, FIFO-backed pipes, ten or more test threads on a documented 3-vCPU runner — about even,
+and unmeasured.
+
+**The counterfactual nobody can argue with.** #108's `1041e3d` — the identical fold module, the
+identical census repoints — was green on macOS with all eleven check-runs successful; the only delta
+to the SIGTERMed `5b67179` is **four comment lines**, and filtering that diff to non-comment lines
+yields zero. "Caused by the diff" is not sustainable in any form.
+
+**One repeated number that is not the lead it looks like.** 44 and 46 orphaned self-copies recurred
+across unrelated pull requests, which reads as a fixed number the kill tests spawn. It is not, and the
+control is a **green** run rather than an argument: run `33780942121` at `741364b` — the repair's own
+green run, `1800 passed; 0 failed` — reaps **54**, more than either red run, and so does instance 1,
+which is an assertion flake with the harness alive. They are the same adjacent-pid pairs throughout:
+fork-only guard-and-probe helpers that outlive their parent on Darwin, which ubuntu does not produce.
+**The red runs have fewer only because they died early.** The orphans are the population waiting on a
+frozen launch gate, not a signature — and a count that is *higher* on the green run is the reading
+that settles it.
+
+*Counts in this row were read from local copies of the job logs rather than taken from a report*, with
+`gh run view <run> --attempt 1 --job <id> --log` and a `grep -oP '\S+::\S+ \.\.\. FAILED'` for the
+named failures, because a bare `grep -c FAILED` also counts a test whose own name contains `T-FAILED`.
+
+**The fix.** PR #115, merged at `046f17d`, one file, three changes in the termination module:
+
+1. the READY-timeout path kills and reaps the late reaper and fails that launch with an ordinary
+   `Err` — no agent exists and no group is registered at that point, so there was nothing to fail
+   closed about;
+2. `Reaper::cancel` reads until `OK` or EOF instead of judging the first byte;
+3. **every arm site writes one async-signal-safe line to fd 2 naming itself**, so the next occurrence
+   is evidence rather than an absence.
+
+At `ae2a58f` — after M6 split `src/agent/proc.rs` — `arm_fail_closed_termination` is defined at
+`src/agent/proc.rs:2076` with five arm sites at `:1671`, `:2010`, `:2131`, `:2173` and `:2295`.
+
+**Guard.** `agent::proc::tests::a_late_reaper_fails_its_launch_without_arming_termination`
+(`src/agent/proc.rs:4635`), driven through the subprocess helper at `:4562`. **Mutation witnesses:
+reverting either behavioural change fails it.** The eight-command baseline was ALL 8 PASS at
+`741364b`, and CI run `33780942121` was green on every leg with macOS reporting `1800 passed; 0
+failed` in 169 s.
+
+**What one green run does and does not prove.** One green macOS run is consistent with the fix and
+with luck alike. **The evidence that counts is the shape staying absent, and the fd-2 line if it ever
+returns** — which is the third change's whole purpose, and the reason this row can be closed without
+closing the question.
+
+**Recurrence, stated so a later reviewer can use this row for what §5 is for.** A macOS death
+carrying `upstroke: fail-closed SIGTERM armed:` on fd 2 is a **recurrence of this row**. A macOS
+death without it is something new, and it should get its own ID rather than this one.
+
+**A false-green check, because a repair to a signal path invites the question.** The defect only
+turns green→red at the job level; it cannot produce a passing job from a failing tree.
+
+**Census.** The C-004 investigation put the macOS red rate over 2026-08-30 → 09-03 at **18 red
+`test` jobs of about 269**, of which two are this shape; the other sixteen are four timing signatures
+with `failures:` sections, and **they are not fixed by #115**. That census's artifacts are
+box-local and are cited here as the investigation's measurement rather than re-derived; the durable
+evidence for every instance above is its run id.
+
+### What this append deliberately does not carry
+
+**Two findings were withdrawn at source and neither has a row here. Both withdrawals are recorded
+rather than tidied away, because in each case the reasoning is the reusable part.**
+
+- **The `Corpus` scaffolding findings (three of them).** They were correct when written, against
+  test scaffolding PR #104's repair rounds built. **That scaffolding no longer exists**: owner ruling
+  7 reverted `src/validate.rs` to `origin/master` entirely and deleted every helper those rounds
+  added. The defects went with the code. They must not be re-derived from the review records, which
+  still discuss them — **text describing code that does not exist is the failure mode this whole
+  append is written against**, and it has bitten twice already: once in
+  `PR103-CONTAINER-SUBSTRATE-LIST-CHECKS-NAME-ONLY`'s withdrawn comparison to a list that never
+  landed, and once here.
+- **The macOS `runner::container::exec` module fingerprint.** It was never a distinct signature. It
+  is `W1-MACOS-PROC-LATE-REAPER-SELF-SIGTERM`, instance 5, and the discriminator section above
+  records both the misfiling and the two artefact-of-the-mechanism discriminators that produced it.
+  **A category invented for a residue propagates**: this one reached six working sessions, a merged
+  pull-request body, and a merge-gate count before it was caught, and a merged body cannot be
+  rewritten — so one disclosure in the repository's history names this instance under an ID that
+  does not exist. That is the cost of the error and it is recorded here because it is the only place
+  it now can be.
+
+**One finding is a member of this append's class row and is not added by it.**
+`PR104-WINDOWS-SETTLE-PATH-HINT-FINGERPRINT` landed in `1f30851` and reached `master` via `079a346`;
+it sits in §2 already, once. It is named as a member of
+`CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES` and nothing about it is edited here.
+**It has two further sightings, and they are new information recorded in the class row rather than in
+its own row**, since a landed row is not this append's to edit. Both carry the identical signature —
+the same two `engine::topology::settle` tests, the same `MalformedEntry { kind: "task_dispatched" }`,
+the same `src/aleph/` against `src/aleph` mismatch:
+
+- run `33781252888`, `test (winguest)` at `6d8cdda` on PR #106, `1761 passed; 2 failed; 35 ignored`;
+- run `33757851135`, `test (winguest)` at `27e905e` on PR #107 — **found by enumerating the
+  population rather than by anybody meeting it**, and recorded nowhere before this append.
+
+So that row describes **three** runs, not the one it was written for. **The row's own wording
+anticipated exactly this**: it says the rate is unmeasured and names the measurement that would
+settle it, rather than calling one run a flake. Further sightings do not change its disposition; they
+raise the priority of the measurement it names, and three sightings on three branches make it a
+member of the class row above rather than a property of any packet.
+
+**And one row already in §2 is not this append's, though four of these rows are instances of its
+shape.** `CLASS-GATE-STATED-DOMAIN-EXCEEDS-COUNTED-DOMAIN` landed with #106. The domain rows here
+cross-reference it; none of them restates it.
+## 44. PR #119 hooks.rs sweep (2026-09-03)
+
+Append-only. The §6/§7 sweep of `src/workspace_manager/hooks.rs` (PR #119) took three frontier
+passes: `a1b319c` (three findings), `6a13e1d` after the finding-2 repair (six findings), and
+`ac466e9` after the second repair and a base merge-in (six findings). Every verdict was
+`CHANGES_REQUIRED`, none P1. A fourth pass, on `43a9acd`, was the pull request's one allowed
+extra pass and returned `CHANGES_REQUIRED` with three unlabelled findings the coordinator classed
+P2; the head that repairs them is not re-reviewed and merges as a repair-only delta disclosed in
+the body and verified by the coordinator under the owner's delegation of 2026-09-04. The pass-1
+and pass-2 rows are `fixed` under the owner's direction
+of the time that a file's refinement pass fixes every finding, except the sweep queue, which
+PR #122 repairs. The pass-3 rows follow the owner's amendment 1 of 2026-09-04: on the sweep pull
+requests P1 and P2 findings are fixed and P3 and lower are recorded. The coordinator classed
+findings 1 and 3 P2, fixed in code; finding 2 is fixed by PR #122 through the base merge-in; and
+findings 4 to 6, body and ledger text, are corrected as text and recorded `fixed` with the docs
+commit. The macOS exit-budget observation this pull request also produced stays where it was
+filed, in §2 as `PR119-MACOS-PROC-SUSPEND-CONTINUE-EXIT-BUDGET`.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR119-SWEEP-QUEUE-STALE-AT-HEAD | P3 | a1b319c9090c2b26df96c3671798d4b154a9ee9a / standards/SWEEP.md:39 | the queue says split files are queued when their split merges -> the head still calls #106, #108 and #111 open while their merges are ancestors of it -> their child files and parents are absent from the queue -> a maintainer following it leaves their untouched §6/§7 sites under the activation-rule exemption | introduced_by_feature | docs-contract | ea25bc8 | repaired by PR #122, which updates the queue after the three sibling sweeps land so one branch edits the table at a time | deferred |
+| PR119-AFTER-REFUSAL-RATIONALE-OVERCLAIMS-DURABILITY | P3 | a1b319c9090c2b26df96c3671798d4b154a9ee9a / src/workspace_manager/hooks.rs:206 | the funnel doc justified `apply(After)?` by "the effect is durable" -> `verify_worktree` performs no effect -> Proceed at Before and Error at After on it -> the funnel refuses and nothing became durable, and `InjectionMode::ErrorReturn` promises only performed or partially performed | introduced_by_feature | docs-contract | f58747a | fixed at 6a13e1db68e4e1946455b92de10983b7c57596b7: the bullet states the mode's contract and what the caller acts on; `a_refusal_at_after_is_returned_after_the_primitive_ran` drives Proceed-then-Error on an effect-free primitive | fixed |
+| PR119-SCOPE-STATEMENT-OMITS-STACKED-FILES | P3 | a1b319c9090c2b26df96c3671798d4b154a9ee9a / AGENTS.md:1 | the body's scope and rollback named two paths -> the diff against master adds `AGENTS.md` and appends to `reviews/FINDINGS.md` -> reverting the merge reverts four paths | introduced_by_feature | docs-contract | ea25bc8 and 2a9e330 | documented guard: the body carries one list of the paths the diff touches and every scope and rollback statement uses it; recurred as `PR119-SCOPE-ACCOUNTING-CONTRADICTORY` below because the first correction left the rollback sentence unchanged | fixed |
+| PR119-LOCK-POISON-JUSTIFICATION-FALSE | P2 | 6a13e1db68e4e1946455b92de10983b7c57596b7 / src/workspace_manager/hooks.rs:144 | the `phase` doc said each hook call is one append and holders only append or read, and `phase` recovered a poisoned guard -> `HookHarness::hook` writes the open fast sequence, the reached points and the observed phases, and holders arm, disarm and open or close sequences -> a worker panics while holding the harness with a sequence open -> `phase` records the next hook into the abandoned sequence and the suite reads false coverage evidence | introduced_by_feature | correctness | f58747a | fixed at 5b8979b6cd54687b8f05f14ad1f022ed2a635f24: a poisoned harness answers `Injection::Error` and the funnel refuses; the §6/§10 paragraph names the state the lock protects; `a_poisoned_harness_refuses_rather_than_recording_into_it` poisons the harness from a thread that panics while holding it and was witnessed failing under silent recovery | fixed |
+| PR119-SWEEP-QUEUE-STALE-RECURRED | P3 | 6a13e1db68e4e1946455b92de10983b7c57596b7 / standards/SWEEP.md:39 | the queue is unchanged from the first pass -> the same four merged splits are still called open -> the pull request body said every finding was fixed while this row said deferred | introduced_by_feature | docs-contract | PR119-SWEEP-QUEUE-STALE-AT-HEAD | repaired by PR #122; the body now says exactly which finding is deferred and where it is being fixed | deferred |
+| PR119-CLONE-TEST-DOES-NOT-TEST-SHARING | P3 | 6a13e1db68e4e1946455b92de10983b7c57596b7 / src/workspace_manager/hooks.rs:449 | the test cloned the observer and dropped the clone at once, then read the harness while the original lived -> a `Clone` producing an independent harness and ledger passes it -> the §6 claim "cloning shares both" had no guard | introduced_by_feature | correctness | f58747a | fixed at 5b8979b6cd54687b8f05f14ad1f022ed2a635f24: `a_clone_shares_the_harness_and_the_ledger_and_the_harness_outlives_every_observer` records through the clone after the original is dropped, reads the original's ledger handle through the clone, and reads the harness after every observer is gone; witnessed failing under an independent-clone impl | fixed |
+| PR119-POINT-TEST-FIRST-WINS-UNPROVEN | P3 | 6a13e1db68e4e1946455b92de10983b7c57596b7 / src/workspace_manager/hooks.rs:261 | the test drove Proceed then one Error -> a `point` that lets the last non-Proceed answer win passes it -> an observer refusing at both modes would be reported at `/error-return` instead of the first declared `/kill` | introduced_by_feature | correctness | f58747a | fixed at 5b8979b6cd54687b8f05f14ad1f022ed2a635f24: `a_point_consults_every_mode_and_applies_the_refusal_at_the_mode_that_answered` refuses at both modes and asserts `/kill`; witnessed failing under the last-answer-wins mutation | fixed |
+| PR119-SCOPE-ACCOUNTING-CONTRADICTORY | P3 | 6a13e1db68e4e1946455b92de10983b7c57596b7 / AGENTS.md:1 | the body named four paths in one place and two in its rollback -> its ledger said Scope and Risk were corrected -> its evidence said the findings were in `reviews/FINDINGS.md` §43 to §45, which the head does not have | introduced_by_feature | docs-contract | PR119-SCOPE-STATEMENT-OMITS-STACKED-FILES | documented guard: one path list used everywhere the body describes scope or rollback, the §43 to §45 claim removed, and this section is where the findings are recorded | fixed |
+| PR119-MACOS-REACHABILITY-OVERCLAIM | P3 | 6a13e1db68e4e1946455b92de10983b7c57596b7 / reviews/FINDINGS.md:179 | the body and the §2 row said nothing in the diff can reach the macOS timing failure -> the diff adds seven tests to the same executable and can alter scheduling -> a pass and a failure at one SHA prove nondeterminism, not absence of a defect at that head | introduced_by_feature | docs-contract | 2a9e330 | documented guard: both now say the failing test is not one the diff touches, that one pass and one failure at one SHA show nondeterminism, and that the runner-load cause is fixed in PR #125 | fixed |
+| PR119-POISON-ANSWER-INVENTS-POINT-CONTRACT | P2 | ac466e9eb0259908252eb036a674853fcb211f8e / src/workspace_manager/hooks.rs:166 | a poisoned harness answered `Injection::Error` at every coordinate -> `candidate_commit_tree` passes `Before`, another holder panics while `git commit-tree` runs, the object is written -> `point(IdUnread)` is consulted at its `Kill` coordinate, the only mode it declares -> the funnel returns `Refused` naming `/kill` on a process still alive, inventing an error-return contract the design tables no recovery for, and the message reads as an injected fault rather than harness corruption | introduced_by_feature | correctness | 5b8979b6cd54687b8f05f14ad1f022ed2a635f24 | fixed at c26553658a7c9d6a8831b242de2d242bfa237698: the observer refuses wherever a refusal is legal (`Before`, `After`, a point consulted in `ErrorReturn` mode), proceeds without recording at a point whose only legal mode is `Kill`, remembers the poison through `poisoned`, and the refusal is worded "harness poisoned" through `refusal_cause` and `consult`; `a_harness_poisoned_mid_funnel_proceeds_at_a_kill_only_point_and_refuses_where_it_may` drives all three coordinates and was witnessed failing under `Error` at the `Kill` point and under the injected-fault wording | fixed |
+| PR119-AGENTS-MD-CONTRADICTS-BUILD-BOX-RULE | P3 | ac466e9eb0259908252eb036a674853fcb211f8e / AGENTS.md:48 | the stacked commit's `AGENTS.md` told a Codex session to run bare `cargo` commands and to set per-run target directories -> the box rule is `upstroke-build` and never a hand-set `CARGO_TARGET_DIR` -> two bare suites share the fixed container pre-clean key and one deletes the other's live containers | introduced_by_feature | docs-contract | ea25bc8 | fixed by PR #122 at 637b8ae7b56ae6fc0b9e515bbb222899ad3f7f24 (the mirror's four false sentences), merged as 20a23d08dfcedefabc1eb710b5bc6668f2f24a72; the merge-in 5296269749fe1140f5f79c69e38b177fc6382f4a makes this branch's `AGENTS.md` identical to master's, so it leaves the diff | fixed |
+| PR119-POISON-TEST-DOES-NOT-OBSERVE-HARNESS | P3 | ac466e9eb0259908252eb036a674853fcb211f8e / src/workspace_manager/hooks.rs:455 | the poison test asserted the refusal and the message and never read the harness -> a `phase` that recovers the guard, records into the abandoned sequence and then answers `Error` passes it -> the ledger's guard and witness claims were stronger than the test | introduced_by_feature | correctness | 5b8979b6cd54687b8f05f14ad1f022ed2a635f24 | fixed at c26553658a7c9d6a8831b242de2d242bfa237698: `a_poisoned_harness_refuses_rather_than_recording_into_it` asserts, on the harness itself, that the refused coordinate's count is unchanged, nothing executed, nothing was reached, and the fast sequence the poisoner left open has no site; witnessed failing under record-then-refuse | fixed |
+| PR119-BODY-BEHAVIOUR-CHANGE-UNDERSTATED | P3 | ac466e9eb0259908252eb036a674853fcb211f8e / src/workspace_manager/hooks.rs:166 | the body's Summary said poison recovery was kept, its Scope said poison refuses, and its Risk called the point message the one behaviour change -> poison at `Before` now prevents an operation that previously ran and at `After` turns a completed one into `Err` -> the stated risk analysis omitted a second substantive change | introduced_by_feature | docs-contract | 5b8979b6cd54687b8f05f14ad1f022ed2a635f24 | documented guard: one statement of both behaviour changes, used in the body's Summary, Scope and Risk alike, with what each means for a caller | fixed |
+| PR119-MACOS-ROW-CLAIMS-PR125-REPAIR | P3 | ac466e9eb0259908252eb036a674853fcb211f8e / reviews/FINDINGS.md:197 | the §2 row said PR #125 fixes the runner-load cause -> #125 changes only the startup `READY` waits, not the post-`SIGCONT` exit wait the failure is in -> the row also called one red and one green "not a defect in the head", which §12 says a pass and a failure at one SHA cannot show | introduced_by_feature | docs-contract | a68d16c7b24e0fd1a34bc51d33fd95e51033e8d8 | the §2 row is rewritten: the failure is the test's own exit budget on a loaded runner, nothing in this pull request or #125 addresses it, it is deferred with the row as its guard and the budget owed a load-tolerant fix, and it is nondeterministic on that runner with the cause not established | fixed |
+| PR119-LOCAL-DOCKER-FAILURE-MISATTRIBUTED | P3 | ac466e9eb0259908252eb036a674853fcb211f8e / src/runner/container/exec/tests.rs:5381 | the body blamed a local red on concurrent eight-command runs sharing container names -> the box's builds are slot-scoped and their container names carry the slot, so they cannot collide that way -> the failing test finds residue by fixed `/proc` markers, so one suite can mistake another suite's live process for residue, and the body neither named that mechanism nor stopped at "plausible" | introduced_by_feature | docs-contract | ac466e9eb0259908252eb036a674853fcb211f8e | documented guard: the body paragraph states the fixed-marker mechanism as the plausible one and not as established, and the later green run as showing only that it did not recur | fixed |
+| PR119-POISON-CAUSE-LOST-THROUGH-FORWARDING-WRAPPERS | P2 | 43a9acdcdc0227e2daa2d69f32d73bc68147fa84 / src/workspace_manager/hooks.rs:287 | `consult` asks `refusal_cause` on the outer trait object and the method was defaulted to `None` -> a wrapper that forwards `phase` and the ledger to an inner `HarnessEffects` but not the new method (`ArmedEffects` in `src/engine/topology/scaffold.rs:418` and `src/engine/topology/candidate/tests.rs`, `TracedEffects` in `src/engine/topology/recover/tests.rs`, `LedgerAtAdd` in `src/workspace_manager/tests.rs`) returns the inner `Error` with no cause -> the message says the funnel "was made to fail", the armed-fault wording the pull request promised never appears, and nothing forced the wrappers to be updated | introduced_by_feature | correctness | c26553658a7c9d6a8831b242de2d242bfa237698 | fixed at 0d09ca4df07728d55fcb637e2508cd4145aaf1d2: the default is removed so the compiler reaches every implementation, the four wrappers forward to their inner observer and the stateless doubles answer `None`; `a_forwarding_observer_reports_the_inner_poison_as_poison` poisons the inner harness and drives a funnel through a forwarding wrapper with no fault armed, and was witnessed failing under the wrapper answering `None` as the default did | fixed |
+| PR119-POISON-LATCH-IGNORED-AFTER-CLEAR-POISON | P2 | 43a9acdcdc0227e2daa2d69f32d73bc68147fa84 / src/workspace_manager/hooks.rs:221 | `phase` checks only the current `lock()` result and ignores the latched `poisoned` flag, while `harness()` exposes the raw mutex -> poison the harness with an open fast sequence, let the observer see it, call `Mutex::clear_poison` through the handle, call `phase` again -> the lock succeeds and `hook` records into the abandoned sequence while `poisoned()` still says true and the doc says nothing more is recorded | introduced_by_feature | correctness | c26553658a7c9d6a8831b242de2d242bfa237698 | fixed at 0d09ca4df07728d55fcb637e2508cd4145aaf1d2: `phase` consults the latch before the lock and answers as for poison whenever it is set, and `harness()`'s doc says the accessor does not reset the latch; `clearing_the_poison_does_not_reopen_recording` poisons with an open sequence, observes, clears, and asserts nothing recorded at `Before`, at a `Kill`-only point or at `After`, and was witnessed failing under the lock-only shape | fixed |
+
+
+## 45. PR #118 naming.rs sweep (2026-09-03)
+
+Append-only. The §6/§7 sweep of `src/workspace_manager/naming.rs` (row 3 of the
+`standards/SWEEP.md` review queue) went through four frontier passes (gpt-5.6-sol at
+max): six findings at `9f83b09`, five at `8d25472`, four at `cff812d`, five at `3482ba1`, none P1. The owner's direction for
+the file's refinement pass was that every finding is fixed; the one exception is the
+stale queue, which is another pull request's. Each row names its introducing commit
+and, when fixed, the fixing commit and the test that guards it. The third pass
+(four findings at `cff812d`) renamed two identifiers the second pass's rows cite; those rows
+say so in place, so every backticked guard resolves at the head.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR118-TEST-CLONES-A-SLOT-TO-KEEP-IT | P2 | 9f83b094d06c9b46c094c5ff847783d2dac1a52b / src/workspace_manager/naming.rs:339 | the round-trip test calls `slot.clone()` only so `slot` survives for the next assertion -> `Slot` owns a `String`, a non-trivial clone taken to satisfy ownership -> the body and the swept-table row say the file has no clone call, false at the head | introduced_by_feature | docs-contract | 51feba7 | a7b7c98: `every_slot_shape_survives_the_intent_name_round_trip` compares borrowed values | fixed |
+| PR118-RECORD-SCHEMA-PIN-TESTS-ONE-FIELD | P2 | 9f83b094d06c9b46c094c5ff847783d2dac1a52b / src/workspace_manager/naming.rs:447 | `the_intent_record_schema_is_pinned` drops `incarnation` only, then asserts no field has a default -> `#[serde(default)]` on `kind`, `slot` or `run_id` -> every assertion stays green while the missing field is silently accepted | introduced_by_feature | correctness | 51feba7 | a7b7c98: `the_intent_record_schema_is_pinned` derives the field list from the serialized record and drops each field on its own; the mutation was run per field and fails on each | fixed |
+| PR118-RECLAIM-REGRESSION-PINNED-AT-PARSER-ONLY | P2 | 9f83b094d06c9b46c094c5ff847783d2dac1a52b / src/workspace_manager.rs:855 | the destructive case composes through `intents()` and `reclaim_intents()` -> the witness asserts only that `from_intent_name` returns `None` -> create `tasks.kalpha-g3.intent` with its worktree, add `tasks.kalpha-g03.intent`, reclaim -> before the fix the legitimate slot is removed and `g03` survives; the head refuses first, and no test pins that | introduced_by_feature | crash-consistency | 51feba7 (the witness); the composition is 7a83e69's | a7b7c98: `reclaim_refuses_a_non_canonical_intent_name_before_removing_anything` in `src/workspace_manager/tests.rs`; with the round-trip guard removed it fails | fixed |
+| PR118-QUESTION-MARK-COUNT-WRONG-IN-DISPOSITION | P3 | 9f83b094d06c9b46c094c5ff847783d2dac1a52b / src/workspace_manager/naming.rs:242 | the disposition counts two `?` sites in `from_intent_name` -> the head has five, two `parse().ok()?` and a new `strip_prefix(..)?` among them -> the swept-table row records a §7 accounting that does not match the file | introduced_by_feature | docs-contract | 51feba7 | a7b7c98: the doc comment on `from_intent_name` dispositions all five and the `then_some` exit; 8d25472: the swept-table row | fixed |
+| PR118-SCOPE-STATEMENT-OMITS-STACKED-FILES | P3 | 9f83b094d06c9b46c094c5ff847783d2dac1a52b / AGENTS.md:1 | the body says the caller edit is the only change outside `naming.rs` and `SWEEP.md` -> the exact diff carries the stacked commit's `AGENTS.md` and queue section -> the Included scope does not match the diff | introduced_by_feature | docs-contract | ea25bc8 | the body's Scope section, corrected 2026-09-03, carries the exact diff stat at each head; the merge of PR #122 removes the stacked files from the diff | fixed |
+| PR118-TEST-USES-LOSSY-PATH-AS-IDENTITY | P3 | 9f83b094d06c9b46c094c5ff847783d2dac1a52b / src/workspace_manager/naming.rs:489 | the `component()` helper feeds `to_string_lossy()` into the expected intent filename -> a lossy string is an identity oracle, against §8 -> a non-UTF-8 fixture would compare replacement characters as equal | introduced_by_feature | portability | 51feba7 | a7b7c98: `component()` uses a checked `to_str()` and fails naming the premise | fixed |
+| PR118-R2-TEST-CLONES-KEYS | P2 | 8d2547234f27ce4d8a177e7c4b96f7e565ff3e6e / src/workspace_manager/naming.rs:495 | `the_intent_record_schema_is_pinned` takes `object().keys().cloned()` -> every key `String` is cloned to satisfy a borrow -> the swept-table row and the body say the file has no clone call, false at the head | introduced_by_feature | docs-contract | a7b7c98 | bc07f05: the map is consumed for its keys, `Slot::parts` borrows the snapshot name through a `Cow`, and the file has no `.clone()` or `.cloned()`; the swept-table row says so | fixed |
+| PR118-R2-SCHEMA-PIN-OVERCLAIMS | P2 | 8d2547234f27ce4d8a177e7c4b96f7e565ff3e6e / src/workspace_manager/naming.rs:469 | `#[serde(alias = "legacy_kind")]` on `kind` -> every assertion passes while `legacy_kind` is accepted; `kind: "bogus"` and `slot: "../../outside"` deserialize because every field is an unconstrained `String` -> "the schema is pinned" is wider than the evidence | introduced_by_feature | correctness | a7b7c98 | bc07f05: `the_intent_record_schema_is_pinned` reads the four names back and refuses each field under three other names; `kind` is `IntentKind` and `the_record_kind_is_one_of_three_words` refuses `bogus`; `slot` is `SlotId` (named `SlotPath` until the third pass) and `the_record_slot_is_refused_on_read_outside_its_grammar` refuses `..`, a leading `/`, a backslash and an empty component; both mutations were run and fail | fixed |
+| PR118-R2-RECORD-SLOT-VIA-LOSSY-PATH | P2 | 8d2547234f27ce4d8a177e7c4b96f7e565ff3e6e / src/workspace_manager.rs:810 | `IntentRecord::slot` is a `String` built by `to_string_lossy().replace('\\', "/")` -> an OS path is rendered lossily into a persisted record, against §8's path rule, and the exact-schema test freezes that -> no documented exception | pre_existing | portability | 7a83e69 (the write site); 51feba7 froze it | bc07f05: `Slot::id` (named `git_path` until the third pass) builds the record's `SlotId` from the validated parts and `write_intent` takes it; the third pass withdrew the exception claim, see PR118-R3-PATH-RULE-EXCEPTION-CLAIMED; `the_record_slot_id_mirrors_the_relative_path` | fixed |
+| PR118-R2-SWEEP-QUEUE-STALE | P2 | 8d2547234f27ce4d8a177e7c4b96f7e565ff3e6e / standards/SWEEP.md:39 | the queue says PR #107 is still open -> `ac16fff`, which merged it and added `src/rundir/*`, is an ancestor of the head -> following the table skips files whose split has merged | pre_existing | docs-contract | ea25bc8 | repaired by PR #122, whose `docs/sweep-queue` queues the `rundir` family; reaches this branch when #122 merges | deferred |
+| PR118-R2-BODY-CLAIMS-FALSE | P3 | 8d2547234f27ce4d8a177e7c4b96f7e565ff3e6e / .github/pull_request_template.md:1 | the body says no code moved after `9f83b09`, that the findings are in `reviews/FINDINGS.md`, and to revert two commits -> `a7b7c98` moved two Rust files, the file at `8d25472` holds none of the rows, and the diff has more than two commits after the base merge-in -> the body does not describe the exact head | introduced_by_feature | docs-contract | 8d25472 | the body rewritten 2026-09-03 with the full commit list, the exact rollback set and this section, which is in the diff | fixed |
+| PR118-R3-SERDE-INTO-CLONES | P2 | cff812de0b82c32667f482cc36f0ce51d142337c / src/workspace_manager/naming.rs:405 | `SlotPath` carries `#[serde(into = "String")]` -> the derived `Serialize` calls `Clone::clone` on the newtype before consuming it -> every `serde_json::to_vec(&record)` deep-copies the slot text, an ownership clone with no `.clone()` in the source, and the body and swept-table row say the file has no clone | introduced_by_feature | docs-contract | bc07f05 | ecddff8: `Serialize` for `SlotId` is written by hand from the borrow; no attribute or macro in the file expands to a clone; `the_intent_record_schema_is_pinned` still pins the bytes | fixed |
+| PR118-R3-PATH-RULE-EXCEPTION-CLAIMED | P2 | cff812de0b82c32667f482cc36f0ce51d142337c / src/workspace_manager/naming.rs:190 | `SlotPath(String)` and `format!("{namespace}/{component}")` represent and build a relative path as text -> §8 requires `Path`/`PathBuf` and forbids string concatenation, and §1 says a deviation needs a reviewed change to the standard -> a type doc comment declaring itself the exception establishes nothing | introduced_by_feature | docs-contract | bc07f05 | ecddff8: the field is `SlotId`, an identifier whose grammar mirrors the relative path; no code derives a filesystem path from its text, paths come from `Slot::relative`, and the doc claims no exception; `the_record_slot_id_mirrors_the_relative_path` | fixed |
+| PR118-R3-RECORD-ACCEPTS-INVALID-STATE | P2 | cff812de0b82c32667f482cc36f0ce51d142337c / src/workspace_manager/naming.rs:416 | `SlotPath::objection` checks a namespace word and one safe component -> `{"kind":"task","slot":"merge/s1",..}` and `{"kind":"task","slot":"tasks/k-g0",..}` deserialize -> a public type exists in a state no validated slot produces, against §5 and §8 | introduced_by_feature | correctness | bc07f05 | ecddff8: `SlotId::parse` goes through `Slot::from_parts`, `Slot::validate` and the canonical re-rendering, and `TryFrom<IntentRecordWire>` requires `kind` to agree with the slot; `the_record_refuses_a_kind_that_disagrees_with_its_slot` and `the_record_slot_is_refused_on_read_outside_its_grammar` carry both examples; both mutations were run and fail | fixed |
+| PR118-R3-NO-ALIAS-UNPINNED | P2 | cff812de0b82c32667f482cc36f0ce51d142337c / src/workspace_manager/naming.rs:469 | the test renames each field to three guessed spellings -> `#[serde(alias = "old_kind")]` on `kind`, or an alias on an `IntentKind` variant, leaves the bytes and every test unchanged while the alias is accepted -> "no aliases" is not pinned | introduced_by_feature | correctness | bc07f05 | ecddff8: the wire struct's and `IntentKind`'s `Deserialize` are hand-written against the literal `IntentRecord::FIELDS` and `IntentKind::WORDS`, so an attribute has nowhere to go; `the_reader_accepts_exactly_the_fields_a_record_writes` compares the list to a serialized record's keys and refuses a fourth word, a duplicate and an unknown key; both mutations were run and fail | fixed |
+| PR118-R4-RECORD-FIELDS-PUBLIC | P2 | 3482ba1cde7097856ca94731ee09270f1abc60e0 / src/workspace_manager/naming.rs:376 | deserialize a valid `staging` record -> assign `record.kind = IntentKind::Task` through the public field -> `Serialize` (derived) writes `kind: task` with `slot: merge/s1` -> reading those bytes back fails: the public type does not round-trip and can emit what its reader refuses, against §5's private-fields rule | introduced_by_feature | correctness | ecddff8 | 5a0ae59: the fields are private, `IntentRecord::new` takes the kind from a validated slot, accessors read; `a_record_round_trips_and_cannot_be_built_disagreeing` reads back and re-serializes every shape and refuses an invalid slot; the reviewer's sequence no longer compiles | fixed |
+| PR118-R4-READERS-REPEAT-LITERALS | P2 | 3482ba1cde7097856ca94731ee09270f1abc60e0 / src/workspace_manager/naming.rs:425 | `IntentRecord::FIELDS` and `IntentKind::WORDS` are advertised but the visitors match a second, hand-repeated list -> add `"old_kind" => WireField::Kind` or `"job" => IntentKind::Task` -> the lists are unchanged and every sampled test stays green while the reader accepts the alias | introduced_by_feature | correctness | ecddff8 | 5a0ae59: the wire reader accepts a key only by finding it in `FIELDS` zipped with `WireField::ALL`, and `IntentKind` is read only by matching `as_str` of `IntentKind::ALL`, from which `WORDS` is derived; witnesses, each run at the fixing commit: adding `old_kind` to the table fails `the_reader_accepts_exactly_the_fields_a_record_writes` (the serialized keys no longer equal `FIELDS`), and accepting `job` in the kind lookup fails the same test (its refused-word sample) | fixed |
+| PR118-R4-CLEAN-MERGE-CLAIM | P3 | 3482ba1cde7097856ca94731ee09270f1abc60e0 / .github/pull_request_template.md:1 | the body says master merges cleanly -> `git merge-tree 1dfb541 3482ba1 20a23d0` shows conflicts in `AGENTS.md` and `standards/SWEEP.md` -> the claim is false in the form the reviewer can check, and a resolved merge changes the head | introduced_by_feature | docs-contract | 3482ba1 (the body) | fixed as text: the body states that master `20a23d0` conflicts in those two files, that the base merge-in is sequenced after #119 by the coordinator and resolved by hand (`AGENTS.md` master's, `standards/SWEEP.md` master's tables with this row moved, `reviews/FINDINGS.md` master first then §45), and carries no clean-merge sentence; the merge-in is not done here | fixed |
+| PR118-R4-SCHEMA-WITHOUT-DESIGN-AUTHORITY | P2 | 3482ba1cde7097856ca94731ee09270f1abc60e0 / design/15_design_event_log_resume_run_layout.md:19 | the diff fixes the persisted intent record's exact fields, no-alias and tagging rules -> no design sentence states that contract, §15 only says synced intents exist -> a persisted-data behaviour change without its design change, a MUST-level docs-contract deviation | introduced_by_feature | docs-contract | 51feba7 | 5a0ae59: `design/15` carries a "Synced intents" paragraph stating the four fields, the words, the identifier grammar, and the refusals, as added sentences only (the sentences `src/export.rs` pins are untouched, and its tests pass); the type's doc cites it | fixed |
+| PR118-R4-STALE-CLAIMS | P3 | 3482ba1cde7097856ca94731ee09270f1abc60e0 / src/workspace_manager/naming.rs:665 | the body says "all eleven" for fifteen findings and "Serialize and Deserialize written by hand" for a type that derives both, names `SlotIdError` while the type is `SlotPathError`, and counts ten commits where the table has eleven; §45's preamble says two passes before describing the third; `SlotId::as_str` says "the path" -> each claim is false at the head | introduced_by_feature | docs-contract | bc07f05 | 5a0ae59: `SlotIdError` is the type and `SlotId::as_str` says identifier; this section's preamble counts four passes; the body counts twenty findings, says exactly what is derived and what is hand-written, and its rollback count matches its table | fixed |
+## 47. PR #126 object.rs sweep (2026-09-04)
+
+Append-only. The §6/§7 sweep of `src/workspace_manager/object.rs` (PR #126), row 4 of the review
+queue. These are the rows of the sweeping session's own line-by-line review at the base
+`809130d`, recorded before any frontier pass; the passes the coordinator launches append their
+rows below these. Under the owner's amendment 1 of 2026-09-04, P1 and P2 findings are fixed and
+P3 and lower are recorded: the one P2, the null id accepted on the new side of a create or
+compare-and-swap, is fixed at `af382fa` with the parent's variant, call sites and import moved
+with it; four P3 rows are fixed in the same commit because the sweep itself is their repair;
+two P3 rows are deferred to the parent's sweep, the queue's last row of this family, because the
+variant field and the parent's suite are where their repair lives.
+
+The first frontier pass, on `6a54b65` (gpt-5.6-sol at max, posted 2026-09-04T04:03Z), returned
+`CHANGES_REQUIRED` with four unlabelled findings, classed here under amendment 1: two P2, the
+refusal's missing design authority and a guard that never observed the public primitives, fixed
+at `6e7604e`; and two text findings, the stale `# Errors` contracts and a diagnostic that claimed
+more than was measured, corrected as text in the same commit and recorded `fixed`. The pass ran
+while master `f458cfc` was being merged in as `1df6828`; a base merge-in is not a code change, so
+its findings apply to the merged head as-is. On the coordinator's repair brief,
+`PR126-OBJECT-CAS-NULL-UNWITNESSED-IN-PARENT-SUITE` below is rewritten to `fixed`: the witness it
+deferred is what the pass required, and the third pass row names it as its prior. The `INV-17`
+name in the code this pull request introduced is replaced by a citation of `design/26` step 5;
+the parent's pre-existing citations of it, one of them in the `NullExpectedOld` message the
+parent's suite asserts on, are the parent's sweep's.
+
+The second frontier pass, on `def9320` (gpt-5.6-sol at max, posted 2026-09-04T04:45Z), was the
+pull request's one further pass and returned `CHANGES_REQUIRED` with six unlabelled findings
+and one evidence inconsistency, no P1. The coordinator classed findings 1, 2 and 4 P2 and 3, 5
+and 6 docs-contract text at P3 whose fixes are sentences; all six are fixed at `df494c8`
+and the inconsistency (the body said three P2 and one P3 for the first pass; the ledger says two
+and two) is corrected in the body. The repaired head is not re-reviewed: it merges as a
+repair-only delta disclosed in the body and verified by the coordinator under the owner's
+delegation of 2026-09-04.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR126-OBJECT-NEW-SIDE-ACCEPTS-NULL-ID | P2 | 809130d540a20ad01faa1c9e94d7acc2ab3f0359 / src/workspace_manager/object.rs:47 | the new side of create and compare-and-swap was gated only by `is_object_id`, which the null id satisfies -> a caller reaches `compare_and_swap_ref` or `create_ref_zero_old` with a value it never filled in -> git 2.43 reads a null new value as "must not exist afterwards": `update-ref --no-deref <ref> 0{40} <old>` exits 0 and deletes the ref, `update-ref --no-deref <ref> 0{40} ""` exits 0 and creates nothing -> the integration ref is deleted under a name that promises a swap, or a create reports success with no ref behind it; no production caller passes a null new value today, so latent | pre_existing | correctness | 7a83e69 | fixed at af382fa271d2dc1b856c57e756995b3010bfdc7a: `refuse_new` refuses malformed then null on the new side as `refuse_expected_old` does on its side, with `Refusal::NullNew` carrying the measurement; `a_new_value_is_a_well_formed_non_null_id_at_either_hash_length` drives both lengths and was witnessed failing under the null check removed and under the malformed check removed | fixed |
+| PR126-OBJECT-REFUSALS-FLATTEN-THE-VARIANT | P3 | 809130d540a20ad01faa1c9e94d7acc2ab3f0359 / src/workspace_manager/object.rs:55 | both refusals returned `UpstrokeError` and converted the `Refusal` into a message at the return site -> no caller and no test could match the variant -> the parent's suite matches the refusals by message substring, which its own `Refusal` doc names as the failure mode, and the file's one `?` propagated a flattened string | pre_existing | correctness | 7a83e69 | fixed at af382fa271d2dc1b856c57e756995b3010bfdc7a: both refusals return `Result<(), Refusal>` and the parent's `?` sites convert through its existing `From<Refusal>`; `a_malformed_id_is_refused_naming_the_ref_the_role_and_the_value_as_offered` and `an_expected_old_is_a_well_formed_non_null_id_at_either_hash_length` assert the variant and its fields, witnessed failing under `refname` and `value` swapped | fixed |
+| PR126-OBJECT-CONTRACT-UNTESTED-AT-THE-BOUNDARIES | P3 | 809130d540a20ad01faa1c9e94d7acc2ab3f0359 / src/workspace_manager/object.rs:32 | the file had no tests and the parent's suite drives the null expected-old through delete only and malformed values through create only -> nothing exercised the 64-length boundaries, a non-hex byte inside a well-formed length, the `expected-old` role or uppercase acceptance -> a predicate accepting lengths of 40 or more, or an alphabet of alphanumerics, passed the suite | pre_existing | correctness | 660e9e1 | fixed at af382fa271d2dc1b856c57e756995b3010bfdc7a: six tests in the file drive both predicates and the three refusals at both hash lengths, at lengths 0, 1, 39, 41, 63, 65 and 128, with a non-hex byte at the first and last position and a multibyte character inside forty bytes; `any_other_length_or_any_non_hex_byte_is_not_an_object_id` was witnessed failing under a length check of at least 40 and under an alphanumeric alphabet, `the_null_id_is_all_zeros_at_either_hash_length_and_nothing_else_is` under any digit counting as a zero, `a_full_hexadecimal_id_of_either_hash_length_is_an_object_id` under the SHA-256 length dropped | fixed |
+| PR126-OBJECT-HASH-LENGTHS-UNNAMED | P3 | 809130d540a20ad01faa1c9e94d7acc2ab3f0359 / src/workspace_manager/object.rs:33 | the match on the lengths 40 and 64 named neither hash -> a reader has to know that 40 is SHA-1 and 64 is SHA-256 and that the predicate is format-agnostic by design -> the doc said "either hash length" without saying which | pre_existing | docs-contract | 7a83e69 | fixed at af382fa271d2dc1b856c57e756995b3010bfdc7a: `SHA1_HEX_CHARS` and `SHA256_HEX_CHARS`, each documented with the hash it is and the statement that git, not this file, decides which format the repository uses | fixed |
+| PR126-OBJECT-MALFORMED-REFUSAL-UNDOCUMENTED | P3 | 809130d540a20ad01faa1c9e94d7acc2ab3f0359 / src/workspace_manager/object.rs:42 | `refuse_malformed_object_id` had no doc comment and no `# Errors` section while its sibling had both -> the `role` parameter's meaning and the fact that nothing has run when it refuses were unstated -> a caller had to read the body to learn what it can act on | pre_existing | docs-contract | 7a83e69 | fixed at af382fa271d2dc1b856c57e756995b3010bfdc7a: documented with `# Errors`, and private now that `refuse_new` and `refuse_expected_old` are its only callers; the effects wrappers row drops the name, as the census that derives the domain from the file requires | fixed |
+| PR126-OBJECT-CAS-NULL-UNWITNESSED-IN-PARENT-SUITE | P3 | 809130d540a20ad01faa1c9e94d7acc2ab3f0359 / src/workspace_manager/tests.rs:1678 | the parent's suite executes its null-old measurement and refusal through `delete_ref_expected_old` only -> the merge-queue CAS and the create shape are never driven against a null or malformed value on either side against a real repository -> the null-new measurement recorded in `Refusal::NullNew` is made on a scratch repository and not executed by a test | pre_existing | correctness | 660e9e1 | fixed at 6e7604e00391e1d09fa1d5a7f356a2d3078ca2b9 on the coordinator's repair brief after the first pass: `the_null_object_id_is_never_a_new_value_through_create_or_compare_and_swap` in the parent's suite drives `compare_and_swap_ref` and `create_ref_zero_old` with the null id of both lengths as the new value against a real repository, asserts the refusal and that the ref is unchanged, and executes the raw-git measurement as `the_null_object_id_is_never_an_expected_old_value` does for the old side; witnessed failing with `refuse_new` removed from the create and, separately, from the compare-and-swap | fixed |
+| PR126-REVIEW-NULL-NEW-HAS-NO-DESIGN-AUTHORITY | P2 | 6a54b658408ea4adab40963f4fc850a1b7597bd4 / src/workspace_manager.rs:227 | the new refusal cites INV-17, a packet invariant the file's pre-existing null-old refusal already cites, and no design file states the rule -> `design/26` step 5 specifies the compare-and-swap and says nothing about the null id -> a behaviour change with no living authority, against the sole-authority rule and §13 | introduced_by_feature | docs-contract | af382fa | fixed at 6e7604e00391e1d09fa1d5a7f356a2d3078ca2b9: `design/26_design_merge_queue_protocol.md` step 5 states that the engine's ref primitives take a full hexadecimal object id on both sides and refuse the null id on either before the mutating `update-ref`, and why; the `Refusal::NullNew` doc points at it | fixed |
+| PR126-REVIEW-ERRORS-CONTRACTS-STALE-AT-CHANGED-SITES | P3 | 6a54b658408ea4adab40963f4fc850a1b7597bd4 / src/workspace_manager.rs:1358 | `create_ref_zero_old` and `compare_and_swap_ref` now return `NullNew` as `UpstrokeError::Refused` and their `# Errors` omit it, as do `IntegrationRefs::create_zero_old` and `ensure_integration_ref` -> the body deferred the docs to the parent's sweep while claiming §13 was applied -> §13 is not transitional, so the deferral was invalid | introduced_by_feature | docs-contract | af382fa | fixed as text at 6e7604e00391e1d09fa1d5a7f356a2d3078ca2b9: the four `# Errors` sections name the object-id refusals for `new` and, on the compare-and-swap, for `old` | fixed |
+| PR126-REVIEW-NULL-NEW-GUARD-DOES-NOT-OBSERVE-THE-PRIMITIVES | P2 | 6a54b658408ea4adab40963f4fc850a1b7597bd4 / src/workspace_manager/object.rs:124 | the six new tests call the private helpers only -> `refuse_new` removed from either public primitive leaves the whole suite green -> ref at A, compare-and-swap with old A and new 0{40}, Git exits 0, the ref is deleted, the method reports success; the body's claim that the tests guard the fix was stronger than the tests | introduced_by_feature | correctness | PR126-OBJECT-CAS-NULL-UNWITNESSED-IN-PARENT-SUITE | fixed at 6e7604e00391e1d09fa1d5a7f356a2d3078ca2b9: `the_null_object_id_is_never_a_new_value_through_create_or_compare_and_swap` drives `compare_and_swap_ref` and `create_ref_zero_old` with the null id of both lengths against a real repository, asserts the refusal names its reason and that the ref is unchanged, and executes the raw-git measurement as `the_null_object_id_is_never_an_expected_old_value` does; witnessed failing with `refuse_new` removed from the create and, separately, from the compare-and-swap | fixed |
+| PR126-REVIEW-NULL-NEW-MESSAGE-OVERSTATES-THE-MEASUREMENT | P3 | 6a54b658408ea4adab40963f4fc850a1b7597bd4 / src/workspace_manager.rs:236 | the message said Git would delete the ref or create nothing while reporting success -> with a mismatched old value, or an existing ref on the create path, git 2.43 exits 128 and preserves the ref -> the diagnostic claimed more than the measurement | introduced_by_feature | docs-contract | af382fa | fixed as text at 6e7604e00391e1d09fa1d5a7f356a2d3078ca2b9: the message, the variant doc and the module doc of `src/workspace_manager/object.rs` qualify the delete with "when the expected old matches" and the empty create with "when the ref is absent", and say what a mismatch does | fixed |
+| PR126-REVIEW2-NULL-TESTS-INHERIT-THE-HASH-FORMAT | P2 | def9320639b28cf61965457c1bee768243ba3dbf / src/workspace_manager/tests.rs:1797 | the fixture's unqualified `git init` inherits `GIT_DEFAULT_HASH` -> the new null-new test and the pre-existing null-old test hard-code forty-zero raw `update-ref` operations -> under `GIT_DEFAULT_HASH=sha256` both fail at their raw call ("not a valid SHA1"), so the two-hash evidence held only in a SHA-1 environment, against §12's controlled-environment rule | introduced_by_feature | correctness | 6e7604e (the new test; the null-old test carried the same defect since 7a83e69) | fixed at df494c8d0acd8a643d4de17c95666af3c0c6e550: `Fixture::new` pins the object format to SHA-1 through `with_object_format`, `Fixture::created_sha256` is the other format, and `the_null_object_id_is_never_a_new_value_through_create_or_compare_and_swap` runs against both with the raw null id spelt at `fixture.head.len()`; the reviewer's command failed both tests before and passes both after; witnessed: with the pin dropped the null-old test fails again under that environment, and with the raw length fixed at forty the new test fails in the SHA-256 fixture | fixed |
+| PR126-REVIEW2-DESIGN-SENTENCE-CONFLATES-CAS-AND-DELETE | P2 | def9320639b28cf61965457c1bee768243ba3dbf / design/26_design_merge_queue_protocol.md:33 | the added design sentence said a null expected-old "deletes unconditionally" -> that is the `-d` form; on the compare-and-swap form against an existing ref git 2.43 exits 128 and preserves it, and against an absent ref it creates -> the sole design authority for the refusal was factually wrong | introduced_by_feature | docs-contract | 6e7604e | fixed at df494c8d0acd8a643d4de17c95666af3c0c6e550: the added sentences distinguish the compare-and-swap (fails on an existing ref, creates on an absent one), `update-ref -d` (deletes unconditionally) and the new side (deletes on a matching old, creates nothing on an absent ref), each measured on git 2.43 on this box; no pre-existing sentence touched | fixed |
+| PR126-REVIEW2-BEFORE-GIT-IS-ASKED-OVERSTATES | P3 | def9320639b28cf61965457c1bee768243ba3dbf / src/workspace_manager.rs:1372 | `refuse_symbolic` and `assert_publishable` invoke Git before `refuse_new` runs -> a symbolic ref with a null new value returns `SymbolicRef`, not `NullNew` -> "before Git is asked" in the design sentence, the test's doc and the body's Risk claimed more than the implementation | introduced_by_feature | docs-contract | 6e7604e | fixed as text at df494c8d0acd8a643d4de17c95666af3c0c6e550: `design/26`, the test's doc and the body say "before the mutating `update-ref`", and the test's doc says which reads precede it | fixed |
+| PR126-REVIEW2-DOUBLES-ACCEPT-NULL-NEW | P2 | def9320639b28cf61965457c1bee768243ba3dbf / src/engine/topology/create.rs:469 | `IntegrationRefs::create_zero_old`'s doc promised the refusal while both in-tree doubles stored any value, and `ensure_integration_ref` validated nothing -> `ensure_integration_ref` over an empty `FakeRefs` with a null base returned `Ok` and stored the forbidden value, and over `FakeRefs::at` the null id took the same-target `Ok` arm -> the contract widened into implementations that did not honour it | introduced_by_feature | correctness | 6e7604e | fixed at df494c8d0acd8a643d4de17c95666af3c0c6e550: `refuse_new` is crate-visible, `ensure_integration_ref` applies it before reading the ref so a ref already at the null id is not adopted, `FakeRefs` and `RecordingRefs` apply it in their `create_zero_old`; `ensure_integration_ref_refuses_a_null_base_whether_the_ref_is_absent_or_at_it` drives the reviewer's two sequences, `the_fake_refs_refuse_a_null_new_value_as_the_real_primitive_does` and `the_recording_refs_refuse_a_null_new_value_as_the_real_primitive_does` drive each double; witnessed failing with the guard removed from `ensure_integration_ref`, from `FakeRefs` and from `RecordingRefs`, one at a time | fixed |
+| PR126-REVIEW2-RECOVERY-WRAPPER-ERRORS-DOC-STALE | P3 | def9320639b28cf61965457c1bee768243ba3dbf / src/engine/topology/recover.rs:2122 | `ensure_recorded_integration_ref` forwards to `ensure_integration_ref` and its `# Errors` named neither the malformed nor the null-base refusal -> `CommitSha` does not validate the invariant, so an absent ref and a null recorded base reach the refusal through the real manager undocumented | introduced_by_feature | docs-contract | 6e7604e | fixed as text at df494c8d0acd8a643d4de17c95666af3c0c6e550: the `# Errors` section names both refusals and says `CommitSha` does not validate them | fixed |
+| PR126-REVIEW2-NULLNEW-SEMVER-UNASSESSED | P3 | def9320639b28cf61965457c1bee768243ba3dbf / src/workspace_manager.rs:101 | `Refusal` is public and not non-exhaustive, and the body called `NullNew` "a public item added" with no §5 SemVer assessment -> a downstream exhaustive match over `Refusal` fails to compile with a missing arm -> the risk statement was incomplete | introduced_by_feature | compatibility | af382fa | documented guard: the body's Risk carries the §5 assessment: `workspace_manager` and `Refusal` do not exist at `v0.1.0` (they arrived at 7a83e69 on 2026-08-22, after the tag), so no released API changes; inside the unreleased 0.2 line the variant breaks an exhaustive match compiled against a master snapshot, adapted by adding an arm or a wildcard, an intentional pre-0.2.0 break; marking the enum non-exhaustive is a larger contract change left to the parent's sweep | fixed |
+
+## 46. PR #120 containment.rs sweep (2026-09-03)
+
+The first §6/§7 sweep pull request (`standards/SWEEP.md` queue row 1). Two frontier passes by
+`gpt-5.6-sol` at `max`: the exact head `ee26cb42bbda4b2ca8bdef62e6143a46dfe74884` (verdict
+CHANGES_REQUIRED, five findings, no P1,
+https://github.com/eventloops/upstroke/pull/120#issuecomment-5532449708) and the repaired head
+`e4bf5dc18255392664603fa3873bc099a7c6d931` (verdict CHANGES_REQUIRED, six findings, one P1,
+https://github.com/eventloops/upstroke/pull/120#issuecomment-5533097443), plus two findings from
+the coordinating session's own read of the second head; and the head that repaired those,
+`41facd4d402270bd6e94976ae2f4257c2874f02e` (verdict CHANGES_REQUIRED, four findings, one P1,
+https://github.com/eventloops/upstroke/pull/120#issuecomment-5533554245). Owner direction for this file's
+refinement pass: every finding of the first two passes is fixed; from the third pass, by owner
+direction of 2026-09-03 after PR #122 merged, only the P1 was repaired at first; amendment 1 of
+2026-09-04 (P1 and P2 findings fixed, P3 and lower recorded) reinstated the two P2 repairs, and
+the P3 is deferred to the parent's sweep (`standards/SWEEP.md` queue row 11).
+A fourth pass on `d5cfbc34412f785534d7260ddf2d0147cd2b5d0c` (verdict CHANGES_REQUIRED, two P1, two P2, one P3,
+https://github.com/eventloops/upstroke/pull/120#issuecomment-5533982492) is dispositioned the same
+way: the P1s and P2s fixed, the P3 deferred.
+A fifth pass on `dd8befecb65d1f373669a49a4fe421591390d119` (verdict CHANGES_REQUIRED, one P1, three P2,
+https://github.com/eventloops/upstroke/pull/120#issuecomment-5534683780) is repaired as a class:
+every funnel primitive names the paths it acts through, as data, and one walk checks them all.
+A sixth pass on `62816dd4f3263e8dd252b009d3b0a6c999e5e9cc` (verdict CHANGES_REQUIRED, two P1, four P2, one P3,
+https://github.com/eventloops/upstroke/pull/120#issuecomment-5535146761) narrows that claim: the
+table is nine roles and no more, and Git's own repository-discovery paths are the parent's funnel
+design, deferred to its sweep; the coordinator declared the seventh pass final.
+The seventh pass on `206d34845185d075a93b87324fd67b6cef01d062` (verdict CHANGES_REQUIRED, four P2, one P3, no P1,
+https://github.com/eventloops/upstroke/pull/120#issuecomment-5535735474) is repaired forward at the
+head that merges: staging leftovers are reported and never deleted, the object lookups propagate a
+refusal, a run id is the canonical ULID, and the three text claims are corrected; that head merges
+as a disclosed repair-only delta verified by the coordinator under the owner's 2026-09-04
+delegation, not re-reviewed. The "First bad / prior ID" column names the introducing
+commit; the guard column names the fixing commit and the test that holds the repair.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR120-ABSOLUTE-RUN-ID-ALIASES-A-PEER-ROOT | P2 | ee26cb42bbda4b2ca8bdef62e6143a46dfe74884 / src/workspace_manager.rs:346 | `execution_root_of` joins an absolute `run_id` so it replaces the intended prefix -> `plain_chain_below` accepts the result whenever it lies at or below the private root, every component being `Normal` -> `derive(base, P, "/abs/P/workspaces/K/victim")` aliases a peer manager's root and `revalidate` treats the victim's worktree as this manager's slot -> `remove_worktree` deletes the victim's checkout; `run_id = "."` passes too because `components()` folds a non-leading `.` away | pre_existing | security-trust | 7a83e69 (`execution_root_of` and the walk); 2dd1350 narrowed but did not close it | fixed in e4bf5dc: `refuse_unplain_run_id` at `derive` refuses any run id that is not one plain component (`Refusal::RunId`) before a path is built; `a_run_id_that_is_not_one_plain_component_is_refused_before_any_path_is_built` | fixed |
+| PR120-REVALIDATE-SKIPS-THE-PRIVATE-ROOT-ANCHOR | P2 | ee26cb42bbda4b2ca8bdef62e6143a46dfe74884 / src/workspace_manager/containment.rs:142 | the walk sets `walked = anchor` and pushes the first child before the first `symlink_metadata` -> the private root `P` itself is never examined -> rename `P` and replace it with a symlink or junction to `O` -> `create_execution_root` revalidates `P/workspaces` through the link and `canonical_prefix` resolves under `O` with nothing to compare against -> `create_dir_all` builds the hierarchy under `O` | pre_existing | security-trust | 7a83e69 (the anchored walk) | fixed in e4bf5dc: `refuse_reparse_points` examines the anchor itself and pins its canonical form; `a_private_root_replaced_by_a_link_after_derive_refuses_every_revalidation`, `a_link_planted_above_the_private_root_after_derive_refuses_every_revalidation` | fixed |
+| PR120-NEW-TESTS-DISCARD-CLEANUP-ERRORS | P3 | ee26cb42bbda4b2ca8bdef62e6143a46dfe74884 / src/workspace_manager/tests.rs:1020 | three regression tests end with `let _ = fs::remove_dir_all(..)` -> a cleanup failure is unobserved, against §7 and §12's RAII temporary directories -> a leaked fixture on a shared runner is invisible to the suite | introduced_by_feature | docs-contract | 2dd1350 | fixed in e4bf5dc: the three tests take `rundir::scratch_tree::acquire`, whose `ScratchTree` drop reclaims the tree and reports a reclaim that failed; `canonical_prefix_propagates_a_resolution_failure_that_is_not_absence` | fixed |
+| PR120-DERIVE-ERRORS-DOC-OMITS-IO | P3 | ee26cb42bbda4b2ca8bdef62e6143a46dfe74884 / src/workspace_manager.rs:542 | the sweep introduces `canonicalize` I/O failures at `derive` -> the rewritten `# Errors` list names refusals and Git failure but not `UpstrokeError::Io` -> a caller reading the contract handles the wrong set; `canonical_prefix`'s relative terminal arm reports the original path while carrying an error produced on the shortened head | introduced_by_feature | docs-contract | 2dd1350 | fixed in e4bf5dc (the `# Errors` list) and c66fb77d3836b24dc41f2da99f58f18309ef30b8 (the relative arm is gone: a relative path anchors at the current directory); `canonical_prefix_anchors_a_relative_path_at_the_current_directory` | fixed |
+| PR120-REFUSAL-TEXT-CITES-A-RETIRED-AUTHORITY | P3 | ee26cb42bbda4b2ca8bdef62e6143a46dfe74884 / src/workspace_manager.rs:127 | the new `RootOutsidePrivateRoot` refusal text names `decisions.workspace_candidates.execution_root` -> the decisions directory was retired on 2026-09-03 and DESIGN §15 holds the exact-root contract -> an operator following the citation finds nothing | introduced_by_feature | docs-contract | 2dd1350 | fixed in e4bf5dc: the `RootOutsidePrivateRoot` and `RunId` texts cite DESIGN.md §15; `an_execution_root_with_no_plain_chain_below_the_private_root_refuses_before_any_effect` reads the text | fixed |
+| PR120-ANCHOR-CHECK-BYPASSED-BETWEEN-GATE-AND-EFFECT | P1 | e4bf5dc18255392664603fa3873bc099a7c6d931 / src/workspace_manager.rs:785 | `create_execution_root` calls `revalidate()` and then enters `funnel`, whose `Before` hook runs before the primitive -> a hook that renames the private root and plants a link in its place after the check and before `create_dir_all` -> revalidation, anchor check included, has already passed -> the hierarchy is created under the link's target; `a_registration_rebound_after_validation_keeps_its_admin_state` already drives that seam | pre_existing | security-trust | 7a83e69 (the gate-before-funnel shape); e4bf5dc's anchor check inherited it | fixed in c66fb77d3836b24dc41f2da99f58f18309ef30b8: `revalidate_chain` — base real, anchor still itself, chain plain and reparse-free — runs as the first statement of every funnel primitive, adjacent to the effect, while `revalidate` stays as the gate before the funnel; `a_private_root_exchanged_between_the_before_hook_and_the_effect_is_still_refused` | fixed |
+| PR120-REGULAR-FILE-ON-CHAIN-COLLAPSES-TO-NOTHING-TO-REMOVE | P2 | e4bf5dc18255392664603fa3873bc099a7c6d931 / src/workspace_manager.rs:829 | e4bf5dc lets `ENOTDIR` pass revalidation as absence -> plant a regular file at `<private>/workspaces` and call `remove_execution_root` -> `revalidate()` succeeds and `execution_root.exists()` folds the file into `false` -> `Ok(false)` with no error naming the path, where Unix used to stop with the walk's I/O error | introduced_by_feature | correctness | e4bf5dc | fixed in c66fb77d3836b24dc41f2da99f58f18309ef30b8: the walk reads each existing component's type and reports a regular file where it stands, as `NotADirectory` at its own path, on every platform; `a_regular_file_on_the_chain_is_reported_where_it_stands_and_never_as_nothing_to_remove` | fixed |
+| PR120-RELATIVE-PATH-SPELLINGS-DISAGREE | P2 | e4bf5dc18255392664603fa3873bc099a7c6d931 / src/workspace_manager/containment.rs:340 | `canonical_prefix("missing")` errors `NotFound` because its parent is empty while `"./missing"` peels to `.`, canonicalizes the current directory and succeeds -> public `quiescence("missing", ..)` fails as I/O while `quiescence("./missing", ..)` reaches `VerifyFailure::NotRegistered` -> two answers for one path | pre_existing | correctness | 7a83e69 (the raw return); e4bf5dc turned it into the error | fixed in c66fb77d3836b24dc41f2da99f58f18309ef30b8: an empty parent peels to `.`, the current-directory anchor, and rejoins; `canonical_prefix_anchors_a_relative_path_at_the_current_directory`, `canonical_prefix_resolves_an_existing_relative_prefix_and_rejoins_the_rest` | fixed |
+| PR120-ANCHOR-PIN-COLLAPSES-ABSENCE-INTO-IO | P3 | e4bf5dc18255392664603fa3873bc099a7c6d931 / src/workspace_manager/containment.rs:201 | `symlink_metadata` on the anchor succeeds -> the anchor vanishes -> the following `canonicalize` returns `NotFound` or `NotADirectory` and the catch-all `map_err` makes it `UpstrokeError::Io` -> against the adjacent contract that only failures other than absence do so | introduced_by_feature | correctness | e4bf5dc | fixed in c66fb77d3836b24dc41f2da99f58f18309ef30b8: the pin routes absence through `is_absent` to `Refusal::BaseIsNotADirectory`; the race itself cannot be staged from a test, and `an_absent_anchor_refuses_as_not_a_real_directory` drives the rule at the function's edge | fixed |
+| PR120-BODY-CONTRADICTS-THE-DIFF | P2 | e4bf5dc18255392664603fa3873bc099a7c6d931 / reviews/FINDINGS.md:1 | the body says the only parent edit is `RootOutsidePrivateRoot` and declares run-id validation out of scope -> the head adds `Refusal::RunId`, `refuse_unplain_run_id` and the early `derive` check -> the body claims six tests where the diff adds ten, lists four behaviour changes and omits both anchor repairs, and its rollback omits e4bf5dc -> the scope statement does not match the diff | introduced_by_feature | docs-contract | the body edit of 2026-09-03 that published e4bf5dc | fixed: the Scope, Summary, Risk and rollback sections were rewritten to the exact head on 2026-09-03 after c66fb77d3836b24dc41f2da99f58f18309ef30b8, naming every parent edit, the true test count, every behaviour change and every commit and path after the base merge-in; `validate-pr-body.sh` and `validate-pr-ledger-evidence.sh` pass against it | fixed |
+| PR120-RETIRED-AUTHORITY-STILL-CITED-AS-LIVING | P3 | e4bf5dc18255392664603fa3873bc099a7c6d931 / src/workspace_manager.rs:105 | the repaired path returns `Refusal::ReparsePointOnChain`, whose text says `decisions.workspace_candidates.execution_root` establishes the rule -> the swept module's doc at containment.rs:4 and around line 110 says that record requires and says the behaviour -> the record is absent at the head and is treated as living authority | pre_existing | docs-contract | 7a83e69 | fixed in c66fb77d3836b24dc41f2da99f58f18309ef30b8: the `ReparsePointOnChain` text and every sentence in `containment.rs` cite `DESIGN.md` §15, which gains the chain rule's one living sentence in `design/15_design_event_log_resume_run_layout.md`; the retired record is mentioned once, in the past tense | fixed |
+| PR120-UNREACHABLE-IN-THE-PEEL | P3 | e4bf5dc18255392664603fa3873bc099a7c6d931 / src/workspace_manager/containment.rs:379 | `canonical_prefix` carries `unreachable!("a head with a parent pops to it")` in production code -> §7 wants shapes that make the impossible branch impossible, and the file is swept to leave no panic -> the `pop()` false arm is the same terminal case as the empty parent | introduced_by_feature | correctness | e4bf5dc | fixed in c66fb77d3836b24dc41f2da99f58f18309ef30b8: the arm returns the terminal case's error naming the head, the in-place `pop` stays and no per-step parent clone returns; `canonical_prefix_anchors_a_relative_path_at_the_current_directory` drives the peel's tail | fixed |
+| PR120-RUN-ID-RULE-RESTATED | P3 | e4bf5dc18255392664603fa3873bc099a7c6d931 / src/workspace_manager.rs:387 | `refuse_unplain_run_id` restates `naming::safe_component`'s grammar with its own three messages -> PR #118 is reshaping `safe_component` into a `Result` with the same messages -> two statements of one rule can drift apart unnoticed | introduced_by_feature | docs-contract | e4bf5dc | fixed in c66fb77d3836b24dc41f2da99f58f18309ef30b8: the doc says it is `safe_component`'s rule for a run id and folds into one helper in the parent's sweep; `a_run_id_and_a_slot_component_are_refused_by_the_same_rule` holds the two to the same verdicts on the same inputs | fixed |
+| PR120-IN-FUNNEL-CHECK-STOPS-AT-THE-ROOT | P1 | 41facd4d402270bd6e94976ae2f4257c2874f02e / src/workspace_manager.rs:754 | `revalidate_chain` walks the chain only to the execution root -> a `Before` hook renames `<root>/intents` and plants a link to a victim directory holding `tasks.kalpha-g1.intent` -> the in-funnel check passes, the link being below the root -> `remove_file` follows the link in its parent and deletes the victim's file; `write_intent` and `add_worktree` write through a substituted `intents/` or `tasks/` the same way | introduced_by_feature | security-trust | c66fb77 (the check as first written); the parent-following removals are 7a83e69's | fixed in a01eecb and retained by f90935542720d76b2ffea43b08cdab1f104d99e8, which withdrew that commit's other repairs by owner direction: `revalidate_chain` takes the effect's own target and walks down to it, every primitive passing the deepest path it acts through; `an_intents_directory_exchanged_at_the_before_hook_refuses_the_intent_removal`, `an_intents_directory_exchanged_at_the_before_hook_refuses_the_intent_write`, `a_tasks_directory_exchanged_at_the_before_hook_refuses_the_worktree_add` | fixed |
+| PR120-CANONICAL-PREFIX-REJOINS-BELOW-A-FILE | P2 | 41facd4d402270bd6e94976ae2f4257c2874f02e / src/workspace_manager/containment.rs:40 | `is_absent` classes `NotADirectory` as absence for the peel -> `canonical_prefix(D/file/child)` fails `NotADirectory`, peels `child`, canonicalizes `D/file` and rejoins -> `Ok(D/file/child)`, a path the filesystem rejected, is compared for containment | introduced_by_feature | correctness | 2dd1350 | fixed in 61398c6706d093b3397c3d0e2f54f9fd01802e8e under amendment 1, reinstating a01eecb's repair that f909355 had withdrawn: a resolved prefix must be a directory while components remain below it, and is `NotADirectory` at that prefix otherwise, on every platform; `canonical_prefix_refuses_a_prefix_that_is_a_regular_file_with_components_below_it` | fixed |
+| PR120-ACTIVATED-PARENT-BODIES-NOT-SWEPT | P2 | 41facd4d402270bd6e94976ae2f4257c2874f02e / src/workspace_manager.rs:1103 | the change modifies eleven funnels, `derive`, `revalidate` and `revalidate_removal`, which activates §6 and §7 over their whole bodies -> `add_worktree` keeps `intent.is_file()`, folding every metadata failure into `AddWithoutIntent`, and `remove_execution_root` keeps `let _ = fs::remove_dir(..)` -> deferring them contradicts the activation rule as written, and the owner's direction now supersedes it for the sweep pull requests | pre_existing | correctness | 7a83e69 (the sites); c66fb77 activated them | fixed in 61398c6706d093b3397c3d0e2f54f9fd01802e8e under amendment 1, reinstating a01eecb's repair that f909355 had withdrawn: every `exists()`, `is_file()`, `is_ok_and` and `let _ =` in a modified body reads the metadata and decides absence from failure, the lossy slot text in `write_intent` is a checked conversion, and two clones leave `add_worktree` and `create_execution_root`; `an_intent_that_cannot_be_read_is_an_error_and_not_an_absent_intent`, `a_scaffolding_directory_that_cannot_be_removed_is_reported_not_swallowed` | fixed |
+| PR120-HOOKS-PATH-NEVER-REVALIDATED | P1 | d5cfbc34412f785534d7260ddf2d0147cd2b5d0c / src/workspace_manager.rs:1181 | every Git command runs with `core.hooksPath` at `<root>/hooks-none` and the in-funnel check walks only the effect's target -> a `Worktree.Add` `Before` hook replaces `hooks-none` with a link to an outside directory holding an executable `post-checkout` -> the inner check walks `tasks/<slot>` and passes -> `git worktree add` follows the link and executes the outside hook | pre_existing | security-trust | 7a83e69 (the hooks path was never walked); c66fb77's in-funnel check inherited it | fixed in be57a3341d666113455a085ef1a7aac7c2667d06: `revalidate_hooks_path` walks the chain from the private root down to `hooks-none` inside the Git runner, immediately before every command; `a_hooks_path_exchanged_at_the_before_hook_refuses_the_worktree_add_and_runs_no_hook` | fixed |
+| PR120-INTENT-STAGING-LEAF-FOLLOWS-A-PLANTED-LINK | P1 | d5cfbc34412f785534d7260ddf2d0147cd2b5d0c / src/workspace_manager.rs:2670 | `write_synced` stages through the fixed name `<intent>.tmp` opened with `File::create`, which follows a link -> plant `intents/<intent>.tmp -> /outside/victim` and call `write_intent` -> every check passes, `File::create` truncates and writes the victim, the link is renamed to the intent's name and the call returns success; §8 forbids a fixed staging name | pre_existing | security-trust | 7a83e69 | fixed in be57a3341d666113455a085ef1a7aac7c2667d06: a per-call unique staging name opened `create_new`, so a planted name refuses rather than being followed, and a refused attempt removes its staged file or names it in the error; `a_link_planted_at_the_old_staging_name_is_never_followed_by_the_intent_write`, `a_link_planted_at_the_intent_name_refuses_the_intent_write` (since ceec50f a link at the intent's name refuses like a link anywhere on an acted-through path) | fixed |
+| PR120-DURABLE-INTENT-CHECK-OUTSIDE-THE-FUNNEL | P2 | d5cfbc34412f785534d7260ddf2d0147cd2b5d0c / src/workspace_manager.rs:1163 | `add_worktree` checks the intent before the funnel and the `Before` hook, and rechecks only the worktree path inside -> a `Before` hook removes the intent -> the inner check passes and Git creates the worktree -> `intents()` returns no slot, so `reclaim_intents` never removes it | pre_existing | crash-consistency | 7a83e69 | fixed in be57a3341d666113455a085ef1a7aac7c2667d06: the metadata read moves inside the funnel after the hook, a read failure staying `UpstrokeError::Io`; `an_intent_removed_at_the_before_hook_refuses_the_worktree_add` asserts the refusal, no worktree, and that `intents()` and `reclaim_intents` agree | fixed |
+| PR120-MODE-BIT-TESTS-ASSUME-AN-UNPRIVILEGED-USER | P2 | d5cfbc34412f785534d7260ddf2d0147cd2b5d0c / src/workspace_manager/tests.rs:1527 | two Unix tests inject failure through mode bits -> root or a process with CAP_DAC_OVERRIDE reads through 000 and writes through 555 -> the scaffolding removal succeeds and deletes the root, `expect_err` panics, and `RestoreMode`'s drop panics again on the deleted path, aborting the process; `#[cfg(unix)]` does not establish the prerequisite | introduced_by_feature | correctness | 61398c6 | fixed in be57a3341d666113455a085ef1a7aac7c2667d06: after each chmod the test probes the operation the mode should refuse and fails with a diagnostic naming the prerequisite if it succeeded, and `RestoreMode` tolerates an absent path; `an_intent_that_cannot_be_read_is_an_error_and_not_an_absent_intent`, `a_scaffolding_directory_that_cannot_be_removed_is_reported_not_swallowed` | fixed |
+| PR120-REBOUND-ADMIN-DIRECTORY-FOLLOWED-INTO-A-VICTIM | P1 | dd8befecb65d1f373669a49a4fe421591390d119 / src/workspace_manager.rs:1415 | `remove_worktree` captures the registration's admin path before the `Before` hook and the inner check walks only the checkout -> the hook renames the admin directory and plants a link to an outside victim holding copied `gitdir` bytes and a `locked` file -> `registration_still_names` follows the link and accepts the copied identity -> `remove_file(admin/locked)` deletes the victim's file; the hostile link exists during the inner check, which never examines this acted-through path | pre_existing | security-trust | 7a83e69 (the admin path was never walked); c66fb77's in-funnel check and be57a33's hooks-path walk each left it open | fixed in ceec50f25bf9f0939e2307604ef1720ffab366ca as a class: `Primitive::acted_through` names every path each funnel primitive acts through and `revalidate_acted_through` walks the whole set with `symlink_metadata` on every component before the syscalls; `every_path_a_primitive_acts_through_refuses_a_link_planted_at_the_before_hook` (generated from the table, forty cases, count pinned; dropping `Registration` from `RemoveWorktree` fails it and the named test), `a_registration_admin_directory_exchanged_at_the_before_hook_refuses_the_worktree_removal` | fixed |
+| PR120-ADD-AUTHORISED-THROUGH-A-LINKED-INTENTS-DIRECTORY | P2 | dd8befecb65d1f373669a49a4fe421591390d119 / src/workspace_manager.rs:1161 | after `Before`, `add_worktree` revalidates only `tasks/<slot>` and reads the intent with `symlink_metadata` -> a hook replaces `intents/` with a link to an outside directory holding a same-named regular file -> the read follows the intermediate link and reports a regular file -> Git creates a worktree whose durable intent is outside the authorized root and in someone else's control, so `reclaim_intents` cannot discover it once it disappears | pre_existing | crash-consistency | be57a33 (the read moved inside the funnel without its chain); the parent-following read is 7a83e69's | fixed in ceec50f25bf9f0939e2307604ef1720ffab366ca as a class: `AddWorktree`'s acted-through set names `IntentsDirectory` and `IntentFile` and the walk covers both before the read; `an_intents_directory_exchanged_at_the_before_hook_refuses_the_worktree_add`, and the generated test's `AddWorktree` cases (dropping `IntentsDirectory` from its set fails the generated test by count) | fixed |
+| PR120-STAGING-NAME-NARROWS-VALID-SLOT-NAMES | P2 | dd8befecb65d1f373669a49a4fe421591390d119 / src/workspace_manager.rs:2708 | `safe_component` has no length bound and a 207-byte task key is valid -> its intent name is 224 bytes and the old staging name 221 -> the new `.<intent>.<ULID>.tmp` staging name is 256 bytes -> `create_new` fails `ENAMETOOLONG` on a `NAME_MAX=255` filesystem, an undisclosed regression | introduced_by_feature | compatibility | be57a33 | fixed in ceec50f25bf9f0939e2307604ef1720ffab366ca: the staging name is `.stage-<ULID>.tmp`, 37 bytes whatever the slot is called, stated on `write_intent`; `a_slot_name_at_the_old_maximum_still_lands_its_intent` | fixed |
+| PR120-STAGING-ORPHAN-POISONS-INTENT-RECOVERY | P2 | dd8befecb65d1f373669a49a4fe421591390d119 / src/workspace_manager.rs:1051 | a kill after the staging file is written and before the rename leaves `.<intent>.<ULID>.tmp` -> `intents()` treats every unrecognised name as an error -> `reclaim_intents()` cannot proceed, and a retry stages under another unique name that cannot consume the orphan -> the §8 staging protocol has no recovery rule | introduced_by_feature | crash-consistency | be57a33 | fixed in ceec50f25bf9f0939e2307604ef1720ffab366ca: a staging file is never an intent — `intents` ignores the `is_staging_name` shape and `reclaim_intents` removes it under the intent-removal site, a write interrupted before its rename having not been durable; the rule is on `write_intent` and in `containment.rs`; `a_staging_orphan_is_ignored_by_intents_and_removed_by_reclaim` | fixed |
+| PR120-HOOKS-PATH-NOT-PROVEN-EMPTY | P1 | 62816dd4f3263e8dd252b009d3b0a6c999e5e9cc / src/workspace_manager.rs:2454 | both checks prove `hooks-none` a real link-free directory and nothing more -> a `Worktree.Add` `Before` hook writes an executable `post-checkout` into the existing directory -> both checks pass -> `git worktree add` executes it; the hostile state exists before both checks | introduced_by_feature | security-trust | be57a33 (the runner's walk), ceec50f (the table's) | fixed in dcb0bddee749d12f1fa7d029cff93513ffbb0f78: `refuse_hooks_entries` reads the directory and refuses any entry as `Refusal::HooksPathNotEmpty`, at the Git runner and in the table's walk; `a_hook_written_into_hooks_none_at_the_before_hook_refuses_the_worktree_add_and_never_runs` | fixed |
+| PR120-CANONICAL-PREFIX-PEELS-PAST-A-DANGLING-LINK | P2 | 62816dd4f3263e8dd252b009d3b0a6c999e5e9cc / src/workspace_manager/containment.rs:435 | `canonicalize` answers `NotFound` for `/d/link/child` with `link -> /missing` -> the peel treats it as absence, peels `child` and then the existing `link`, canonicalizes `/d` and rejoins -> `/d/link/child` comes back unchanged, a path through a link that is there; a foreign registration at `/alias/tasks/foreign` with `/alias` pointing at a root not yet created compares as outside before creation and resolves inside after | introduced_by_feature | correctness | 2dd1350 (the peel); e4bf5dc narrowed absence to the two kinds without reading the component | fixed in dcb0bddee749d12f1fa7d029cff93513ffbb0f78: before peeling past a `NotFound`, the head is read with `symlink_metadata` and an existing link refuses as `ReparsePointOnChain`; `canonical_prefix_refuses_a_dangling_link_rather_than_peeling_past_it` | fixed |
+| PR120-STAGING-SHAPE-OWNS-WHAT-IT-CANNOT-PROVE | P2 | 62816dd4f3263e8dd252b009d3b0a6c999e5e9cc / src/workspace_manager.rs:3037 | `is_staging_name` accepts any name beginning `.stage-` and ending `.tmp` -> `intents/.stage-report.tmp` is hidden by `intents()` and durably deleted by reclaim -> cleanup infers ownership from a shared filename, against §8; the supplied test used a 24-character interior with an illegal `O` | introduced_by_feature | security-trust | ceec50f | fixed in dcb0bddee749d12f1fa7d029cff93513ffbb0f78: `staging_kind` accepts the exact shape only, `.stage-<kind>-<ULID>.tmp` with one of three kinds and twenty-six Crockford characters, and the orphan tests plant real ULIDs; `a_name_that_merely_resembles_a_staging_file_is_neither_hidden_nor_removed` | fixed |
+| PR120-ORPHAN-REMOVED-UNDER-THE-WRONG-SITE | P2 | 62816dd4f3263e8dd252b009d3b0a6c999e5e9cc / src/workspace_manager.rs:1325 | every orphan is removed as `WorktreeSite::RemoveIntent` -> a staging or snapshot intent write that crashed before its rename is reclaimed under R9 instead of `RemoveStagingIntent` (R10) or `SnapshotSite::RemoveIntent` (R24) -> the wrong hooks, fault row, adjacency and accounting fire; the generic name had discarded the kind | introduced_by_feature | correctness | ceec50f | fixed in dcb0bddee749d12f1fa7d029cff93513ffbb0f78: the staging name carries the kind and `reclaim_staging_orphans` removes each under the site of that kind; `a_staging_orphan_of_each_kind_is_removed_under_its_own_site` asserts the harness's recorded sites | fixed |
+| PR120-ROOT-REMOVAL-COLLAPSES-SUCCESS-INTO-FAILURE | P2 | 62816dd4f3263e8dd252b009d3b0a6c999e5e9cc / src/workspace_manager.rs:1137 | another remover deletes the empty root between `directory_is_empty` and the final `remove_dir` -> the `NotFound` is mapped to `UpstrokeError::Io` while the helper treats `NotFound` as empty -> a successful removal reports as a failure, and every new removal and write failure reads "failed to read" | introduced_by_feature | correctness | 61398c6 (the modified body); the Io text is 7a83e69's | fixed in dcb0bddee749d12f1fa7d029cff93513ffbb0f78: a `NotFound` from the final `remove_dir` is success, and the removals, creates, writes and renames this pull request added carry their operation in the new `UpstrokeError::Filesystem`, added to `src/error.rs` because no variant named an operation; `a_scaffolding_directory_that_cannot_be_removed_is_reported_not_swallowed` asserts the removal is named | fixed |
+| PR120-RECLAIM-DELETES-A-LEFTOVER-IT-CANNOT-PROVE-IT-OWNS | P2 | 206d34845185d075a93b87324fd67b6cef01d062 / src/workspace_manager.rs:3132 | `staging_kind` accepts any twenty-six Crockford characters while the generator (`src/ulid.rs:39`) emits only `0` to `7` first -> create `intents/.stage-task-<26 Zs>.tmp` -> `intents()` hides it and `reclaim_staging_orphans` durably deletes a file this writer provably never created, and even a canonical-looking name is no provenance -> `PR120-STAGING-SHAPE-OWNS-WHAT-IT-CANNOT-PROVE` stayed unfixed: cleanup inferring ownership from a shared filename, against §8 | introduced_by_feature | security-trust | ceec50f (the orphan removal); dcb0bdd narrowed the shape and kept the deletion; prior ID PR120-STAGING-SHAPE-OWNS-WHAT-IT-CANNOT-PROVE | fixed in 7f6af205c8e05c298efb71869b09af0af00152a2: this crate deletes no staging leftover; `reclaim_intents` returns `Reclaimed { slots, staging_leftovers }`, reporting every file of the exact shape (the ULID now canonical) and removing none, while `intents()` keeps ignoring the shape and a retried write stages beside it; the rule is stated on `write_intent`; `a_staging_orphan_is_ignored_by_intents_reported_by_reclaim_and_never_removed`, `a_staging_orphan_of_each_kind_is_reported_and_no_removal_site_fires` | fixed |
+| PR120-TABLE-OMITS-THE-ORPHAN-REMOVAL-TARGET | P2 | 206d34845185d075a93b87324fd67b6cef01d062 / src/workspace_manager.rs:517 | `ReclaimStagingOrphan` lists `IntentsDirectory` only while the primitive removes the captured orphan path -> enumeration captures `O`, the funnel's `Before` hook replaces `O` with another file or a link, revalidation walks the parent only -> `remove_file(O)` deletes the replacement instead of refusing; the generated test derives its cases from the table and cannot see the omission | introduced_by_feature | security-trust | ceec50f (the primitive); dcb0bdd (its table row) | fixed in 7f6af205c8e05c298efb71869b09af0af00152a2: the primitive and its row are removed together with the deletion itself, so there is no removal target to name; `every_primitive` stays exhaustive over the fourteen variants and the generated test pins 39 cases; `a_staging_orphan_of_each_kind_is_reported_and_no_removal_site_fires` asserts that no removal site fires for a leftover | fixed |
+| PR120-OBJECT-LOOKUPS-COLLAPSE-A-REFUSAL-INTO-ABSENCE | P2 | 206d34845185d075a93b87324fd67b6cef01d062 / src/workspace_manager.rs:2461 | `commit_parent` and `commit_tree_sha` call `git_ok(..).ok()` -> the gate's `revalidate()` passes, an entry appears in `hooks-none`, the per-command check refuses `HooksPathNotEmpty` -> `.ok()` discards it and both return `Ok(None)` -> candidate verification reports `ObjectMissing` for a refusal (`src/engine/topology/candidate.rs:1072`); error collapsed into absence, against §7 | pre_existing | correctness | 7a83e69 (the `.ok()` fold); be57a33 added the refusal it swallows | fixed in 7f6af205c8e05c298efb71869b09af0af00152a2 and e793de5c858f64879738ac47063112a88a1b54e6: `quiet_object_lookup` answers `None` only for Git's quiet "no such object" (exit status 1, nothing on stderr) and propagates a refusal, a spawn failure or a Git failure that speaks; the engine caller already used `?` and refused on `None`, so it is unchanged; `a_hook_planted_in_hooks_none_makes_the_object_lookups_refuse_rather_than_answer_none` drives the lookup as the second command of the sequence | fixed |
+| PR120-RUN-ID-CASE-VARIANT-ALIASES-A-PEER-ROOT | P2 | 206d34845185d075a93b87324fd67b6cef01d062 / src/workspace_manager.rs:409 | `refuse_unplain_run_id` accepts `RUN1` and `run1` alike while `DESIGN.md` §15 says "run-id = ULID" -> on a case-insensitive filesystem derive a victim as `RUN1` and a second manager as `run1`, both resolving to one root -> the victim's worktrees classify as the second manager's own slots by path shape alone (line 1046) -> the second manager removes the victim's slot | introduced_by_feature | security-trust | e4bf5dc (the plain-component rule) | fixed in 7f6af205c8e05c298efb71869b09af0af00152a2: only the canonical ULID as `crate::ulid::ulid` spells it is accepted (`is_canonical_ulid`: twenty-six uppercase Crockford base32 characters, the first `0` to `7`); every other spelling refuses as `Refusal::RunId` before a path is built, so the classification is unreachable through a non-canonical id; `a_run_id_is_the_canonical_ulid_and_a_case_variant_is_refused` | fixed |
+| PR120-STAGING-AND-HOOKS-DOCS-FALSE-AT-THE-HEAD | P3 | 206d34845185d075a93b87324fd67b6cef01d062 / src/workspace_manager.rs:1235 | `write_intent`'s doc says `.stage-<ULID>.tmp`, 37 bytes, while the implementation writes `.stage-<kind>-<ULID>.tmp`, up to 46 -> the body says the recovery rule is stated in `containment.rs`, where it does not appear -> "every Git command" is too broad: `read_only_git` invokes Git without the hooks-path check | introduced_by_feature | docs-contract | dcb0bdd (the kind in the name); be57a33 (the "every Git command" sentence) | fixed as text in 7f6af205c8e05c298efb71869b09af0af00152a2: `write_intent` states the exact shape, the 46-byte bound and the recovery rule, and the body says the rule lives there; `revalidate_hooks_path` names the exact set it guards (every command through `git` and `git_with_identity`) and why `read_only_git` and `read_only_git_ok` are outside it: no manager, no `core.hooksPath`, plumbing that invokes no hook | fixed |
+
+## 48. PR sweep of parsers.rs (2026-09-04)
+
+Append-only. The §6/§7 sweep of `src/workspace_manager/parsers.rs`, row 5 of the
+`standards/SWEEP.md` review queue, read line by line against `origin/master` `f458cfc`
+by one Claude Fable 5.1 session whose only subject was that file; the cleanup is `196f641`.
+The rows below are the sweep's own findings, every location at the base. Under the owner's
+rule for the sweep pull requests (2026-09-04: P1 and P2 findings fixed, P3 and lower recorded
+as deferred rows) a sweep's own findings are fixed where the fix is the file's to make and
+deferred where it is another queue row's; the two deferred here belong to the parent
+(`src/workspace_manager.rs`, row 11) and to `worktree.rs` (row 8). Frontier-pass rows are
+appended below these as the passes happen, with the pull request's number as their prefix.
+
+The first frontier pass, on `3ef06f2` (gpt-5.6-sol at max, posted 2026-09-04T05:16Z), returned
+five findings, every one labelled P2 by the reviewer; under the owner's rule all five are fixed,
+in `8cf2d90`. Between pass 1 and pass 2 the coordinator read `8cf2d90` and found two more, the
+`PR127-COORD-` rows: the relative join handed out a path with `..` in it, fixed in `59fc2c6`, and
+the body's refname claim had to be kept as narrow as the check, fixed as text. Neither is a
+frontier pass's finding. Each `fixed` row names the test that holds the repair and the mutation it
+was witnessed against on the box: for the pass-1 rows the fix reverted to its `3ef06f2` shape in
+the repaired tree, for the coordinator's row the `8cf2d90` tree itself and then the join restored.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| SWEEP-PARSERS-001 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:41 | `trim_ascii` trims both ends and the form feed -> a `gitdir` file holding ` /root/slot/.git` (leading space) or `/root/slot/.git` followed by a form feed, which Git 2.43.0 reads as a relative path and as a path whose name is not `.git` (measured with `git worktree list --porcelain`: `strbuf_rtrim` takes off trailing space, tab, CR and LF only), decodes here to the checkout `/root/slot` -> `registration_admin_for` matches that admin directory for the target and recovery acts on a registration Git does not associate with the checkout | pre_existing | correctness | — | `a_gitdir_is_trimmed_exactly_as_git_trims_it`; `trim_gitdir` takes off trailing space, tab, CR and LF and nothing else. Mutations: the leading trim restored, and the form feed added to the class, each fail that test on its named case | fixed |
+| SWEEP-PARSERS-002 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:124 | `.ok()` on `from_utf8` at lines 124 and 130 -> the `Utf8Error` and its `valid_up_to` are discarded -> the refusal says "cannot represent exactly" and not where -> an operator repairing a registration by hand is not told which byte to look at | pre_existing | docs-contract | — | `a_registration_that_is_not_utf8_is_refused_with_its_offset`, on the non-Unix legs: the Windows CI leg is its witness and no mutation of that arm can run on the box. `decode_path` returns the `Utf8Error` and the message carries the offset | fixed |
+| SWEEP-PARSERS-003 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:268 | `decode_git_path` on Windows is `from_utf8_lossy` -> a worktree path with bytes Git for Windows does not write but a hostile or corrupt output can carry decodes to a *different* path, `U+FFFD` where the bytes were -> the parent compares, canonicalises and hands that path to removal as identity (`worktree_record`, `record_for`, `revalidate`, `assert_publishable`), while `registration_checkout` refuses the same bytes at line 123 ("lossy path aliases are not registration identity", the suite's own words) | pre_existing | correctness | — | `a_worktree_path_that_is_not_utf8_is_refused_with_its_offset` on the non-Unix legs and `a_worktree_path_keeps_every_byte_on_unix`; one strict `decode_path` per platform family, and `parse_worktree_records` returns `Result` with its two callers propagating | fixed |
+| SWEEP-PARSERS-004 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:163 | the `-z` terminator is not required -> `A\0src/x`, a tail cut off before its NUL, is read as the complete record `src/x` -> the region is what the cut-off answer names, which the comment at line 171 says is refused as a truncated record | pre_existing | correctness | — | `changed_path_records_names_the_shape_it_refuses`, cases "a tail without its terminator" and "a second record without its terminator". Mutation: the terminator made optional fails the first case | fixed |
+| SWEEP-PARSERS-005 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:165 | the empty-field filter re-aligns the records -> `A\0\0src/x\0` becomes the path `src/x`, a lone NUL becomes an empty diff and `A\0src/a\0\0` a well-formed one -> an answer outside the grammar is admitted as a plausible shorter list, the direction the doc comment says this decoder refuses | pre_existing | correctness | — | the same test, cases "a path that is nothing but a delimiter", "an empty path field" and "a doubled terminator". Mutation: the filter restored fails the first case | fixed |
+| SWEEP-PARSERS-006 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:178 | `Err(_)` and the two `return PathSet::RepoWide` at lines 168 and 174 drop each refusal's reason at its source -> the suite's hostile-shape test asserts only `is_repo_wide()` -> a shape refused for the wrong reason (a rename score that is not a number refused as a truncated record, say) passes every test | pre_existing | docs-contract | — | `NameStatusError` names the field at the source and `decode_changed_paths` is the one fold, spelling every variant; `changed_path_records_names_the_shape_it_refuses` asserts the variant per shape, sixteen shapes. Mutations: the fold to an empty `Prefixes`, `Truncated` with a constant record index, and a rename accepted without a score each fail it on its named case | fixed |
+| SWEEP-PARSERS-009 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:254 | `parse_worktree_records` flushes an unclosed final record, accepts bytes without a terminator and skips an attribute before any record -> a list cut short after `HEAD` is read as a complete record without the `locked` line -> the parent and `residue.rs`, which tell a registered-but-unpopulated worktree by the word `initializing` in that line, read it as populated | pre_existing | correctness | — | `a_worktree_list_cut_short_is_refused_not_read_as_complete`, four shapes. Mutations: the flush restored, the terminator made optional, and the orphan attribute skipped each fail it on its named case | fixed |
+| SWEEP-PARSERS-010 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:239 | `trim_end` on a NUL-terminated attribute -> a lock reason's trailing whitespace is removed, where under `-z` Git emits the reason verbatim (measured: Git trims its own `locked` file, so the field carries what was written minus Git's trim) -> a line-oriented trim in a grammar that has no lines | pre_existing | docs-contract | — | `worktree_records_are_read_from_the_porcelain_grammar` pins a lock reason with an embedded newline and a trailing space verbatim. Mutation: the trim restored fails it | fixed |
+| SWEEP-PARSERS-011 | P3 | f458cfc6d4470970744c3950f20a5a108ac0d1fe / src/workspace_manager/parsers.rs:196 | the review question of record: `?` on `Option` in `status_endpoints` -> `None` for an empty field -> the only caller reads `None` as "not a status field" and, since this sweep, refuses an empty field by name before asking; no absence becomes failure silently, and the function stays total over every slice | pre_existing | docs-contract | — | the comment at the site; `changed_path_records_names_the_shape_it_refuses` pins the empty-field refusal | rejected |
+| PR127-WORKTREE-FRAMING-CLOSES-A-RECORD-AT-THE-NEXT-HEADER | P2 | 3ef06f2272d023d991a8414f8370d8aa5b4f96c2 / src/workspace_manager/parsers.rs:361 | `parse_worktree_records` closes the open record when the next `worktree` field arrives, and at line 345 accepts an empty successful answer -> `worktree /slot\0HEAD abc\0worktree /next\0HEAD def\0\0` reads as two records with no separator between them -> a list whose `locked initializing\0\0` is cut off before the next header gives the first record `locked: None`, and `residue.rs:203` classifies an interrupted add as populated; an empty answer lets `assert_publishable` see no checked-out branch -> the body's "read exactly" and cut-short claims were stronger than the head | pre_existing | correctness | — (the header close and the empty answer are the base's, f458cfc:212) | fixed in 8cf2d907db43402906f970b90476315e2cd1f3aa: a record ends only at the empty attribute; a `worktree` header while a record is open, an empty answer (Git lists at least the repository's own worktree), a separator with nothing open and an empty path each refuse by record number. `a_worktree_list_cut_short_is_refused_not_read_as_complete` ("two records without the separator between them") and `worktree_records_are_read_from_the_porcelain_grammar` ("Git never lists nothing"). Mutations: the header closing the record fails the first on that case; the empty answer accepted fails the second | fixed |
+| PR127-STRUCTURAL-ATTRIBUTES-KEEP-FORBIDDEN-WHITESPACE | P2 | 3ef06f2272d023d991a8414f8370d8aa5b4f96c2 / src/workspace_manager/parsers.rs:392 | the sweep removed `trim_end` for every attribute, so whitespace is kept in `HEAD` and `branch` too -> `branch refs/heads/main ` is accepted with its space, which no refname holds -> `assert_publishable` (workspace_manager.rs:1404 at the reviewed head) does not recognise `refs/heads/main` as checked out and permits its compare-and-swap -> an under-refusal outside the lock-reason fix, against the body's "all in the refusing direction" | introduced_by_feature | correctness | 196f641 (the trim removed for every attribute) | fixed in 8cf2d907db43402906f970b90476315e2cd1f3aa: the structural attributes are held to their own grammars, `HEAD` forty or sixty-four hexadecimal digits (`is_object_id`), `branch` a refname's byte set (`can_be_refname`: no control byte, space, DEL or `~^:?*[\`; the `..`, `@{` and `.lock` clauses of `git check-ref-format` are not applied, and the doc says so), `detached` and `bare` carrying no value, none appearing twice; `locked` and `prunable` reasons stay verbatim, and so does the path, of which a space is a legal byte under `-z`. `structural_attributes_refuse_what_their_grammars_forbid`. Mutations: `can_be_refname` reduced to non-empty fails it on "a branch with a trailing space"; `is_object_id` reduced to non-empty on "a HEAD with a trailing space" | fixed |
+| PR127-RELATIVE-REGISTRATIONS-STRAND-REMOVAL | P2 | 3ef06f2272d023d991a8414f8370d8aa5b4f96c2 / src/workspace_manager/parsers.rs:112 | Git 2.48's `worktree.useRelativePaths=true` makes `worktree add` write a relative `gitdir`; the manager's add passes no override (workspace_manager.rs:951) and `registration_checkout` refuses every relative path -> the add succeeds and the removal revalidation (workspace_manager.rs:1211), which scans every registration, refuses -> one relative registration, this manager's or a foreign one, strands every managed removal and its intent -> the body's "every file Git writes is unaffected" was too strong | pre_existing | correctness | — (the base refused `..` in every registration, f458cfc:87; the README's Git floor is 2.40) | fixed in 8cf2d907db43402906f970b90476315e2cd1f3aa and 59fc2c6538f8074b8f0d0e639630a70d226275fe: a relative registration is joined to the directory holding the `gitdir` file, as Git's `get_linked_worktree` does before realpath, resolved lexically, and then held to the same containment check as an absolute one; `--no-relative-paths` is not passed, since Git 2.40 has no such flag. `a_relative_registration_is_resolved_against_its_registration_directory`, and in `tests.rs` `a_relative_registration_still_binds_its_checkout` against a real repository (a relative registration binds its slot; one resolving to a foreign directory inside the root refuses). Mutation: every registration treated as absolute fails both, and `a_gitdir_is_trimmed_exactly_as_git_trims_it` on its leading-space case | fixed |
+| PR127-RECORD-FOR-COLLAPSES-A-GIT-FAILURE-INTO-ABSENCE | P2 | 3ef06f2272d023d991a8414f8370d8aa5b4f96c2 / src/workspace_manager.rs:2382 | `record_for`, its whole body activated by this pull request's edit under `standards/SWEEP.md`, returns `Ok(None)` for every non-zero `git worktree list` -> the zero-length `commondir` an interrupted add leaves (documented at workspace_manager.rs:2048) makes the enumeration fail -> the residue classifier (`residue.rs:203` and `:327`) reads "not registered" and misses the registered-unpopulated worktree, a subprocess failure read as absence against §7 | pre_existing | correctness | — (the `Ok(None)` is the base's; 196f641 activated the body) | fixed in 8cf2d907db43402906f970b90476315e2cd1f3aa: `read_only_git_ok` propagates the failure carrying Git's stderr, and absence is only the parsed list not naming the worktree; the classifier's two call sites already used `?` and now propagate. `a_failed_worktree_list_is_an_error_not_an_absent_registration`: a zero-length `commondir` makes `record_for` and `classify_object_residue` return `Err`. Mutation: the `Ok(None)` restored fails it ("Git could not enumerate: None") | fixed |
+| PR127-CHANGED-PATH-ALIASES-BECOME-NARROW-LEASES | P2 | 3ef06f2272d023d991a8414f8370d8aa5b4f96c2 / src/workspace_manager/parsers.rs:247 | `changed_path_records` checks a path for UTF-8 and non-emptiness only -> `M\0src/./shared.rs\0` becomes the narrow `GitPath("src/./shared.rs")` -> the lease comparator (`topology/leases.rs:99`) compares components literally, `.` is not `shared.rs`, and two owners of one normalised repository path run at once, against the parser's own claim that unsafe input is repo-wide | pre_existing | correctness | — (the base's `decode_changed_paths` admitted the same bytes) | fixed in 8cf2d907db43402906f970b90476315e2cd1f3aa: `is_normalised_repository_path` requires no backslash and no empty, `.` or `..` component, which also refuses an absolute path, a trailing separator and a doubled one; anything else is `NameStatusError::UnsafePath`, and `decode_changed_paths` folds it repo-wide, the parser's stated answer for unsafe input. `a_changed_path_that_is_not_one_normalised_path_is_repo_wide`, seven aliases and a plain path that stays narrow. Mutation: the check reduced to non-empty fails it on "a `.` component" | fixed |
+| PR127-COORD-RELATIVE-JOIN-HANDS-OUT-PARENTDIR | P2 | 8cf2d907db43402906f970b90476315e2cd1f3aa / src/workspace_manager/parsers.rs:144 | the relative branch returns `admin.join(recorded)` and the normalisation guard allows `..` there, while `components().collect()` resolves nothing -> a registration of `../../../victim/.git` is handed out as `/repository/.git/worktrees/example/../../../victim` -> both callers pass it through `canonical_prefix`, which peels past an absent prefix and rejoins the remainder textually, so when the checkout does not exist the `..` survives into `is_at_or_inside` and the identity comparison, which compare components literally: the class of finding 5 above and of PR #120's dangling-prefix row | introduced_by_feature | correctness | 8cf2d90 (the join) | fixed in 59fc2c6538f8074b8f0d0e639630a70d226275fe: `resolve_relative` pops one component per `..` and refuses by name a path that would climb above the filesystem root, so the value handed out is always one normalised absolute path and no caller has to canonicalise it; a relative path not normalised in itself refuses too, and the `..` guard now applies to both branches. The coordinator's brief said to refuse a climb above the registration directory; a relative `gitdir` Git writes always climbs above it (`../../../../<checkout>/.git` from `.git/worktrees/<id>/`), so that bound would refuse the form finding 3 admits, and escape from the execution root stays the parent's containment check, now over a normalised value. `a_relative_registration_is_resolved_against_its_registration_directory` (the value has no `..`; four `..` from a four-deep registration reach the root exactly, five refuse by name) and, in `tests.rs`, `a_relative_registration_still_binds_its_checkout`, whose new case writes a registration that climbs above the root to an absent checkout and requires `revalidate_removal` to refuse by name. Witnessed against 8cf2d90: that case fails there with `None`, the absent checkout read as "not this registration"; the join restored in the repaired tree fails the parsers test and the `tests.rs` test | fixed |
+| PR127-COORD-REFNAME-CLAIM-WIDER-THAN-THE-CHECK | P3 | 8cf2d907db43402906f970b90476315e2cd1f3aa / src/workspace_manager/parsers.rs:396 | `can_be_refname` applies the byte-set clauses of `git check-ref-format` and its doc says the `..`, `@{` and `.lock` clauses are not applied -> a body sentence calling `branch` "a valid refname" would claim more than the head checks -> the reviewer measures the body against the head, and the claim would be the next finding | introduced_by_feature | docs-contract | 8cf2d90 (the check and its doc) | fixed as text in the pull request body: the claim is exactly the doc's, and the body says why the unapplied clauses cannot produce finding 2's harm, which is a branch Git itself checked out failing to match its own name: Git never writes a `branch` field spelled with `..`, `@{` or `.lock`, and what a stray or hostile byte can add to Git's spelling is a byte, which the byte set refuses; the check does not tell a well-formed refname from a corrupted well-formed one, and does not claim to | fixed |
+
+## 49. PR #125 closed after eight frontier passes (2026-09-04)
+
+Append-only. PR #125 (`fix/darwin-helper-ready-budget`, head `33604e6` at closure) set out to fix
+master's macOS test-leg failure "Unix cleanup reaper did not initialize" by raising the forked
+helpers' READY budget from two seconds to ten. Eight frontier passes (`gpt-5.6-sol` at `max`)
+each found a new P1 in code the pull request added:
+pass 1 at `b058661` https://github.com/eventloops/upstroke/pull/125#issuecomment-5533118669,
+pass 2 at `102c27e` https://github.com/eventloops/upstroke/pull/125#issuecomment-5533321264,
+pass 3 at `aa7699d` https://github.com/eventloops/upstroke/pull/125#issuecomment-5533611903,
+pass 4 at `ecc9aa1` https://github.com/eventloops/upstroke/pull/125#issuecomment-5534857355,
+pass 5 at `8841045` https://github.com/eventloops/upstroke/pull/125#issuecomment-5535670541,
+pass 6 at `de69832` https://github.com/eventloops/upstroke/pull/125#issuecomment-5536270335,
+pass 7 at `1428112` https://github.com/eventloops/upstroke/pull/125#issuecomment-5539395887,
+pass 8 at `33604e6` https://github.com/eventloops/upstroke/pull/125#issuecomment-5539824458.
+The budget increase was withdrawn as a fix at pass 7 (the exact head `ecc9aa1` had failed with
+the budget elapsed, run 33821116191, and the cause was never established), and the pull request
+was narrowed to a READY failure diagnostic and a bounded, ownership-checked end of a helper; pass
+8 found two P1s in that kept code, and the coordinator, under the owner's written delegation for
+the pull request, applied the stopping rule set after pass 6 and closed it rather than open a
+ninth round. No code from the pull request is merged. These rows preserve what the eight passes
+learned so that none of it is rediscovered; every one is `deferred`, and its guard column is the
+proposal it carries for the change that takes it up. Rows bound to `0bff83d` name the defect on
+master, which the pull request did not introduce and did not merge a fix for; rows bound to
+`33604e6` name a defect in the closed pull request's own attempt, reachable at the pull request,
+recorded so the next attempt does not repeat it.
+
+Every one of those rows is still open, so all eleven are files under `reviews/findings/` rather
+than rows here: `grep -rl 'id: PR125-CLOSE-' reviews/findings/` lists them.
+
+### Addendum, 2026-09-04, from PR #136: the first live catch of #134's diagnostic
+
+Evidence added under `PR125-CLOSE-MACOS-READY-RED-CAUSE-UNKNOWN`, not a new row and not a
+disposition change: the row stays `deferred` and its cause stays unestablished. PR #134 landed the
+diagnostic that row asked for ("the next change is a diagnostic, not a budget"), and this is its
+first observation in the wild.
+
+`test (macos-latest)` failed on PR #136 at head `2ee5595eac5c0e739feafe41572102540e160bf1`, run
+33904978763, job 101127703019, `1911 passed; 1 failed`:
+
+```
+thread 'engine::tests::the_resume_that_rederives_an_old_logs_gates_records_them_for_the_next_one'
+panicked at src/engine/tests.rs:6108:6:
+resume: Agent { message: "Unix cleanup reaper did not initialize; waited 2.000048625s of 2s;
+descriptor ceiling 10240; ending it: SIGKILL was delivered, and the wait collected it, having
+already exited with status 1" }
+```
+
+**What is new is the last clause.** The row's evidence is a reaper child that was *silent* for the
+whole budget — at a ten-second budget it recorded "waited 10.000190708s of 10s", a parent polling on
+time and a child saying nothing for ten seconds. This one says the child **had already exited, and
+non-zero**, before the parent's wait expired: the kill was delivered to a process that was already
+gone, and the wait collected a status of 1 rather than the signal. A child that exits 1 before
+writing READY is a different failure from a child that is scheduled late or blocks in `open`/`close`,
+and the row's two established facts — that the child's `open` and `close` can block, and that a
+parent polling on time measures nothing about the child's scheduling — do not account for it. So
+the title's "cause unknown" is now less unknown than it was: whatever else is true, on this
+occurrence the reaper reached an exit path before READY.
+
+Recorded by the PR #136 session, which met it as a red on its own pull request and established it as
+master's rather than its own on four independent grounds: the fingerprint is this row's, first
+sighted on master 2026-09-03; the failing test is in `engine::tests`, which PR #136 does not touch;
+the same `src/` bytes passed that leg twice at `142c321`; and #134's diagnostic, whose output this
+is, is in that tree by merge-in. **Nothing was rerun**, so this is a single observation and not a
+rate; the row's owner should treat it as one datum, not as a reproduction.
+
+## 50. PR #130 snapshot_ref.rs sweep (2026-09-04)
+
+Append-only. The sweep of `src/workspace_manager/snapshot_ref.rs`, row 7 of the review queue in
+`standards/SWEEP.md`, under the owner's amendment 7 of 2026-09-04 (correctness, better
+implementation, the standards, the tests, in that order). These are the rows of the sweeping
+session's own review at the base `8084330`, recorded before any frontier pass; the passes the
+coordinator launches append their rows below these. The file held two types and no functions,
+so §6 and §7 literally found nothing; the findings are §5's (raw `String` object ids beside the
+crate's own validator, public fields that permit states the readers refuse, a fact carried
+twice, a `Clone` on a live handle) and §12's (no tests). Under the owner's rule, the two P2 rows
+are fixed at `dda65ab`; four P3 rows are fixed in the same commit because the sweep itself is
+their repair; one P3 row is deferred to the parent's sweep, the queue's last row of this family,
+because the primitives that would take the new type live there.
+
+The first frontier pass, on `be201d8` (gpt-5.6-sol at max, posted 2026-09-04T10:29Z), returned
+`CHANGES_REQUIRED` with one finding labelled P2 by the reviewer: the lexical newtype admits a ref
+spelt as hexadecimal of the other object format's length, which `git worktree add` follows.
+Fixed at `a1c8d2f`: the funnel resolves each input against the repository and accepts only an
+answer equal to the input; the `PR130-REVIEW-` row below records it.
+
+The second pass, on `891cd7a` (posted 2026-09-04T11:43Z), returned `CHANGES_REQUIRED` with two
+findings: a P1, that a replacement object defeats the resolve-once check because `rev-parse`
+still prints the replaced id while Git reads the replacement everywhere, and a text finding, that
+the refusal called a commit id offered as the tree "not a full object id of this repository".
+Both fixed at `8a2b0bd`, recorded in the two `PR130-REVIEW2-` rows: the manager sets
+`GIT_NO_REPLACE_OBJECTS=1` where it builds every command it runs, and the message names the
+object type the role requires and what the repository peeled the value to.
+
+The third pass, on `8c5dbc3` (posted 2026-09-04T15:06Z), returned `CHANGES_REQUIRED` with a P1, a
+P2, a design finding and a count. **It is the last pass on this pull request**, and its P1 is the
+third in three rounds to land inside the previous round's fix: the newtype, then the resolve-once
+check, then the isolation variable. The answer is the one PR #125 reached — narrow rather than
+iterate. The variable stays and every claim narrows to what it covers; the open half, which needs
+the host runner's environment composition, the read-only path and a `design/` sentence defining
+what an exact snapshot is measured against, is one deferred row awaiting the owner's design
+ruling (amendment 11), and `src/runner/host.rs` is untouched. The P2 and the count are fixed at
+`3e00568`. The three `PR130-REVIEW3-` rows record all four.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR130-SNAPREF-IDS-ARE-RAW-STRINGS | P2 | 80843302a8367e607e54f181ef592c02ca5a089f / src/workspace_manager/snapshot_ref.rs:33 | `Commit(String)`, `tree`, `parent`, `head` and `ephemeral` held unvalidated text while the crate's `is_object_id` sat unused beside them -> `add_snapshot` handed each to `git commit-tree` and `git worktree add` as an argument -> a ref name checks out wherever the ref points at that moment, with exit 0, which is not an exact snapshot; a short id resolves by prefix; an option-shaped value is parsed as an option; no production caller passes anything but Git output today, so this is latent, the same class as `PR126-OBJECT-NEW-SIDE-ACCEPTS-NULL-ID` | pre_existing | correctness | 7a83e69 (the module's arrival; the types predate the split `660e9e1`) | fixed at dda65ab: every id is an `ObjectId`, whose only constructor refuses a malformed or null value with `Refusal::NotAnObjectId` and spells the accepted id lowercase so equality is of the object; `a_malformed_value_is_refused_as_not_an_object_id_with_the_value_as_offered`, `the_null_id_of_either_hash_length_is_refused_as_naming_no_object`, `a_full_non_null_hexadecimal_id_of_either_hash_length_is_an_object_id` and `an_id_offered_in_upper_or_mixed_case_is_the_same_object_id_spelt_lowercase`, witnessed failing with the well-formedness check skipped, the null check skipped, the two reasons swapped, and the case kept as offered | fixed |
+| PR130-SNAPREF-PUBLIC-FIELDS-PERMIT-REFUSED-STATES | P2 | 80843302a8367e607e54f181ef592c02ca5a089f / src/workspace_manager/snapshot_ref.rs:48 | `Snapshot` had four public fields and no constructor -> a value can be built, or mutated after the funnel returned it, with a task or staging slot, a path that is not the slot's checkout, or an `ephemeral` that disagrees with `head` -> `remove_snapshot` force-removes whatever slot the value names and the engine runs gates and reviewers in whatever path it holds; the class PR #118 fixed for the intent record | pre_existing | correctness | 7a83e69 | fixed at dda65ab: the fields are private, `Snapshot::new` is parent-visible and builds the slot from a `SnapshotName`, and the HEAD is one `SnapshotHead`; `an_existing_head_is_the_commit_given_and_records_no_ephemeral_commit`, `an_ephemeral_head_is_both_the_head_and_the_ephemeral_commit` and `two_snapshots_are_equal_exactly_when_they_name_the_same_checkout`, witnessed failing with the constructor ignoring the name, dropping the path, `ephemeral` answering for both arms, and equality ignoring the path | fixed |
+| PR130-SNAPREF-EPHEMERAL-IS-A-SECOND-FIELD | P3 | 80843302a8367e607e54f181ef592c02ca5a089f / src/workspace_manager/snapshot_ref.rs:55 | `head: String` and `ephemeral: Option<String>` carried one fact twice -> the funnel copied the ephemeral commit into both and every reader had to know they agree -> the parent's suite asserted the agreement (`snapshot.ephemeral == Some(head)`) because the type could not hold it | pre_existing | correctness | 7a83e69 | fixed at dda65ab (the better-implementation pass): `SnapshotHead` is `Existing(ObjectId)` or `Ephemeral(ObjectId)`, `head()` is the id of either arm and `ephemeral()` is `Some` only for the second, so there is nothing to agree; `an_ephemeral_head_is_both_the_head_and_the_ephemeral_commit` and, through the funnel, `an_ephemeral_snapshot_commit_created_before_the_intent_is_left_to_git` and `snapshot_residue_reclaimed`, witnessed failing with `ephemeral()` answering `None` for both arms and with the parent's tree arm building `Existing` | fixed |
+| PR130-SNAPREF-COMMIT-TREE-LINE-UNCHECKED | P3 | 80843302a8367e607e54f181ef592c02ca5a089f / src/workspace_manager.rs:1891 | the trimmed stdout of `git commit-tree` became the snapshot HEAD unchecked -> a line that is not an object id would be handed to `git worktree add` and recorded as the HEAD -> the failure surfaces as a worktree-add error that names nothing about its cause, or not at all if Git resolves the line | pre_existing | correctness | 7a83e69 | fixed at dda65ab: `SnapshotHead::Ephemeral` takes an `ObjectId`, whose only constructor validates, so the bypass does not compile, and `add_snapshot` reports a line that is not an id as `UpstrokeError::Git` naming the command before anything is checked out; no test drives real Git to print a non-id, so the guard is the type and the documented conversion at the site, not a test | fixed |
+| PR130-SNAPREF-CLONE-ON-A-LIVE-HANDLE | P3 | 80843302a8367e607e54f181ef592c02ca5a089f / src/workspace_manager/snapshot_ref.rs:45 | `Snapshot` derived `Clone` with no clone site in the crate and no stated reason -> a copy is two values for one checkout, and `remove_snapshot` on either leaves the other naming a removed slot -> §6 asks who clones and why, and nothing did | pre_existing | correctness | 7a83e69 | fixed at dda65ab: the derive is gone and the module doc says why `ObjectId` and `SnapshotInput` keep theirs; a clone site of `Snapshot` no longer compiles, which is the guard | fixed |
+| PR130-SNAPREF-NO-TESTS | P3 | 80843302a8367e607e54f181ef592c02ca5a089f / src/workspace_manager/snapshot_ref.rs:1 | the module had no tests -> the agreement between the input variants and the fields, and what a snapshot could be built from, were pinned only where the parent's suite happened to read a field -> a change to either type had no witness of its own | pre_existing | correctness | 660e9e1 | fixed at dda65ab: seven tests in the file, each witnessed under at least one of ten mutations listed in the pull request body; the census row `effects/wrappers.toml` names the eight reachable functions | fixed |
+| PR130-REVIEW-NEWTYPE-ADMITS-A-HEX-SPELT-REF | P2 | be201d80a67b488650b51e49367747b2cf713951 / src/workspace_manager/snapshot_ref.rs:81 | `ObjectId::new` checks length and alphabet only and accepts both hash lengths without knowing the repository's object format -> in a SHA-256 repository a branch named with forty hexadecimal characters passes the newtype and `add_snapshot` hands it to `git worktree add --detach`, which checks out wherever the branch points at execution time (reproduced by the reviewer on git 2.43, and the inverse in a SHA-1 repository) -> the snapshot is not exact, `Snapshot::head()` carries the branch name, and the body's claims that the type names an object and that equality is equality of the object were false at that head | introduced_by_feature | correctness | dda65ab | fixed at a1c8d2f0dae66c895bfe69a4364d161b81d1cd99: `add_snapshot` resolves each id of its input once (`rev-parse --verify --quiet <id>^{commit}` or `^{tree}` by role) and accepts only an answer equal to the input, else `Refusal::SnapshotInputResolvesElsewhere` carrying the role, the value and what Git answered, before the ephemeral commit and the intent; the newtype's doc and the module doc now say it is a spelling and the funnel adds the resolution; `a_snapshot_input_spelt_as_hexadecimal_of_the_other_formats_length_is_refused_by_name` (a SHA-1 and a SHA-256 repository, the branch moved between two commits, refused as commit, tree and parent, plus a missing id of the own length, with no intent, no checkout and no object left) and `a_full_id_of_the_repositorys_own_format_is_accepted_and_the_head_is_what_git_reports` (both formats, and a branch spelt as the head's own id pointing elsewhere), witnessed failing with the resolution removed from `add_snapshot` (the head's lexical-only check), with the tree role skipped, with the parent role skipped, and with any resolved answer accepted | fixed |
+| PR130-REVIEW2-REPLACEMENT-OBJECTS-DEFEAT-THE-EXACT-SNAPSHOT | P1 | 891cd7aad4d2c72a28ea0d1e064f71989335ff30 / src/workspace_manager.rs:1994 | `git replace A B` makes Git read `B` wherever `A` is named while `rev-parse` still prints `A` -> `add_snapshot`'s resolve-once check compares `rev-parse`'s answer with the input, so it passes; `commit-tree A -p P` records the raw tree `A` and `worktree add --detach` on that commit materialises the contents of `B` (reproduced by the reviewer and measured again here on git 2.43) -> gates and reviewers run over a tree that is not the one judged, against `DESIGN.md` §15's exact snapshot, and the pull request's central "resolves to itself" claim does not hold | introduced_by_feature | correctness | a1c8d2f | fixed at 8a2b0bde66c87623874ba4a0a58364e8245828b8: `command`, the one place every command this manager runs is built, sets `GIT_NO_REPLACE_OBJECTS=1`, so the mechanism is gone rather than detected; the doc names the commands that covers (every funnel primitive and every read through `git` and `git_with_identity`) and the two free `read_only_git*` functions outside it, which nothing on the snapshot path uses; `a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree` builds the replacement sequence against real Git and asserts the materialised bytes and the ephemeral commit's raw tree are the judged tree, witnessed failing with the environment variable removed (the checkout holds the replacement) | fixed |
+| PR130-REVIEW2-REFUSAL-CALLS-A-FULL-ID-NOT-ONE | P3 | 891cd7aad4d2c72a28ea0d1e064f71989335ff30 / src/workspace_manager.rs:326 | a commit id offered as the `tree` peels to that commit's tree, so the resolve-once check refuses it -> the message said it "is not a full object id of this repository" -> it is one, of the wrong type for that role, so the diagnostic sends a reader looking for a malformed value; the body claimed the case was handled more strongly than the message allowed | introduced_by_feature | docs-contract | a1c8d2f | fixed at 8a2b0bde66c87623874ba4a0a58364e8245828b8: the message names the object type the role requires (`SnapshotObject::object_type`, so the parent's is `commit` and not `parent`) and what the repository peeled the value to, and lists the wrong object type among the causes; `a_full_id_of_the_wrong_object_type_is_refused_naming_the_type_its_role_requires` asserts both halves against real Git and that the old sentence is absent, witnessed failing with the message printing the role's own name instead of its object type and with `object_type` answering `parent` for the parent role | fixed |
+| PR130-REVIEW3-WRONG-TYPE-CLASSIFIED-BY-GIT-STDERR | P2 | 8c5dbc37b0cf3ed2ef28c6a6447368f10c1b0adf / src/workspace_manager.rs:1983 | a `Tree` whose `parent` is that same tree cannot be peeled to a commit, so Git failed with "expected commit type" on stderr rather than the silent exit 1 the lookup reads as absence, and a bare `?` returned `UpstrokeError::Git` -> the peelable direction (a commit offered as the tree) returned `Refusal::SnapshotInputResolvesElsewhere` for the same class of caller mistake, and the body promised the typed refusal for an input that does not resolve to itself -> one caller mistake was classified by Git's stderr behaviour and the other by the decision the caller can make; the inverse also held, malformed `git write-tree` output reaching `ObjectId::new(..)?` became `UpstrokeError::Refused` when it is the tool misbehaving | introduced_by_feature | correctness | a1c8d2f | fixed at 3e00568752: the failing peel is classified by asking the object's type once (`cat-file -t`), and a type that is not the role's is the same refusal, which gains `found_type` so the message names the type the value does name; only a repository that will not say keeps the Git error (a bare `rev-parse --verify` cannot make the distinction: measured, it echoes an absent full id and exits 0). `captured_object_id` in `attempt.rs` turns a malformed `write-tree` or recorded-base value into `UpstrokeError::Git` naming its source. `a_full_id_of_the_wrong_object_type_is_refused_naming_the_type_its_role_requires` covers both directions and an absent id; `a_malformed_captured_id_is_a_git_error_naming_where_the_value_came_from` covers the inverse; witnessed under four mutations listed in the body | fixed |
+| PR130-REVIEW3-SCOPE-NUMSTAT-WRONG | P3 | 8c5dbc37b0cf3ed2ef28c6a6447368f10c1b0adf / reviews/FINDINGS.md:1 | the body's Scope said `src/workspace_manager/tests.rs` was `+388 -25` while the diff was `+391 -25` -> the figure was carried from an earlier head instead of being re-derived after the last commit -> a reviewer checking scope against the diff finds the accounting false, which is the one thing that list exists to be | introduced_by_feature | docs-contract | 8c5dbc3 | fixed at 3e00568752: every numstat in the body is generated from `git diff --numstat origin/master..HEAD` at the published head by the script that assembles the body, never typed; the count is re-derived after the final commit and before the single publish | fixed |
+
+## 51. PR #128 residue.rs sweep (2026-09-04)
+
+Append-only. The §6/§7 sweep of `src/workspace_manager/residue.rs` (PR #128), row 6 of the review
+queue. These are the rows of the sweeping session's own line-by-line review at the base
+`fb067d6`, recorded before any frontier pass; the passes the coordinator launches append their
+rows below these. Under the owner's amendment 1 of 2026-09-04, P1 and P2 findings are fixed and
+P3 and lower are recorded. The one P2, every residue name read through `Path::exists` so that a
+git dir the process could not search classified as no residue, is fixed at `a17b8c5` with the
+parent's `index_lock_present` moved into the child, its only caller; three P3 rows in the file are
+fixed in the same commit because the sweep itself is their repair; the tests that witness the
+repairs are `9a5ce03`. Six P3 rows are in the parent, `src/workspace_manager.rs` at master
+`8084330` (merged into this branch before the review of the parent's side): five helpers the
+classifier reads through fold a Git failure that speaks into an answer before the child's `?`,
+and `quiescence` reads a `common_git_dir` failure as `Missing`. The five helpers are fixed at
+`335bb27` under the owner's amendment 7 of 2026-09-04 (the sweep is a correctness and
+better-implementation pass, bounded to the file and the minimum around it needed to land a
+change honestly): they are the classifier's own inspections, left in the parent by the split, and
+the child's claim that a failed inspection is never an answer cannot be landed without them;
+`quiet_object_lookup`, which PR #120 added to the parent for the manager's own lookups, is the
+shape the repair takes. The `quiescence` row stays deferred: what `Missing` should mean for a git
+dir that exists but cannot be read is a contract question for the parent's public method. The
+same amendment's better-implementation pass adds the two rows at the end: the adds' two arms
+read one state, and the test that pins the `initializing` lock.
+
+The first frontier pass, on `b5c12e0` (gpt-5.6-sol at max, posted 2026-09-04 as the pull
+request's first comment), returned `CHANGES_REQUIRED` with five unlabelled findings and two
+evidence corrections, no P1. The coordinator classed findings 1, 2 and 3 P2 (each the fold the
+sweep set out to remove, one level down: an unreadable pack read as a missing object and as a
+difference, a `gitdir:` pointer taken as a directory without one being read, a registration Git
+omits from its listing read as unregistered), finding 4 P2 (a §7 MUST in touched code: the
+spawn failure named no command and the failure message dropped stdout) and finding 5 a
+docs-contract MUST (§13: the behaviour change had no design sentence). All five are fixed at
+`87c29fc`, each with a test witnessed under a stated mutation, as the five `PR128-REVIEW-` rows
+record; the evidence corrections (nine test functions, not six; `add_state` read once in
+`classify_object_residue`) are made in the body and the code. One more pass follows.
+
+The second frontier pass, on `f161c9e` (gpt-5.6-sol at max, posted 2026-09-04), returned
+`CHANGES_REQUIRED` with seven findings, no P1. Four of them are defects in one thing the first
+repair invented: the scan that walked the object store to decide whether Git's "absent" could be
+trusted. One, an unbounded `File::open` on a FIFO named `objects/pack/ignored.pack`, is a hang
+in production code. On the coordinator's brief of 2026-09-04 13:00Z, and with PR #125 closed the
+same day after eight passes in which each round's new machinery produced the next defect, **the
+pull request narrows**: the scan is deleted with every claim resting on it, and what stays is
+the part that needs no filesystem walking, because Git itself reports the failure. What
+establishing the store's readability would take is recorded below as a deferred row naming where
+it belongs. The other findings are fixed at `55ed9d3`, each with a test witnessed under a stated
+mutation. The same commit folds in `SWEEP-WORKTREE-012`, measured by the `worktree.rs` sweep on
+PR #131 and deferred to this file.
+
+The third frontier pass, on `dfc238c`, returned `CHANGES_REQUIRED` with six findings, and it is
+the last on this pull request. Finding 5 decided the shape: the registration scan that replaced
+the object-store scan reads repository-controlled entries with unrestricted `fs::read`, so a
+FIFO at `.git/worktrees/poison/gitdir` blocks for ever and a symlink to `/dev/zero` consumes
+memory without bound — the same unbounded-I/O class the previous round had narrowed away, back
+in its replacement. Finding 1 was the fold-into-absence defect for the third consecutive pass,
+one level deeper each time: the exit codes, then the stat, then a dangling symlink under it.
+**On the coordinator's final instruction of 2026-09-04 15:35Z the parent-helper programme is
+reverted entire** at `59f2bd99c95c80f1a2a011a78ebe34b43fbf4555`: `src/workspace_manager.rs` is master's but for the four-line
+removal of `index_lock_present`, whose only callers are in this file, and `design/26`,
+`parsers.rs` and `effects/wrappers.toml` are master's exactly. `residue.rs` keeps its own sweep.
+Every row above whose repair lived in the parent is `deferred` to the sweep of
+`src/workspace_manager.rs`, queue row 11, and pass 3's six findings are rows of their own below,
+each carrying its reproduction: making an inspection's absence trustworthy means reading a
+repository the way Git reads it — its gitfile grammar, its linked-worktree reader, its
+trace-polluted streams, and a bound on bytes and time for every read of a repository-controlled
+file — which belongs with whoever owns those helpers, and a design sentence follows that code
+rather than preceding it.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| PR128-RESIDUE-NAME-READS-FOLD-INSPECTION-FAILURE-INTO-ABSENCE | P2 | fb067d6778936163a5e0fb8b04933bfeacdf434f / src/workspace_manager/residue.rs:311 | every residue name was read with `Path::exists`: the six git-dir names in `observed_residue_elements` (311 to 326), the eight in `administrative_residue_at` (395), and `index.lock` at the four `index_lock_present` sites through the parent's helper -> `Path::exists` answers `false` for a permission failure, a symlink loop and a transient I/O error as well as for an absent name -> a git dir this process could not search classified `None`, the class no action recovers, and `administrative_residue_at` answered no residue for it, so an inspection that failed was read as an answer, against §7's not-found rule; no production caller reaches the classifier's git-dir arms today (`verify_object` asks the commit-tree site only), and `quiescence` answers `Missing` before the residue read for such a git dir, so the harm is to the tabled classification evidence | pre_existing | correctness | 7a83e69 | fixed at a17b8c57cf5b6b25a5e353d970c61505c9ff62d3: `name_present` reads `symlink_metadata` and makes only `NotFound` absence, every name in the module goes through it, and `index_lock_present` lives in the child; `a_git_dir_that_cannot_be_searched_is_an_error_and_not_an_absent_residue` drives `observed_residue_elements`, `classify_object_residue` and `administrative_residue_at` against a linked worktree's git dir at mode 000 and asserts each returns an `Io` error naming the lock, witnessed failing with `name_present` reduced to `Path::exists`; `a_dangling_index_lock_symlink_is_the_lock_git_sees` executes the measurement behind not following the link and was witnessed failing with `symlink_metadata` replaced by `metadata` | fixed |
+| PR128-RESIDUE-POPULATED-IS-THE-NAME-DOT-GIT | P3 | fb067d6778936163a5e0fb8b04933bfeacdf434f / src/workspace_manager/residue.rs:206 | the three adds' after phase read populated as `worktree.join(".git").exists()`, and the `RegisteredUnpopulatedWorktree` element (330) as its negation -> a pointer file a kill left empty, or holding no `gitdir:` line, is a name that exists -> a registered worktree with no git dir behind it classified `After`, and the element the site registers for exactly that state was never observed; the same metadata fold as the row above, on the worktree's own directory | pre_existing | correctness | 7a83e69 | fixed at a17b8c57cf5b6b25a5e353d970c61505c9ff62d3: both arms read populated through `git_dir_of`, which propagates a metadata failure and answers `None` for a pointer naming no git dir; `a_git_pointer_that_names_no_git_dir_is_a_registered_unpopulated_worktree` rewrites a populated worktree's pointer to empty and to a non-pointer and asserts `Internal` with the element observed, witnessed failing with the after arm restored to the name check and, separately, with the element arm restored | fixed |
+| PR128-RESIDUE-TARGET-CLONE-WITHOUT-COPY | P3 | fb067d6778936163a5e0fb8b04933bfeacdf434f / src/workspace_manager/residue.rs:60 | `ResidueTarget` is four borrows and derived `Clone` but not `Copy` -> a caller needing the target twice writes a `clone()` for a value whose copy is its intended semantics, and §6 asks for a stated reason on every clone -> no caller clones it today; the derive was the file's one §6 item | pre_existing | docs-contract | 7a83e69 | fixed at a17b8c57cf5b6b25a5e353d970c61505c9ff62d3: `Copy` derived with the reason on the line and stated in the module doc | fixed |
+| PR128-RESIDUE-ERRORS-CONTRACTS-SAY-NOTHING-A-CALLER-CAN-ACT-ON | P3 | fb067d6778936163a5e0fb8b04933bfeacdf434f / src/workspace_manager/residue.rs:166 | the `# Errors` sections of `classify_object_residue` and `observed_residue_elements` said "a Git or I/O error" and `administrative_residue_at` had none, while every `?` in the file propagates a parent inspection -> a caller cannot tell from the contract what the error names, and nothing in the file says why each `?` is deliberate in §7's sense -> the propagation was undocumented, against §7 and §13 | pre_existing | docs-contract | 7a83e69 | fixed as text at a17b8c57cf5b6b25a5e353d970c61505c9ff62d3: the module doc states why each `?` propagates unchanged (the helper already names the git command and worktree, or the path; the crate's error type wraps no error in another; the callers propagate or record) and what the module decides itself; the three `# Errors` sections say what the error names; the two match arms carry the same note at the site | fixed |
+| PR128-RESIDUE-ADDS-READ-THE-SAME-STATE-TWICE | P3 | fb067d6778936163a5e0fb8b04933bfeacdf434f / src/workspace_manager/residue.rs:203 | the adds' after phase (203 to 206) and the `RegisteredUnpopulatedWorktree` element (327 to 331) each read the registration and the population separately and each wrote the complement of the other by hand -> the two arms are complementary only while both are edited together, and a third state (registered, unlocked, unpopulated) has no name in the code -> a reader must prove the complement from two match arms sixty lines apart; no wrong answer today | pre_existing | correctness | 7a83e69 | fixed at 335bb27637f080a2800d2acb2a61d020716eb2e4: `add_state` reads once into `AddState`, whose `Populated` is the after phase and `Unpopulated` the element, so no state is both or neither while registered; `a_git_pointer_that_names_no_git_dir_is_a_registered_unpopulated_worktree` was witnessed failing with the after arm reading `Unpopulated` (as was `the_classifier_is_total_over_three_classes_for_every_registered_site`), with the git-dir read restored to the name check, and with the `initializing` check dropped | fixed |
+| PR128-RESIDUE-INITIALIZING-LOCK-ON-A-POPULATED-CHECKOUT-UNPINNED | P3 | fb067d6778936163a5e0fb8b04933bfeacdf434f / src/workspace_manager/tests.rs:2569 | the totality grid's unpopulated state sets the `initializing` lock and removes the checkout together -> a classifier that ignored the lock still answered `Internal` for it through the missing checkout -> the lock's contribution (Git's own statement that the population did not finish) survived being dropped | pre_existing | correctness | 660e9e1 | fixed at 335bb27637f080a2800d2acb2a61d020716eb2e4: `a_git_pointer_that_names_no_git_dir_is_a_registered_unpopulated_worktree` holds the lock on a populated checkout and asserts `Internal` with the element observed; witnessed failing with the `initializing` check dropped from `add_state` | fixed |
+| PR128-BODY-ACCOUNTING-INACCURATE | P3 | dfc238c63fd7db4c9f9d8ab5f41113ad8ad56617 / src/workspace_manager/tests.rs:6574 | the body's Rollback said nine paths where the diff touches eight and listed `effects/wrappers.toml` twice; it named `refuse_unreadable_object_store` and `refuse_unlistable_registrations` as helpers at that head, where neither existed; Validation listed a deleted test among the thirteen it said run; and a mutation comment in `tests.rs` named a helper that was gone -> every figure had been carried forward by hand across five heads -> a reviewer checking the body against the head finds it wrong in four places | introduced_by_feature | docs-contract | 87c29fc | fixed at 59f2bd99c95c80f1a2a011a78ebe34b43fbf4555: the body published for this head has every path count, file name, test name and identifier regenerated from the tree at the head it describes, and the mutation comments name only helpers that exist here; the deleted tests took their comments with them | fixed |
+
+## 52. PR sweep of worktree.rs (2026-09-04)
+
+**This section was §51 until PR #128 merged as `95c5bd3` and took that number**; rows and prose
+written before that merge, here and in the pull request body, call it §51 where they are quoting
+themselves at an earlier head. The section is §52 and its rows are unchanged.
+
+Append-only. The §6/§7 sweep of `src/workspace_manager/worktree.rs`, row 8 of the
+`standards/SWEEP.md` review queue, read against `origin/master` `0bff83d` (the merge of PR #127,
+whose parser is the record's one producer) by one Claude Fable 5.1 session whose only subject was
+that file; the cleanup is `5e60c5e`, and the producer's forced edit in parsers.rs is `219e9e0`.
+The file has no `?`, no lock, no shared ownership and no `clone()` call, so the rows below are the
+four readings the owner's amendment 7 asks for: correctness, the shape, the standards and the
+tests. Under the owner's rule for the sweep pull requests (2026-09-04: P1 and P2 findings fixed,
+P3 and lower recorded) every row is P3; the ones the file can repair are fixed in the same
+commits, and the ones another file owns are deferred with the file named. sweep_coordinator's
+rule of 2026-09-04 for this branch: parsers.rs (PR #127, merged) may move with the record, and
+residue.rs (PR #128, open) may not, so the `locked` field stays readable by the parent module
+until the base merge-in that follows #128. Frontier-pass rows are appended below these as the
+passes happen, with the pull request's number as their prefix.
+
+The first frontier pass, on `ea4fd74` (gpt-5.6-sol at max, posted 2026-09-04T11:15Z), returned
+CHANGES_REQUIRED with five unlabelled findings; sweep_coordinator classed 1, 2 and 3 P2 and 4 and
+5 text at P3; four are fixed and finding 1 is deferred as `SWEEP-WORKTREE-013`. Finding 1, a user's `git worktree lock --reason initializing` read as
+Git's own marker, is `SWEEP-WORKTREE-013` below: the engine's add funnel passes no lock of its
+own, so the marker is Git's and a marker only the engine writes is the parent's to add (row 11,
+the proposal in the row); the doc at `5e19848` no longer calls it an invariant. Findings 2 and 3
+are repaired in the same commit by `OpenRecord`, which applies every rule of the record as the
+parser feeds it each attribute, and the sweep-own rows above that name `from_porcelain` describe
+`5e60c5e`; at `5e19848` the constructor they describe is `OpenRecord::at` and its readers, and
+`close`, and the tests they name are the same tests, two of them renamed with `_read_once`.
+`SWEEP-WORKTREE-012`, a sighting when first written, is rewritten with the mechanism the repair
+round measured: a second occurrence with the same `Worktree.Add` histogram, and a hand-built
+registration whose zero-length `commondir` makes `git worktree list` exit 128, which #127's
+`record_for` repair turned from absence into the `Err` the sampler counts as unclassified.
+
+The second frontier pass, on `c0eb8c5` (gpt-5.6-sol at max, posted 2026-09-04T14:49Z), returned
+CHANGES_REQUIRED with four unlabelled findings; sweep_coordinator classed 1, 2 and 3 P2 and 4
+text at P3, and all four are fixed in `1720d91`. Finding 3 is the substantial one: the record
+kept `detached` and `bare` for duplicate detection only, so a record with a HEAD and no branch
+was accepted and `assert_publishable` read its `branch: None` as "no branch is checked out
+here". The shape rule that replaces it is what Git 2.43.0 was measured printing, not what its
+documentation says. The rows below name the pass-2 findings; `SWEEP-WORKTREE-014` is the
+tree-wide citation question finding 2 uncovered, and the rows above that name
+`MalformedAttribute` describe `5e19848`, whose type is `MalformedRecord` from `1720d91` on,
+since it refuses records and not only attributes.
+
+The third frontier pass, on `9dd3a79` (gpt-5.6-sol at max, posted 2026-09-04T15:43Z), returned
+CHANGES_REQUIRED with six findings and **no P1**, which is what converged the pull request: three
+P2, one design-authority finding and two accuracy findings, and no fourth pass. Two of the P2s
+are pre-existing defects outside this file that the sweep's own claims brought to light --
+`SWEEP-WORKTREE-015`, ref identity on a case-insensitive filesystem, and `SWEEP-WORKTREE-016`,
+the check/use race the reviewer reproduced in the parent's publication funnel -- and both are
+deferred with the reproduction and a proposal, on sweep_coordinator's ruling of 2026-09-04:
+row 11 is their subject, a change to the publication funnel on a round with no further pass
+would merge unreviewed, and amendment 11 reserves what the funnel guarantees for the owner. The
+other four are fixed in `0e51073`.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| SWEEP-WORKTREE-001 | P3 | 0bff83dfa632b80a0373202613f37cce222410f9 / src/workspace_manager/worktree.rs:35 | `WorktreeRecord` has public `String` fields for `head` and `branch` -> the grammar (`HEAD` an object id, `branch` a refname's byte set) lives in `parse_worktree_records` alone and the value accepts any string -> a second producer, or a test building one by hand, holds no invariant the type states: the shape PR #118 found in naming.rs, private fields behind a validated constructor being the accepted repair | pre_existing | correctness | — | fixed at 5e60c5ef25da9b2ae10df12cfc07fdf448a24dc8: the fields are private and the record is built one way (at 5e60c5e `from_porcelain`; at 5e19848 `OpenRecord`, whose readers apply object.rs's `is_object_id` to `HEAD` and `can_be_refname`, moved here from parsers.rs, to `branch` as each attribute arrives), with accessors for every reader; the producer moved with it at 219e9e0d7523abba13cb37863fe7fcbec18b7bef. `a_head_is_a_full_hexadecimal_object_id_of_either_length_read_once` (three accepted, eight refused shapes, a second HEAD) and `a_branch_is_inside_the_refname_byte_set_read_once_and_kept_as_bytes` (each of the 41 forbidden bytes, the empty name, a second branch). Mutations: the length check dropped from the head grammar fails the first and the parsers' `structural_attributes_refuse_what_their_grammars_forbid` on `HEAD abc`; the byte set reduced to non-empty fails the second and the same parsers test on the trailing space | fixed |
+| SWEEP-WORKTREE-002 | P3 | 0bff83dfa632b80a0373202613f37cce222410f9 / src/workspace_manager/worktree.rs:41 | `branch` is `from_utf8_lossy` into a `String` -> `assert_publishable` compares it with a `&str` refname as identity -> on Unix a branch spelled with bytes that are not UTF-8 equals no refname but does equal its own `U+FFFD` spelling, so the check over-refuses on that one collision and can never under-refuse (`SWEEP-PARSERS-008`, whose guard named this file) | pre_existing | portability | SWEEP-PARSERS-008 | fixed at 5e60c5ef25da9b2ae10df12cfc07fdf448a24dc8: `branch` is the bytes Git printed and `has_checked_out` compares them with the refname's UTF-8, the parent's one comparison moved to it; `checked_out_is_byte_equality_with_the_full_refname`. Mutations: the comparison made lossy fails it on the `caf\u{FFFD}` case; the constructor requiring UTF-8 of a branch fails it and `a_branch_is_inside_the_refname_byte_set_read_once_and_kept_as_bytes` | fixed |
+| SWEEP-WORKTREE-003 | P3 | 0bff83dfa632b80a0373202613f37cce222410f9 / src/workspace_manager/worktree.rs:46 | `locked: Option<String>` is documented as "Git's own lock reason" with no statement of what `None` and `Some("")` are -> a lock taken without a reason lists as `locked` with no value (measured, Git 2.43.0: `git worktree lock` lists `locked`; `--reason "why  "` lists `locked why`) and reads as `Some("")` -> the word `initializing` is spelled by three consumers (the parent's `quiescence`, residue.rs twice) and nothing in the type says a bare lock is not it | pre_existing | docs-contract | — | fixed at 5e60c5ef25da9b2ae10df12cfc07fdf448a24dc8: `lock_reason` and `prunable_reason` state the three shapes and `is_initializing` is the one spelling, adopted by the parent's `quiescence` and by tests.rs; `a_bare_lock_is_a_lock_without_a_reason_and_only_initializing_is_initializing`. Mutations: the bare lock mapped to `None` fails it and the parsers' `worktree_records_are_read_from_the_porcelain_grammar`; `starts_with` in place of equality fails it on the trailing-space case; the prunable reason read in place of the lock fails it and `reclaim_removes_a_registered_but_unpopulated_worktree` in tests.rs | fixed |
+| SWEEP-WORKTREE-005 | P3 | 0bff83dfa632b80a0373202613f37cce222410f9 / src/workspace_manager/worktree.rs:34 | `Clone` is derived on a record owning a `PathBuf` and four heap strings, and nothing clones one -> §6 asks who copies a value and why; the parent iterates the list by value and moves the path into its refusal | pre_existing | docs-contract | — | fixed at 5e60c5ef25da9b2ae10df12cfc07fdf448a24dc8: `Clone` dropped from `WorktreeRecord`, `into_path` being the move; kept on `VerifyFailure` (the engine's `Reuse` derives it and the settle double answers one recorded failure to every caller) and on `Quiescence` (the double records every question asked), the reason on each type. Guard: a derive with no caller to satisfy, so the tree compiling without it is the check, and a caller that needs one says so at the type | fixed |
+| SWEEP-WORKTREE-006 | P3 | 0bff83dfa632b80a0373202613f37cce222410f9 / src/workspace_manager/worktree.rs:109 | `HeadMismatch` displays as `HEAD is …` -> §7's Display text starts lowercase so a report chain reads `…: the worktree's HEAD is …` -> the one arm of seven starting uppercase | pre_existing | docs-contract | — | fixed at 5e60c5ef25da9b2ae10df12cfc07fdf448a24dc8: reworded; `every_verify_failure_displays_as_a_lowercase_fragment_carrying_its_fields` pins every arm (an exhaustive match, so a new variant does not compile until it is listed) lowercase and without a trailing period, `expected` and `actual` in their places, and the residue element named. Mutations: the two swapped, and a period added to `Missing`, each fail it | fixed |
+| SWEEP-WORKTREE-010 | P3 | 0bff83dfa632b80a0373202613f37cce222410f9 / src/workspace_manager/worktree.rs:1 | the module has no tests of its own -> the record's grammar and the Display contract are exercised only through the parser's and the parent's suites -> a mutation of the value's own rules is caught, if at all, by a file whose subject is something else | pre_existing | docs-contract | — | fixed at 5e60c5ef25da9b2ae10df12cfc07fdf448a24dc8: seven tests in the file; nine mutations run on the box against the committed tree, each killed by the test rows 001, 002, 003 and 006 name | fixed |
+| SWEEP-WORKTREE-011 | P3 | 219e9e0d7523abba13cb37863fe7fcbec18b7bef / src/workspace_manager/parsers.rs:1029 | the parsers test's expected records are built through `from_porcelain` -> the oracle for the reason grammar moved with the constructor: with a bare lock mapped to `None`, `worktree_records_are_read_from_the_porcelain_grammar` stayed green because its expected record was built by the same mutated code -> a test whose oracle is the implementation under test, for that one rule | introduced_by_feature | docs-contract | — | fixed at 219e9e0d7523abba13cb37863fe7fcbec18b7bef: the test asserts `lock_reason` and `prunable_reason` of the bare record directly, at this location (the fixtures go through `OpenRecord` since 5e19848, and the assertion stands). Witnessed: the bare-lock mutation run again fails it | fixed |
+| PR131-DETACHED-AND-BARE-ACCEPTED-TWICE | P2 | ea4fd748236917e10eab916c3266d2ce976672f6 / src/workspace_manager/parsers.rs:295 | the doc says none of the four structural attributes appears twice, and the `detached`/`bare` arm records no seen state while the constructor never sees them -> `worktree /repo\0HEAD <sha>\0detached\0detached\0\0` is accepted -> the parser's stated grammar is not the one it applies, in code this pull request rewrote (pass-1 finding 2; the arm is the base's, `parsers.rs:557` at `0bff83d`) | pre_existing | correctness | — | fixed at 5e19848d3eae6b16d96c2786eaf708282aba7fa1: `OpenRecord::detached` and `OpenRecord::bare` refuse a second reading as `MalformedAttribute::BooleanTwice`, "has a boolean attribute twice", by record number like the other attributes. `a_boolean_attribute_is_read_once` in worktree.rs; the reviewer's record and `bare` twice in the parsers' `structural_attributes_refuse_what_their_grammars_forbid`. Mutation: the `detached` check removed fails both | fixed |
+| PR131-CLOSURE-TIME-VALIDATION-CHANGES-THE-DIAGNOSTIC | P2 | ea4fd748236917e10eab916c3266d2ce976672f6 / src/workspace_manager/parsers.rs:288 | `from_porcelain` validated at record closure, `HEAD` before `branch` -> a record with an invalid `branch` before an invalid `HEAD` was refused for the HEAD where the base refused it for the branch -> a behaviour change the body disclosed only for malformed-plus-framing, and a claim of same messages that did not hold (pass-1 finding 3) | introduced_by_feature | docs-contract | 5e60c5e (the constructor at closure) | fixed at 5e19848d3eae6b16d96c2786eaf708282aba7fa1: `OpenRecord` applies every rule as the attribute is fed to it, so the refusal names the first attribute outside the grammar in attribute order, as the base did; `close` cannot fail. `a_record_with_two_malformed_attributes_is_refused_for_the_first_read` in the parsers module, both orders. Witnessed: the test planted in the `ea4fd74` tree fails on "the branch came first"; at 5e19848d3eae6b16d96c2786eaf708282aba7fa1 the parser's refusal ignored fails it and the grammar tests | fixed |
+| PR131-DISPLAY-DOC-PROMISES-AN-OPERATOR-CONTRACT | P3 | ea4fd748236917e10eab916c3266d2ce976672f6 / src/workspace_manager/worktree.rs:243 | the `VerifyFailure` doc said the variant and its `Display` are what an operator is told afterwards -> no production caller renders the `Display` (`SWEEP-WORKTREE-007`) -> a living behavioural contract stated in rustdoc, outside `DESIGN.md`, for behaviour the tree does not have (pass-1 finding 4) | introduced_by_feature | docs-contract | 5e60c5e (the sentence) | fixed as text at 5e19848d3eae6b16d96c2786eaf708282aba7fa1: the doc says the variant is what a caller reads today (`Reuse::Recreated`, `RetryOutcome::Close`), that nothing renders the `Display` to an operator yet, and that each arm carries what it compared so that a renderer has it; the obligation stays the engine's deferred row | fixed |
+| PR131-BODY-COUNTS-AND-DERIVES-INEXACT | P3 | ea4fd748236917e10eab916c3266d2ce976672f6 / src/workspace_manager/worktree.rs:103 | the body said eight fixed and four deferred (seven and five), "every reader moved to an accessor" while residue.rs reads the field twice by the coordinator's ruling, five accessor sites in workspace_manager/tests.rs and four in attempt/tests.rs (six and three), and `MalformedAttribute` carried `Clone + Copy` with no caller while the same pull request removed `Clone` elsewhere for that reason -> the reviewer measures the body against the head and each of the four is a claim the head does not support (pass-1 finding 5) | introduced_by_feature | docs-contract | 5e60c5e (the derive); ea4fd74 (the body) | fixed: the derives dropped at 5e19848d3eae6b16d96c2786eaf708282aba7fa1 (`MalformedAttribute` derives `Debug`, `PartialEq`, `Eq` and `Error`, the three the parser's join and the tests use); the counts, the reader sentence and the site counts corrected in the body, every count of which is now derived from the diff at the head | fixed |
+| PR131-P2-UNPOPULATED-DISPLAY-CLAIMS-A-HISTORY | P2 | c0eb8c5d35517b9402f7ddd5dfc46eb0c8c9ee42 / src/workspace_manager/worktree.rs:426 | `is_initializing`'s doc admits the record cannot tell Git's `initializing` from a writer's, while `VerifyFailure::Unpopulated`'s `Display` still said the worktree "was never populated" and that `git worktree add` still holds the lock -> `git worktree lock --reason initializing <path>` on a populated worktree makes verification answer `Unpopulated` -> whatever renders the failure reports a cause the predicate cannot know, and the body's claim that every arm names an observation was false | pre_existing | docs-contract | — | fixed at 1720d912e5d363f32a87b577cd185ad75ab0e4d6: the arm reads "the worktree is registered and holds an `initializing` lock, the lock `git worktree add` writes while it populates a checkout", and the variant's doc says the reuse path treats it as the residue element without claiming it is proof of one. `every_verify_failure_displays_as_a_lowercase_fragment_carrying_its_fields` asserts the text names the lock and does not claim a history. Mutation: the old wording restored fails it (it survived the same test before this assertion was added, which is why the assertion is there) | fixed |
+| PR131-P2-RECORD-SHAPE-NOT-ENFORCED | P2 | c0eb8c5d35517b9402f7ddd5dfc46eb0c8c9ee42 / src/workspace_manager/worktree.rs:250 | `OpenRecord` kept `detached` and `bare` only for duplicate detection and `close` discarded them -> `worktree /repo\0HEAD <sha>\0\0` was accepted with `branch: None`, and `bare` with a checkout and `branch` with `detached` were accepted too -> `assert_publishable` (`src/workspace_manager.rs:2002`) reads `branch: None` as "no branch is checked out here" and grants publication of a refname on evidence that is malformed rather than absent, against §14's fail-closed rule for external CLI output | pre_existing | security-trust | — | fixed at 1720d912e5d363f32a87b577cd185ad75ab0e4d6: `close` refuses a set of attributes that is not a worktree -- bare, or a HEAD with exactly one of `branch` and `detached` -- as `MalformedRecord::BareWithCheckout`, `NoHead`, `BranchAndDetached` or `NeitherBranchNorDetached`, and the parser names the record. The rule is what Git 2.43.0 was measured printing over twelve shapes (the body has the table). `a_record_is_bare_or_a_head_with_exactly_one_of_branch_and_detached` in worktree.rs and `a_record_whose_attributes_are_not_a_worktree_is_refused` in parsers.rs, six refused shapes and six measured accepted ones. Mutations: the whole rule removed, the neither-branch-nor-detached arm removed, and the bare arm made unreachable each fail both tests | fixed |
+| PR131-P2-INVENTED-DESIGN-AND-TRUST-AUTHORITY | P2 | c0eb8c5d35517b9402f7ddd5dfc46eb0c8c9ee42 / src/workspace_manager/worktree.rs:5 | the module doc said the retired `decisions.workspace_candidates.generation`'s substance is `DESIGN.md` §26 and the `is_initializing` doc ruled that a writer to the execution root is inside the trust boundary (§14) -> `DESIGN.md`'s retired-records table maps no `workspace_candidates` record to any section and no design sentence settles that trust boundary -> a doc comment became the authority for a design claim and for a security-policy question, against §1 and the owner's amendment 11 | introduced_by_feature | docs-contract | 5e60c5e (the §26 parenthetical); 5e19848 (the §14 sentence) | fixed at 1720d912e5d363f32a87b577cd185ad75ab0e4d6: the quotation is marked as the retired record's own words with no claim about where its substance lives now, and the trust-boundary question is `SWEEP-WORKTREE-013`'s, for the owner. The body no longer says the `Worktree.Verify` contract is "as `sites.rs` states it": `sites.rs` is implementation. Guard: the doc states only what the code does, and `SWEEP-WORKTREE-014` carries the tree-wide citation question | fixed |
+| PR131-P3-EXACT-HEAD-CLAIMS-STILL-INACCURATE | P3 | c0eb8c5d35517b9402f7ddd5dfc46eb0c8c9ee42 / src/workspace_manager/worktree.rs:344 | the body said seven module tests (eight), nine mutations (eleven in its own table), twelve P3 sweep findings (`SWEEP-WORKTREE-012` is P2 since the repair round rewrote it), all five pass-1 findings repaired (`SWEEP-WORKTREE-013` is deferred), construction through `from_porcelain` (renamed), every reader on an accessor (residue.rs reads the field), and reasons "verbatim" (`reason` decodes lossily, as its own test shows) -> the reviewer measures the body against the head and each is a claim the head does not support | introduced_by_feature | docs-contract | ea4fd74 (the body); 5e19848 (the `verbatim` comments) | fixed at 1720d912e5d363f32a87b577cd185ad75ab0e4d6 and in this body: the code comments say the reasons are decoded with replacement characters, and every count in the body is derived from this head -- the test count from `cargo test --lib workspace_manager::worktree`, the mutation count from the table itself, the dispositions from the ledger rows below | fixed |
+| PR131-P2-REFNAME-RULES-PARTIAL | P2 | 9dd3a791f19dcee490ae4da006c39ed84a16f304 / src/workspace_manager/worktree.rs:422 | `can_be_refname` applied only the byte-set clauses of `git check-ref-format` while this pull request called the value a full refname and its evidence well formed -> `worktree /repo\0HEAD <40 hex>\0branch refs/heads/a..b\0\0` was accepted as a record -> `assert_publishable` compares a refname Git would refuse, so malformed external evidence reached a publication decision instead of failing closed (§14) | pre_existing | security-trust | — | fixed at 0e510735c5324d8d8c5e9194cf80f2858e4e1878: every documented rule for a full refname is applied -- no component beginning with `.` or ending `.lock`, at least one `/`, no `..`, the byte set, no empty component, no trailing `.`, no `@{`, not the single `@`, no backslash. `a_branch_is_a_full_refname_by_every_documented_rule`, twenty-two refused cases (one per rule) and seven accepted ones, which are the `branch` values the twelve measured shapes printed plus this engine's own run-branch spelling, so the rule cannot over-refuse what Git writes. Mutations: the byte-set-only check, `..` allowed, the `.lock` suffix allowed, an empty component allowed and a trailing dot allowed each fail it | fixed |
+| PR131-P2-RETIRED-RECORD-QUOTED-AS-CONTRACT | P2 | 9dd3a791f19dcee490ae4da006c39ed84a16f304 / src/workspace_manager/worktree.rs:12 | the module and `VerifyFailure` still carried the retired record's normative wording for `Worktree.Verify` and its four conditions, while the same module said no `DESIGN.md` section carries or maps them -> `DESIGN.md` is the only living authority and says every still-binding retired conclusion lives in its sections -> a module documenting the contract in a pull request that materially documents it, on an authority the design does not confirm; logging `SWEEP-WORKTREE-014` did not license carrying it meanwhile | introduced_by_feature | docs-contract | PR131-P2-INVENTED-DESIGN-AND-TRUST-AUTHORITY | fixed at 0e510735c5324d8d8c5e9194cf80f2858e4e1878: the quotation is gone from the module and from both enums; the types say what they are and what the code does, `verify_worktree` is named as where the conditions live, and the module states that the design mapping is missing and is the owner's (`SWEEP-WORKTREE-014`). No design sentence is cited that does not say it | fixed |
+| PR131-P3-BODY-FIGURES-UNGENERATED | P3 | 9dd3a791f19dcee490ae4da006c39ed84a16f304 / reviews/FINDINGS.md:5955 | the body said 14 fixed and 8 deferred (the ledger had 15 and 7, and Scope said 6), six commits (the range had eight), seventeen mutations (the table listed fifteen), construction through `from_porcelain` (renamed two heads earlier), and both §52 (§51 at that head) and `standards/SWEEP.md` said all five pass-1 findings were fixed while `SWEEP-WORKTREE-013` is deferred -> every figure was written by hand and re-checked by hand -> the reviewer measures each against the head and each disagreement is a finding | introduced_by_feature | docs-contract | PR131-P3-EXACT-HEAD-CLAIMS-STILL-INACCURATE | fixed: every figure in the body is generated from the tree at the head being pushed -- the disposition totals by counting the ledger's rows, the commit list from `git log`, the mutation count from the table's own rows, the test count from `cargo test --lib workspace_manager::worktree::` against a binary with a `Compiling upstroke` line -- and the pass-1 sentences in §52 (§51 at that head) and `standards/SWEEP.md` say four fixed and one deferred | fixed |
+| PR131-P3-FUTURE-SHAPE-CLAIM-TOO-STRONG | P3 | 9dd3a791f19dcee490ae4da006c39ed84a16f304 / src/workspace_manager/parsers.rs:536 | the body said a future thirteenth shape would be refused rather than misread -> the parser accepts any label it does not know (`_ => Ok(())`), by design and by its own doc, so a record that is well formed today plus a future attribute parses -> the claim was about the shape rule and read as a claim about the whole grammar | introduced_by_feature | docs-contract | — | fixed as text: the body says what is true, that an unknown label is skipped so Git may add one, and that the shape rule refuses only a combination of the four attributes it knows that is not a worktree. The behaviour is right and unchanged; `worktree_records_are_read_from_the_porcelain_grammar` pins the unknown label being skipped | fixed |
+
+## 53. PR #109 — the closing-handle control, and the oracle that observed timing
+
+Three `gpt-5.6-sol` passes at `max` effort on this pull request's own subject,
+`workspace_manager::tests::a_worktree_whose_killed_child_is_still_closing_is_removed_not_refused`
+(`#[cfg(windows)]`): on `48cefb3` (two findings), on `7f1b998` (four), and on `86fa1d8` (one P1,
+three P2, one P3). The rows the first two passes left carried are **closed** by the repair the
+third forced, and this section is written from that end rather than as three appended layers,
+because a reader meeting a red needs one instruction and not a history.
+
+**The one defect underneath all of them.** The control released its held handle at the remove
+funnel's `Before` phase, which fires *before* the primitive is entered. Nothing outside the loop
+could see an *attempt*, so the oracle asserted the retry indirectly — the closing case expected a
+removal to succeed against a handle it believed was open when the first attempt ran. That belief is
+a scheduling assumption, and it is unsound in both directions. Deschedule the remover between the
+hook and the loop, let the timed release expire first, and the single attempt of a
+retry-deleted engine (`ATTEMPTS = 1`) succeeds unaided: **the mutant passes.** The same
+interleaving unmutated is a removal that never needed the retry, which the oracle equally could not
+tell from one that did.
+
+**The repair, and why the carried rows go with it.** `remove_tree_once_handles_close` now records
+each attempt through a seam that is a `#[cfg(not(test))]` no-op in production, and the control
+reads the count: both cases assert the removal made more than one attempt, so a deleted retry fails
+by the count rather than by whether a handle happened still to be open. The release is ordered
+against an attempt instead of a clock — the holder closes when told attempt 1 has *already
+completed*, and the observer waits for the close before the loop continues — so attempt 1 provably
+ran with the handle open and attempt 2 provably ran after it closed. The 300ms hold, the
+five-second timer before it and the funnel-phase signal are all gone with the assumption they
+served.
+
+`FIND-109-CLOSING-CASE-HOLDER-STARVATION` is therefore **closed, not carried**. It existed because
+a release could not be ordered against an attempt, and now it can. So is the record's own defect,
+which the pass on `7f1b998` found and this section used to carry: it gave the residual the same
+fingerprint a real retry regression produces, told a maintainer to classify a red as the known
+scheduling failure, and then told them the fingerprint could not be relied on. Those two
+instructions contradicted each other and the discriminator offered to settle them — whether the
+holder was still holding when the assertion ran — did not discriminate, because with `ATTEMPTS = 1`
+removal returns error 32 while the holder is normally still inside its hold, exactly like the
+starvation case.
+
+**So the instruction is short, with one exception that is named rather than buried.** A red on
+this test is a regression, and the assertions quote the attempt count, which is the discriminator
+the earlier record could not supply: a count at or below the derived floor is a retry budget that
+no longer covers the closing window this control is sized against, and at one attempt it is a retry
+that is gone. Neither reading needs a rate, a soak, or a judgement about how loaded the runner was.
+
+**The exception is the fail-safe, and it is not a regression by default.** That assertion measures
+the *case*, which begins before the removal does, so it can expire because this thread was never
+scheduled to reach the retry at all. The pass on `8d45582` found the old wording asserting a slow
+removal from a bare fire, which is not sound. The assertion now reports which of the two happened,
+from the millisecond at which the removal's first attempt completed: **no attempt recorded** is a
+scheduling failure of the test and says nothing about any removal's duration; **an attempt
+recorded** says the bound was spent inside the funnel and quotes when it was entered. Read the
+message, not the fingerprint.
+
+### FIND-109-FAIL-SAFE-DIAGNOSES-ONLY-ITS-BOUND
+
+**Fingerprint.** Windows only, assertion text beginning `the fail-safe released the handle`.
+
+**What it still says.** `FAIL_SAFE` is a ten-minute watchdog that converts a wedged removal into a
+verdict rather than a hung CI job. Firing establishes the bound that was crossed — a removal slower
+than the fail-safe — and **not** the reason: an unbounded retry and a thread that stopped being
+scheduled read identically from where the test stands. The assertion says only the former and
+quotes both the elapsed time and the attempt count so a reader can tell them apart. This row exists
+so nobody re-reads a fire as a proof of the former.
+
+**What is closed.** The pass on `86fa1d8` found the watchdog was not end-to-end: the holder had two
+600-second receives in series, so a wedged removal could hold the Windows job for nearly twenty
+minutes and be killed by its 20-minute timeout with no assertion having run at all — the fail-safe
+defeating its own purpose. There is now **one deadline**, taken once before the holder starts, and
+every receive in the test and in the holder waits only for what is left of it, so the sum is
+bounded by it. The holder also has a single wait now rather than two, which closes the transition
+between them that `SOL-7F1-01` recorded: there is no longer a window in which the holder is parked
+with nothing armed.
+
+**Rate.** Unobserved. What remains needs a 600-second stall of one specific thread, and the
+measurement that would settle it is a soak; nothing here claims a rate without one.
+
+**Consequence.** A red matching the fingerprint means a removal slower than ten minutes, which is
+worth investigating on its own terms whatever caused it. Owner: whoever holds the workspace-manager
+area.
+
+### The `86fa1d8` pass, and what each finding became
+
+`gpt-5.6-sol` at `max` on `86fa1d82308898e666f5ef2d20fea787f4dfad33`, `CHANGES_REQUIRED`: one P1,
+three P2, one P3, all in the test this pull request exists to fix and so all in scope. They are
+`SOL-86F-01` through `SOL-86F-05` in PR #109's ledger, all `fixed`. Four of the five were one
+defect and are repaired at the root described above; the fifth was text.
+
+- **P1, the retry-deleted mutant can still pass.** The oracle observed timing rather than attempts.
+  Repaired by the seam and the count assertion; the mutant now dies by the count on the guest.
+- **P2, `FAIL_SAFE` is not end-to-end.** Two 600-second receives in series. Repaired by the single
+  deadline.
+- **P2, the touched test is not §10/§12-compliant.** `ready.recv()` unbounded, `Holder::drop`
+  joining without a bound and discarding the join result — so a holder panic dropped the file, let
+  the closing case succeed without a retry, and vanished. All three repaired: the deadline bounds
+  the receive and the wait for the thread, and the payload is re-raised with `resume_unwind` (or
+  reported, during an unwind, where panicking would abort).
+- **P2, the flake record can still hide a real regression.** The contradiction and the
+  non-discriminating discriminator described above. Repaired by closing the row rather than by
+  wording it better.
+- **P3, the variant documentation repair is incomplete.** `workspace_manager.rs:679` still said the
+  engine reports a hard `Io` failure while every failure from that helper is
+  `Filesystem { operation: "remove" }`. Corrected, and the rest of the file re-checked rather than
+  the cited line alone — it was the only stale spelling left in it.
+
+**What is still not measured, stated so it is not read as closed.** The rate of a 600-second stall
+above, and nothing else about this control: the attempt count removed the scheduling dependence
+that the earlier rows carried, rather than narrowing it.
+
+### FIND-109-SECOND-SIGHTING-OF-THE-LINUX-EMPTY-GITDIR-SAMPLER
+
+**Not this pull request's defect, and not this pull request's row to change.** It is recorded here
+because the row it concerns is merged, a merged row is not edited by a later pull request, and a
+sighting that lives only in a pull-request body is a sighting nobody finds when the fingerprint
+fires again.
+
+**The prior row.** `PR107-LINUX-WORKSPACE-RESIDUE-EMPTY-GITDIR-FINGERPRINT` records
+`workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered`
+panicking at `forced removal converges: Git { message: "worktree registration
+…/.git/worktrees/kalpha-g1 has an empty gitdir" }`, on PR #107's `test (ubuntu-latest)` leg at
+`9963fb0`. It is explicitly **open as one unexplained observation, not classified as a flake or a
+regression**, it is a member of `CLASS-INTERMITTENT-SUBPROCESS-KILL-SETTLE-RESIDUE-FAILURES`, and
+its own terms make **a second sighting** one of the three things that would move its disposition —
+alongside an owner ruling and new evidence. It also calls itself the cheapest of that class to
+chase, because it is the only member on the Linux leg, which this project's build box reproduces
+directly.
+
+**The second sighting.** The eight-command baseline at `4b933311978ceab058ed355a52d1ec6b021169db`
+on the Linux build box, full suite: `test result: FAILED. 1904 passed; 1 failed; 35 ignored`, the
+same test, the same assertion, the same message shape — `worktree registration
+/tmp/upstroke-wm-sample-add-3511797-218/repo/.git/worktrees/kalpha-g1 has an empty gitdir` — at
+`src/workspace_manager/tests.rs:8815`. Run under the box-wide gate lock, with another session's
+suite active on the machine at the same time. The same test then passed **five times out of five**
+run alone at that head, which is the isolation half of the prior row's own nondeterminism.
+
+**What this pull request can and cannot say about it.** It does not touch that test:
+`git diff 95c5bd3 HEAD -- src/workspace_manager/tests.rs` contains no line naming it. The prior
+sighting is on PR #107 and predates this branch. But the honest limit is this: this pull request's
+only production change on the Linux leg is a thread-local increment inside the removal primitive,
+and a kill sampler is a timing experiment, so it **cannot be absolutely excluded** as an influence.
+The judgement here — offered as a judgement, not a measurement — is that a thread-local get-and-set
+is nanoseconds against a sampler whose ladder is in microseconds (the failing run's own ladder
+begins at 11304us), and that the fingerprint predating the change is the stronger evidence. If a
+third sighting lands on a head without that increment, this paragraph is what to delete.
+
+**Consequence.** This row exists to be found when that fingerprint fires a third time. The
+disposition of the prior row is its owner's to rule on, not this pull request's; nothing in it has
+been edited.
+## 54. PR sweep of `src/workspace_manager/tests.rs` (2026-09-04)
+
+Append-only. The amendment-7 sweep of `src/workspace_manager/tests.rs`, row 10 of the
+`standards/SWEEP.md` review queue and the largest file on it (8,529 lines at the reviewed base
+`95c5bd3`). These are the rows of the sweeping session's own line-by-line review, recorded before
+any frontier pass; the passes the coordinator launches append their rows below these. P1 and P2
+findings are fixed and P3 and lower are recorded; the P3 rows marked `fixed` are ones the sweep
+itself repairs in the same commit, and the `deferred` rows each name the file that owns them.
+
+**Why this section is in a file marked closed.** PR #138 (`d91e84a`) replaced this layout: a
+finding recorded after 2026-09-04 is its own file under `reviews/findings/`, which ends the merge
+conflicts this single file caused and retires the practice of sessions reserving section numbers
+from one another. §54 was written on 2026-09-04, before that landed, and pass 1 reviewed it here;
+converting twenty-six rows to the new layout mid-round would make the next pass's diff a wholesale
+move rather than the four repairs it has to check. So it is finished in place on the coordinator's
+direction, and it is the last section this file takes. **Every finding this session records from
+here on goes in `reviews/findings/`**, and the number it happens to carry — §54, the next after
+§52 from PR #131 and §53 from PR #109 — is an artefact of the convention it is the last user of.
+
+Four merges of `origin/master` are in this branch: `c61880f`, then `5f661fa` — one
+append-at-the-tail conflict in this file, resolved as the union with master's §53 before this §54
+— then `ff34031`, then `d91e84a`, the last two clean.
+
+**§6 and §7 in this file, re-derived by reading the tree rather than from recollection**
+(PR #136 pass 1, finding 5 corrects the first version of this paragraph, which said "no `Arc` and
+no lock the file owns" and was false in both halves). There is no `Rc`. There are three kinds of
+shared ownership, and each has a reason at its site:
+
+* `Arc<Mutex<HookHarness>>`, built by the `harness()` helper and once inline in
+  `the_intent_and_its_directory_are_synced_before_the_add_begins`. Two holders with independent
+  lifetimes — the `HarnessEffects` moved into the funnel, and the test that reads the log after
+  it returns — which is §6's stated exception; `src/workspace_manager/hooks.rs`, already swept,
+  states the protected invariant.
+* `static SAMPLED_LAUNCHES: std::sync::Mutex<Vec<SampledLaunch>>`, **a lock this file does own**,
+  process-global and appended to inside `kill_git_child`. Its long doc comment gives the reason:
+  the record must be written by the statement that performs the kill, and an observer threaded
+  from the test to that statement is one an edit can walk past — which is what `PR5-R5-002`
+  measured. It is a `Mutex` rather than a channel because the readers are assertions that run
+  after every sample.
+* Six `Arc<Atomic…>` values in the closing-handle and removal-attempt tests, each cloned into a
+  spawned thread or an observer closure, which is §6's "transfer to another thread". **These
+  arrived with the 5f661fa merge-in (PR #109) and are not this sweep's lines**; they are
+  recorded here because the file is being listed as swept and a reader of that table should not
+  have to discover them.
+
+§7: there is no `.unwrap()` anywhere in the file, and the three `?` sites are all inside
+`parse_budget_spec`, each mapping into a `BudgetSpecError` variant that names what was wrong with
+the operator's spec. What the rule found was the discard clause — `let _ =` and `.ok()` sites, of
+which this pull request repairs four (`let _ = &slot`/`let _ = &absent` kept a fixture alive that
+nothing read; `let _ = &intents_dir` stood in for an assertion the Windows leg was not running;
+`let _ = child.kill()` discarded the one answer that says whether a kill killed) and records the
+rest.
+
+**What the four limbs found.** The census of the suite's tests is in the pull-request body ---
+126 `#[test]` items at the base, of which 122 compile on Linux, four are Windows-only and
+thirteen Unix-only ---
+grouped by what each group asserts. Two groups did not pin what they claimed: the `IdUnread`
+abort, whose oracle accepted any unsuccessful exit and therefore accepted the helper's own panic,
+and the intent-ordering assertion, which compared two positions in a log the test itself appended
+to in that order. One public method of the module, `candidate_diff`, had no test in this suite at
+all. Three unit tests of a sibling child's `pub(super)` helper are weaker copies of that child's
+own tests and one of them was vacuous on Windows; they are deleted, each row naming the test that
+carries the claim. Two source censuses counted unblanked text and had no positive control, which
+§12 requires of every census. Four mutations of `candidate_diff` were run against **master's whole
+crate suite at the base**, all 1,903 of whose tests passed under each: three of them are the
+witnesses the new test now carries, and the fourth — dropping `-c color.ui=false` alone — is
+disclosed in the pull-request body as a claim this sweep wrote and then withdrew, because
+`--no-color` still suppresses colour and the mutation therefore does not bite. The colour claim is
+stated as the pair.
+
+**Pass 1, on `966775e`** (gpt-5.6-sol at max, posted as the pull request's comment), returned
+`CHANGES_REQUIRED` with five findings — four P2 and one P3, **no P1**. Every one of them is the
+same kind, and it is this row's own kind: a test or census that appears to guard something it does
+not. Three of the four P2s are defects in *this pull request's own repairs*, which is the shape the
+project has recorded before — each round's finding lives in the last round's fix. All four P2s are
+fixed and each is witnessed by running the reviewer's own reproduction at `966775e` and at the
+repaired head; the P3 is a correction to this record and to the body, and is made as text rather
+than deferred, because a false claim in the audit record is not a thing to carry. Two residuals the
+repairs cannot reach are `deferred` rows naming where they belong.
+
+**Pass 2, on `142c321`**, returned `CHANGES_REQUIRED` with two findings, both P2 and again **no
+P1** — and both, once more, inside this pull request's own repairs: the argv census's extent could
+be forged by a string literal, and the abort oracle accepted `process::exit(1)` on Windows. Each is
+fixed and witnessed with the reviewer's own reproduction. The second could not be witnessed on the
+Unix legs at all — the mutation is Windows-only and the Unix arm names `SIGABRT`, so both heads
+fail it here — so the repair is accompanied by a test of the *oracle* rather than of the funnel,
+which witnesses it on every platform. A third row records the same weakness in the shared helper's
+other caller, deferred because that file is open PR #135's subject.
+
+**Pass 3, on `ead3573`**, returned `CHANGES_REQUIRED` with four findings — three P2 and one P3,
+**again no P1** — and two of the three P2s are defects in machinery pass 2 added. **That is the
+stopping rule, agreed with the coordinator before the pass, and it fires: this pull request narrows
+rather than taking a fourth round.** The census's boundary claim and the kill oracle's pairing are
+**withdrawn**, not repaired a third time; the slot census's claims are corrected without writing a
+third census; and the P3, stale figures in a body that claimed to be generated at its head, is the
+fifth head claim this pull request has had to correct and the cheapest of them. Three of the four
+findings therefore end as `deferred` rows carrying their reproductions, which is what a narrowing
+looks like: twelve fixes with reproductions survive intact, and two pieces of machinery that could
+not be made sound are recorded rather than shipped green.
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| SWEEP-TESTS-KILL-ORACLE-ACCEPTS-THE-HELPERS-OWN-PANIC | P2 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:6444 | `a_kill_at_id_unread_aborts_before_the_id_is_recorded` asserted `!helper.status.success()` -> the helper ends in `unreachable!`, so a `Kill` that stopped killing leaves it panicking, the harness reports a failed test and exits 101, and `!success()` is true of that -> the helper then completes the commit-tree, whose unreferenced object is `Internal` for a target with no recorded id, so every remaining assertion holds too and the test passes while the abort it is named for never happened. Measured: with `Injection::Kill` replaced by `Injection::Proceed` in `id_unread_kill_helper`, the test passed | pre_existing | correctness | — | fixed: the oracle is `died_by_abort`, the shared per-platform fingerprint whose own documentation records this confusion as measured (`SIGABRT` on Unix, and on Windows any unsuccessful exit that is not the panic's 101). Witnessed in both directions on Linux -- the repaired assertion fails under that mutation and master's passes it | fixed |
+| SWEEP-TESTS-CANDIDATE-DIFF-HAS-NO-TEST-IN-THIS-SUITE | P2 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:2939 | `candidate_diff` appeared once in this file, in the hostile-slot-name grid, where every call is expected to fail -> nothing in this suite asserted anything about the diff it produces -> a body diffing from current HEAD instead of the recorded parent, and one dropping `--binary` from the shared review flags, each passed **master's whole crate suite** (1,903 tests, 0 failures); what a reviewer and `classify::diff_failure` are shown is decided here and was pinned nowhere | pre_existing | correctness | — | fixed: `the_candidate_diff_is_of_the_recorded_objects_and_survives_operator_diff_config` moves the worktree's HEAD off the recorded parent, proves the two readings differ, and asserts the recorded-parent answer, the binary patch and the absence of escape codes under a repository configured `color.ui=always`. Each claim carries the mutation it was witnessed against, and the colour claim is stated as the pair `-c color.ui=false` plus `--no-color` because dropping either alone does not bite | fixed |
+| SWEEP-TESTS-INTENT-ORDER-ASSERTION-RESTATES-THE-TESTS-OWN-SCRIPT | P2 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:3756 | `the_intent_is_durable_before_the_add_and_reclaim_removes_it` ended by comparing the positions of `Worktree.WriteIntent`/After and `Worktree.Add`/Before in `HookHarness::coverage` -> that log is first-observation order and the test calls `write_intent` before `add_worktree`, twice, so the recorded entry is the first call's and precedes every `Add` whatever either funnel does -> no edit to `src/` can reorder two calls the test makes itself, which is what makes the assertion unfalsifiable rather than merely weak; it is the `PR5-WORKSPACE-022` shape, recorded one screen below on the snapshot test, where a fresh harness repairs it because there both events happen inside one `add_snapshot` | pre_existing | correctness | PR5-WORKSPACE-022 | fixed by deletion, with the reason in the test's own doc: the ordering is enforced rather than merely performed by `an_add_without_a_durable_intent_refuses_and_leaves_nothing_registered`, and what durable means at the moment the add begins is `the_intent_and_its_directory_are_synced_before_the_add_begins`, which reads the durability ledger at the add's `Before` hook | fixed |
+| SWEEP-TESTS-SLOT-GRID-HAS-NO-LEGAL-NAME-CONTROL | P2 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:2974 | `every_slot_taking_primitive_refuses_a_hostile_slot_name` asserted refusals and nothing else -> a primitive that refuses **every** slot name satisfies all eighty-eight of its assertions -> measured: with `candidate_diff` returning a slot-name refusal for every call, this module's whole suite passed; the only legal-name control in the file drove `write_intent` alone, and what caught the mutation crate-wide was a driver test two modules away, which is not the lowest layer that can observe it (§12) | pre_existing | correctness | — | fixed: the grid drives a legal `Slot::Task` through all eleven primitives before the hostile loop and asserts that whatever else goes wrong, the refusal is never a slot-name refusal. `a_slot_name_that_could_escape_the_root_refuses` is deleted in the same change: its six names are a strict subset of `HOSTILE_SLOT_NAMES` and its one primitive is one of the eleven, so only its control was not redundant and that half has moved into the grid | fixed |
+| SWEEP-TESTS-DIRECTORY-BARRIER-PATH-UNASSERTED-ON-WINDOWS | P2 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:3979 | `the_intent_and_its_directory_are_synced_before_the_add_begins` asserts the durability sequence on every platform and then gated the assertion that the directory barrier is of the **intents directory** behind `#[cfg(unix)]` -> the Windows leg ran the step list and not the path -> a barrier taken against the wrong path is invisible on the one platform whose directory fsync needed a Win32 recipe of its own, and the `cfg` needed a `let _ = &intents_dir;` to keep the binding used, a §7 discard standing in for a missing assertion | pre_existing | portability | PR5-CONF-013 | fixed: the assertion is ungated and the discard is gone. `write_synced` ends in `sync_directory(parent, ledger)` and `sync_directory` records the path it is handed on every platform, so nothing platform-shaped remained in what is recorded; the `cfg` was the last residue of the fork the step list had already lost | fixed |
+| SWEEP-TESTS-SOURCE-CENSUSES-COUNT-UNBLANKED-TEXT | P2 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:3004 | `slot_taking_fallible_primitives` split `src/workspace_manager.rs` on `"\n    pub fn "` and `no_sampled_funnel_builds_its_argv_from_a_literal` counted `OsString::from("` in a function body, both over raw source -> a block comment or a raw string literal carries a real newline followed by four spaces, and a comment inside a funnel body is where a note about `OsString::from(` is most likely to be written -> a census that counts prose reports an answer about text nobody compiles, which is `PR4-CENSUS-COMMENT-ORACLE`; neither census had the positive control §12 requires, so neither could be shown able to fail | pre_existing | correctness | PR4-CENSUS-COMMENT-ORACLE | fixed: both route through the one blanker in the tree, `blank_comments_and_strings` for the census whose needles are code and `blank_comments` for the one whose needle lives inside a literal, each with the reason at the site; both scans take text so a control can drive them, and `the_slot_primitive_scan_reads_code_and_never_prose` and `the_sampled_argv_census_counts_code_and_never_comments` inject a violation and see it, then inject the same text as prose and see nothing | fixed |
+| SWEEP-TESTS-NORMALIZED-GITDIR-CASE-IS-VACUOUS-ON-WINDOWS | P2 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:4344 | `registration_gitdir_requires_an_absolute_normalized_path` spelt its registration directory `/repository/.git/worktrees/example` and its inputs `/absolute/../traversal/.git` -> on Windows neither is absolute, because `Path::is_absolute` wants a prefix -> the guest reached `registration_checkout`'s rooted-but-not-absolute arm and never the normalization check the test is named for, so the test passed there for a reason it does not state | pre_existing | portability | — | fixed by deletion: `registration_checkout_names_the_row_a_gitdir_falls_into` in `src/workspace_manager/parsers.rs` makes the same claim over six shapes, asserts which row each falls into rather than only that it refused, and builds every fixture through its `absolute` helper, which prepends a drive letter on Windows | fixed |
+| SWEEP-TESTS-REGISTRATION-UNIT-TESTS-DUPLICATE-A-SWEPT-CHILD | P3 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:4359 | three `registration_gitdir_*` tests drove `registration_checkout`, a `pub(super)` helper of a sibling child, from this file -> each claim is made again and more strongly by that child's own module tests, and §12 asks a test not to reach through private state when the public behaviour can be exercised -> the file carried coverage that reads as this suite's and is not, and the weaker copy is the one a reader meets first | pre_existing | docs-contract | SWEEP-TESTS-NORMALIZED-GITDIR-CASE-IS-VACUOUS-ON-WINDOWS | fixed by deletion, with a comment naming the covering test for each: `a_registration_that_is_not_utf8_is_refused_with_its_offset` also asserts the byte offset, and `a_registration_keeps_every_path_byte_on_unix` is the same assertion. What this file keeps is the composition, `a_relative_registration_still_binds_its_checkout`, which drives the decoder through the public primitives against a real repository | fixed |
+| SWEEP-TESTS-FUNNEL-FAILURE-BUILDS-A-FIXTURE-NOTHING-READS | P3 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:5570 | `a_git_child_that_fails_inside_a_funnel_records_before_and_never_claims_after` built a repository and a task worktree, and an absent-object id, that no assertion or closure reads -> both cases construct their own fixture inside the closure and spell the same id inline -> a real Git repository and a checkout are created on every run of the suite for nothing, and two `let _ = &x;` statements at the end of the test kept the compiler from saying so | pre_existing | performance | — | fixed: the dead fixture and both discards are gone, and the id is `ABSENT_COMMIT`, one constant with the reason on it, used by both cases | fixed |
+| SWEEP-TESTS-KILL-FINGERPRINT-WRITTEN-TWICE | P3 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:8108 | `launch_end` carried its own `#[cfg(unix)]` `SIGKILL` and `#[cfg(windows)]` exit-code-1 arms, byte-for-byte the ones in `died_by_kill` -> `src/engine/topology/attempt/tests.rs` reads the shared one and this file read its copy -> two spellings of one platform fact drift apart at whichever is taught a new platform first, and the half not taught goes on counting kills after the kill is gone; `PR5D-VISIBILITY-CHECK-DUPLICATED` is the standing row for a parser written twice | pre_existing | portability | PR5D-VISIBILITY-CHECK-DUPLICATED | fixed: `launch_end` calls `died_by_kill` and keeps its own `Completed` and `Failed` arms, which are this sampler's and not the shared helper's. The whole `workspace_manager` suite passes on the merged tree, on a binary the test log shows being compiled | fixed |
+| SWEEP-TESTS-SAMPLER-DISCARDS-THE-CLASSIFIERS-REFUSAL | P3 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:7784 | `sample_site` recorded each sample as `classify_object_residue(site, &target).ok()` -> a classifier refusal and a residue in no class both become `None` -> the assertion those `None`s fail is worded for the second of them, so a red run reports "an unclassifiable residue is durable state no tabled action recovers" for what may have been an I/O failure, and the error's own words are gone. §7 asks a discard to be best-effort with defined observability | pre_existing | docs-contract | — | fixed: the refusals are kept in `SamplingRun` and printed by the assertion that fails on them, so a red run says which of the two it met. The tally is unchanged, and so is what is asserted | fixed |
+| SWEEP-TESTS-SLOT-PATH-LITERAL-IS-OBFUSCATED | P3 | 95c5bd336986a620f1b36c2e17496717c0edae6c / src/workspace_manager/tests.rs:5657 | `two_generations_of_one_task_key_are_two_worktrees` spelt one expected path `"tasks/k alpha-g0".replace(' ', "")` while the next assertion spelt its sibling `"tasks/kalpha-g1"` plainly -> nothing in the gates, the effect allowlists or the docs greps for that text, so the construction defends against nothing -> a reader has to evaluate it to see that the two assertions are the same shape, and a construction that looks like it is hiding from a census invites the question of which one | pre_existing | docs-contract | — | fixed: the literal is `"tasks/kalpha-g0"`, matching its sibling. `git grep` over the four `test-*.sh` gates, `effects/` and every tracked Markdown file finds no consumer of either spelling | fixed |
+| PR136-P1-CANDIDATE-DIFF-DOES-NOT-PIN-ITS-TREE-ARGUMENT | P2 | 966775e2c9ba0d1a7f317c15451c119e346b4150 / src/workspace_manager/tests.rs:6731 | the new `candidate_diff` test moved HEAD with `reset --soft`, which by design leaves the index equal to the tree just captured -> `git diff --cached <parent> --` and `git diff <parent> <tree> --` then produce byte-identical output, so a body ignoring `tree` passed every assertion the test added -> after a capture the index moves on, and a reviewer shown the index is shown a tree the candidate does not commit, against `DESIGN.md` §14's exact-tree guarantee; the pull request's claim of a "mutation per claim" was therefore too strong for the tree half | introduced_by_feature | correctness | SWEEP-TESTS-CANDIDATE-DIFF-HAS-NO-TEST-IN-THIS-SUITE | fixed: one more file is staged **after** the capture, so the index no longer holds the recorded tree, and three premises are asserted before the answer is read — `git write-tree` no longer equals the recorded tree, an index-reading body would carry `after-capture.txt`, and a HEAD-reading body would carry `b.txt`. Witnessed with the reviewer's own mutant, `candidate_diff` running `--cached <parent> --` and ignoring `tree`: it passes at 966775e and fails here | fixed |
+| PR136-P2-REFUSAL-DIAGNOSTIC-IS-UNREACHABLE | P2 | 966775e2c9ba0d1a7f317c15451c119e346b4150 / src/workspace_manager/tests.rs:8551 | a classifier refusal becomes `None` in `observed` -> `tally` counts it into no bucket, so `histogram.total()` falls below `SAMPLING_N` and the generic total assertion fires first -> the assertion that prints `run.refusals`, added by this pull request precisely so a refusal says what it was, was unreachable on the only failure it exists to diagnose, and the body's claim that the error is kept "for the diagnostic that fails on it" was false | introduced_by_feature | docs-contract | SWEEP-TESTS-SAMPLER-DISCARDS-THE-CLASSIFIERS-REFUSAL | fixed: the refusals are asserted **before** anything derived from the tally, as their own failure rather than as a shortfall in a count. Proved by execution rather than by argument — a refusal injected at sample 0 of `Object.CandidateStage` fires "every sample is accounted for by exactly one class, left: 7" at 966775e with no refusal text, and here fires "the classifier refused 1 of 8 samples … it is an inspection that failed" carrying the refusal's own words | fixed |
+| PR136-P3-SAMPLED-ARGV-CENSUS-IS-FAIL-OPEN | P2 | 966775e2c9ba0d1a7f317c15451c119e346b4150 / src/workspace_manager/tests.rs:8456 | the census matched two exact source spellings, `OsString::from("` and `OsString::from(` -> an argument added beside the shared list in any other form leaves both counts unchanged, the reviewer's reproduction being `argv.push("--ignore-errors".into())` in `candidate_stage` -> the sampled child then differs from the funnel's real child while the census and its own positive control stay green, which is the whole thing the shared lists exist to prevent | pre_existing | correctness | SWEEP-TESTS-SOURCE-CENSUSES-COUNT-UNBLANKED-TEXT | fixed as far as a text census can be, and the overclaim withdrawn: every string literal in each sampled funnel body is now counted and declared, with what each one is, so the reviewer's reproduction moves a number. Witnessed in production: argv.push("--ignore-errors".into()) in `candidate_stage` passes at 966775e and fails here. The doc no longer says the census stops a funnel growing an argument -- a `const`, a variable or a call still passes it -- and the structural version is the deferred row below | fixed |
+| PR136-P4-KILL-RESULT-DISCARDED | P2 | 966775e2c9ba0d1a7f317c15451c119e346b4150 / src/workspace_manager/tests.rs:9015 | `kill_git_child` discarded `Child::kill`'s result with `let _ =` while `SampledChild::kill` wrote `fired = Some` whether or not the kill worked -> a shape whose kills all fail, but whose children exit normally, passes its per-shape firing count with nothing killed and contributes no `Failed` end -> the one global kill floor is then satisfied by another shape's kills, and the suite certifies killing the Git child of all four commands while one of them was never killed; §7's discard rule with no defined failure path | pre_existing | correctness | PR5-R4-001 | fixed as to the discard, which was the finding: the kill's error is recorded on the launch and printed beside the per-shape counts, so §7's rule that a discard be best-effort with a defined failure path is satisfied by observability. **The assertion that once accompanied it is withdrawn** — pass 3 reproduced a false green in the `try_wait`/`kill` race — and `PR136-PASS3-P3-KILL-PAIRING-IS-A-TOCTOU-ORACLE` carries that reproduction and what a sound version needs | fixed |
+| PR136-P5-AUDIT-RECORD-AND-ACCOUNTING-FALSE | P3 | 966775e2c9ba0d1a7f317c15451c119e346b4150 / reviews/FINDINGS.md:6347 | §54 said the file has "no `Arc` and no lock the file owns" -> it declares `static SAMPLED_LAUNCHES: std::sync::Mutex<Vec<SampledLaunch>>`, which the file does own, and six `Arc<Atomic…>` values; and the body's accounting said 422 insertions with `FINDINGS.md` +58 against an actual 426 and +62, and said both CI heads differ from the head in findings prose alone, which is false of `97ccb77` — five paths differ there, `src/workspace_manager.rs` and `fixture.rs` among them -> an audit record whose own claims do not survive a reading is worth less than none, and every figure had been written by hand once and re-checked by hand | introduced_by_feature | docs-contract | — | fixed as text: the §6 paragraph is re-derived by reading, naming all three kinds of shared ownership with the reason at each and marking the six Arc<Atomic…> values as PR #109's, arrived with the 5f661fa merge-in; every figure in the body is regenerated from the tree at the head being pushed; and the CI sentence now says what is true of each head separately | fixed |
+| PR136-P4-A-KILL-AT-AN-ALREADY-REAPED-CHILD-IS-INDISTINGUISHABLE | P3 | 966775e2c9ba0d1a7f317c15451c119e346b4150 / src/workspace_manager/tests.rs:9000 | the repair pairs a kill error with `already_exited`, read by `try_wait` immediately before the kill -> a reordering that reaps the child before killing it makes `already_exited` true, so its kill error reads as the legal one -> a kill that cannot kill is then invisible again, in that one shape | pre_existing | correctness | PR136-P4-KILL-RESULT-DISCARDED | **superseded**: this row deferred a residual of the `try_wait` pairing, and pass 3 showed the pairing itself unsound and it is withdrawn, so there is no residual of it left to carry. What survives is the general statement, now in `PR136-PASS3-P3-KILL-PAIRING-IS-A-TOCTOU-ORACLE`: two observations taken at two instants cannot decide from inside this process whether a kill killed, and a sound version needs the child watched from outside it, which is `src/runner/**`'s ground | rejected |
+| PR136-PASS2-P1-CENSUS-EXTENT-FORGED-BY-A-LITERAL | P2 | 142c321144729517024e6f632737d6e79918cc12 / src/workspace_manager/tests.rs:8571 | `sampled_argv_counts` found the function's end with `body.find("\n    }\n")` over text whose string literals were deliberately kept, because its needles live inside literals -> a raw string holding a line of four spaces and a brace ends the body early, and the declared counts are then satisfied by whatever was injected before the cut -> the reviewer's reproduction adds `--no-rerere-autoupdate` and such a raw string to `proposal_cherry_pick` together: the scan stops inside the raw string, never sees the existing `"rev-parse"` and `"HEAD"`, reports the declared numbers, and the production child gains an argument `sampled_command` does not run. §12 asks a census to assert the boundaries of the domain it claims, and this one asserted none; its positive control never tested a false boundary | introduced_by_feature | correctness | PR136-P3-SAMPLED-ARGV-CENSUS-IS-FAIL-OPEN | the literal forgery is closed and the boundary claim is **withdrawn**, not repaired a third time. The extent still comes from `blank_comments_and_strings`, where no literal survives to forge one, and the control still injects the raw string and sees the whole body read — that much is kept because reverting it would restore this very defect. What is gone is the false-boundary field and the assertion built on it, because pass 3 forged the extent a second way at the function boundary and a third piece of machinery in the same place is what this pull request stopped doing. §12's domain-boundary requirement is recorded as unmet in `PR136-PASS3-P1-CENSUS-EXTENT-FORGED-BY-A-DECOY` | fixed |
+| PR136-PASS2-P2-ABORT-ORACLE-ACCEPTS-AN-EXIT-OF-ONE | P2 | 142c321144729517024e6f632737d6e79918cc12 / src/workspace_manager/tests.rs:7163 | the repaired abort test delegates to `died_by_abort`, whose Windows arm is a negation — unsuccessful, and not the panic's 101 — because `abort()` reaches `__fastfail`, whose code has moved between CRT versions -> `process::exit(1)` satisfies that negation -> changing only the Windows arm of `Injection::Kill` from `abort()` to `exit(1)` leaves the helper dying at `IdUnread`, the repository and the unreferenced object intact, and every assertion green on every leg, so the body's claim of an abort oracle overstated what is pinned on a first-class platform | pre_existing | portability | PR136-P1-KILL-ORACLE-ACCEPTS-THE-HELPERS-OWN-PANIC | fixed without touching the shared helper, which is PR #135's subject: what cannot be written down is **measured**. The test now runs `abort_probe_helper`, a child whose whole body is `std::process::abort()`, and requires the kill helper's status to be the `same_end` — signal and code on Unix, code on Windows — as that measured abort. `the_abort_oracle_separates_an_abort_from_an_exit_of_one` witnesses the repair on **every** platform by testing the oracle rather than the funnel: two real children, one aborting and one exiting 1, the Windows negation written out and shown to accept both, and `same_end` shown to separate them. Measured: the Unix legs cannot see the reviewer's mutation through the kill test at either head, since the Unix arm names `SIGABRT`, so that test was never going to be Linux's witness | fixed |
+| PR136-PASS3-P4-BODY-FIGURES-STALE-AT-THE-EXACT-HEAD | P3 | ead3573882c931f9c7eaf0846a81be3bffd404a8 / reviews/FINDINGS.md:6347 | the body said every figure was generated at the head and then gave 719 insertions, 168 deletions and `FINDINGS.md` +108 -> those are exactly the stale `2ee5595` figures, where `d91e84a..ead3573` is 936/167 with `FINDINGS.md` +120 -> it also still called `2ee5595` "this head" and said no job had reported a failing test two lines from where it recorded the macOS failure. The figures had been regenerated by scripted substitution and **the substitutions matched nothing and exited clean**, which is the fifth head claim this pull request has had to correct and the cheapest of them | introduced_by_feature | docs-contract | PR136-P5-AUDIT-RECORD-AND-ACCOUNTING-FALSE | fixed: every figure in the body is regenerated at the head being pushed by a script that **asserts a match count on every substitution** and fails loudly on zero, and the counts, the diff figures and the census totals are read from the tree and the ledger rather than transcribed. The contradiction is gone: the CI paragraph says which jobs failed and why, and no sentence claims none did | fixed |
+
+
+## 56. PR #137 first pass over `src/rundir/classify.rs` (2026-09-04)
+
+Append-only. The first pass over `src/rundir/classify.rs`, row 12 of the `standards/SWEEP.md`
+review queue and the first file of the `#107 rundir` family, read against `origin/master`
+`5f661fa7f8d5c45471cc33746a70df1cd192c61e` by one session whose only subject was that file. Under
+the owner's amendment 7 the four readings are correctness, a better implementation, the standards
+and the tests; under the owner's rule of 2026-09-04 for the sweep pull requests, P1 and P2 findings
+are fixed and P3 and lower are recorded.
+
+**It is not a completed sweep and the file is not in the swept table.** Seven inspections still
+fold an I/O failure the filesystem declined to explain into the same `Husk` as an honest absence, and
+listing the file would activate §6 and §7 over it in full — which recording a violation does not
+satisfy. What making them errors costs was measured rather than guessed: `classify_run_dir`'s
+public signature, the `pub` `RunDirClass` re-export, `RunDirEntry`'s `pub` class field in the
+engine's census, and both `list_runs` and `list_husks` in `src/rundir/discovery.rs`, which is queue
+row 13 — three production call sites in three files and thirty-six in all. That is past any reading
+of a sweep's own-file bound, so the queue row stays open and a successor takes the folds with the
+call sites they force. `standards/SWEEP.md` says the same thing beneath its queue table. This
+section was headed "PR sweep of" until pass 1; the claim was wrong and the heading with it.
+
+Two rows are P2 and deferred, stated rather than shaded: `SWEEP-CLASSIFY-003` on a preference the
+row argues for, and `SWEEP-CLASSIFY-009` because both folds are in files this pull request does not
+own and one of them is another pull request's live subject. Neither severity was lowered to fit the
+disposition, and sweep_coordinator ruled both escalations rather than this session settling them.
+
+**The section number is 56.** Master's last section is 53; PR #136 has taken 54 and PR #135 has
+taken 55, so 56 is the first free number. sweep_coordinator ruled it on 2026-09-04 after this
+section was first written as 55, which its own branch had already lost to #135.
+
+The first frontier pass, on `701e370fa535148b7725dac712d5a979e4188109`, returned CHANGES_REQUIRED
+with five findings; sweep_coordinator classed one P1 and four P2, all five in scope, none rowed and
+shipped. All five were addressed, and three of them by **withdrawing a claim rather than changing
+code** — the swept-table entry, the design authority, and the constraint the fifo deferral rested
+on.
+
+**The second pass, on `b971716974e5e99b9cf2d8a9c92ee7f29d63568c`, returned CHANGES_REQUIRED with
+four, and its finding 1 is a P1 inside the machinery pass 1's repair added.** That is the stopping
+rule, and this pull request narrowed rather than taking a third round. Pass 1 said the reader
+retries `Interrupted` for ever and hangs holding the worktree lock; the repair capped the retries;
+pass 2 observed that an exhausted cap answers `Husk`, which is the *reclaiming* classification. The
+repair had converted a liveness defect into a data-loss defect. **The cap is withdrawn**, together
+with `read_chunk`, `read_within` and the three tests and fixtures that witnessed them, so the
+interrupted-read behaviour is master's again and this pull request changes no classification
+outcome. Pass 2's finding 2 dissolved with it: there is no new classification policy left to lack
+design authority.
+
+Before withdrawing, one fact was settled by measurement because withdrawal depended on it: the hang
+is **pre-existing on master**, not written here. Master's own `first_line_within` and
+`newline_offset_from`, lifted verbatim into a standalone binary and diffed byte-identical against
+the source apart from `pub(super)`, did not return within 25 seconds against an always-`Interrupted`
+reader. So this pull request found the defect, wrote the wrong fix, withdrew it, and leaves
+`SWEEP-CLASSIFY-001` as an open P1 carrying both halves — the hang with its reproduction, and the
+reason the obvious repair is wrong. That row is the most valuable thing here.
+
+What survives in the code is the work that was never about interruption: the re-read's terminator
+and no-inner-newline guards, `chunk_len`, the short-read clamp, and the corrected texts. The rows
+are appended below with the pull request's number as their prefix.
+
+### Converting this section to the per-file layout
+
+`reviews/FINDINGS.md` is closed to new sections from PR #138 (`d91e84a`); this section was written
+and pushed before that merged, and sweep_coordinator's ruling is that this round finishes on it
+rather than converting mid-flight. §56 keeps its number and keeps being cited as a section; its
+rows that were still open have since been converted by the migration this recipe describes, and
+what is left here is the ones it resolved.
+
+§54 above says it is "the last section this file takes", and both sentences are true of what their
+authors knew: §54 and §56 were written the same day, on two branches, each before #138 landed, and
+each was grandfathered by the same ruling. §56 merged after §54 did. Neither is a section anyone
+should add a successor to — the count of grandfathered sections is two, and the next finding from
+either file goes in `reviews/findings/`.
+
+**The conversion is mechanical, and this paragraph is the recipe**, checked against
+`reviews/findings/README.md` as this branch carries it — PR #140 (`44dc06f`) restored the two
+rules `#138` lost by merging with only its first commit, and the README is authoritative, so read
+it at the head you work from rather than trusting this paragraph if the two ever disagree. A file
+is
+`reviews/findings/<severity>_<category>_<UTC timestamp>_<brief-description>.md`: **severity leads
+the name**, which is the whole point, because the directory then sorts worst-first. Every category
+in the table below is already a word from the closed vocabulary
+`.github/scripts/test-pr-policy.sh` enforces, so each transcribes without a decision. The
+frontmatter is `id`, `severity`, `disposition`, `category`, `pr`, `reviewed_sha`, `location`,
+`provenance`, `first_bad`, `guard`; `disposition` takes only `deferred` and `accepted-risk`,
+because **a fixed finding has no file** — it is deleted, and the pull-request body's ledger row is
+its permanent record.
+
+So the identifier is *not* in the filename: it lives in `id:`, precisely so a citation survives a
+reclassification, and a file is found by `grep -rl 'id: SWEEP-CLASSIFY-003' reviews/findings/`.
+That makes the closing point stronger rather than weaker: **nothing citing these identifiers has to
+change** — not this pull request's ledger rows, and not `src/rundir/classify.rs`, which names
+`SWEEP-CLASSIFY-003`, `-009`, `-010`, `-012` and `-013` at the code they are about. A successor
+writes a file for each row that is still open, writes none for the rows already fixed, and deletes
+each remaining file as it is resolved. That successor has run, over this section and over every
+other one this file holds; the recipe stays because it is what the next reader needs to understand
+what happened to a row they came here for.
+
+### The `.ok()?` inventory, settled one at a time
+
+The brief asks what each fold means and what the census does with the answer, and this is the
+whole list at the reviewed head. Two are honest absence: a first line that is not UTF-8 and one
+that is not this header are not a valid `run_started`, which is exactly what the rule this module
+implements asks, and nothing is lost at either. One was unreachable and is gone
+(`SWEEP-CLASSIFY-005`). The remaining **seven** fold an I/O failure the filesystem declined to
+explain into the same `None` as "there is nothing here".
+
+**Seven is derived, not counted.** The count was five, then six, then seven across two passes, so
+it is no longer hand-counted: the pull-request body carries the one-line command that enumerates
+the sites from the source, and this section, `standards/SWEEP.md` and the body all quote what it
+prints. The seven are the `symlink_metadata` guard, the `open`, the `fstat` that takes the bound,
+the window read, the scan read's own `Err(_)` arm, the seek, and the re-read — the scan read being
+the site both earlier counts missed, because it folds inside `newline_offset_from` rather than at a
+`.ok()?`.
+
+The rule this module implements classifies as `Committed` or "anything else", so `Husk` is the
+answer for all seven and this pull request does not change it — it corrects the claim that the file
+is swept instead. What the census then
+*does* with that answer is the part worth stating, because the module's own comment had it wrong
+(`SWEEP-CLASSIFY-004`). A `Husk` is not deleted because a proof requires `committed.json` to be
+absent; that holds only of `PrivateHalfOwnership::Proven`. The answer a failed marker read actually
+produces is `NothingBound`, which reclaims the public half with no commit-record check anywhere on
+the path. What protects a directory this probe could not read is `unbound_shape`, which reclaims
+only a bare directory or one holding the staging file alone: an `events.jsonl` that could not be
+opened is still an entry in the listing, so the answer is `RetainReason::MarkerlessWithContent` and
+the directory is retained and reported.
+
+That leaves exactly one hole, and it is `SWEEP-CLASSIFY-009`: the listing is a *second* observation
+of a directory the classifier already failed to read once, and `read_dir_names` answers `[]` for a
+`read_dir` that failed. A transient whole-process failure — `EMFILE`, `ENFILE` — fails the `open`,
+the marker read and the listing at the same moment, and `remove_public_husk` then lists the
+directory again, after the transient has passed, and deletes what it finds. Both folds are in
+`src/rundir.rs` and `src/rundir/ownership.rs`, and the row is deferred to their queue rows with the
+sequence written out.
+
+### The fifo race, measured rather than restated
+
+The module doc named an unbounded `open(2)` and called it byte-identical to the parent's. Measured
+on this box (Linux 6.8.0-137-generic), against a fifo `mkfifo` created with no writer, `stat`
+reporting `fifo` for it:
+
+* `std::fs::File::open` was still blocked when a five-second `timeout` killed it (exit 124, no
+  output);
+* the same open with `O_NONBLOCK` through `OpenOptions::custom_flags` returned `Ok` in 3.737
+  microseconds.
+
+So the usual close works. Adding either spelling to this module was measured emitting clippy's
+disallowed-method error for `std::fs::File::options` and its disallowed-type error for
+`std::fs::OpenOptions`, each naming this module's own `#![deny(` as the level; `libc::open` and
+`libc::fcntl` are denied beside them.
+
+**What this section said next was false, and pass 1 was right to say so.** It said an allowance
+must be a module-level attribute and would therefore replace the deny posture `PR6-LANEF-004` put
+here, and concluded that the close was impossible in this module. `standards/02` admits a per-site
+`#[expect]` of a governed lint below module level in a file whose `effects/allowlist.toml` row
+records the lint and the exact annotation count, and the placement census in `src/effects/tests.rs`
+requires that file to **deny** the lint at module level — so the deny is the mechanism's
+precondition, not the casualty of using it. An unsuppressed clippy error proves that a lint fires,
+never that a repair is impossible. The close is available here at the cost of an allowlist row.
+
+The deferral stands on what is left when the false constraint is removed, and it is a **preference**:
+a governed primitive belongs in the funnel parent as a site-taking non-blocking read-only open, and
+the round in which this would have been added is the round pass 1 found a P1 inside the machinery
+the previous round added — the standing signal to narrow rather than reach for one more mechanism.
+The measurement is the durable half and is what makes the row actionable later.
+
+### The bounds, checked on every path
+
+`FIRST_LINE_WINDOW` bounds the window read; the file's own `fstat` length bounds the scan, so a
+file growing under the read cannot unbound it; `SCAN_CHUNK` bounds the scan's memory. Two paths
+evaded a bound: the `Interrupted` branch spent none of the budget (`SWEEP-CLASSIFY-001`), and a
+`Read` implementation answering more than its buffer indexed past the chunk and underflowed the
+budget (`SWEEP-CLASSIFY-006`). One bound is absent by design and is documented rather than implied:
+the line that is found is materialised at its own length (`SWEEP-CLASSIFY-012`).
+
+**The interrupted-read path is still unbounded, deliberately, and that is `SWEEP-CLASSIFY-001`.**
+Two repairs were attempted across two passes and both were wrong, which is why the row is worth
+more than either. The first bounded `newline_offset_from`, the scan *between* the probe's two
+reads, while both reads went through `Read::read_to_end` — so the allowance was never reached and
+the probe still hung on its first read; the round's own fixture *documented* the hole, firing its
+interruptions past the window "so a schedule firing from byte zero would be spent there", which is
+how a suite can be green over a defect its author has written down. The second moved the bound to
+the read, which worked — and made an exhausted bound answer `Husk`, the reclaiming classification,
+so a burst of interruptions could hide and eventually delete a recoverable run. Both are withdrawn.
+The behaviour is master's, the docs no longer claim a termination the code does not have, and the
+row carries what a third attempt has to satisfy.
+
+### The rows
+
+| ID | Severity | Reviewed SHA / location | Failure sequence | Provenance | Category | First bad / prior ID | Regression or documented guard | Disposition |
+|---|---|---|---|---|---|---|---|---|
+| SWEEP-CLASSIFY-002 | P2 | 5f661fa7f8d5c45471cc33746a70df1cd192c61e / src/rundir/classify.rs:209 | `first_line_within` reads twice, a constant-memory scan for the newline's offset and then a re-read of that many bytes from the start, and the only property checked on the re-read was its length -> a source rewritten between the two reads returns bytes the scan proved nothing about: a rewrite that keeps the length and moves a newline earlier returns a "line" with a newline inside it, and one that moves it later returns bytes with no terminator at all, which is the requirement `startup_census` states -> the probe hands `serde_json` something that is not the first newline-terminated line and can classify `Committed` on it; the log is append-only under a lock, so the reachable writer is hostile or broken | pre_existing | correctness | 7a83e69 | fixed: the re-read takes `length + 1` bytes and re-establishes every property on the bytes returned, the last of them the terminator and none of the others one; `a_source_rewritten_between_the_scan_and_the_reread_has_no_first_line` drives one case per guard plus an unchanged-source control, and each of the three guards was witnessed by exactly one case failing when that guard alone was removed | fixed |
+| SWEEP-CLASSIFY-004 | P2 | 5f661fa7f8d5c45471cc33746a70df1cd192c61e / src/rundir/classify.rs:133 | the module said a `Husk` is safe because "a husk is never deleted on shape alone -- deletion additionally requires the ownership proof, which requires `committed.json` to be absent" -> that is true of `PrivateHalfOwnership::Proven`, which reclaims both halves, and false of `NothingBound`, which reclaims the public half through `remove_public_husk` with no commit-record check anywhere on the path and is what the proof answers as soon as the marker cannot be read -> a reader of this file takes a safety property the code does not have, and the fold below it was licensed by an argument that does not cover the path it reaches | pre_existing | docs-contract | 7a83e69 | fixed as text: the comment now says what actually protects a directory this probe could not read, which is `unbound_shape` reclaiming only a bare directory or one holding the staging file alone, so an `events.jsonl` in the listing is `RetainReason::MarkerlessWithContent`; both halves were already pinned by the proof grid's "marker-less husk carrying run-scoped content" and "bare public directory" cases, which the comment now cites, and the residual the corrected argument exposes is `SWEEP-CLASSIFY-009` | fixed |
+| SWEEP-CLASSIFY-005 | P3 | 5f661fa7f8d5c45471cc33746a70df1cd192c61e / src/rundir/classify.rs:231 | the chunk size was `usize::try_from(budget.min(SCAN_CHUNK as u64)).ok()?` -> the value converted is at most `SCAN_CHUNK`, so the conversion cannot fail on any target this crate builds for, and the `?` answers `Husk` for a case that does not exist -> a `?` that decides nothing, against §7's rule that each one is deliberate | pre_existing | docs-contract | 7a83e69 | fixed: the chunk size is the smaller of two `usize` values and there is no `?`; `the_first_line_probe_spends_its_budget_and_stops` asserts the exact byte count the scan spends, which is what the sizing decides | fixed |
+| SWEEP-CLASSIFY-006 | P3 | 5f661fa7f8d5c45471cc33746a70df1cd192c61e / src/rundir/classify.rs:239 | the scan indexed `chunk[..read]` and then subtracted `read` from the budget with whatever a `Read` implementation returned -> a reader answering more than the buffer it was given panics on the slice index, or underflows the budget -> a panic on an I/O outcome in a generic function, which §7's panic policy forbids. No claim is made about which implementations answer more than they were given; the clamp costs one comparison and the claim would have to be defended | pre_existing | correctness | 7a83e69 | fixed: the count is clamped at the scan's read with the reason on the line. Round 2 moved the clamp into a shared read primitive and the narrowing withdrew that primitive, so it is back where the defect is, unchanged in effect. Not witnessed by a test, and the reason is disclosed in the body: the source that reaches it violates `Read`'s contract, and a fixture answering more than its buffer meets std's own buffer handling first inside `read_to_end` | fixed |
+| SWEEP-CLASSIFY-007 | P3 | 5f661fa7f8d5c45471cc33746a70df1cd192c61e / src/rundir/classify.rs:136 | the guard is `symlink_metadata` rather than `metadata` and the module states the difference as deliberate, since refusing the link itself narrows the residual race to replacing a directory entry the census owns -> the suite's only planted link points at `/dev/zero`, which `metadata` refuses too because a character device is not a regular file, so both spellings pass every test -> the one behaviour that separates them, a link to a valid committed log, was unmeasured and the guard could have been widened silently | pre_existing | correctness | 7a83e69 | fixed: `a_symlinked_event_log_is_a_husk_however_valid_its_target` points the link at a log it first asserts is `Committed` when read as a file, and was witnessed failing with `symlink_metadata` replaced by `metadata` | fixed |
+| SWEEP-CLASSIFY-008 | P3 | 5f661fa7f8d5c45471cc33746a70df1cd192c61e / src/rundir/classify.rs:278 | `run_started_sha256` and `first_line_digest` are two independent spellings of one number and recovery compares a value produced by each, the commit record's written from `first_line_digest` at P5b and the check recomputed with `run_started_sha256` -> every test on either side computes its oracle with the same function it is testing, so nothing asserted the two agree -> either format string could change alone and every schema-4 recovery would begin refusing, with both digests looking correct where they were computed | pre_existing | correctness | 7a83e69 | fixed: `the_two_spellings_of_the_first_line_digest_agree` asserts the pairing production makes, over a log with a second event after the first line so a whole-file digest cannot satisfy it, and was witnessed failing with one of the two format strings changed | fixed |
+| SWEEP-CLASSIFY-013 | P3 | 5f661fa7f8d5c45471cc33746a70df1cd192c61e / src/rundir/classify.rs:3 | this module quotes `sequential_substrate.startup_census` twelve times as the rule it classifies by, and the quotations read as normative -> neither `DESIGN.md` nor any `design/` section contains that sentence, the classification, or the "no size exception" rule at this SHA, measured by grep over both -> a retired packet is doing the work `DESIGN.md`'s sole-authority rule reserves to the design, and a reader cannot tell a quoted requirement from an implementation choice | pre_existing | docs-contract | 7a83e69 | fixed as text, and the design gap escalated rather than papered over. The module doc now says once, at the top, what those citations are: the retired packet's wording, quoted as what the module was built to and as its own reasoning, never as authority. `DESIGN.md` is deliberately not edited to manufacture the authority -- adding a classification rule to the design is an owner-level change and sweep_coordinator has it. The three places that asserted a size rule as though the design stated it now say "the rule this module implements" | fixed |
+| PR137-CLASSIFY-INTERRUPTED-RETRY-NEVER-REACHED | P1 | 701e370fa535148b7725dac712d5a979e4188109 / src/rundir/classify.rs:284 | `INTERRUPTED_RETRIES` bounded `newline_offset_from`, the scan between the probe's two reads, and both reads went through `Read::read_to_end` -> `read_to_end` retries `Interrupted` inside `std::io` without limit, and an interrupted read consumes none of a `Take`'s byte budget, so a source interrupted before the scan spun in std with the allowance never consulted -> `classify_run_dir` did not return, and `startup_census` holds the physical worktree lock across it, so `SWEEP-CLASSIFY-001` was not fixed and the body's "both behaviour changes are bounded" was false; measured at rustc 1.85, a reader answering `Interrupted` unconditionally was still being called after five million reads with the `Take` limit untouched | introduced_by_feature | liveness | 7098956 | **repaired, then the repair was withdrawn, and the finding survives in `SWEEP-CLASSIFY-001`.** The round-2 repair moved the bound to the read and worked; pass 2 then found that an exhausted bound answers `Husk`, the reclaiming classification, so it had traded a hang for a deletion. Everything it added is withdrawn -- the allowance, both read primitives, and the three tests and fixtures that witnessed them -- and the interrupted-read behaviour is master's. What this row leaves behind is the measurement, which is the durable part: five million interrupted reads with the `Take` limit untouched at rustc 1.85, and master's own two functions lifted verbatim into a standalone binary and not returning within 25 seconds against an always-`Interrupted` reader. `SWEEP-CLASSIFY-001` carries both doors and the reason a cap is the wrong shape | deferred |
+| PR137-CLASSIFY-SWEPT-CLAIM-WITH-SIX-FOLDS | P2 | 701e370fa535148b7725dac712d5a979e4188109 / standards/SWEEP.md:122 | the pull request added the file to the swept table while six I/O-to-`Husk` folds remained, and the body said five while enumerating six -> listing a file activates §6 and §7 over the whole of it, and recording a violation does not satisfy a standard -> the swept table would have asserted a conformance the file does not have, and the queue row would have closed over work nobody was left owing | introduced_by_feature | docs-contract | — | fixed by correcting the claim rather than the code, after measuring what the code change would cost. **The identifier records pass 1's count and the derived number is seven**: pass 2 found a seventh fold inside `newline_offset_from`, which neither hand count reached because it is an `Err(_)` arm rather than a `.ok()?`. The count is no longer hand-counted -- the body carries the command that enumerates it and all three documents quote what it prints. The cost measured was: `classify_run_dir`'s public signature, the `pub` `RunDirClass` re-export, `RunDirEntry`'s class field and both `list_runs` and `list_husks` in `src/rundir/discovery.rs`, three production call sites in three files and thirty-six in all. The swept row is withdrawn, queue row 12 is restored, `standards/SWEEP.md` states beneath its queue table what landed and what is still owed, and the count reads six everywhere | fixed |
+| PR137-CLASSIFY-DESIGN-AUTHORITY-ABSENT | P2 | 701e370fa535148b7725dac712d5a979e4188109 / src/rundir/classify.rs:3 | the patch quoted `sequential_substrate.startup_census` and a "no size exception" rule as the authority for what it implements and for two changes it made -> neither sentence exists in `DESIGN.md` or `design/` at that SHA -> a retired packet was treated as normative without the design changing, against `DESIGN.md`'s sole-authority rule, in a patch that also added new citations of it | introduced_by_feature | docs-contract | SWEEP-CLASSIFY-013 | fixed as text and escalated as a design question: the module states once what the citations are and claims no authority for them, `DESIGN.md` is not edited to manufacture it, and whether the design should carry a run-directory classification rule is with sweep_coordinator and the owner. `SWEEP-CLASSIFY-013` is the standing row for the gap | fixed |
+| PR137-CLASSIFY-FIFO-DEFERRAL-FALSE-CONSTRAINT | P2 | 701e370fa535148b7725dac712d5a979e4188109 / src/rundir/classify.rs:21 | the deferral of `SWEEP-CLASSIFY-003` rested on the claim that a governed-lint allowance must be module-level and would replace this module's deny posture -> a per-site `#[expect]` below module level is admitted in a file whose `effects/allowlist.toml` row records the lint and the exact annotation count, and the placement census in `src/effects/tests.rs` requires that file to deny the lint at module level -> the deny posture is the mechanism's precondition rather than its casualty, an unsuppressed clippy error was presented as proof that a repair is impossible, and a liveness defect was deferred on evidence that does not hold | introduced_by_feature | docs-contract | SWEEP-CLASSIFY-003 | fixed by correcting the evidence, not the disposition: the module doc and `SWEEP-CLASSIFY-003` now say the close is available locally at the cost of an allowlist row, and that the deferral is a preference -- a governed primitive belongs in the funnel parent, and the round in which this would have been added is the round a pass found a P1 in the machinery the previous round added. The measurement that makes the row actionable is unchanged | fixed |
+| PR137-CLASSIFY-SAFETY-CORRECTION-INCOMPLETE | P2 | 701e370fa535148b7725dac712d5a979e4188109 / src/rundir/tests.rs:1453 | `SWEEP-CLASSIFY-004` corrected the module's false safety claim and the suite kept a verbatim copy of it, while the body's risk section called `Husk` retaining and `SWEEP-CLASSIFY-009` in the same body described the deletion sequence -> a reader who greps the claim finds the uncorrected copy, and the body contradicts itself on the one question the correction was about -> the correction read as complete and was not; separately, the residual was under-described, since `read_dir_names`'s `.flatten()` drops an entry whose iteration step fails and yields the same reclaiming `[]` | introduced_by_feature | docs-contract | SWEEP-CLASSIFY-004 | fixed: the test doc says what the comment used to claim and why it was wrong, the risk section says plainly that `Husk` is retaining only while the listing can be read, and `SWEEP-CLASSIFY-009` carries the `.flatten()` reach. `read_dir_names` is PR #139's live subject and is described rather than touched | fixed |
+| PR137-CLASSIFY-CAP-TRADES-A-HANG-FOR-A-DELETION | P1 | b971716974e5e99b9cf2d8a9c92ee7f29d63568c / src/rundir/classify.rs:453 | the round-2 repair bounded the interrupted-read retry at the read, and on the allowance's exhaustion `read_chunk` answered `None` -> `classify_run_dir` has only `Committed` and `Husk` to answer with and `Husk` is the **reclaiming** classification, so a finite burst of interruptions above the allowance followed by success classified a run the source would have delivered as a husk -> that run is hidden by `list_runs`, refused by `resolve_run_id`, and deletable by the reclaim path once the transient listing failure of `SWEEP-CLASSIFY-009` occurs; the pull request's own test asserted the outcome and passed, because it recorded what the new code does rather than what changed | introduced_by_feature | correctness | 7098956 | **withdrawn, not sharpened.** A liveness defect had been converted into a data-loss defect, which is the wrong shape rather than a repair to tune, and it cannot be fixed in this pull request: the rule a correct repair needs is the one PR #139 is landing one door down -- an observation that could not be completed yields the retaining answer, never the reclaiming one -- and expressing it needs a classification that is neither `Committed` nor `Husk`, which needs the signature change measured and refused under `PR137-CLASSIFY-SWEPT-CLAIM-WITH-SIX-FOLDS`. The allowance, both read primitives and the three tests and fixtures that witnessed them are gone; the interrupted-read behaviour is master's, verified by diffing both functions against `5f661fa`. The finding survives as the open P1 `SWEEP-CLASSIFY-001` | fixed |
+| PR137-CLASSIFY-FOLD-COUNT-WRONG-A-THIRD-TIME | P2 | b971716974e5e99b9cf2d8a9c92ee7f29d63568c / src/rundir/classify.rs:343 | the fold inventory was hand-counted and said six, in the body, `standards/SWEEP.md` and this section alike -> the scan's own read in `newline_offset_from` folds at its `Err(_)` arm rather than at a `.ok()?`, so every hand count missed it -> the number has been five, then six, then seven across two passes, and each time it was quoted as complete in three documents at once | introduced_by_feature | docs-contract | PR137-CLASSIFY-SWEPT-CLAIM-WITH-SIX-FOLDS | fixed by deriving it instead of counting it: the pull-request body carries a command that enumerates every `.ok()?`, `.is_ok_and(` and `Err(_) => return None` in the file outside comments, separates the two parse folds from the I/O ones, and prints the number all three documents quote. A reader reproduces it in one line rather than trusting a count | fixed |
+| PR137-CLASSIFY-FIFO-TEXT-CONTRADICTS-ITSELF | P2 | b971716974e5e99b9cf2d8a9c92ee7f29d63568c / src/rundir/classify.rs:163 | the module doc was corrected to say the non-blocking close **is** available locally at the cost of an allowlist row, and `classify_run_dir`'s doc still said the open "cannot be written in this module" -> two sentences of one file contradict each other on the fact the deferral rests on -> the claim that `PR137-CLASSIFY-FIFO-DEFERRAL-FALSE-CONSTRAINT` was fixed is false while both stand, and a reader believes whichever they meet first | introduced_by_feature | docs-contract | PR137-CLASSIFY-FIFO-DEFERRAL-FALSE-CONSTRAINT | fixed: `classify_run_dir`'s doc now says the close is available here at the cost of an allowlist row and that the deferral to the funnel parent is a preference, which is what the module doc says. Both sentences now carry the same fact | fixed |
+
+Frontier-pass rows are appended above, with the pull request's number as their prefix.

@@ -74,6 +74,29 @@
 //!   second constructor would buy nothing and would cost the field privacy six
 //!   compile-fail fixtures rest on.
 //!
+//! # The boundary's scope, stated
+//!
+//! The boundary is a rule about **run-lifecycle paths** — every path in this
+//! module, and every path a census takes: nothing that reaches a run directory
+//! *as a run directory* deletes a private half once `committed.json` exists.
+//! That is the scope the sentence has always had; it is written down here
+//! because the test build now carries the one thing outside it.
+//!
+//! `rundir::scratch_tree` reclaims a tree a **test** minted. Its token binds a
+//! root that did not exist before the token did — `acquire` creates it with a
+//! non-recursive exclusive create and refuses an occupied or undecidable one —
+//! so nothing beneath that root predates the token, and a `committed.json`
+//! found there is a fixture the holder published rather than a run's boundary.
+//! It is on none of the paths above: the module is `#[cfg(test)]`, it takes no
+//! `RunDirSite` and adds no row to `effect_sites.json`, it cannot mint or
+//! weaken a `PrivateHalfProof`, and it has no way to reach
+//! `remove_private_husk`. Conjunct 12 is unmoved and still fail-closed: the
+//! witness in `rundir::tests` named for a scratch tree holding a committed
+//! record shows one directory answered by both authorities — the proof retains
+//! it as `PossiblyCommitted`, and the scratch token reclaims it.
+//! `decisions/2026-08-30-test-scratch-tree-ownership.md` is the record, and
+//! states the completeness rule in its two-token form.
+//!
 //! # `RunPaths::create_hooked` is not used here
 //!
 //! It creates the five private skeleton directories **before** the owner
@@ -443,8 +466,13 @@ pub trait IntegrationRefs {
     ///
     /// # Errors
     ///
-    /// A Git error, including the zero-old failure when the ref appeared
-    /// between [`Self::direct_target`] and this call.
+    /// [`UpstrokeError::Refused`] when `new` is not a full hexadecimal object
+    /// id or is the null id (`workspace_manager::Refusal::MalformedObjectId`
+    /// and `NullNew`, the latter what Git would read as "must not exist
+    /// afterwards"); every implementation, the test doubles included, applies
+    /// `workspace_manager::refuse_new` for it. A Git error, including the
+    /// zero-old failure when the ref appeared between [`Self::direct_target`]
+    /// and this call.
     fn create_zero_old(
         &self,
         hooks: &mut dyn crate::workspace_manager::EffectHooks,
@@ -2133,14 +2161,18 @@ fn p8_create_integration_ref(
 ///
 /// # Errors
 ///
-/// [`UpstrokeError::Refused`] when the ref is symbolic, checked out, or at any
-/// SHA other than `base`; a Git error from the creation.
+/// [`UpstrokeError::Refused`] when `base` is not a full hexadecimal object id
+/// or is the null id (`workspace_manager::Refusal::MalformedObjectId`,
+/// `NullNew`), checked here before anything is read so that a ref already at
+/// the null id is not adopted as "already there"; when the ref is symbolic,
+/// checked out, or at any SHA other than `base`; a Git error from the creation.
 pub fn ensure_integration_ref(
     refs: &dyn IntegrationRefs,
     hooks: &mut dyn crate::workspace_manager::EffectHooks,
     refname: &str,
     base: &str,
 ) -> Result<(), UpstrokeError> {
+    crate::workspace_manager::refuse_new(refname, base)?;
     refs.assert_publishable(refname)?;
     match refs.direct_target(refname)? {
         None => refs.create_zero_old(hooks, refname, base),
