@@ -62,13 +62,31 @@ const fn supplies_credentials(role: &ExecutionRole) -> bool {
     }
 }
 
-// This runner owns both locks. `resolved` serializes each program lookup and
-// caches its success or error before releasing the guard. Concurrent callers
-// reuse that result. It is released before `hooks` is acquired; the locks never
-// nest. `hooks` gives one caller exclusive access to the mutable observer during
-// startup or an entire supervised run, so callers on one runner wait their turn.
-// Guards release on return or unwind. Poisoned locks retain their inner state;
-// child cleanup during a run belongs to the process funnel's RAII owners.
+// The §10 protocol, at the type it governs. This runner owns both mutexes and
+// nothing outside this module reaches either.
+//
+// `resolved` is the program memo. `program_for` takes it once it has the
+// `ProgramQuestion` and holds it across the whole get-or-insert: the memo
+// lookup, `resolve_program`'s search, and the insertion of that answer. The
+// insertion is the linearization point — the first caller to ask a question
+// decides it, and every later caller asking it replays that decision, a
+// refusal included.
+//
+// `hooks` is the mutable observer. `start_write_command` takes it for the
+// containment startup step. `run` composes the environment and resolves the
+// program with `hooks` free — so a request refused pre-flight never takes it —
+// and then holds it from after resolution through `proc::run_with_timeout_at`
+// — subprocess supervision, not the whole of `run`. That interval is the one
+// in which a shared runner supervises one child at a time.
+//
+// The two are never held at once and are taken in that order, so a runner
+// cannot deadlock against itself. Every guard releases at scope exit: a
+// return, a `?`, or an unwind. All three acquisitions — `resolved` in
+// `program_for`, `hooks` in `start_write_command` and in `run` — recover the
+// inner state with `unwrap_or_else(PoisonError::into_inner)`, so a panic under
+// one guard leaves the memo and the observer usable instead of refusing every
+// later caller. Child cleanup after a failure or a cancellation belongs to the
+// process funnel's RAII owners, not to these guards.
 pub struct HostRunner {
     policy: RunnerPolicy,
     digest: String,

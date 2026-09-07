@@ -5847,3 +5847,106 @@ fn the_clone_probe_reports_the_trait_however_it_was_implemented() {
     assert!(<CloneProbe<KeyCase>>::IMPLEMENTS_CLONE);
     assert!(!<CloneProbe<HostRunner>>::IMPLEMENTS_CLONE);
 }
+
+const HOST_SOURCE: &str = include_str!("../host.rs");
+const HOST_NOTES: &str = include_str!("../../../docs/internals/runner/host.md");
+
+/// The `//` block immediately above `HostRunner`'s declaration, joined into one
+/// line — the §10 site itself, not a match from anywhere else in the file.
+fn adjacent_protocol() -> String {
+    let (above, _) = HOST_SOURCE
+        .split_once("\npub struct HostRunner {")
+        .expect("`HostRunner`'s declaration");
+    let mut block: Vec<&str> = above
+        .lines()
+        .rev()
+        .map_while(|line| line.strip_prefix("//"))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    assert!(
+        !block.is_empty(),
+        "no comment sits above `HostRunner`; §10 puts the concurrency protocol at the type"
+    );
+    block.reverse();
+    block.join(" ")
+}
+
+#[test]
+fn the_lock_protocol_sits_beside_the_type_and_states_both_intervals() {
+    let protocol = adjacent_protocol();
+    for required in [
+        // `resolved`: lookup, resolution and insertion under one guard.
+        "holds it across the whole get-or-insert",
+        // `hooks`: taken after resolution, held through supervision — and the
+        // correction, since "the whole of `run`" is what the notes used to say.
+        "through `proc::run_with_timeout_at` — subprocess supervision, not the whole of `run`",
+        // Poisoning recovery, named by the API that performs it.
+        "`unwrap_or_else(PoisonError::into_inner)`",
+        // Release.
+        "Every guard releases at scope exit",
+    ] {
+        assert!(
+            protocol.contains(required),
+            "the protocol beside `HostRunner` does not state {required:?}: {protocol}"
+        );
+    }
+}
+
+#[test]
+fn the_notes_do_not_claim_the_hooks_guard_spans_the_whole_run() {
+    assert!(
+        !HOST_NOTES.contains("Held for the whole of one `run`"),
+        "the notes still claim `hooks` covers the whole of one `run`; \
+         `run` composes and resolves with that lock free"
+    );
+    assert!(
+        HOST_NOTES.contains("from after the program is resolved through subprocess supervision"),
+        "the notes do not state the interval `hooks` is actually held for"
+    );
+}
+
+#[test]
+fn run_takes_the_hooks_guard_after_it_has_resolved_the_program() {
+    let root = scratch("hooks-interval");
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create the workspace");
+    let runner = Arc::new(
+        HostRunner::new()
+            .with_environment(environment_on_path(&[&root.join("nothing-here")], None)),
+    );
+
+    // The disputed interleaving, forced rather than raced: this thread owns
+    // `hooks` for the whole of the worker's `run`. A `run` that took `hooks` on
+    // entry could not reach the resolution that refuses it, and the worker
+    // would still be blocked when the receive below times out.
+    let held = runner.hooks.lock().unwrap_or_else(PoisonError::into_inner);
+
+    let (report, refusals) = std::sync::mpsc::channel();
+    let worker = {
+        let runner = Arc::clone(&runner);
+        let workspace = workspace.clone();
+        std::thread::spawn(move || {
+            let outcome = runner.run(&named_request(
+                "upstroke-no-such-program",
+                "arg",
+                &workspace,
+            ));
+            // The receiver is gone only when this test has already failed.
+            let _ = report.send(outcome.map(|_| ()).map_err(|error| error.to_string()));
+        })
+    };
+
+    let refused = refusals
+        .recv_timeout(Duration::from_secs(60))
+        .expect("`run` refuses an unresolvable program while another caller holds `hooks`");
+    drop(held);
+    worker.join().expect("the worker thread");
+
+    let message = refused.expect_err("nothing of that name is on the composed PATH");
+    assert!(
+        message.contains("upstroke-no-such-program"),
+        "the refusal did not come from program resolution: {message}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

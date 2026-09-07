@@ -68,13 +68,17 @@ The `Host` / `host-v1` `Runner`.
 | `shell_probe(shell, workspace, invocation)` | The `RunnerPreflight` shell probe, executed through this runner. **Errors:** `UpstrokeError::Refused` when the recorded shell cannot be spawned, is killed by the probe timeout, or does not exit 0. |
 | `program_for(program, composed)` | Which file `program` is, at **this** boundary — decided once and then remembered, at most once per `ProgramQuestion` per runner. Increments `program_resolutions` on entry; `program_searches` moves only when the filesystem is reached. **Errors:** `UpstrokeError::Refused` — `resolve_program`'s, first-hand or replayed. |
 
-**Fields.** The source keeps the lock protocol beside `HostRunner`. The runner
-owns both locks and never nests them. `resolved` serializes each lookup and caches
-its success or error before another caller can read it. Its guard is released
-before `hooks` is acquired. The hooks guard covers startup or an entire supervised
-run, so a shared runner supervises one process at a time even when its callers are
-concurrent. Guards release on return or unwind; a poisoned lock retains its inner
-state. The process funnel's RAII owners handle child cleanup.
+**Fields.** The source keeps the lock protocol beside `HostRunner`, which is where
+§10 puts it; this is a summary of that protocol and not a second copy of it. The
+runner owns both locks and never holds them at once. `resolved` is held across one
+whole get-or-insert, so the first caller to ask a `ProgramQuestion` decides it and
+every later caller replays that answer. `hooks` covers the containment startup
+step, and in `run` the interval from after the program is resolved through
+subprocess supervision — a request refused by `compose` or by `program_for` never
+takes it. That interval, and not the whole of `run`, is why a shared runner
+supervises one process at a time even when its callers are concurrent. Guards
+release at scope exit; every acquisition recovers the inner state of a poisoned
+lock, and the process funnel's RAII owners handle child cleanup.
 
 ### `ProgramQuestion`
 
@@ -158,10 +162,15 @@ The three fields that decide the answer are the three the key carries.
 
 ## `HostRunner::hooks`
 
-Held for the whole of one `run`, so one `HostRunner` supervises one process at a time. That is not a
-limitation today — `Runner::run` is synchronous until PR11 and the substrate is sequential — but
-PR11's concurrent scheduler will need an observer per invocation rather than per runner, and this is
-where that shows up.
+Held from after the program is resolved through subprocess supervision, not for the whole of one
+`run`. `run` composes the environment and resolves the program name with this lock free, and takes
+it only to hand `&mut dyn SpawnHooks` to `proc::run_with_timeout_at`; a request refused by `compose`
+or by `program_for` never takes it at all. Within that interval one `HostRunner` supervises one
+process at a time —
+`run_takes_the_hooks_guard_after_it_has_resolved_the_program` is what holds the boundary rather than
+this sentence. That is not a limitation today — `Runner::run` is synchronous until PR11 and the
+substrate is sequential — but PR11's concurrent scheduler will need an observer per invocation
+rather than per runner, and this is where that shows up.
 
 ## `HostRunner::with_environment`
 
