@@ -388,6 +388,10 @@ pub(super) struct Ran {
     pub(super) agent: Option<AgentId>,
     pub(super) command: CommandSpec,
     pub(super) durable_at_spawn: Vec<String>,
+    /// The commit the workspace's HEAD named when the process was spawned —
+    /// what a gate or reviewer actually looked at — or `None` when the
+    /// workspace is not a checkout.
+    pub(super) head_at_spawn: Option<String>,
 }
 
 pub(super) const GATE_DIAGNOSTIC: &str = "scaffold gate rejected the diff";
@@ -459,6 +463,16 @@ impl RecordingRunner {
 impl Runner for RecordingRunner {
     fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
         let durable_at_spawn = self.durable_now();
+        let head_at_spawn = {
+            let output = crate::workspace_manager::fixture::git_out(
+                &request.workspace,
+                &["rev-parse", "--verify", "--quiet", "HEAD"],
+            );
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        };
         self.ran
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -469,6 +483,7 @@ impl Runner for RecordingRunner {
                 agent: request.agent.clone(),
                 command: request.command.clone(),
                 durable_at_spawn,
+                head_at_spawn,
             });
         let mut codes = self
             .codes

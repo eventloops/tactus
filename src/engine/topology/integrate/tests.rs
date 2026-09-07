@@ -552,6 +552,7 @@ fn third_sha_refused_and_a_ref_already_at_the_proposal_only_records() {
 #[test]
 fn stale_candidate_takes_staging_path_and_publishes_pinned_proposal() {
     let mut run = Run::started("stale-clean");
+    run.verify_gates.push(passing_gate());
     run.verify_reviewers.push(passing_reviewer());
     let first = run.queue_candidate(ALPHA);
     let second = run.queue_candidate(BETA);
@@ -618,6 +619,23 @@ fn stale_candidate_takes_staging_path_and_publishes_pinned_proposal() {
             HookPhase::After
         ),
         "the proposal was never cherry-picked"
+    );
+    // The gate judged the proposal itself — the commit the record names and
+    // the ref now publishes — on an exact snapshot of it, never the candidate
+    // commit the cherry-pick was made from and never the staging worktree.
+    assert_eq!(
+        gate_heads(&run),
+        vec![proposal.clone()],
+        "the gate ran on a snapshot whose HEAD is the proposal"
+    );
+    assert_ne!(proposal, second.commit_sha.0);
+    let staging_path = run.fixture.manager.slot_path(&staging_slot(SequenceId(1)));
+    assert!(
+        run.runner
+            .ran()
+            .iter()
+            .all(|ran| ran.workspace != staging_path),
+        "no process ran in the staging worktree"
     );
     assert_eq!(run.task_state(BETA), TaskState::Merged);
     assert!(run.reservations.balances());
@@ -722,17 +740,21 @@ fn terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay
         match shape {
             Shape::Fast | Shape::Conflict => {}
             Shape::StaleClean | Shape::AlreadyPresent => {
+                run.verify_gates.push(passing_gate());
                 run.verify_reviewers.push(passing_reviewer());
             }
             Shape::CodeRejected => {
+                run.verify_gates.push(passing_gate());
                 run.verify_reviewers.push(passing_reviewer());
                 run.verify_review = VerifyReview::NeedsChanges;
             }
             Shape::Parked => {
+                run.verify_gates.push(passing_gate());
                 run.verify_reviewers.push(passing_reviewer());
                 run.verify_review = VerifyReview::NeedsHuman;
             }
             Shape::Deferred => {
+                run.verify_gates.push(passing_gate());
                 run.verify_reviewers.push(passing_reviewer());
                 run.verify_review =
                     VerifyReview::Unavailable(crate::ir::OutcomeStatus::RateLimited);
@@ -844,6 +866,34 @@ fn terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay
                 ));
             }
         }
+        // Every verifying shape judged exactly the commit its
+        // merge_verification_started recorded as proposed — the proposal for
+        // a stale-clean sequence, the head for an already-present one — and
+        // never the candidate commit the pick was made from.
+        if !matches!(shape, Shape::Fast | Shape::Conflict) {
+            let started = run
+                .emitter
+                .durable_events()
+                .into_iter()
+                .find_map(|event| match event.body {
+                    TopologyEventBody::MergeVerificationStarted { data }
+                        if data.sequence == SequenceId(1) =>
+                    {
+                        Some(data)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{shape:?}: no verification started"));
+            assert_eq!(
+                gate_heads(&run),
+                vec![started.proposed_sha.0.clone()],
+                "{shape:?}: the gate judged the recorded proposal"
+            );
+            assert_ne!(
+                started.proposed_sha, started.candidate.commit_sha,
+                "{shape:?}: a verified sequence never proposes the candidate commit itself"
+            );
+        }
         run.replay_twice_equal();
     }
 }
@@ -851,6 +901,7 @@ fn terminal_shape_coverage_table_drives_every_shape_and_each_converges_on_replay
 #[test]
 fn an_already_present_candidate_settles_without_an_empty_commit() {
     let mut run = Run::started("already-present");
+    run.verify_gates.push(passing_gate());
     run.verify_reviewers.push(passing_reviewer());
     // Both candidates make the same change to the same path, so beta's
     // cherry-pick onto the merged head is empty.
@@ -858,10 +909,29 @@ fn an_already_present_candidate_settles_without_an_empty_commit() {
     let second = run.queue_candidate_editing(BETA, "shared.txt", "the shared change\n");
     published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
     let head = run.head().expect("the head moved");
+    let gates_before = gate_heads(&run).len();
 
     let objects_before = count_objects(&run);
+    let mark = run.mark();
     let published =
         published(integrate_through(&mut run, &second).expect("beta is already present"));
+    // `transaction_fault_matrix[T-PREPARED]`: "already_present is a
+    // validation-only no-op" — the expected-old swap at the head runs, once,
+    // so Git validates the head atomically; it just moves nothing.
+    assert_eq!(
+        run.count_after(
+            mark,
+            EffectSiteId::Ref(RefSite::CompareAndSwapIntegration),
+            HookPhase::After
+        ),
+        1,
+        "the validation-only swap was issued exactly once"
+    );
+    assert_eq!(
+        gate_heads(&run).get(gates_before),
+        Some(&head),
+        "the gate reran on the head itself"
+    );
     assert_eq!(
         published.merged_sha.0, head,
         "already_present publishes the unchanged head"
@@ -894,6 +964,8 @@ fn a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_e
     published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
     let head = run.head().expect("head moved");
 
+    let kinds_before = run.emitter.durable_kinds();
+    let mark = run.mark();
     let terminal = integrate_through(&mut run, &second).expect("beta conflicts");
     let Terminal::Rejected { sequence, key } = terminal else {
         panic!("a conflict must reject, reached {terminal:?}");
@@ -942,16 +1014,37 @@ fn a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_e
         "the first repair of a run with automatic repairs is runnable"
     );
 
-    // No repair was dispatched: no task_dispatched for the repair, and no
-    // repair worktree exists — merge_rejected is before any repair effect.
+    // "merge_rejected before any repair effect": the sequence appended
+    // exactly the rejection, dispatched nothing, and performed no task
+    // worktree effect — no intent written, no worktree added — for the
+    // repair it registered, whose slot does not exist.
+    let mut expected_kinds = kinds_before;
+    expected_kinds.push("merge_rejected");
+    assert_eq!(
+        run.emitter.durable_kinds(),
+        expected_kinds,
+        "the rejection is the only append of the sequence"
+    );
+    for site in [
+        EffectSiteId::Worktree(WorktreeSite::WriteIntent),
+        EffectSiteId::Worktree(WorktreeSite::Add),
+    ] {
+        assert_eq!(
+            run.count_after(mark, site, HookPhase::Before),
+            0,
+            "`{site}` executed after the rejection: a repair effect before dispatch"
+        );
+    }
+    let repair_slot = crate::engine::topology::dispatch::task_slot(repair, GenerationId(0));
     assert!(
-        !run.emitter
-            .durable_kinds()
+        !run.fixture
+            .manager
+            .intents()
+            .expect("intents")
             .iter()
-            .rev()
-            .take(1)
-            .any(|k| *k == "task_dispatched"),
-        "the terminal is merge_rejected, not a dispatch"
+            .any(|slot| matches!(slot, crate::workspace_manager::Slot::Task { .. }))
+            && !run.fixture.manager.slot_path(&repair_slot).exists(),
+        "the registered repair has no worktree and no intent"
     );
     // The staging worktree of the rejected transaction is gone.
     assert!(
@@ -1103,6 +1196,20 @@ fn infrastructure_failure_defers_then_parks_at_max_defers() {
     ));
     assert_eq!(run.task_state(BETA), TaskState::AwaitingInput);
     run.replay_twice_equal();
+}
+
+/// The commits the recording runner's gate processes looked at: the HEAD of
+/// each gate's workspace at spawn, in spawn order.
+fn gate_heads(run: &Run) -> Vec<String> {
+    run.runner
+        .ran()
+        .into_iter()
+        .filter(|ran| ran.role == crate::runner::ExecutionRole::Gate)
+        .map(|ran| {
+            ran.head_at_spawn
+                .unwrap_or_else(|| panic!("gate `{}` ran outside a checkout", ran.invocation))
+        })
+        .collect()
 }
 
 /// One gate the scaffold's recording runner answers with exit 0.
