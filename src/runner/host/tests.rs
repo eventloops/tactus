@@ -2469,15 +2469,6 @@ struct RoleWitness {
 #[cfg(unix)]
 const GROUP_OBSERVATION_MARKER: &str = "<<GROUP-OBSERVATION";
 
-// Printed on every call, not only inside a failing `assert_eq!`'s message, so
-// a `--nocapture` run of a passing grid still carries the raw
-// `proc::GroupObservation` records — including, on macOS, whatever
-// `proc_pidinfo`'s non-zero argument answered — rather than only ever
-// producing them on the (rare, on `leads_own_group`'s current predicate)
-// failing path (PR173-LIVE-RECORD-ANSWER-NEVER-PRINTED). The predicate itself
-// is unchanged by this: on macOS it accepts either a child that currently
-// leads its own group or an exited, unreaped child whose own record names
-// its own pid as leader.
 #[cfg(unix)]
 fn group_leadership(observations: &[proc::GroupObservation]) -> (Vec<bool>, String) {
     let leads = observations

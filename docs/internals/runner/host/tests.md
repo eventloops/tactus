@@ -1371,6 +1371,12 @@ children are short-lived and the look comes after `spawn` returns, so
 the exited case is ordinary here, and it is the case the standing macOS
 red was (`W2-MACOS-HOST-CONTAINMENT-ROLE-GROUP-FINGERPRINT`).
 
+## `const GROUP_OBSERVATION_MARKER: &str = "<<GROUP-OBSERVATION";`
+
+Prefixes every record `group_leadership` prints, so a test reading another
+test's captured stdout can tell the observation from the rest of the harness's
+output.
+
 ## `fn group_leadership(observations: &[proc::GroupObservation]) -> (Vec<bool>, String) {`
 
 The decisions and the rendered records side by side, so an assertion
