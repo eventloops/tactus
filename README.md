@@ -155,5 +155,5 @@ grant (Apache-2.0 §6): use "upstroke" to refer to this project, not to present 
 as the original.
 
 Outside contributions are not being accepted at present; [CONTRIBUTING.md](CONTRIBUTING.md) says
-why, and records the terms that would apply if that changes. Rust changes follow the
+why, and carries the CLA that a pull request accepts when it is opened. Rust changes follow the
 [coding standards](CODING_STANDARDS.md), and the design lives in [DESIGN.md](DESIGN.md).

@@ -5,8 +5,9 @@ owner, and opening it to other contributors is a question for later, once the v0
 `DESIGN.md` §21 has settled; it is not on offer now. Bug reports and questions are welcome as
 issues. A pull request from outside the project will be closed without review.
 
-The rest of this file records how a change enters `master` today and the terms that would apply
-to contributions if they are accepted, so that nothing here needs deciding at that point.
+The rest of this file records how a change enters `master` today, and the licence terms every
+contribution carries. Those terms are not conditional on the decision above. Opening a pull
+request accepts them whether or not the pull request is ever read.
 
 Every change enters `master` the same way: a draft pull request opened early, the deterministic CI
 and PR-policy gates green, one independent frontier-model review of the exact green head, findings
@@ -46,10 +47,10 @@ commands above are the automated baseline, not the whole standard.
 
 ## Contributor Licence Agreement
 
-These are the terms that would govern contributions if the project opens to them. They are recorded
-now so that the decision to accept contributions, when it comes, does not have to settle them. By
-submitting a contribution you would agree to the terms below. There is nothing to sign: opening a
+By submitting a contribution you agree to the terms below. There is nothing to sign: opening a
 pull request is your acceptance, and it applies to every contribution you make to this project.
+That rule does not pause while outside contributions are closed. An uninvited pull request accepts
+these terms the moment it is opened, and closing it unreviewed does not undo that.
 
 1. **You keep your copyright.** You are not assigning ownership of anything.
 
@@ -72,12 +73,12 @@ pull request is your acceptance, and it applies to every contribution you make t
 
 Licences are not forever: this project began under the AGPL and was relicensed to Apache-2.0 on
 2026-09-01. A move like that is only ever cheap while one party can license the whole codebase,
-which is what clause 2 preserves as outside contributions arrive: a future change, such as a
-licence exception or a newer licence version, should not require tracking down every past
+which is what clause 2 preserves for any contribution that does come in: a future change, such as
+a licence exception or a newer licence version, should not require tracking down every past
 contributor.
 
 The trade is explicit and worth stating plainly: your contribution may later be offered under
 terms you did not choose. Everything you contribute also remains available to everyone under
-the Apache License 2.0, permanently — that cannot be taken back. If clause 2 isn't acceptable
-to you, say so in the PR; a change can often be reworked as a suggestion instead, and that's a
-perfectly good way to contribute.
+the Apache License 2.0, permanently — that cannot be taken back. If clause 2 isn't acceptable to
+you, don't open a pull request; opening one is what accepts these terms. Raising an issue is not
+opening a pull request, and asks nothing of you here.
