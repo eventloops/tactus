@@ -528,8 +528,12 @@ pub mod chain {
 
             pub(in crate::engine::topology::recover) fn writer(
                 &mut self,
-            ) -> (&mut crate::events::log::EventLog, &mut TopologyFold) {
-                (&mut self.log, &mut self.fold)
+            ) -> (
+                &mut crate::events::log::EventLog,
+                &mut TopologyFold,
+                &mut Vec<crate::topology::events::TopologyEvent>,
+            ) {
+                (&mut self.log, &mut self.fold, &mut self.events)
             }
         }
     }
@@ -1309,9 +1313,12 @@ pub fn ensure_recorded_integration_ref(
 ) -> Result<(), UpstrokeError> {
     let started = started_of(certified);
     let refname = started.integration_ref.as_str();
-    let Some((sequence, published)) = latest_publication(events_of(certified)) else {
+    let authorized =
+        crate::engine::topology::integrate::authorized_head(started, events_of(certified));
+    let Some(sequence) = authorized.published_by else {
         return ensure_integration_ref(refs, hooks.effects(), refname, started.base_sha.as_str());
     };
+    let published = authorized.head;
     refs.assert_publishable(refname)?;
     match refs.direct_target(refname)? {
         Some(at) if at == published.0 => Ok(()),
@@ -1332,13 +1339,6 @@ pub fn ensure_recorded_integration_ref(
             ),
         }),
     }
-}
-
-fn latest_publication(events: &[TopologyEvent]) -> Option<(SequenceId, CommitSha)> {
-    events.iter().rev().find_map(|event| match &event.body {
-        TopologyEventBody::TaskMerged { data } => Some((data.sequence, data.merged_sha.clone())),
-        _ => None,
-    })
 }
 
 pub struct EmitContext<'a> {
@@ -1500,7 +1500,7 @@ fn emit(
         committed_first_line_sha256: Some(records.commit().run_started_sha256.clone()),
     };
 
-    let (log, fold) = certified
+    let (log, fold, events) = certified
         .rebuilt_mut()
         .censused_mut()
         .barrier_mut()
@@ -1508,6 +1508,7 @@ fn emit(
     let mut state = EmitState {
         fold,
         log,
+        events,
         reservations: context.reservations,
         warnings: context.warnings,
     };

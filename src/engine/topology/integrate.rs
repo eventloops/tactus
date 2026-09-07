@@ -8,9 +8,9 @@ use crate::topology::effects::RefSite;
 use crate::topology::events::{
     CandidateRef, CommitSha, FrozenQuestion, GitRef, InfrastructureKind, MergeLeaseRelease,
     MergePrepared, MergeVerificationStarted, MergeVerificationUnavailable, PreparedDisposition,
-    RejectionDisposition, SequenceId, TaskMerged, TopologyEventBody, UnavailableCause,
-    UnavailableOutcome, VerificationBasis, VerificationRecord, VerificationSource,
-    VerificationVerdict,
+    RejectionDisposition, RunStarted4, SequenceId, TaskMerged, TopologyEvent, TopologyEventBody,
+    UnavailableCause, UnavailableOutcome, VerificationBasis, VerificationRecord,
+    VerificationSource, VerificationVerdict,
 };
 use crate::topology::fold::{TopologyFold, TransactionClass};
 use crate::topology::paths::PathSet;
@@ -83,6 +83,21 @@ pub enum Refusal {
     IntegrationRefAbsent { refname: String },
 
     #[error(
+        "refusing to open sequence {sequence}: the integration ref `{refname}` is at {found}, and \
+         the log authorizes {authorized} ({authority}); a head the log did not put there is \
+         foreign integration state, so nothing is decided, staged or appended against it, and \
+         the ref is neither moved nor recreated \
+         (decisions.coordinator_integration.integration_sequence; DESIGN §26)"
+    )]
+    ForeignHead {
+        sequence: u32,
+        refname: String,
+        found: String,
+        authorized: String,
+        authority: String,
+    },
+
+    #[error(
         "refusing to publish sequence {sequence}: the integration ref `{refname}` is at {found}, \
          and the authorization expects {expected} before the move and {proposed} after it; a \
          third SHA is foreign history and is never adopted"
@@ -137,13 +152,18 @@ pub struct IntegrationRequest {
     pub candidate: CandidateRef,
     pub sequence: SequenceId,
     pub base_sha: CommitSha,
+    pub authorized: AuthorizedHead,
     pub satisfies: Vec<TaskKey>,
     pub lease_release: MergeLeaseRelease,
     pub integration_ref: GitRef,
 }
 
 impl IntegrationRequest {
-    pub fn from_fold(fold: &TopologyFold, candidate: &CandidateRef) -> Result<Self, UpstrokeError> {
+    pub fn from_log(
+        fold: &TopologyFold,
+        events: &[TopologyEvent],
+        candidate: &CandidateRef,
+    ) -> Result<Self, UpstrokeError> {
         let started = fold
             .started()
             .ok_or_else(|| refused("the run has not started, so nothing can be integrated"))?;
@@ -158,11 +178,46 @@ impl IntegrationRequest {
             candidate: candidate.clone(),
             sequence,
             base_sha,
+            authorized: authorized_head(started, events),
             satisfies,
             lease_release: lease_release(fold, candidate),
             integration_ref: started.integration_ref.clone(),
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizedHead {
+    pub head: CommitSha,
+    pub published_by: Option<SequenceId>,
+}
+
+impl AuthorizedHead {
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self.published_by {
+            Some(sequence) => format!("the publication of sequence {} put it there", sequence.0),
+            None => "the run recorded it as its base and has published nothing yet".to_owned(),
+        }
+    }
+}
+
+#[must_use]
+pub fn authorized_head(started: &RunStarted4, events: &[TopologyEvent]) -> AuthorizedHead {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::TaskMerged { data } => Some(AuthorizedHead {
+                head: data.merged_sha.clone(),
+                published_by: Some(data.sequence),
+            }),
+            _ => None,
+        })
+        .unwrap_or_else(|| AuthorizedHead {
+            head: started.base_sha.clone(),
+            published_by: None,
+        })
 }
 
 fn prepared_base(
@@ -226,6 +281,16 @@ pub fn decide(
                 refname: refname.to_owned(),
             })?;
     let head = CommitSha(head);
+    if head != request.authorized.head {
+        return Err(Refusal::ForeignHead {
+            sequence: request.sequence.0,
+            refname: refname.to_owned(),
+            found: head.0,
+            authorized: request.authorized.head.0.clone(),
+            authority: request.authorized.describe(),
+        }
+        .into());
+    }
     let exact_base = if head == request.base_sha {
         ExactBase::Fast
     } else {

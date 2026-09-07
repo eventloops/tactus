@@ -734,6 +734,7 @@ impl TopologyRun {
                 state: EmitState {
                     fold: &mut self.handle.fold,
                     log: &mut self.handle.log,
+                    events: &mut self.handle.events,
                     reservations: &mut self.reservations,
                     warnings: &mut self.warnings,
                 },
@@ -761,7 +762,8 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
-        let request = IntegrationRequest::from_fold(&self.handle.fold, &candidate)?;
+        let request =
+            IntegrationRequest::from_log(&self.handle.fold, &self.handle.events, &candidate)?;
         let key = candidate.key;
         self.reservations.take(key, ReservationKind::Integration)?;
 
@@ -772,6 +774,7 @@ impl TopologyRun {
                     state: EmitState {
                         fold: &mut self.handle.fold,
                         log: &mut self.handle.log,
+                        events: &mut self.handle.events,
                         reservations: &mut self.reservations,
                         warnings: &mut self.warnings,
                     },
@@ -1142,6 +1145,7 @@ impl TopologyRun {
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
+                events: &mut self.handle.events,
                 reservations: &mut self.reservations,
                 warnings: &mut self.warnings,
             },
@@ -1354,6 +1358,7 @@ impl TopologyRun {
                 state: EmitState {
                     fold: &mut self.handle.fold,
                     log: &mut self.handle.log,
+                    events: &mut self.handle.events,
                     reservations: &mut self.reservations,
                     warnings: &mut self.warnings,
                 },
@@ -1507,6 +1512,7 @@ impl TopologyRun {
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
+                events: &mut self.handle.events,
                 reservations: &mut self.reservations,
                 warnings: &mut self.warnings,
             },

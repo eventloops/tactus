@@ -92,8 +92,9 @@ authenticated — `run_started(4).integration_ref` and `run_started(4).base_sha`
 For a run that *has* published, the base is no longer where the ref belongs:
 `transaction_fault_matrix[T-RESUME].durable_state` counts "CAS completions"
 among what a resume continues from, so the step reads the latest
-`task_merged.merged_sha` in the proven prefix ([`latest_publication`]) and
-requires the ref there. A ref elsewhere, or none, is DESIGN §26's
+`task_merged.merged_sha` in the proven prefix
+([`super::integrate::authorized_head`], the rule the live `decide` reads
+too) and requires the ref there. A ref elsewhere, or none, is DESIGN §26's
 "`task_merged` exists but the ref disagrees — refuse; the log and integration
 branch no longer describe the same run": nothing is moved and nothing is
 created. The three reviews of `3414dc58` found the base compared after a
@@ -1568,8 +1569,10 @@ arguments and nothing else on that path; a second "present == base" would be
 the duplication the shared body exists to prevent.
 
 **After a publication, the ref belongs to the last `task_merged`.** The
-proven prefix's latest `merged_sha` ([`latest_publication`]) is the one head
-the ref may name: a ref there continues, a ref elsewhere refuses as the run
+proven prefix's latest `merged_sha` ([`super::integrate::authorized_head`],
+one rule with two callers since the cover review of `8a5f59e8` found the
+live decision without it, `PR8-R4-LIVE-HEAD`) is the one head the ref may
+name: a ref there continues, a ref elsewhere refuses as the run
 whose log and branch no longer agree (DESIGN §26), and an absent ref refuses
 rather than being recreated — P7/P8's create-at-base is for a run killed at
 run start, and a published run was not.
@@ -2077,12 +2080,11 @@ already-present sequence pins nothing and is not here.
 A fresh process holds no provisional reservation; a recovery
 publication converts nothing.
 
-## `fn latest_publication(events: &[TopologyEvent]) -> Option<(SequenceId, CommitSha)> {`
+## `pub(in crate::engine::topology::recover) fn writer(`
 
-The head the log's latest publication put the integration ref at: the
-`merged_sha` of the last `task_merged` in the proven prefix.
+The append handle, the fold and the event list together, because the one
+`emit` funnel keeps all three in step: what recovery appends is read back
+by the loop it hands the `RunHandle` to (the authorized head after a
+publication recovery completed, for one), so the list a resume was
+derived from is extended by every append the resume itself makes.
 
-`transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
-completions" among what a resume continues from, and this is where the
-startup repair reads them: a run that has published owes its ref to its
-last publication, not to `run_started.base_sha`.

@@ -152,6 +152,12 @@ The sequence this transaction opens under: the fold's next dense one.
 The base `candidate_prepared` recorded — the head the exact-base
 decision compares against.
 
+## `pub struct IntegrationRequest {` › `pub authorized: AuthorizedHead,`
+
+The head the log authorizes the integration ref to be at, read from the
+proven prefix before any effect ([`authorized_head`]). `decide` requires
+the ref there before it decides anything.
+
 ## `pub struct IntegrationRequest {` › `pub satisfies: Vec<TaskKey>,`
 
 The closure this publication settles, as the fold derives it.
@@ -164,15 +170,45 @@ The lease `task_merged` releases: the candidate's own, or its lineage's.
 
 The ref this run publishes onto, as `run_started` recorded it.
 
-## `impl IntegrationRequest {` › `pub fn from_fold(fold: &TopologyFold, candidate: &CandidateRef) -> Result<Self, UpstrokeError> {`
+## `impl IntegrationRequest {` › `pub fn from_log(`
 
-Read the request from the fold that selected `candidate`.
+Read the request from the fold that selected `candidate` and from the
+events the fold was derived from — the fold retains nothing about past
+publications, and the authorized head is the last one.
 
 ### Errors
 
 [`Refusal::NoCandidateRecord`] when the fold holds no
 `candidate_prepared` for the candidate, or a refusal when the run has
 not started.
+
+## `pub struct AuthorizedHead {`
+
+Where the log says the integration ref is: the latest publication's
+`merged_sha`, or the recorded base before any publication, and which
+sequence put it there.
+
+## `pub fn authorized_head(started: &RunStarted4, events: &[TopologyEvent]) -> AuthorizedHead {`
+
+**The one head rule, with two callers.** The resume's startup check
+([`super::recover::ensure_recorded_integration_ref`]) learned in the first
+repair round to compare the ref with the log's latest `task_merged` rather
+than with `run_started.base_sha` (`PR8-C1`); the live [`decide`] never
+learned the same lesson and compared the head it read with the candidate's
+base only, so an external writer resetting the ref from a publication back
+to the base made the next candidate exact-base again, and the engine
+published it fast — recording work as merged that no longer existed. The
+cover review of `8a5f59e8` reproduced it on a real repository
+(`PR8-R4-LIVE-HEAD`). This function is the rule both now read;
+`transaction_fault_matrix[T-RESUME].durable_state` counts "CAS completions"
+among what a resume continues from, and a live sequence continues from the
+same record.
+
+The live engine reads it off the event list `RunHandle` carries, which the
+one `emit` funnel keeps current for every writer
+([`super::emit::EmitState`]), so a publication recovery completed a moment
+ago and one the loop performed itself are read the same way.
+
 
 ## `fn prepared_base(`
 
@@ -205,17 +241,33 @@ The head the integration ref was read at, and what it decided.
 
 ## `pub fn decide(`
 
-The exact-base decision: `assert_publishable`, then the head read.
+The exact-base decision: `assert_publishable`, then the head read, then
+the head required to be the one the log authorizes, and only then
+fast-or-stale.
 
 Read-only, and every staging effect of the sequence comes after it — that
 is INV-09's "the exact-base decision is made from the integration ref head
 before any staging effect", and the reason this is a separate function
 from the paths it selects between.
 
+**A head the log did not put there refuses here.**
+`decisions.coordinator_integration.integration_sequence`: "assert_publishable
+and read the integration ref head H (this is expected_head; a symbolic,
+checked-out, or **foreign** ref refuses here)". The exact-base comparison
+alone cannot tell a foreign reset from a fresh run: a ref an external
+writer moved back to the base is exactly the candidate's base, and the
+first version chose `Fast` and published over the lost publication. The
+comparison with [`AuthorizedHead`] comes first, so a foreign head decides
+nothing, stages nothing and appends nothing; the ref is neither moved nor
+recreated, and the refusal names what was found, what the log authorizes
+and the sequence that put it there.
+
 ### Errors
 
 A symbolic or checked-out integration ref (`assert_publishable`),
-[`Refusal::IntegrationRefAbsent`], or a Git error reading the ref.
+[`Refusal::IntegrationRefAbsent`], [`Refusal::ForeignHead`], or a Git error
+reading the ref.
+
 
 ## `pub struct Authorized {`
 

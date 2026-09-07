@@ -657,6 +657,7 @@ struct Fixture {
     reservations: Reservations,
     invocations: InvocationLedger,
     warnings: Vec<String>,
+    events: Vec<TopologyEvent>,
     clock: FixedClock,
     /// **Last, and that is a guarantee rather than a layout accident.** A
     /// struct's fields drop in *declaration* order, so this drops after `log` —
@@ -702,6 +703,8 @@ impl Fixture {
             fold,
             log,
             reservations: Reservations::new(),
+            events: Vec::new(),
+
             invocations: InvocationLedger::new(),
             warnings,
             clock: FixedClock("2026-08-23T09:41:02Z"),
@@ -723,6 +726,7 @@ impl Fixture {
         let mut state = EmitState {
             fold: &mut self.fold,
             log: &mut self.log,
+            events: &mut self.events,
             reservations: &mut self.reservations,
             warnings: &mut self.warnings,
         };
@@ -2232,9 +2236,11 @@ fn the_production_emitter_reaches_the_append_error_protocol() {
             state: EmitState {
                 fold: &mut fixture.fold,
                 log: &mut fixture.log,
+                events: &mut fixture.events,
                 reservations: &mut fixture.reservations,
                 warnings: &mut fixture.warnings,
             },
+
             clock: &fixture.clock,
         };
         emitter

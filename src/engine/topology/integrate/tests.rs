@@ -19,7 +19,8 @@ fn count_objects(run: &Run) -> u64 {
 }
 
 fn integrate_through(run: &mut Run, candidate: &CandidateRef) -> Result<Terminal, UpstrokeError> {
-    let request = IntegrationRequest::from_fold(run.emitter.fold(), candidate)?;
+    let request =
+        IntegrationRequest::from_log(run.emitter.fold(), &run.emitter.durable_events(), candidate)?;
     run.reservations
         .take(candidate.key, ReservationKind::Integration)?;
     let manager = run.fixture.manager.clone();
@@ -214,7 +215,12 @@ fn an_append_failure_at_merge_prepared_issues_no_cas_and_leaves_the_integration_
 fn fast_dual_holding_released_once() {
     let mut run = Run::started("fast-dual-holding");
     let candidate = run.queue_candidate(ALPHA);
-    let request = IntegrationRequest::from_fold(run.emitter.fold(), &candidate).expect("request");
+    let request = IntegrationRequest::from_log(
+        run.emitter.fold(),
+        &run.emitter.durable_events(),
+        &candidate,
+    )
+    .expect("request");
     let manager = run.fixture.manager.clone();
 
     run.reservations
@@ -251,7 +257,12 @@ fn fast_dual_holding_released_once() {
 fn merge_prepared_fast_with_moved_head_or_wrong_proposed_or_pin_refused_live_and_on_replay() {
     let mut run = Run::started("fast-relations");
     let candidate = run.queue_candidate(ALPHA);
-    let request = IntegrationRequest::from_fold(run.emitter.fold(), &candidate).expect("request");
+    let request = IntegrationRequest::from_log(
+        run.emitter.fold(),
+        &run.emitter.durable_events(),
+        &candidate,
+    )
+    .expect("request");
     let sibling = run.queue_candidate(BETA);
 
     let honest = MergePrepared {
@@ -423,7 +434,12 @@ fn a_symbolic_or_checked_out_integration_ref_refuses_before_any_append() {
 fn third_sha_refused_and_a_ref_already_at_the_proposal_only_records() {
     let mut run = Run::started("third-sha");
     let candidate = run.queue_candidate(ALPHA);
-    let request = IntegrationRequest::from_fold(run.emitter.fold(), &candidate).expect("request");
+    let request = IntegrationRequest::from_log(
+        run.emitter.fold(),
+        &run.emitter.durable_events(),
+        &candidate,
+    )
+    .expect("request");
     let manager = run.fixture.manager.clone();
     run.reservations
         .take(ALPHA, ReservationKind::Integration)
@@ -630,7 +646,12 @@ fn passing_reviewer() -> crate::engine::topology::attempt::ReviewerPlan {
 fn a_recovered_authorization_is_the_live_one_and_completes_through_the_same_publish() {
     let mut run = Run::started("recovered-authorization");
     let candidate = run.queue_candidate(ALPHA);
-    let request = IntegrationRequest::from_fold(run.emitter.fold(), &candidate).expect("request");
+    let request = IntegrationRequest::from_log(
+        run.emitter.fold(),
+        &run.emitter.durable_events(),
+        &candidate,
+    )
+    .expect("request");
     let manager = run.fixture.manager.clone();
 
     assert_eq!(
@@ -1314,7 +1335,12 @@ fn a_rejected_or_unavailable_terminal_refuses_to_delete_a_pin_another_writer_sub
         let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
         let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
         published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
-        let request = IntegrationRequest::from_fold(run.emitter.fold(), &second).expect("request");
+        let request = IntegrationRequest::from_log(
+            run.emitter.fold(),
+            &run.emitter.durable_events(),
+            &second,
+        )
+        .expect("request");
         run.reservations
             .take(BETA, ReservationKind::Integration)
             .expect("the provisional pair");
@@ -1370,4 +1396,124 @@ fn a_rejected_or_unavailable_terminal_refuses_to_delete_a_pin_another_writer_sub
         );
         run.replay_twice_equal();
     }
+}
+
+#[test]
+fn a_foreign_reset_of_the_integration_ref_refuses_before_any_append_and_keeps_the_merged_task() {
+    let mut run = Run::started("foreign-head-reset");
+    let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+    let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
+    published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+    assert_eq!(run.task_state(ALPHA), TaskState::Merged);
+    assert_eq!(run.head().as_deref(), Some(first.commit_sha.as_str()));
+    assert_eq!(
+        git(
+            &run.fixture.base,
+            &["show", &format!("{}:a.txt", first.commit_sha)]
+        ),
+        "alpha",
+        "alpha's publication carries its change"
+    );
+
+    git(
+        &run.fixture.base,
+        &[
+            "update-ref",
+            "--no-deref",
+            run.integration_ref().as_str(),
+            run.base().as_str(),
+            first.commit_sha.as_str(),
+        ],
+    );
+    let kinds_before = run.emitter.durable_kinds();
+    let objects_before = count_objects(&run);
+    let mark = run.mark();
+
+    let error = integrate_through(&mut run, &second)
+        .expect_err("a head the log did not put there refuses before any append");
+    let text = error.to_string();
+    assert!(
+        text.contains(run.base().as_str())
+            && text.contains(first.commit_sha.as_str())
+            && text.contains("sequence 0"),
+        "the refusal names what it found, what the log authorizes and the publication that put \
+         it there: {text}"
+    );
+    assert_eq!(
+        run.emitter.durable_kinds(),
+        kinds_before,
+        "nothing was appended: beta was not published over alpha's lost change"
+    );
+    assert_eq!(
+        run.head().as_deref(),
+        Some(run.base().as_str()),
+        "the foreign head was neither moved nor recreated"
+    );
+    assert_eq!(
+        run.task_state(ALPHA),
+        TaskState::Merged,
+        "alpha stays merged: the log is the record and the foreign ref does not rewrite it"
+    );
+    assert_eq!(run.task_state(BETA), TaskState::AwaitingMerge);
+    assert!(
+        run.reservations.is_empty() && run.reservations.balances(),
+        "a pre-append failure cancels the provisional pair"
+    );
+    assert_eq!(
+        run.count_after(
+            mark,
+            EffectSiteId::Worktree(WorktreeSite::WriteStagingIntent),
+            HookPhase::Before
+        ),
+        0,
+        "the refusal came before any staging effect"
+    );
+    assert!(
+        !run.observed(
+            EffectSiteId::Ref(RefSite::CompareAndSwapIntegration),
+            HookPhase::Before
+        ) || run.count_after(
+            mark,
+            EffectSiteId::Ref(RefSite::CompareAndSwapIntegration),
+            HookPhase::Before
+        ) == 0,
+        "no swap was issued against a foreign head"
+    );
+    assert_eq!(count_objects(&run), objects_before, "no object was created");
+    assert!(run.emitter.fold().transaction().is_none());
+    run.replay_twice_equal();
+
+    git(
+        &run.fixture.base,
+        &[
+            "update-ref",
+            "--no-deref",
+            run.integration_ref().as_str(),
+            first.commit_sha.as_str(),
+            run.base().as_str(),
+        ],
+    );
+    published(
+        integrate_through(&mut run, &second)
+            .expect("with the ref back at the log's publication, beta integrates"),
+    );
+    assert_eq!(run.task_state(BETA), TaskState::Merged);
+    let head = run.head().expect("beta's publication moved the ref");
+    assert_eq!(
+        git(&run.fixture.base, &["show", &format!("{head}:a.txt")]),
+        "alpha",
+        "beta's publication still carries alpha's change"
+    );
+    assert_eq!(
+        authorized_head(
+            run.emitter.fold().started().expect("started"),
+            &run.emitter.durable_events()
+        ),
+        AuthorizedHead {
+            head: CommitSha(head),
+            published_by: Some(SequenceId(1)),
+        },
+        "the rule the live decision and the resume check share names the latest publication"
+    );
+    run.replay_twice_equal();
 }
