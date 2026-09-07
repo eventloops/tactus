@@ -277,7 +277,12 @@ and `task_merged` — is `super::integrate`'s, appending through the
 same `RunJournal` the candidate sequence uses. A pre-append failure
 cancels the reservation and leaves the candidate queued; a failure
 after the first append leaves the fold-derived holding the append
-created, which recovery resolves.
+created, which recovery resolves — an unresolved verification included:
+its reservation converted at `merge_verification_started`, the open
+transaction is what holds the pipeline entitlement from then on, and the
+`Err` arm's cancellation is not reached (the review of `79ddbffb`
+measured the reservation ledger at 0 there and read it as a release;
+`pr8-triage.md` §6 finding 5).
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::DeferBackoff => Disposition::Performed,`
 
@@ -977,6 +982,15 @@ How many pipeline entitlements this run currently holds.
 Exposed so a test can assert the provisional ledger is balanced after a
 branch that refused partway. At `max_parallel = 1` a single leaked
 entitlement is a full pipeline, and nothing is ever selected again.
+
+## `impl TopologyRun` › `pub const fn reservations_cancelled(&self) -> u32 {`
+
+How many provisional reservations this run cancelled.
+
+Exposed so a test can tell a reservation that converted at its append
+from one the failure path cancelled: the review of `79ddbffb` read the
+empty ledger after an unresolved verification as a release, and the count
+is what says it was a conversion (`pr8-triage.md` §6 finding 5).
 
 ## `impl TopologyRun` › `pub fn defer_round(&self) -> u32 {`
 

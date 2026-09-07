@@ -7265,6 +7265,9 @@ struct Driven {
     spend_after: f64,
     invocations_balance: bool,
     entitlements_held: u32,
+    reservations_cancelled: u32,
+    transaction_open: bool,
+    pipeline_held: usize,
     log: Vec<TopologyEvent>,
 }
 
@@ -7511,10 +7514,30 @@ fn drive_with(
     runner: &dyn Runner,
     hooks: &mut dyn TopologyHooks,
 ) -> Driven {
+    drive_as(
+        fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        seams,
+        steps,
+        runner,
+        hooks,
+    )
+}
+
+fn drive_as(
+    fixture: &Fixture,
+    incarnation: &str,
+    resume_runtime: &dyn ContainerRuntime,
+    seams: &DriveSeams,
+    steps: usize,
+    runner: &dyn Runner,
+    hooks: &mut dyn TopologyHooks,
+) -> Driven {
     use crate::engine::topology::run::{RunSeams, TopologyRun};
 
-    let (_, handle) =
-        resume_with_real_refs_hooked(fixture, hooks).expect("the resume settles the planted state");
+    let (_, handle) = resume_as(fixture, incarnation, resume_runtime, hooks)
+        .expect("the resume settles the planted state");
     let mut run = TopologyRun::resumed(
         handle,
         fixture.inputs(),
@@ -7592,6 +7615,9 @@ fn drive_with(
         spend_after: run.spend().run_total(),
         invocations_balance: run.invocations_balance(),
         entitlements_held: run.entitlements_held(),
+        reservations_cancelled: run.reservations_cancelled(),
+        transaction_open: run.fold().transaction().is_some(),
+        pipeline_held: run.fold().pipeline_held(),
         log: TopologyFold::parse_log(&fixture.log_bytes()).expect("the result log parses"),
     }
 }
@@ -7973,6 +7999,197 @@ fn a_gate_whose_runner_lost_it_after_start_and_reclaimed_it_defers_as_an_outage(
     assert!(
         fixture.manager().intents().expect("intents").is_empty(),
         "with no process alive the snapshot and staging were reclaimed at the terminal"
+    );
+}
+
+#[test]
+fn an_unresolved_verification_leaves_its_entitlements_with_the_open_transaction() {
+    let fixture = Fixture::two_tasks("unresolved-entitlements");
+    plant_stale_verification(&fixture);
+    let fake = runtime_holding_the_record();
+    for op in RUNTIME_LOST_MID_GATE {
+        fake.set_unreachable(op);
+    }
+    let runner = production_container_runner(&fixture, &fake);
+    let driven = drive_with(
+        &fixture,
+        &DriveSeams::default(),
+        2,
+        &runner,
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    assert!(
+        driven.progress.first().is_some_and(Result::is_err),
+        "the first step ends the command resumably: {:?}",
+        driven.progress
+    );
+    assert_eq!(fake.container_names().len(), 1, "the running gate survives");
+    assert!(
+        unavailable_terminals(&driven.log).is_empty(),
+        "no terminal was appended over the running gate"
+    );
+    assert!(
+        driven.transaction_open,
+        "the verification transaction is still open in the fold"
+    );
+    assert_eq!(
+        driven.pipeline_held, 1,
+        "the open transaction is what holds the pipeline entitlement now"
+    );
+    assert_eq!(
+        (driven.entitlements_held, driven.reservations_cancelled),
+        (0, 0),
+        "the provisional reservation converted at merge_verification_started, before any \
+         process ran, exactly as C.side_effect_vs_event_ordering has it, and nothing cancelled \
+         it; it is not what holds the entitlements after the append, so a count of it says \
+         nothing about a release"
+    );
+    assert_eq!(
+        driven.log.len(),
+        TopologyFold::parse_log(&fixture.log_bytes())
+            .expect("the log parses")
+            .len(),
+        "the second step in the same incarnation appended nothing"
+    );
+    assert!(
+        !matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Integrated { .. }
+                | Progress::Rejected { .. }
+                | Progress::Unavailable { .. }))
+        ),
+        "the second step admitted no sequence beside the open transaction: {:?}",
+        driven.progress
+    );
+    assert_eq!(
+        fake.container_names().len(),
+        1,
+        "and started no second gate beside the surviving one"
+    );
+    assert_eq!(
+        last_event_kind(&fixture),
+        "merge_verification_started",
+        "the transaction is the next resume's to settle"
+    );
+}
+
+#[test]
+fn repeated_container_launch_outages_before_start_consume_defers_through_the_production_runner() {
+    use crate::runner::container::ContainerHooks;
+    use crate::runner::container::runtime::RuntimeOp;
+    use crate::topology::effects::ContainerSite;
+
+    struct RuntimeLostAtCreate {
+        fake: FakeRuntime,
+        trace: ContainerTrace,
+    }
+
+    impl ContainerHooks for RuntimeLostAtCreate {
+        fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+            if site == EffectSiteId::Container(ContainerSite::Create) && phase == HookPhase::Before
+            {
+                for op in [RuntimeOp::Create, RuntimeOp::Stop, RuntimeOp::Remove] {
+                    self.fake.set_unreachable(op);
+                }
+            }
+            Injection::Proceed
+        }
+
+        fn trace(&self) -> ContainerTrace {
+            self.trace.clone()
+        }
+    }
+
+    let fixture = Fixture::two_tasks("container-launch-outages");
+    plant_stale_verification(&fixture);
+    let fake = runtime_holding_the_record();
+    let mut shapes = Vec::new();
+    for (restart, incarnation) in ["resumer-1", "resumer-2", "resumer-3"]
+        .into_iter()
+        .enumerate()
+    {
+        // The runtime is back for the resume, so the census reclaims whatever the
+        // previous outage retained; it goes down again at the next `docker create`.
+        for op in [RuntimeOp::Create, RuntimeOp::Stop, RuntimeOp::Remove] {
+            fake.set_reachable(op);
+        }
+        let runner = production_container_runner(&fixture, &fake).with_hooks(Box::new(
+            RuntimeLostAtCreate {
+                fake: fake.clone(),
+                trace: ContainerTrace::default(),
+            },
+        ));
+        let driven = drive_as(
+            &fixture,
+            incarnation,
+            &fake,
+            &DriveSeams::default(),
+            1,
+            &runner,
+            &mut HarnessTopologyHooks::new(harness()),
+        );
+        shapes.push(match driven.progress.first() {
+            Some(Ok(Progress::Unavailable {
+                parked, sequence, ..
+            })) => format!("unavailable(s{}, parked={parked})", sequence.0),
+            other => format!("restart {restart}: {other:?}"),
+        });
+        assert!(
+            fake.container_names().is_empty(),
+            "restart {restart}: no container exists after an outage before start"
+        );
+        assert!(
+            driven.entitlements_held == 0 && driven.invocations_balance,
+            "restart {restart}: the terminal released the sequence's holdings"
+        );
+    }
+    assert_eq!(
+        shapes,
+        vec![
+            "unavailable(s2, parked=false)",
+            "unavailable(s3, parked=false)",
+            "unavailable(s4, parked=true)",
+        ],
+        "each observed pre-start outage consumed a defer and the third parked at the limit"
+    );
+    assert!(
+        !fake.calls().contains(&RuntimeOp::Start),
+        "no gate process was ever started: {:?}",
+        fake.calls()
+    );
+    let terminals = unavailable_terminals(
+        &TopologyFold::parse_log(&fixture.log_bytes()).expect("the log parses"),
+    );
+    assert_eq!(terminals.len(), 3);
+    for (index, terminal) in terminals.iter().enumerate() {
+        assert!(
+            matches!(
+                terminal.cause,
+                crate::topology::events::UnavailableCause::Infrastructure {
+                    kind: crate::topology::events::InfrastructureKind::RunnerSpawnFailure
+                }
+            ),
+            "terminal {index} is the spawn failure it was: {:?}",
+            terminal.cause
+        );
+    }
+    assert!(matches!(
+        terminals[0].outcome,
+        crate::topology::events::UnavailableOutcome::Deferred { defers: 1 }
+    ));
+    assert!(matches!(
+        terminals[1].outcome,
+        crate::topology::events::UnavailableOutcome::Deferred { defers: 2 }
+    ));
+    assert!(matches!(
+        terminals[2].outcome,
+        crate::topology::events::UnavailableOutcome::Parked { .. }
+    ));
+    assert_eq!(
+        interrupted_sequences(&fixture),
+        vec![1],
+        "only the planted stale verification was settled interrupted; none of the three \
+         outages was mistaken for one"
     );
 }
 

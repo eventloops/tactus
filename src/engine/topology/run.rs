@@ -633,6 +633,11 @@ impl TopologyRun {
     }
 
     #[must_use]
+    pub const fn reservations_cancelled(&self) -> u32 {
+        self.reservations.cancelled()
+    }
+
+    #[must_use]
     #[allow(dead_code)]
     pub fn defer_round(&self) -> u32 {
         self.deferral.round()
