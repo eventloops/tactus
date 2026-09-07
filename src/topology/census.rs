@@ -2859,8 +2859,7 @@ mod tests {
             "q-raised-bet".to_owned(),
         ]);
         assert_eq!(
-            question_ids,
-            identities,
+            question_ids, identities,
             "every question identity the classes construct: one parked per task per generation, \
              and one raised directly on each task"
         );

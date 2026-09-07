@@ -275,10 +275,18 @@ predicate is about.
 Narrow rather than `pub` because `deferred_tasks` is a representation
 the fold is free to reshape, and a published accessor over it would
 make that reshaping a SemVer question for the sake of one test oracle.
-It sits in its own `impl` block at the end of the file rather than
-beside [`Self::task_state`], because §12 puts test-only items after
-every production item: a mid-file `#[cfg(test)]` truncates the
-production region every source census reads.
+
+It sits at the end of the file rather than beside [`Self::task_state`]
+because §12 puts test-only items after every production item: a
+mid-file `#[cfg(test)]` truncates the production region every source
+census reads. It sits in a `#[cfg(test)] mod` rather than a bare
+`#[cfg(test)] impl` because a bare one is still an early cut at
+something other than a module, which is the shape
+`every_production_region_that_stops_early_stops_at_a_module` pins —
+the module keeps the cut where the census expects a file's production
+region to end. An inherent `impl` inside a private module still
+attaches to the type, and `pub(crate)` on the method carries it to the
+census.
 
 `false` before `run_started`, and `false` for a key the run does not
 register — absence and "no backoff pending" are one answer here, which

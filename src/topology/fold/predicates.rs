@@ -167,11 +167,15 @@ impl TopologyFold {
 }
 
 #[cfg(test)]
-impl TopologyFold {
-    #[must_use]
-    pub(crate) fn task_backoff_pending(&self, key: TaskKey) -> bool {
-        self.run
-            .as_ref()
-            .is_some_and(|run| run.deferred_tasks.contains(&key))
+mod test_seams {
+    use super::*;
+
+    impl TopologyFold {
+        #[must_use]
+        pub(crate) fn task_backoff_pending(&self, key: TaskKey) -> bool {
+            self.run
+                .as_ref()
+                .is_some_and(|run| run.deferred_tasks.contains(&key))
+        }
     }
 }
