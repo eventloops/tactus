@@ -1036,6 +1036,7 @@ pub enum PreparedDefect {
     FastWithPreparedRef,
     FastProposesAnotherCommit,
     FastWithoutCandidateSource,
+    FastWithVerification,
     StaleWithoutPreparedRef,
     AlreadyPresentMovesTheHead,
     VerifiedWithoutVerificationSource,
@@ -1056,6 +1057,10 @@ impl fmt::Display for PreparedDefect {
             Self::FastWithoutCandidateSource => {
                 "a fast publication citing a verification rather than the candidate record that \
                  judged the commit being published"
+            }
+            Self::FastWithVerification => {
+                "a fast publication carrying a verification record: an exact-base publication \
+                 runs no integration verification for it to carry"
             }
             Self::StaleWithoutPreparedRef => {
                 "a stale publication without the pin keeping its proposal reachable"
@@ -1100,6 +1105,9 @@ impl MergePrepared {
                     VerificationSource::CandidatePrepared { .. }
                 ) {
                     return Err(PreparedDefect::FastWithoutCandidateSource);
+                }
+                if self.verification.is_some() {
+                    return Err(PreparedDefect::FastWithVerification);
                 }
             }
             PreparedDisposition::StaleClean | PreparedDisposition::AlreadyPresent => {
@@ -3067,6 +3075,8 @@ mod tests {
                                             Err(PreparedDefect::FastProposesAnotherCommit)
                                         } else if !cited_candidate {
                                             Err(PreparedDefect::FastWithoutCandidateSource)
+                                        } else if record.is_some() {
+                                            Err(PreparedDefect::FastWithVerification)
                                         } else {
                                             Ok(())
                                         }
@@ -3149,6 +3159,17 @@ mod tests {
         assert_eq!(
             other.self_consistency(),
             Err(PreparedDefect::FastProposesAnotherCommit)
+        );
+    }
+
+    #[test]
+    fn a_fast_publication_carrying_a_verification_record_is_refused() {
+        let mut carrying = merge_prepared_fast();
+        assert!(carrying.verification.is_none());
+        carrying.verification = Some(verification(VerificationVerdict::Passed));
+        assert_eq!(
+            carrying.self_consistency(),
+            Err(PreparedDefect::FastWithVerification)
         );
     }
 

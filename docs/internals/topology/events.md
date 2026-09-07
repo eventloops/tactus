@@ -1226,6 +1226,11 @@ A fast publication proposing something other than the candidate commit.
 A fast publication citing a verification rather than the candidate's
 own record.
 
+## `pub enum PreparedDefect` › `FastWithVerification,`
+
+A fast publication carrying a verification record. The exact-base case runs
+no integration verification, so there is nothing for the field to hold.
+
 ## `pub enum PreparedDefect` › `StaleWithoutPreparedRef,`
 
 A stale publication without the pin that keeps its proposal reachable.
