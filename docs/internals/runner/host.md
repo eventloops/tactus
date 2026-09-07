@@ -69,12 +69,14 @@ The `Host` / `host-v1` `Runner`.
 | `program_for(program, composed)` | Which file `program` is, at **this** boundary — decided once and then remembered, at most once per `ProgramQuestion` per runner, but only when the filesystem gave a definite answer. Increments `program_resolutions` on entry; `program_searches` moves only when the filesystem is reached. **Errors:** `UpstrokeError::Refused` — `resolve_program`'s, first-hand or replayed; `UpstrokeError::Filesystem` when a candidate's `stat` failed for a reason other than not-found, first-hand only, never replayed. |
 
 **Fields.** The source keeps the lock protocol beside `HostRunner`. The runner
-owns both locks and never nests them. `resolved` serializes each lookup and caches
-its success or error before another caller can read it. Its guard is released
-before `hooks` is acquired. The hooks guard covers startup or an entire supervised
-run, so a shared runner supervises one process at a time even when its callers are
-concurrent. Guards release on return or unwind; a poisoned lock retains its inner
-state. The process funnel's RAII owners handle child cleanup.
+owns both locks and never nests them. `resolved` serializes each lookup and, before
+another caller can read it, caches what the filesystem decided — the resolved file,
+or `resolve_program`'s `Refused`. What it did not decide is not cached at all;
+**What the memo holds** below is that rule and its reasons. The `resolved` guard is
+released before `hooks` is acquired. The hooks guard covers startup or an entire
+supervised run, so a shared runner supervises one process at a time even when its
+callers are concurrent. Guards release on return or unwind; a poisoned lock retains
+its inner state. The process funnel's RAII owners handle child cleanup.
 
 **What the memo holds.** `resolved` caches only what the filesystem actually decided:
 `Ok(path)` and `resolve_program`'s `Refused` (nothing of that name found anywhere
@@ -188,15 +190,19 @@ holds it.
 ## `HostRunner::program_for`
 
 The `PR6-LANED-001` repair. `resolve_program` answers the question by searching a filesystem; this
-decides *whether the question is asked*, and it is asked at most once per `ProgramQuestion` per
-runner. See [`HostRunner::resolved`](#hostrunnerresolved) for why per-runner rather than per-spawn (a
+decides *whether the question is asked*. A question the filesystem answered — with a file, or with
+`Refused` because nothing of that name was anywhere it searched — is asked at most once per
+`ProgramQuestion` per runner. One it could not answer is not memoised at all and is asked again on
+the next call; **What the memo holds** in the fields section above is the rule and its reasons.
+See [`HostRunner::resolved`](#hostrunnerresolved) for why per-runner rather than per-spawn (a
 filesystem that moves between pre-flight and the attempt would otherwise hand the attempt a
 different executable under the same name) and why per-runner rather than process-wide (that is
 `PR4-ADAPTER-RESOLVES-ON-THE-HOST`).
 
-**A refusal is remembered too.** Fail-closed: a run whose pre-flight could not find `claude` on the
-`PATH` it composes does not silently find it at the third attempt because something installed one
-meanwhile. The stored value is the refusal's message, and `UpstrokeError::Refused` displays as
+**A refusal is remembered too** — `resolve_program`'s `Refused`, which is its definite miss and the
+only error variant the memo takes. Fail-closed: a run whose pre-flight could not find `claude` on
+the `PATH` it composes does not silently find it at the third attempt because something installed
+one meanwhile. The stored value is the refusal's message, and `UpstrokeError::Refused` displays as
 exactly its message, so the replayed error is the first one byte for byte —
 `a_refused_name_is_refused_identically_without_asking_the_filesystem_again` is what holds that
 rather than this sentence.
@@ -279,7 +285,9 @@ for this spawn, and when", not "did the filesystem move".
 `program_searches` is its sibling and the observable of the `PR6-LANED-001` repair: `HostRunner`
 resolves a name **once per boundary**, not once per spawn, so that a run's pre-flight and its
 attempts execute the same file even when the filesystem moves between them (DESIGN.md:612). N spawns
-of one name through one runner move `program_resolutions` by N and this by one.
+of one name through one runner move `program_resolutions` by N and this by one — once the filesystem
+has answered. While it cannot, nothing is remembered and this moves by N too, which is the point of
+not memoising an undetermined result rather than a lapse in the repair.
 
 It has to be a second counter rather than a reinterpretation of the first, because the two predicates
 are independently droppable: a memo that never hits satisfies "once per spawn" and reopens :612, and
