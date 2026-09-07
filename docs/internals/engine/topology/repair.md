@@ -62,11 +62,32 @@ A refusal when the run has not started or the candidate is not registered.
 ## `pub fn merge_rejected(` › `let mut spec = root_entry.spec.clone();`
 
 The specification is the one part of the root the repair rewrites —
-its kind, its hints and its acceptance — so it is cloned once and
-edited in place (§6); the rest of the entry copies the root's fields
+its kind, its hints, its acceptance and its body — so it is cloned once
+and edited in place (§6); the rest of the entry copies the root's fields
 because the contract fixes them as the root's (`decisions.repairs`:
 the root's authoritative deps, and the inherited review and agent
 policy), and a registry row owns what it records.
+
+The body is where the contract's "spec embedding evidence, rejecting head"
+(`decisions.repairs.merge_rejected`) lives: PR9 dispatches the repair from
+its registry entry, and a spec that still described the root task — which
+the reviews of `916852c9` found this builder producing — would have made
+PR9 reconstruct from the enclosing event what the registration was
+required to carry (`pr8-triage.md` §5, record F1).
+
+## `fn repair_body(`
+
+The root's body followed by a merge-repair section: the rejected
+candidate's commit, ref, task and generation, the sequence, the rejecting
+head, and the evidence — the conflict paths, or the verification's
+verdict, gate outcome, review passes and detail. The other facts of the
+rejection (the lease effect, the admission) are the event's and the
+fold's, not the worker's.
+
+## `fn render_paths(paths: &PathSet) -> String {`
+
+The conflict paths as a worker reads them; a repo-wide region says so
+rather than listing nothing.
 
 ## `fn candidate_paths(fold: &TopologyFold, candidate: &CandidateRef) -> PathSet {`
 

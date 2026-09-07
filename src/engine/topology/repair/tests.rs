@@ -191,6 +191,98 @@ fn the_admission_follows_the_ladder_first_and_the_consumed_allowance_second() {
     }
 }
 
+#[test]
+fn the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas() {
+    let mut run = Run::started("repair-spec-evidence");
+    let candidate = run.queue_candidate(ALPHA);
+    let ids = crate::engine::topology::seams::RealIds;
+    let head = crate::topology::events::CommitSha("f".repeat(40));
+    let root_body = run
+        .emitter
+        .fold()
+        .registry()
+        .expect("a registry")
+        .get(ALPHA)
+        .expect("alpha is registered")
+        .spec
+        .body
+        .clone();
+
+    let conflict = merge_rejected(
+        run.emitter.fold(),
+        &ids,
+        &candidate,
+        head.clone(),
+        SequenceId(0),
+        crate::topology::events::RejectionDisposition::Conflict {
+            paths: region(&["shared.txt"]),
+        },
+        region(&["shared.txt"]),
+    )
+    .expect("the conflict rejection builds");
+    let spec = serde_json::to_string(&conflict.repair.entry.spec).expect("the spec serializes");
+    for needle in [
+        candidate.commit_sha.as_str(),
+        candidate.candidate_ref.as_str(),
+        head.as_str(),
+        "shared.txt",
+        "conflicted",
+        root_body.as_str(),
+    ] {
+        assert!(
+            spec.contains(needle),
+            "the frozen spec of a conflict repair embeds `{needle}`: {spec}"
+        );
+    }
+
+    let evidence = "the gate `clippy` failed: exit 1 (REPAIR-SPEC-UNIQUE-EVIDENCE)";
+    let review = crate::events::ReviewRecord {
+        pass: "acceptance".to_owned(),
+        agent: "claude-code".to_owned(),
+        model: "claude-opus-5".to_owned(),
+        adapter: None,
+        preflight_cli_version: None,
+        effort: None,
+        pool: None,
+        cost_usd: Some(0.5),
+        outcome: crate::events::ReviewPassOutcome::Failed,
+    };
+    let rejected = merge_rejected(
+        run.emitter.fold(),
+        &ids,
+        &candidate,
+        head.clone(),
+        SequenceId(1),
+        crate::topology::events::RejectionDisposition::CodeRejected {
+            verification: super::code_rejection_record(false, vec![review], evidence.to_owned()),
+        },
+        region(&["shared.txt"]),
+    )
+    .expect("the code rejection builds");
+    let spec = serde_json::to_string(&rejected.repair.entry.spec).expect("the spec serializes");
+    for needle in [
+        candidate.commit_sha.as_str(),
+        candidate.candidate_ref.as_str(),
+        head.as_str(),
+        "REPAIR-SPEC-UNIQUE-EVIDENCE",
+        "gates failed",
+        "acceptance",
+        "claude-opus-5",
+        "sequence 1",
+        root_body.as_str(),
+    ] {
+        assert!(
+            spec.contains(needle),
+            "the frozen spec of a code-rejected repair embeds `{needle}`: {spec}"
+        );
+    }
+    assert_eq!(
+        rejected.repair.entry.spec.kind,
+        crate::ir::TaskKind::Fix,
+        "and it is still a Fix"
+    );
+}
+
 fn region(paths: &[&str]) -> PathSet {
     PathSet::Prefixes {
         paths: paths

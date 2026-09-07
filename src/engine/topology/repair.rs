@@ -61,6 +61,13 @@ pub fn merge_rejected(
     spec.kind = crate::ir::TaskKind::Fix;
     spec.path_hints = hints;
     spec.acceptance.push(PRESERVE_MERGED.to_owned());
+    spec.body = repair_body(
+        &root_entry.spec.body,
+        candidate,
+        &rejecting_head,
+        sequence,
+        &disposition,
+    );
 
     let entry = TaskEntry {
         key,
@@ -106,6 +113,69 @@ pub fn merge_rejected(
         },
         lease_effect,
     })
+}
+
+fn repair_body(
+    root_body: &str,
+    candidate: &CandidateRef,
+    rejecting_head: &CommitSha,
+    sequence: SequenceId,
+    disposition: &RejectionDisposition,
+) -> String {
+    let mut body = String::new();
+    body.push_str(root_body);
+    body.push_str("\n\n## Merge repair\n\n");
+    body.push_str(&format!(
+        "Candidate {} ({}) of task {} generation {} was rejected at integration sequence {} \
+         against the integration head {}.\n",
+        candidate.commit_sha,
+        candidate.candidate_ref.as_str(),
+        candidate.key,
+        candidate.generation.0,
+        sequence.0,
+        rejecting_head
+    ));
+    match disposition {
+        RejectionDisposition::Conflict { paths } => {
+            body.push_str("\nThe cherry-pick onto that head conflicted in: ");
+            body.push_str(&render_paths(paths));
+            body.push_str(".\n");
+        }
+        RejectionDisposition::CodeRejected { verification } => {
+            body.push_str(&format!(
+                "\nThe verification of the proposal on that head ended {} (gates {}): {}\n",
+                match verification.verdict {
+                    crate::topology::events::VerificationVerdict::Passed => "passed",
+                    crate::topology::events::VerificationVerdict::GatesFailed => "gates failed",
+                    crate::topology::events::VerificationVerdict::Rejected => "rejected",
+                },
+                if verification.gates_passed {
+                    "passed"
+                } else {
+                    "failed"
+                },
+                verification.detail
+            ));
+            for review in &verification.reviews {
+                body.push_str(&format!(
+                    "- review pass `{}` by {} ({}): {:?}\n",
+                    review.pass, review.agent, review.model, review.outcome
+                ));
+            }
+        }
+    }
+    body
+}
+
+fn render_paths(paths: &PathSet) -> String {
+    match paths.prefixes() {
+        Some(paths) if !paths.is_empty() => paths
+            .iter()
+            .map(|path| format!("`{}`", path.as_str()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "the whole repository".to_owned(),
+    }
 }
 
 fn candidate_paths(fold: &TopologyFold, candidate: &CandidateRef) -> PathSet {
