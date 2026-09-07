@@ -1779,8 +1779,8 @@ fn a_halted_run_is_attributed_to_the_first_halting_settlement_live_and_by_replay
         live.pipeline_held(),
         2,
         "both attempts have to be in flight before either settles, or the \
-             second halt is not a second attempt racing the first but a \
-             dispatch the run's ending already forbids"
+             second halting settlement is not racing the first but following \
+             a run that has already ended, which is a weaker thing to see"
     );
     assert!(!live.run_is_ending(), "and neither has halted yet");
 
@@ -1817,8 +1817,9 @@ fn a_halted_run_is_attributed_to_the_first_halting_settlement_live_and_by_replay
         replayed.halted_at(),
         live.halted_at(),
         "the attribution did not survive the process that wrote it, and \
-             `check_run_finished` refuses a `run_finished` whose `halted_at` \
-             differs from the fold's, so the resumed run could not end at all"
+             `check_run_finished` compares a recorded `run_finished`'s \
+             `halted_at` against the fold's, so a replay that derives a \
+             different one refuses the ending its own log records"
     );
     assert_ne!(
         replayed.halted_at(),
