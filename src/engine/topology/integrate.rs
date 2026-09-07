@@ -584,6 +584,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
                 request,
                 staging,
                 pin,
+                proposed,
                 UnavailableCause::Infrastructure { kind },
                 Some(detail),
             );
@@ -602,6 +603,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             request,
             staging,
             pin,
+            proposed,
             UnavailableCause::Infrastructure {
                 kind: InfrastructureKind::Other {
                     detail: detail.clone(),
@@ -625,6 +627,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             request,
             staging,
             pin,
+            proposed,
             infrastructure(&failure),
             Some(failure.reason.clone()),
         ),
@@ -634,6 +637,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             request,
             staging,
             pin,
+            proposed,
             UnavailableCause::HumanRequired {
                 verdict: failure.reason.clone(),
             },
@@ -657,7 +661,12 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             journal.emit(TopologyEventBody::MergeRejected {
                 data: Box::new(rejected),
             })?;
-            reclaim_staging(journal, manager, staging, pin.as_ref())?;
+            reclaim_staging(
+                journal,
+                manager,
+                staging,
+                pin.as_ref().map(|pin| (pin, proposed)),
+            )?;
             Ok(Terminal::Rejected { sequence, key })
         }
     }
@@ -712,6 +721,7 @@ fn unavailable<J: IntegrationJournal + Verification>(
     request: &IntegrationRequest,
     staging: &Slot,
     pin: Option<GitRef>,
+    proposed: &CommitSha,
     cause: UnavailableCause,
     detail: Option<String>,
 ) -> Result<Terminal, UpstrokeError> {
@@ -741,7 +751,12 @@ fn unavailable<J: IntegrationJournal + Verification>(
             outcome,
         },
     })?;
-    reclaim_staging(journal, manager, staging, pin.as_ref())?;
+    reclaim_staging(
+        journal,
+        manager,
+        staging,
+        pin.as_ref().map(|pin| (pin, proposed)),
+    )?;
     Ok(Terminal::Unavailable {
         sequence: request.sequence,
         key: candidate.key,
@@ -860,20 +875,13 @@ fn reclaim_staging(
     journal: &mut dyn IntegrationJournal,
     manager: &WorkspaceManager,
     staging: &Slot,
-    pin: Option<&GitRef>,
+    pinned: Option<(&GitRef, &CommitSha)>,
 ) -> Result<(), UpstrokeError> {
     reclaim_snapshots(journal, manager)?;
     manager.remove_worktree(journal.hooks().effects(), staging)?;
     manager.remove_intent(journal.hooks().effects(), staging)?;
-    if let Some(pin) = pin {
-        if let Some(proposed) = manager.direct_ref_target(pin.as_str())? {
-            manager.delete_ref_expected_old(
-                journal.hooks().effects(),
-                RefSite::DeletePreparedPin,
-                pin.as_str(),
-                &proposed,
-            )?;
-        }
+    if let Some((pin, proposed)) = pinned {
+        prune_pin(journal.hooks(), manager, pin, proposed)?;
     }
     Ok(())
 }

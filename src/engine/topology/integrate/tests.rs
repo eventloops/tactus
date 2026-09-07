@@ -1239,3 +1239,135 @@ fn unavailable_of(run: &Run) -> crate::topology::events::MergeVerificationUnavai
         })
         .expect("a durable merge_verification_unavailable")
 }
+
+struct SubstitutingVerification<'a> {
+    run: &'a mut Run,
+    substituted: Option<(GitRef, CommitSha)>,
+}
+
+impl IntegrationJournal for SubstitutingVerification<'_> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        IntegrationJournal::emit(self.run, body)
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        IntegrationJournal::fold(self.run)
+    }
+
+    fn hooks(&mut self) -> &mut dyn crate::engine::topology::seams::TopologyHooks {
+        IntegrationJournal::hooks(self.run)
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        IntegrationJournal::converted(self.run, key)
+    }
+}
+
+impl Verification for SubstitutingVerification<'_> {
+    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
+        let outcome = Verification::verify(self.run, request)?;
+        let run_id = self
+            .run
+            .emitter
+            .fold()
+            .started()
+            .expect("the run started")
+            .run_id
+            .clone();
+        let pin = prepared_pin_ref(&run_id, request.sequence);
+        assert_ne!(
+            request.proposed, request.head,
+            "a stale proposal is a commit of its own, so the head is a foreign target for its pin"
+        );
+        git(
+            &self.run.fixture.base,
+            &[
+                "update-ref",
+                "--no-deref",
+                pin.as_str(),
+                request.head.as_str(),
+                request.proposed.as_str(),
+            ],
+        );
+        self.substituted = Some((pin, request.head.clone()));
+        Ok(outcome)
+    }
+
+    fn ids(&self) -> &dyn crate::engine::topology::seams::IdSource {
+        Verification::ids(self.run)
+    }
+}
+
+#[test]
+fn a_rejected_or_unavailable_terminal_refuses_to_delete_a_pin_another_writer_substituted() {
+    for (label, review, terminal) in [
+        ("rejected", VerifyReview::NeedsChanges, "merge_rejected"),
+        (
+            "parked",
+            VerifyReview::NeedsHuman,
+            "merge_verification_unavailable",
+        ),
+    ] {
+        let mut run = Run::started(&format!("substituted-pin-{label}"));
+        run.verify_reviewers.push(passing_reviewer());
+        run.verify_review = review;
+        let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+        let second = run.queue_candidate_editing(BETA, "b.txt", "beta\n");
+        published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+        let request = IntegrationRequest::from_fold(run.emitter.fold(), &second).expect("request");
+        run.reservations
+            .take(BETA, ReservationKind::Integration)
+            .expect("the provisional pair");
+        let manager = run.fixture.manager.clone();
+
+        let mut verification = SubstitutingVerification {
+            run: &mut run,
+            substituted: None,
+        };
+        let outcome = integrate(&mut verification, &manager, &request);
+        let (pin, foreign) = verification
+            .substituted
+            .expect("the pin was substituted while the verification ran");
+
+        let error = outcome.expect_err(
+            "a terminal whose pin no longer names the recorded proposal refuses the deletion",
+        );
+        let text = error.to_string();
+        assert!(
+            text.contains("refusing to prune the pin") && text.contains(foreign.as_str()),
+            "{label}: the refusal names the substitution: {text}"
+        );
+        assert_eq!(
+            manager
+                .direct_ref_target(pin.as_str())
+                .expect("read the pin")
+                .as_deref(),
+            Some(foreign.as_str()),
+            "{label}: the substituted ref is neither adopted nor deleted"
+        );
+        assert_eq!(
+            run.emitter.durable_kinds().last().copied(),
+            Some(terminal),
+            "{label}: the terminal was durable before the cleanup refused"
+        );
+        assert!(
+            run.fixture
+                .manager
+                .intents()
+                .expect("intents")
+                .iter()
+                .all(|slot| !matches!(
+                    slot,
+                    crate::workspace_manager::Slot::Staging { .. }
+                        | crate::workspace_manager::Slot::Snapshot { .. }
+                )),
+            "{label}: the snapshots and the staging worktree were reclaimed before the pin was \
+             reached"
+        );
+        assert!(
+            run.reservations.is_empty(),
+            "{label}: the provisional pair converted at the start append"
+        );
+        run.replay_twice_equal();
+    }
+}

@@ -382,7 +382,9 @@ relations for stale_clean and already_present.
 
 A verification outage: `merge_verification_unavailable`, deferred while the
 candidate is inside its frozen allowance and parked at it, then the
-snapshots, the staging worktree and the pin reclaimed. `detail` is what
+snapshots, the staging worktree and the pin reclaimed — the pin at the
+proposal the record names ([`reclaim_staging`]). `detail` is what
+
 the infrastructure reported, carried into the park question's context so
 a person sees why the outage exhausted its deferrals.
 
@@ -403,4 +405,21 @@ hand back, and this sequential coordinator runs one judgement at a time.
 
 After a rejection or an unavailable terminal: the snapshots, then the
 stale transaction's staging worktree with force and its intent, then its
-pin deleted expected-old.
+pin pruned through [`prune_pin`] at the proposal
+`merge_verification_started` recorded.
+
+**The expected-old value is the record's, never the ref's.** The first
+version read the pin's current target and deleted expected-old at
+whatever it found, so a pin another writer had moved was deleted at the
+substituted object and the terminal returned success — the cover review
+of `8a5f59e8` reproduced it on both the rejected and the parked branch
+(`PR8-R4-SUBSTITUTED-PIN-LIVE`). `decisions.workspace_candidates.cleanup`
+says cleanup "never establishes authority": the proposal the verification
+recorded is the only thing that says what this pin may name, so the
+deletion is issued at that SHA and refuses at any other, exactly as the
+resume's prune of a resolved sequence's pin does. The refusal comes after
+the terminal is durable and after the snapshots and the staging worktree
+are reclaimed — those are the sequence's own residue — so what a
+substitution leaves behind is the terminal, the substituted ref untouched,
+and a command that ends with the refusal naming it.
+
