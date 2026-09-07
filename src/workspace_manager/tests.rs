@@ -9975,3 +9975,155 @@ fn every_site_this_lane_owns_executes_both_hook_phases() {
              statement about the trace and not about the process"
     );
 }
+
+/// The index a worktree-inspecting **read** leaves behind, so a test can say
+/// what a classification wrote.
+fn worktree_index(path: &Path) -> Vec<u8> {
+    let index = git_dir_of(path)
+        .expect("inspect the git directory")
+        .expect("a linked worktree has one")
+        .join("index");
+    fs::read(&index).expect("the index file")
+}
+
+/// Make the index stat-dirty and nothing else: one tracked file's timestamp
+/// moves to `seconds` after the epoch while its content stays byte for byte
+/// what the index records.
+///
+/// This is the whole input. A refresh is then the only thing that would write
+/// the index, so an index whose bytes move across the call under test moved
+/// because that call refreshed it.
+///
+/// **Into the past, and a different second per call.** Git will not cache a
+/// stat that is not older than the index it is writing — the racily-clean
+/// rule, at one-second granularity where the build has no nanosecond support —
+/// so a file rewritten *now* leaves a refresh with nothing it is allowed to
+/// write back, and the measurement reads clean for a reason that has nothing to
+/// do with the repair. Measured on git 2.43 in a linked worktree: rewriting the
+/// file byte for byte moved no index at all, the same file aged to 2001 moved
+/// it, and aging it twice to the same second moved it only once.
+fn age_tracked_file(path: &Path, seconds: u64) {
+    let file = path.join("a.txt");
+    let handle = fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .expect("open a tracked file the fixture seeded");
+    handle
+        .set_times(
+            fs::FileTimes::new()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)),
+        )
+        .expect("age the file the index recorded a stat for");
+}
+
+/// `proposal_state` classifies a failed pick and writes **nothing** — not the
+/// index (`decisions.effect_site_inventory.{mechanism,identity,claim_scope}`).
+///
+/// It takes no hooks and names no effect site, on the stated ground that it
+/// "creates no object, moves no ref and touches no index". Its unmerged-entry
+/// query was the porcelain `git diff`, which silently runs `update-index
+/// --refresh` against the working tree first (`diff.autoRefreshIndex`, default
+/// true) — and that refresh writes: measured on git 2.43,
+/// `open(index.lock, O_RDWR|O_CREAT|O_EXCL)` and `rename(index.lock, index)`,
+/// moving the index's hash with the 209 bytes unchanged. So the one function
+/// in the manager that claims to be a pure read was writing a resource outside
+/// every effect hook, which is exactly the observation the effect-site
+/// inventory exists to make impossible.
+///
+/// Both diffs the classifier runs are inside the hashed window, so this covers
+/// the `--cached` one too. The classification itself is pinned elsewhere —
+/// `integrate::tests::a_conflicting_candidate_is_rejected_with_an_atomic_repair_before_any_repair_effect`
+/// drives the conflict arm through this same function, and the empty arm is
+/// asserted here — so a repair that bought silence by answering differently
+/// would fail one of the two.
+#[test]
+fn the_proposal_classifier_writes_no_index_while_reading_an_empty_pick() {
+    let fixture = Fixture::created("proposal-state-readonly");
+    let staging = Slot::Staging { sequence: 1 };
+    fixture
+        .manager
+        .write_intent(&mut NoHooks, &staging)
+        .expect("the staging intent");
+    let path = fixture
+        .manager
+        .add_worktree(&mut NoHooks, &staging, &fixture.head)
+        .expect("the staging worktree");
+    fixture
+        .manager
+        .proposal_cherry_pick(&mut NoHooks, &staging, &fixture.side)
+        .expect("the first pick applies the side change");
+    let head = git(&path, &["rev-parse", "HEAD"]);
+    fixture
+        .manager
+        .proposal_cherry_pick(&mut NoHooks, &staging, &fixture.side)
+        .expect_err("the same change a second time is an empty pick");
+
+    age_tracked_file(&path, 1_000_000_100);
+    let before = worktree_index(&path);
+    let state = fixture
+        .manager
+        .proposal_state(&staging, &head)
+        .expect("the classifier reads the worktree");
+    let after = worktree_index(&path);
+
+    assert!(
+        matches!(state, ProposalState::Empty),
+        "an already-present change with no unmerged entry, HEAD where it was and \
+         CHERRY_PICK_HEAD left behind is the empty pick: {state:?}"
+    );
+    assert_eq!(
+        before.len(),
+        after.len(),
+        "the index is the same size across the read"
+    );
+    assert!(
+        before == after,
+        "a read that names no effect site rewrote the {}-byte index it was only asked to \
+         classify, and answered {state:?} either way, so nothing about the answer needed the \
+         write",
+        before.len()
+    );
+}
+
+/// The manager's worktree-inspecting reads write no index either
+/// (`PR5-CONF-002`, swept).
+///
+/// That finding named the mechanism — Git's porcelain takes the index lock
+/// opportunistically to write back a refreshed stat cache — and
+/// `--no-optional-locks` was applied at the one call site it was found at.
+/// Every other read through `read_only_git` kept the behaviour, and one of them
+/// is reached from the residue classifier: `git status --porcelain` moves the
+/// index's hash after nothing but a timestamp did, measured on git 2.43. That
+/// makes the classifier's own optional lock a thing a later classification can
+/// read as evidence — an `index.lock` left by a crash inside it is read as
+/// proof that the interrupted `git add` never published.
+#[test]
+fn a_worktree_inspecting_read_writes_no_index() {
+    let fixture = Fixture::created("read-only-reads");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let path = fixture.manager.slot_path(&slot);
+
+    age_tracked_file(&path, 1_000_000_100);
+    let before = worktree_index(&path);
+    let unstaged = worktree_has_unstaged_changes(&path).expect("inspect the working tree");
+    let midpoint = worktree_index(&path);
+    age_tracked_file(&path, 1_000_000_200);
+    let staged = index_differs_from_head(&path).expect("inspect the index");
+    let after = worktree_index(&path);
+    assert!(
+        before == midpoint,
+        "`git status` rewrote the {}-byte index it was only asked to read",
+        before.len()
+    );
+
+    assert!(
+        !unstaged,
+        "the fixture worktree holds exactly what its index records"
+    );
+    assert!(!staged, "and its index holds exactly HEAD");
+    assert!(
+        before == after,
+        "a read that classifies residue rewrote the {}-byte index it was classifying",
+        before.len()
+    );
+}

@@ -1784,9 +1784,12 @@ impl WorkspaceManager {
     ///
     /// `diff-index --cached` asks the question `write-tree` was being used to
     /// answer — *does the index hold this exact tree* — and answers it by
-    /// reading. `--no-optional-locks` is what makes that read-only rather than
-    /// nearly: without it `diff-index` takes the index lock to write back a
-    /// refreshed stat cache, which is a write to `.git/index`.
+    /// reading. What makes that read-only rather than nearly is
+    /// `--no-optional-locks`, which [`read_only_git`] now passes for every read
+    /// the manager makes: without it `diff-index` takes the index lock to write
+    /// back a refreshed stat cache, which is a write to `.git/index`. It is
+    /// passed there and not also here, so that dropping it is a single change
+    /// a test can witness.
     ///
     /// Three outcomes, because `--quiet` implies `--exit-code`: 0 is "holds it",
     /// 1 is "differs", and anything else is a Git failure — of which one case is
@@ -1799,19 +1802,13 @@ impl WorkspaceManager {
     ///
     /// A Git error other than "the index differs" or "the tree is absent".
     fn index_differs_from(&self, path: &Path, tree: &str) -> Result<Option<String>, UpstrokeError> {
-        const READ_ONLY: &str = "--no-optional-locks";
-        let quiet = read_only_git(
-            path,
-            &[READ_ONLY, "diff-index", "--cached", "--quiet", tree, "--"],
-        )?;
+        let quiet = read_only_git(path, &["diff-index", "--cached", "--quiet", tree, "--"])?;
         match quiet.status.code() {
             Some(0) => return Ok(None),
             Some(1) => {}
             _ => {
-                let present = read_only_git(
-                    path,
-                    &[READ_ONLY, "cat-file", "-e", &format!("{tree}^{{tree}}")],
-                )?;
+                let present =
+                    read_only_git(path, &["cat-file", "-e", &format!("{tree}^{{tree}}")])?;
                 if present.status.success() {
                     return Err(UpstrokeError::Git {
                         message: format!(
@@ -1831,15 +1828,7 @@ impl WorkspaceManager {
         // that split on one would name paths that do not exist.
         let names = read_only_git_ok(
             path,
-            &[
-                READ_ONLY,
-                "diff-index",
-                "--cached",
-                "--name-only",
-                "-z",
-                tree,
-                "--",
-            ],
+            &["diff-index", "--cached", "--name-only", "-z", tree, "--"],
         )?;
         let differing: Vec<String> = String::from_utf8_lossy(&names)
             .split('\0')
@@ -2591,9 +2580,34 @@ impl WorkspaceManager {
     /// and the two are opposite dispositions (`DESIGN.md` §26.3), so the
     /// worktree is inspected rather than the message parsed:
     ///
-    /// * unmerged index entries (`git diff --name-status --diff-filter=U`,
-    ///   NUL-delimited and decoded byte-safely) are a conflict, and their
-    ///   paths are what the repair lineage takes a lease on;
+    /// * unmerged index entries (`git diff-files --name-status
+    ///   --diff-filter=U`, NUL-delimited and decoded byte-safely) are a
+    ///   conflict, and their paths are what the repair lineage takes a lease
+    ///   on;
+    ///
+    /// **`diff-files` rather than the porcelain `git diff`, so that the
+    /// paragraph above is true.** Porcelain `git diff` against the working
+    /// tree silently runs `update-index --refresh` first — `diff.autoRefreshIndex`,
+    /// which defaults to true — and that refresh *writes*: measured on git
+    /// 2.43, `open(index.lock, O_RDWR|O_CREAT|O_EXCL)` then
+    /// `rename(index.lock, index)`, changing the 209-byte index's hash after
+    /// nothing but an unchanged file's timestamp moved. A function that claims
+    /// to touch no index and takes no hooks was therefore writing one outside
+    /// the effect funnel, which is the observation
+    /// `decisions.effect_site_inventory.{mechanism,identity,claim_scope}`
+    /// exists to make impossible. The read is made genuinely read-only rather
+    /// than routed through the funnel because there is no site to route it to:
+    /// the frozen `EffectSiteId` names no classification read, and adding one
+    /// is a change under the `src/topology/**` freeze for a function that
+    /// creates nothing to account for. `diff.autoRefreshIndex`'s own
+    /// documentation is what makes `diff-files` the answer rather than a
+    /// configuration override — it "affects only `git diff` Porcelain, not
+    /// lower level `diff` commands such as `git diff-files`" — and the two
+    /// produce byte-identical `--name-status --diff-filter=U -z` records for
+    /// the same unmerged entries, measured. The `--cached` diff below compares
+    /// the index with `HEAD` and never consults the working tree, so no
+    /// refresh applies to it; the regression test hashes the index across the
+    /// whole call and so covers both.
     /// * no unmerged entry, `HEAD` still at `head`, `CHERRY_PICK_HEAD` present
     ///   and the index equal to `HEAD` is the empty pick — measured on git
     ///   2.43, "The previous cherry-pick is now empty", exit 1;
@@ -2609,7 +2623,7 @@ impl WorkspaceManager {
         let unmerged = self.git_ok(
             &path,
             &[
-                OsString::from("diff"),
+                OsString::from("diff-files"),
                 OsString::from("--name-status"),
                 OsString::from("--diff-filter=U"),
                 OsString::from("-z"),
@@ -3285,11 +3299,22 @@ fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
         .map(|target| PathBuf::from(target.trim())))
 }
 
+/// Run one of the manager's reads.
+///
+/// **`--no-optional-locks` on every one of them**, which is what makes these
+/// reads read-only rather than nearly. Git's porcelain takes the index lock
+/// opportunistically to write back a refreshed stat cache, and that is a write
+/// to `.git/index`: measured on git 2.43, `git status --porcelain` moves the
+/// index's hash after nothing but an unchanged file's timestamp did, and the
+/// flag stops it. `PR5-CONF-002` established the rule at one call site
+/// ([`WorkspaceManager::index_differs_from`]); it belongs here, where a read
+/// added later inherits it, because a read that writes the index writes it
+/// outside every effect hook.
 fn read_only_git(cwd: &Path, args: &[&str]) -> Result<Output, UpstrokeError> {
     Command::new("git")
         .arg("-C")
         .arg(cwd)
-        .args(["-c", "core.fsmonitor=false"])
+        .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
         .args(args)
         .stdin(Stdio::null())
         .output()
