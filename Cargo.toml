@@ -93,13 +93,18 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 # Lint levels are repository policy and live here (CODING_STANDARDS.md §2): no
-# attribute loosens or narrows a lint this table governs. §2's two carve-outs
-# stand outside it, in module-level attributes: a `#![deny]` that activates a
-# lint this table does not yet govern, ahead of the entry `standards/SWEEP.md`
-# says is owed (`src/validate/graph.rs`, §7), and the `clippy.toml`
-# `disallowed-*` census. Each entry landed with the tree already clean under it;
-# the named output modules and the documented §7 invariant sites carry
-# `#[expect]` with reasons, and `clippy.toml` holds the test allowances.
+# `#![allow]` or `#![deny]`, at crate root or module level, loosens or narrows a
+# lint this table governs. A narrow, reasoned `#[expect]` suppresses one at its
+# own site without changing its level, which is what §2 asks for and what the
+# output modules below carry. §2's two carve-outs from the level rule are
+# module-level: a `#![deny]` that activates a lint this table does not yet
+# govern, ahead of the entry `standards/SWEEP.md` says is owed
+# (`src/validate/graph.rs`, §7), and the allowlisted attributes carrying the
+# `clippy.toml` `disallowed-*` census, which §2 states in both its governed
+# forms. Each entry landed with the tree already clean under it; the output
+# modules (`src/main.rs`, `src/interaction.rs`, `examples/probe.rs`) and the
+# documented §7 invariant sites carry `#[expect]` with reasons, and
+# `clippy.toml` holds the test allowances.
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 
