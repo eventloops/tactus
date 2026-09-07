@@ -1298,3 +1298,39 @@ refusal: the Runner's own `Err` is [`JudgeError::Runner`], settled in
 the ledger as a cancellation exactly as before. The in-memory registration
 is cancelled whatever the fate: the ledger is this process's, and a process
 the Runner could not resolve is the next incarnation's census to reclaim.
+
+## `pub trait ReviewAccount {`
+
+Where a completed review pass's cost is charged.
+
+A review that returned has been paid for, whatever becomes of the judgement it
+belongs to. [`Judge::judge`] can still fail after one — the next reviewer's
+snapshot, the invocation ledger, an absent adapter — and those exits carry no
+[`Judgement`] and so no reviews, while an integration that settles on a Git
+error settles *unavailable* rather than ending the command, and the loop then
+admits another sequence in the same incarnation against a run total the reviews
+are missing from. So the charge is reported here as each pass completes rather
+than read off the judgement that returns, and every exit from `judge` leaves
+the account holding what was spent.
+
+A pass whose `run` returns an error is not charged: no outcome means no cost was
+reported, and unknown spend is reported as unknown (INV-14).
+
+## `pub trait ReviewAccount {` › `fn charge(&mut self, cost_usd: Option<f64>);`
+
+Charge one completed review pass, whose reported cost may be unknown.
+
+## `pub struct NoReviewAccount;`
+
+The account of a caller that keeps none.
+
+The legacy attempt path charges from the durable `AttemptRecord` its settlement
+writes, and the test scaffold judges nothing it pays for. It is a named type
+rather than an `Option`, so a caller that judges cannot reach `judge` without
+saying what it does with the cost.
+
+## `for (index, reviewer) in subject.reviewers.iter().enumerate() {` › `account.charge(outcome.cost_usd);`
+
+The pass has returned, so its cost is spent. Charge it before anything below
+can fail and discard the judgement: the invocation ledger, the snapshot
+removal, and the next iteration's snapshot creation are all `?` from here on.

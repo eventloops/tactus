@@ -210,33 +210,46 @@ The legacy verification ladder is its first caller — through
 `run_attempt`'s own `workspace`, not through this — and the schema-4 driver
 is its second. One policy, two callers.
 
-## `pub(super) fn review_failure(result: review::ReviewResult) -> Option<AttemptFailure> {`
+## `pub(super) fn review_failure(`
 
 Turn a review result into an attempt failure, or `None` if it passed.
 
-## `pub(super) fn review_failure(result: review::ReviewResult) -> Option<AttemptFailure> {` › `review::ReviewResult::Unavailable { status, detail } => {`
+`never_started` is [`crate::review::ReviewOutcome::never_started`]: whether the
+Runner established that no process of the pass was started. It marks the
+unavailable failure and nothing else — a judged verdict is by construction an
+answer from a process that ran — and the schema-4 integration reads it to
+attribute the outage as `invariants[22]` (INV-23) requires. The legacy ladder
+never reads it, so the reviewer-unavailable mapping it sees is unchanged.
+
+## `pub(super) fn review_failure(` › `review::ReviewResult::Unavailable { status, detail } => {`
 
 The judge could not run. That is an environment problem, not a
 rejection of the code: it is attributed to the reviewer so the
 ladder defers instead of blaming the implementer.
 
-## `pub(super) fn review_failure(result: review::ReviewResult) -> Option<AttemptFailure> {` › `if verdict.needs_human {`
+The `FailureKind` is the same whether or not a process started — an
+unavailable review is an unavailable review, and that vocabulary is
+serialized and frozen. What differs is the durable *outage* the schema-4
+integration persists for it, so the fact travels beside the kind rather than
+inside it: see `engine::topology::integrate::infrastructure`.
+
+## `pub(super) fn review_failure(` › `if verdict.needs_human {`
 
 §12: the reviewer declined to judge and asked for a person. That is not
 a rejection of the code, so it must not spend an attempt or escalate —
 it parks the task and asks.
 
-## `pub(super) fn review_failure(result: review::ReviewResult) -> Option<AttemptFailure> {` › `let contradictory = verdict.pass && !verdict.required_changes.is_empty();`
+## `pub(super) fn review_failure(` › `let contradictory = verdict.pass && !verdict.required_changes.is_empty();`
 
 A pass carrying required changes contradicts itself, and the engine is
 about to commit on the strength of it — fail closed and say why rather
 than discard the blockers the reviewer took the trouble to write.
 
-## `pub(super) fn review_failure(result: review::ReviewResult) -> Option<AttemptFailure> {` › `let feedback = if verdict.required_changes.is_empty() {`
+## `pub(super) fn review_failure(` › `let feedback = if verdict.required_changes.is_empty() {`
 
 required_changes is what the retry gets back verbatim (§11.4).
 
-## `pub(super) fn review_failure(result: review::ReviewResult) -> Option<AttemptFailure> {` › `format!("review failed: {}", util::head(&summary, 400)),`
+## `pub(super) fn review_failure(` › `format!("review failed: {}", util::head(&summary, 400)),`
 
 Head, not tail: the reviewer's first reason is its primary
 finding, and that is what has to reach the user.

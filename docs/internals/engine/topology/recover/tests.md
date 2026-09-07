@@ -3318,3 +3318,44 @@ What holds today, pinned here: the authorized publication is retried,
 Git refuses on the lock, the refusal is resumable — the ref unchanged,
 merge_prepared durable, nothing appended — and once an operator removes
 the lock the next resume completes the publication.
+
+## `struct BlockNthSnapshotAdd {`
+
+The obstruction the final cover reviewer's witness used: the second reviewer's
+snapshot slot is occupied by a foreign non-empty directory just before its
+`git worktree add` runs, so that `add` fails with a genuine Git error after the
+first reviewer has already been paid for. `write_file` creates the parents, so
+one write leaves the slot occupied; it goes through the fixture funnel because
+`std::fs::write` and `std::fs::create_dir_all` are denied here (R18/R21).
+
+## `fn a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fails() {`
+
+Two reviewers on the integration judgement. The first returns, costing 2.50
+against a 2.20 run ceiling; creating the second's snapshot then fails with a Git
+error, which `verify` settles as an infrastructure deferral rather than ending
+the command. The completed pass is spent whatever the judgement does next, so
+the loop's next admission — in this same incarnation, with no restart — has to
+be made against a total that holds it. Charging only on a successful judgement
+return discarded the whole vector with `?` and let another sequence in.
+
+Distinct from `PR8-R2-SPEND-REPLAY`, which is a restart losing costs the frozen
+terminal cannot carry: this one involves no restart, and the cost is known and
+in memory when it is thrown away.
+
+## `fn a_reviewer_whose_process_never_started_is_a_runner_spawn_failure() {`
+
+A reviewer whose process never started settles as a `RunnerSpawnFailure`
+(`invariants[22]`, INV-23), and every other unavailable reviewer still settles
+as `ReviewUnavailable`.
+
+INV-23 requires it in those words — a container whose reported image id differs
+from the record "refuses during pre-flight or rebuild and is a
+RunnerSpawnFailure outage settlement mid-run" — and says the rule covers "every
+probe, worker, gate, review, and re-ask process of the run". The container
+runner detects a reviewer's image mismatch before start and answers
+`NeverStarted`; `run_review` contains that so the pass can defer instead of
+ending the command, and the contained result was `Unavailable{AgentError}`,
+which the generic mapping turns into `ReviewUnavailable` — a statement about
+the reviewer where the invariant names one about the runner. Deferral and
+containment were right, and the `Gone` arm is the control that says this repair
+changed only the attribution of the one fate the invariant names.

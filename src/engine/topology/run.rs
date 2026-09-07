@@ -145,12 +145,6 @@ fn implementer_binding(
 
 impl Verification for IntegrationCx<'_, '_> {
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
-        // The reviews are charged as each pass completes, inside `judge`
-        // (`SpendAccount`), and not from the judgement returned here: a
-        // judgement that fails after a paid pass carries no reviews, and the
-        // Git-error arm below settles unavailable rather than ending the
-        // command, so the loop would go on to admit another sequence against a
-        // total that pass is missing from.
         match self.judge_proposal(request) {
             Ok(judgement) => Ok(Verified::Judged(judgement)),
             Err(JudgeError::Runner(error)) => match error.fate {
@@ -328,9 +322,6 @@ impl IntegrationCx<'_, '_> {
     }
 }
 
-/// The run's live account: each completed integration review is charged to the
-/// run's `Spend` as it returns, so the ceiling the next selection is admitted
-/// against has already paid for it.
 struct SpendAccount<'a> {
     spend: &'a mut Spend,
     key: TaskKey,

@@ -703,9 +703,6 @@ impl super::attempt::ReviewPasses for ScaffoldReviews {
             if error.fate.is_unresolved() {
                 return Err(error.into());
             }
-            // As `run_review` does: the double reports what the Runner
-            // established about the process, so it cannot hide the outage
-            // attribution INV-23 names.
             let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);
             return Ok(crate::review::ReviewOutcome {
                 result: crate::review::ReviewResult::Unavailable {

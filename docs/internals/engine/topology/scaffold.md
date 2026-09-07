@@ -742,3 +742,13 @@ What the integration ref names right now.
 
 Replay the durable log twice and check both replays agree with the
 live fold.
+
+## `impl ReviewPasses for ScaffoldReviews {` › `let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);`
+
+As `run_review` does: the double reports what the Runner established about the
+process, so it cannot hide the outage attribution INV-23 names. A double that
+answered `false` here would make
+`recover::tests::a_reviewer_whose_process_never_started_is_a_runner_spawn_failure`
+unwritable and the arm untestable — the same shape as the review doubles that
+ignored the workspace they were handed and hid the isolation defect of the
+round before.

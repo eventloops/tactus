@@ -2228,3 +2228,54 @@ failure. A successful wait proves the direct child was reaped and makes a
 racing kill refusal irrelevant. If wait fails, both kill and wait errors are
 reported. Deferred worker reports append through `WithCleanup`, preserving
 the primary type and avoiding a second agent-error prefix around it.
+
+## `#[cfg(any(target_os = "macos", test))]` › `fn listed_pid_bytes(returned: i32, errno: i32, buffer_bytes: usize) -> Option<usize> {`
+
+How many bytes of pids `proc_listpids` listed, or `None` when its answer is not
+an enumeration at all.
+
+**Apple's wrapper returns zero on failure.** `proc_listpids` calls `__proc_info`
+and reports its `-1` as `0` with `errno` left set, and a type outside the range
+it accepts sets `EINVAL` and returns `0` as well
+(`libsyscall/wrappers/libproc/libproc.c`). So "no process is in that group" and
+"this call could not enumerate the group" are the same return value, and
+`errno` — cleared immediately before the call, so nothing older can be read as
+this call's failure — is the only thing that separates them. A buffer filled to
+its last byte may have been truncated and is not an enumeration either.
+
+The rule is a function rather than three lines inside the scanner because the
+scanner compiles only on macOS. This is compiled and exercised on every
+platform, so the reasoning about Apple's contract is checked on the box the
+reasoning is done on and not only on the one it runs on.
+
+The Linux scanner has no such ambiguity and needs no equivalent: `getdents64`
+answers a failure with a negative value, so its zero — the end of `/proc` — is
+unambiguous. That is why the two platforms' `Some(false)` are not the same
+claim, and why §7.3's row in `pr8-triage.md` now states each separately.
+
+## `#[cfg(target_os = "macos")]` › `fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {`
+
+The macOS half of the scanner `cleanup_reaper_group` loops on and
+`verify_group_scanner` checks at launch. Its answer is evidence about the
+process group, so an enumeration that did not happen has to be `None` and not
+`Some(false)`: the loop treats `None` as "keep killing", exactly as the Linux
+`None` is treated, and the launch check refuses rather than reporting a group
+it could not see. Before this was fixed, a failed enumeration exited the loop at
+once, so the anchor was reaped, `CLEANUP` acknowledged and `Supervisor::finish`
+returned `Ok` beside a same-group descendant that had not terminated — which
+permits termination reporting, snapshot removal and release of the cleanup
+lease (INV-18, INV-15).
+
+## `mod tests {` › `fn a_pid_enumeration_that_failed_is_not_an_empty_process_group() {`
+
+Apple's `proc_listpids` answers 0 for a group with no members and 0 for a call
+that failed, so a scanner that reads 0 as an enumeration acknowledges a cleanup
+it never observed. The rule this asserts is the one the macOS scanner reads;
+the platform this test runs on cannot reach the syscall, which is why the rule
+is a function. The assertions are, in order: Apple's failure answers
+(`__proc_info` reporting `-1` with `errno` set, and the wrapper's own
+out-of-range refusal); a group that really has no members, which answers 0 with
+the `errno` this call left alone and is an enumeration of nothing; an ordinary
+listing, where a stale `errno` cannot make a non-zero return unknown because a
+non-zero return is the syscall's own success; and a buffer filled to its last
+byte or a negative return, neither of which is an enumeration.

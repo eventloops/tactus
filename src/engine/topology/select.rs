@@ -40,13 +40,6 @@ impl Spend {
         }
     }
 
-    /// Charge one review pass, whose reported cost may be unknown.
-    ///
-    /// The live integration account charges here as each pass completes
-    /// (`topology::attempt::ReviewAccount`), and [`Self::record_reviews`]
-    /// charges the same way from the records a durable terminal carries, so a
-    /// replayed total accumulates by the same additions in the same order as
-    /// the total the incarnation that wrote them held.
     pub fn record_review_cost(&mut self, key: TaskKey, cost_usd: Option<f64>) {
         let cost = cost_usd.unwrap_or(0.0);
         self.run += cost;

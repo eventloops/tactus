@@ -34,15 +34,6 @@ pub struct AttemptFailure {
     pub origin: FailureOrigin,
     pub reason: String,
     pub feedback: Option<String>,
-    /// Whether the process this failure reports **never started**.
-    ///
-    /// Not a `FailureKind`: the kinds are a frozen serialized vocabulary and
-    /// this is not a new kind of failure but a fact about the one that
-    /// happened, which the schema-4 integration needs in order to attribute an
-    /// outage the way `invariants[22]` (INV-23) names — a mid-run image
-    /// mismatch is a `RunnerSpawnFailure`, "and includes reviewers and
-    /// re-asks". It is in memory only; nothing serializes it, and the legacy
-    /// ladder does not read it, so the v0.1 path is unchanged by its presence.
     pub never_started: bool,
 }
 
@@ -57,7 +48,6 @@ impl AttemptFailure {
         }
     }
 
-    /// Record that the process this failure reports never started.
     #[must_use]
     pub fn from_a_process_that_never_started(mut self) -> Self {
         self.never_started = true;

@@ -1667,3 +1667,25 @@ Ingest an answer to a verification-park question: append
 candidate re-verifies under a new sequence) or, for a decline, to a
 failed lineage with its queue position consumed and its lease released,
 halting per `decline_halts_run`.
+
+## `impl Verification for IntegrationCx<'_, '_> {` › `match self.judge_proposal(request) {`
+
+The reviews are charged as each pass completes, inside `judge` (`SpendAccount`
+below), and **not** from the judgement returned here: a judgement that fails
+after a paid pass carries no reviews, and the Git-error arm settles the sequence
+*unavailable* rather than ending the command, so the loop would go on to admit
+another sequence in the same incarnation against a total that pass is missing
+from.
+
+## `struct SpendAccount<'a> {`
+
+The run's live account: each completed integration review is charged to the
+run's `Spend` as it returns, so the ceiling the next selection is admitted
+against has already paid for it.
+
+The replay of this path is a separate and deferred matter. A verification that
+reaches `merge_verification_unavailable` carries no review record in the frozen
+terminal, so a restart restores a total without it — `PR8-R2-SPEND-REPLAY`,
+which needs a wire-vocabulary change this slice may not make. That gap is about
+a restart; this account is about one incarnation, and holding the cost inside
+it needs no vocabulary at all.

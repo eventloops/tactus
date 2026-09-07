@@ -788,3 +788,26 @@ wrong is in the grid rather than adjacent to it.
 
 No primary is `None ⟺ review disabled`, and nothing else can
 resurrect a pass — not even a configured second opinion.
+
+## `pub struct ReviewOutcome {` › `pub never_started: bool,`
+
+Whether the pass ended because the Runner established that **no process of it
+was started**.
+
+An unavailable review is unavailable for many reasons, and the durable
+attribution differs: `invariants[22]` (INV-23) requires a container whose
+reported image id differs from the record to refuse before it starts and
+settles that as a `RunnerSpawnFailure` outage mid-run, "and includes reviewers
+and re-asks". That is a statement about the runner, not about the reviewer, and
+the reviewer's answer — `AgentError` on an unavailable result — cannot carry
+it.
+
+## `let output = match runner.run(&request) {` › `Err(error) => {`
+
+What the Runner established about the process is carried out of here, because
+the durable outage attribution differs by it: a reviewer's container refused
+before `docker start` over an image id that is not the recorded one is a
+`RunnerSpawnFailure` (INV-23), not a reviewer that answered badly. The pass
+still ends unavailable and still defers — only what the terminal says happened
+changes. The re-ask runs through this same arm, which is why the invariant's
+"and re-asks" needs nothing further.

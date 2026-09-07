@@ -263,15 +263,6 @@ impl super::topology::attempt::ReviewPasses for LegacyReviewPasses {
     }
 }
 
-/// What an integration or attempt should do about a review pass's result.
-///
-/// `never_started` is [`review::ReviewOutcome::never_started`]: whether the
-/// Runner established that no process of the pass was started. It marks the
-/// unavailable failure and nothing else — a judged verdict is by construction
-/// an answer from a process that ran — and the schema-4 integration reads it to
-/// attribute the outage as `invariants[22]` (INV-23) requires. The legacy
-/// ladder never reads it, so the reviewer-unavailable mapping it sees is
-/// unchanged.
 pub(super) fn review_failure(
     result: review::ReviewResult,
     never_started: bool,

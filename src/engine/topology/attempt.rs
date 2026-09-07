@@ -108,30 +108,10 @@ pub trait ReviewPasses {
     ) -> Result<review::ReviewOutcome, UpstrokeError>;
 }
 
-/// Where a completed review pass's cost is charged.
-///
-/// A review that returned has been paid for, whatever becomes of the judgement
-/// it belongs to. [`Judge::judge`] can still fail after one — the next
-/// reviewer's snapshot, the invocation ledger, an absent adapter — and those
-/// exits carry no [`Judgement`] and so no reviews, while an integration that
-/// settles on a Git error settles *unavailable* rather than ending the
-/// command, and the loop then admits another sequence in the same incarnation
-/// against a run total the reviews are missing from. So the charge is reported
-/// here as each pass completes rather than read off the judgement that
-/// returns, and every exit from `judge` leaves the account holding what was
-/// spent.
-///
-/// A pass whose `run` returns an error is not charged: no outcome means no cost
-/// was reported, and unknown spend is reported as unknown (INV-14).
 pub trait ReviewAccount {
-    /// Charge one completed review pass, whose reported cost may be unknown.
     fn charge(&mut self, cost_usd: Option<f64>);
 }
 
-/// The account of a caller that keeps none.
-///
-/// The legacy attempt path charges from the durable `AttemptRecord` its
-/// settlement writes, and the test scaffold judges nothing it pays for.
 pub struct NoReviewAccount;
 
 impl ReviewAccount for NoReviewAccount {
@@ -692,8 +672,6 @@ impl Judge<'_> {
                     &(subject.invocations)(pass),
                 )
                 .map_err(JudgeError::Other)?;
-            // The pass has returned, so its cost is spent. Charge it before
-            // anything below can fail and discard the judgement.
             account.charge(outcome.cost_usd);
 
             let ids = (subject.invocations)(pass);

@@ -413,16 +413,6 @@ pub struct ReviewOutcome {
     pub cost_usd: Option<f64>,
     pub invocations: u32,
     pub transcript: PathBuf,
-    /// Whether the pass ended because the Runner established that **no process
-    /// of it was started**.
-    ///
-    /// An unavailable review is unavailable for many reasons, and the durable
-    /// attribution differs: `invariants[22]` (INV-23) requires a container
-    /// whose reported image id differs from the record to refuse before it
-    /// starts and settles that as a `RunnerSpawnFailure` outage mid-run, "and
-    /// includes reviewers and re-asks". That is a statement about the runner,
-    /// not about the reviewer, and the reviewer's answer — `AgentError` on an
-    /// unavailable result — cannot carry it.
     pub never_started: bool,
 }
 
@@ -558,13 +548,6 @@ pub fn run_review(
             Ok(output) => output,
             Err(error) if error.fate.is_unresolved() => return Err(error.into()),
             Err(error) => {
-                // What the Runner established about the process is carried out
-                // of here, because the durable outage attribution differs by
-                // it: a reviewer's container refused before `docker start`
-                // over an image id that is not the recorded one is a
-                // `RunnerSpawnFailure` (INV-23), not a reviewer that answered
-                // badly. The pass still ends unavailable and still defers —
-                // only what the terminal says happened changes.
                 let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);
                 let mut outcome = unavailable_after_error(
                     "review process failed",

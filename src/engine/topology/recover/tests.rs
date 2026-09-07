@@ -7362,9 +7362,6 @@ impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews {
             if error.fate.is_unresolved() {
                 return Err(error.into());
             }
-            // As `run_review` does: the double reports what the Runner
-            // established about the process, so it cannot hide the outage
-            // attribution INV-23 names.
             let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);
             return Ok(crate::review::ReviewOutcome {
                 result: crate::review::ReviewResult::Unavailable {
@@ -9714,10 +9711,6 @@ fn every_packet_named_recovery_action_has_a_production_caller() {
     );
 }
 
-/// The obstruction the reviewer's witness used: the second reviewer's snapshot
-/// slot is occupied by a foreign non-empty directory just before its
-/// `git worktree add` runs, so that `add` fails with a genuine Git error after
-/// the first reviewer has already been paid for.
 struct BlockNthSnapshotAdd {
     rest: HarnessTopologyHooks,
     blocked: PathBuf,
@@ -9732,9 +9725,6 @@ impl crate::workspace_manager::EffectHooks for BlockNthSnapshotAdd {
         {
             self.adds += 1;
             if self.adds == self.at {
-                // `write_file` creates the parents, so this leaves the
-                // reviewer's slot occupied by a foreign non-empty directory
-                // and `git worktree add` fails on it.
                 crate::workspace_manager::fixture::write_file(
                     &self.blocked.join("occupied"),
                     b"a foreign non-empty directory",
@@ -9773,18 +9763,6 @@ impl TopologyHooks for BlockNthSnapshotAdd {
 
 #[test]
 fn a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fails() {
-    // Two reviewers on the integration judgement. The first returns, costing
-    // 2.50 against a 2.20 run ceiling; creating the second's snapshot then
-    // fails with a Git error, which `verify` settles as an infrastructure
-    // deferral rather than ending the command. The completed pass is spent
-    // whatever the judgement does next, so the loop's next admission — in this
-    // same incarnation, with no restart — has to be made against a total that
-    // holds it. Charging only on a successful judgement return discarded the
-    // whole vector with `?` and let another sequence in.
-    //
-    // Distinct from `PR8-R2-SPEND-REPLAY`, which is a restart losing costs the
-    // frozen terminal cannot carry: this one involves no restart, and the cost
-    // is known and in memory when it is thrown away.
     let fixture = Fixture::build(
         "paid-review-then-failed-snapshot",
         Damage {
@@ -9855,22 +9833,6 @@ fn a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fa
     );
 }
 
-/// A reviewer whose process never started settles as a `RunnerSpawnFailure`
-/// (`invariants[22]`, INV-23), and every other unavailable reviewer still
-/// settles as `ReviewUnavailable`.
-///
-/// INV-23 requires it in those words — a container whose reported image id
-/// differs from the record "refuses during pre-flight or rebuild and is a
-/// RunnerSpawnFailure outage settlement mid-run" — and says the rule covers
-/// "every probe, worker, gate, review, and re-ask process of the run". The
-/// container runner detects a reviewer's image mismatch before start and
-/// answers `NeverStarted`; `run_review` contains that so the pass can defer
-/// instead of ending the command, and the contained result was
-/// `Unavailable{AgentError}`, which the generic mapping turns into
-/// `ReviewUnavailable` — a statement about the reviewer where the invariant
-/// names one about the runner. Deferral and containment were right, and the
-/// `Gone` arm below is the control that says this repair changed only the
-/// attribution of the one fate the invariant names.
 #[test]
 fn a_reviewer_whose_process_never_started_is_a_runner_spawn_failure() {
     use crate::error::ProcessFate;
