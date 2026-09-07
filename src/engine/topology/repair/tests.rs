@@ -1,11 +1,12 @@
 //! Tests for the repair-spawn builder.
 
 use crate::engine::topology::scaffold::{ALPHA, Run};
+use crate::ir::Tier;
 use crate::topology::events::{RejectionLeaseEffect, SequenceId, SpawnAdmission};
 use crate::topology::paths::PathSet;
-use crate::topology::registry::Origin;
+use crate::topology::registry::{Admission, FrozenLadder, FrozenRung, Origin};
 
-use super::merge_rejected;
+use super::{admission_for, merge_rejected, repair_ladder};
 
 #[test]
 fn a_conflict_rejection_registers_a_runnable_repair_that_descends_from_the_candidate() {
@@ -58,6 +59,148 @@ fn a_conflict_rejection_registers_a_runnable_repair_that_descends_from_the_candi
             .any(|line| line.contains("preserve the behaviour already merged")),
         "the repair carries the preserve-merged-behaviour requirement"
     );
+}
+
+fn rung(tier: Tier) -> FrozenRung {
+    FrozenRung {
+        tier,
+        agent: format!("root-{tier}-agent"),
+        model: format!("root-{tier}-model"),
+        pinned: false,
+    }
+}
+
+fn root_ladder(tiers: &[Tier], floor: Option<Tier>) -> FrozenLadder {
+    FrozenLadder {
+        tiers: tiers.to_vec(),
+        attempts_per: 2,
+        rungs: tiers.iter().copied().map(rung).collect(),
+        floor,
+        ceiling: tiers.iter().copied().max(),
+        effort: crate::ir::ResolvedEffortPolicy {
+            small: crate::ir::Effort::Low,
+            mid: crate::ir::Effort::High,
+            frontier: crate::ir::Effort::Max,
+            review: crate::ir::Effort::Medium,
+        },
+        admission: Admission::Runnable,
+    }
+}
+
+#[test]
+fn the_repair_ladder_is_the_roots_rungs_at_or_above_the_raised_floor() {
+    // `decisions.repairs.routing`: minimum tier mid intersected with the
+    // root's frozen pin and ceiling. A root that starts at small loses that
+    // rung; its floor becomes mid and its ceiling the highest survivor.
+    let ladder = repair_ladder(
+        &root_ladder(&[Tier::Small, Tier::Mid, Tier::Frontier], Some(Tier::Small)),
+        &["claude-code".to_owned()],
+    );
+    assert_eq!(ladder.tiers, vec![Tier::Mid, Tier::Frontier]);
+    assert_eq!(
+        ladder.rungs,
+        vec![rung(Tier::Mid), rung(Tier::Frontier)],
+        "the root's own rungs at the surviving tiers, in the root's order"
+    );
+    assert_eq!(ladder.floor, Some(Tier::Mid));
+    assert_eq!(ladder.ceiling, Some(Tier::Frontier));
+    assert_eq!(ladder.attempts_per, 2);
+    assert!(matches!(ladder.admission, Admission::Runnable));
+
+    // A root floored above mid keeps its own floor.
+    let frontier_only = repair_ladder(
+        &root_ladder(&[Tier::Mid, Tier::Frontier], Some(Tier::Frontier)),
+        &["claude-code".to_owned()],
+    );
+    assert_eq!(frontier_only.floor, Some(Tier::Frontier));
+    assert_eq!(frontier_only.tiers, vec![Tier::Frontier]);
+}
+
+#[test]
+fn an_empty_tier_intersection_registers_a_human_binding_ladder_with_the_allowed_agents() {
+    // R10: a root whose every rung is below mid has no tier the repair may
+    // run at. The frozen payload records exactly that — no tier, no rung, no
+    // ceiling, the raised floor — and offers the run's allowed agents to the
+    // person who must name a binding, never the sub-floor rungs it excluded.
+    let allowed = vec!["claude-code".to_owned(), "copilot".to_owned()];
+    let ladder = repair_ladder(&root_ladder(&[Tier::Small], Some(Tier::Small)), &allowed);
+    assert!(
+        ladder.tiers.is_empty(),
+        "no tier survived: {:?}",
+        ladder.tiers
+    );
+    assert!(ladder.rungs.is_empty());
+    assert_eq!(
+        ladder.floor,
+        Some(Tier::Mid),
+        "the floor the repair still has to meet"
+    );
+    assert_eq!(ladder.ceiling, None, "no ceiling: the maximum of no tier");
+    assert_eq!(ladder.attempts_per, 2);
+    assert_eq!(
+        ladder.admission,
+        Admission::HumanBinding {
+            options: allowed.clone()
+        },
+        "the options are the entry's allowed agents"
+    );
+    assert!(
+        !allowed.contains(&"root-small-agent".to_owned()),
+        "the excluded rung's agent is not among what is offered"
+    );
+}
+
+#[test]
+fn the_admission_follows_the_ladder_first_and_the_consumed_allowance_second() {
+    let mut run = Run::started("repair-admission");
+    let candidate = run.queue_candidate(ALPHA);
+    let ids = crate::engine::topology::seams::RealIds;
+    let rejected = merge_rejected(
+        run.emitter.fold(),
+        &ids,
+        &candidate,
+        crate::topology::events::CommitSha("f".repeat(40)),
+        SequenceId(0),
+        crate::topology::events::RejectionDisposition::Conflict {
+            paths: region(&["shared.txt"]),
+        },
+        region(&["shared.txt"]),
+    )
+    .expect("the rejection builds");
+    let entry = rejected.repair.entry;
+    let key = entry.key;
+
+    // Below the limit: runnable. At it: a person approves another attempt.
+    assert!(matches!(
+        admission_for(&entry, 2, 3, &ids, key),
+        SpawnAdmission::Runnable
+    ));
+    let SpawnAdmission::HumanRequired { limit, question } = admission_for(&entry, 3, 3, &ids, key)
+    else {
+        panic!("a lineage at its limit registers with human admission");
+    };
+    assert_eq!(limit, 3);
+    assert_eq!(question.key, key);
+    assert!(question.is_complete());
+
+    // The empty intersection wins over the limit on either side of it: the
+    // fold refuses HumanRequired on a HumanBinding ladder, so this is the one
+    // admissible shape for an over-limit rejection with no tier left.
+    let mut waiting = entry;
+    waiting.ladder = repair_ladder(
+        &root_ladder(&[Tier::Small], Some(Tier::Small)),
+        &["claude-code".to_owned()],
+    );
+    for members in [0, 3] {
+        let SpawnAdmission::HumanBinding { options, question } =
+            admission_for(&waiting, members, 3, &ids, key)
+        else {
+            panic!("an empty intersection asks for a binding with {members} member(s)");
+        };
+        assert_eq!(options, vec!["claude-code".to_owned()]);
+        assert_eq!(question.options, options);
+        assert_eq!(question.kind, crate::ir::QuestionKind::Unblock);
+    }
 }
 
 fn region(paths: &[&str]) -> PathSet {

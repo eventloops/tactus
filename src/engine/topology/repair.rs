@@ -71,17 +71,15 @@ pub fn merge_rejected(
     let registry = fold
         .registry()
         .ok_or_else(|| refused("the run has not started"))?;
-    let root_entry = {
-        let entry = registry
-            .get(candidate.key)
-            .ok_or_else(|| refused(&format!("task {} is not registered", candidate.key)))?;
-        let root_key = entry.lineage.map_or(candidate.key, |lineage| lineage.root);
-        registry
-            .get(root_key)
-            .ok_or_else(|| refused(&format!("lineage root {root_key} is not registered")))?
-            .clone()
-    };
-    let root = root_entry.key;
+    let rejected_entry = registry
+        .get(candidate.key)
+        .ok_or_else(|| refused(&format!("task {} is not registered", candidate.key)))?;
+    let root = rejected_entry
+        .lineage
+        .map_or(candidate.key, |lineage| lineage.root);
+    let root_entry = registry
+        .get(root)
+        .ok_or_else(|| refused(&format!("lineage root {root} is not registered")))?;
     let members = fold
         .lineage_members(root)
         .ok_or_else(|| refused("the run has not started"))?;
@@ -92,21 +90,23 @@ pub fn merge_rejected(
         .max_merge_repairs;
 
     let key = TaskKey(u32::try_from(registry.len()).map_err(|_| refused("the registry is full"))?);
-    let (ladder, empty_intersection) = repair_ladder(&root_entry.ladder);
+    let ladder = repair_ladder(&root_entry.ladder, &root_entry.allowed_agents);
     let hints = expand_hints(
         &root_entry.spec.path_hints,
         &candidate_paths(fold, candidate),
         &contended,
     );
 
+    // The specification is the one part of the root the repair rewrites —
+    // its kind, its hints and its acceptance — so it is cloned once and
+    // edited in place (§6); the rest of the entry copies the root's fields
+    // because the contract fixes them as the root's (`decisions.repairs`:
+    // the root's authoritative deps, and the inherited review and agent
+    // policy), and a registry row owns what it records.
     let mut spec = root_entry.spec.clone();
     spec.kind = crate::ir::TaskKind::Fix;
     spec.path_hints = hints;
-    spec.acceptance = {
-        let mut acceptance = root_entry.spec.acceptance.clone();
-        acceptance.push(PRESERVE_MERGED.to_owned());
-        acceptance
-    };
+    spec.acceptance.push(PRESERVE_MERGED.to_owned());
 
     let entry = TaskEntry {
         key,
@@ -127,12 +127,8 @@ pub fn merge_rejected(
         }),
     };
 
-    let admission = admission_for(&entry, empty_intersection, members, limit, ids, key);
-    let lease_effect = if registry
-        .get(candidate.key)
-        .and_then(|entry| entry.lineage)
-        .is_some()
-    {
+    let admission = admission_for(&entry, members, limit, ids, key);
+    let lease_effect = if rejected_entry.lineage.is_some() {
         RejectionLeaseEffect::WidensLineage {
             root,
             paths: contended,
@@ -170,14 +166,20 @@ fn candidate_paths(fold: &TopologyFold, candidate: &CandidateRef) -> PathSet {
         .map_or(PathSet::RepoWide, |prepared| prepared.paths.clone())
 }
 
-/// The repair's ladder, and whether the tier intersection was empty.
+/// The repair's ladder: `min_tier = mid` intersected with the root's frozen
+/// floor and ceiling (`decisions.repairs.routing`).
 ///
-/// The floor is `max(Mid, root floor)`; the tiers at or above it survive with
-/// the root's rungs. An empty survivor set is a `HumanBinding` ladder — the
-/// root's tiers with the rungs cleared, exactly as the fold's own fixtures
-/// clip one — because no automatic rung can run and a person must name what
-/// does.
-fn repair_ladder(root: &FrozenLadder) -> (FrozenLadder, bool) {
+/// The floor is `max(mid, root floor)`; the root's rungs at or above it
+/// survive, in the root's order, and the ceiling is the highest of them.
+/// When none survives the record says so: no tier, no rung, no ceiling, the
+/// raised floor the repair still has to meet, and the ladder admitted
+/// `HumanBinding` over the entry's allowed agents — every agent the run
+/// probed, which is what `check_spawn` binds `allowed_agents` to — so a
+/// person names what runs (E2: the answer's override is validated against
+/// these options). The rungs the intersection excluded are not offered back:
+/// each of them is below the floor by construction. `check_ladder` accepts
+/// the shape — an absent ceiling is the maximum of an empty tier list.
+fn repair_ladder(root: &FrozenLadder, allowed_agents: &[String]) -> FrozenLadder {
     let floor = root
         .floor
         .map_or(REPAIR_FLOOR, |floor| floor.max(REPAIR_FLOOR));
@@ -188,47 +190,45 @@ fn repair_ladder(root: &FrozenLadder) -> (FrozenLadder, bool) {
         .cloned()
         .collect();
     if rungs.is_empty() {
-        return (
-            FrozenLadder {
-                admission: Admission::HumanBinding {
-                    options: root.rungs.iter().map(|rung| rung.agent.clone()).collect(),
-                },
-                rungs: Vec::new(),
-                ..root.clone()
+        return FrozenLadder {
+            tiers: Vec::new(),
+            attempts_per: root.attempts_per,
+            rungs: Vec::new(),
+            floor: Some(floor),
+            ceiling: None,
+            effort: root.effort,
+            admission: Admission::HumanBinding {
+                options: allowed_agents.to_vec(),
             },
-            true,
-        );
+        };
     }
     let tiers: Vec<Tier> = rungs.iter().map(|rung| rung.tier).collect();
     let ceiling = tiers.iter().copied().max();
-    (
-        FrozenLadder {
-            tiers,
-            attempts_per: root.attempts_per,
-            rungs,
-            floor: Some(floor),
-            ceiling,
-            effort: root.effort,
-            admission: Admission::Runnable,
-        },
-        false,
-    )
+    FrozenLadder {
+        tiers,
+        attempts_per: root.attempts_per,
+        rungs,
+        floor: Some(floor),
+        ceiling,
+        effort: root.effort,
+        admission: Admission::Runnable,
+    }
 }
 
-/// The repair's admission: `HumanBinding` for an empty intersection,
-/// `HumanRequired` once the lineage is at its automatic-repair limit, else
-/// `Runnable`. The empty intersection wins, because without a binding nothing
-/// runs whatever the limit says.
+/// The repair's admission: `HumanBinding` when the ladder is (the empty
+/// intersection), `HumanRequired` once the lineage is at its automatic-repair
+/// limit, else `Runnable`. The empty intersection wins, because without a
+/// binding nothing runs whatever the limit says — and the fold refuses
+/// `HumanRequired` on a `HumanBinding` ladder, so it is the only admissible
+/// shape for an over-limit rejection with no tier left.
 fn admission_for(
     entry: &TaskEntry,
-    empty_intersection: bool,
     members: u32,
     limit: u32,
     ids: &dyn IdSource,
     key: TaskKey,
 ) -> SpawnAdmission {
     if let Admission::HumanBinding { options } = &entry.ladder.admission {
-        debug_assert!(empty_intersection);
         return SpawnAdmission::HumanBinding {
             options: options.clone(),
             question: question(
@@ -241,7 +241,6 @@ fn admission_for(
             ),
         };
     }
-    let _ = empty_intersection;
     if members >= limit {
         return SpawnAdmission::HumanRequired {
             limit,
