@@ -880,13 +880,13 @@ way to know the directory exists.
 The phrase [`super::cancel_created`] uses for each step, so the assertion
 above reads the message rather than the enum that wrote it.
 
-## `const DAEMON_ALREADY_STOPPED: &str = "Error response from daemon: cannot kill container: \`
+## `fn daemon_already_stopped(name: &str) -> String {`
 
 ---------------------------------------------------------------------------
 5b. Two reclaimers that actually race
 ---------------------------------------------------------------------------
 
-## `const DAEMON_ALREADY_STOPPED: &str = "Error response from daemon: cannot kill container: \`
+## `fn daemon_already_stopped(name: &str) -> String {`
 
 What `docker` 29.7.2 writes to stderr, measured on the build box.
 
@@ -930,14 +930,14 @@ the container.
 Real failures stay failures. `--force` removal and a kill the daemon could
 not deliver are things a reclaimer must NOT report as convergence.
 
-## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `let unreachable = super::settle_stop(Err(RuntimeError::Unreachable {`
+## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `let unreachable = super::settle_stop(`
 
 And unreachable is a different answer even when its text would be
 tolerable: `crash_reconstruction` refuses a write command when the runtime
 "cannot be reached", and swallowing that here would turn a refusal into a
 convergence.
 
-## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `super::settle_stop(Ok("upstroke-c\n".to_owned())),`
+## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `Ok("upstroke-c\n".to_owned()),`
 
 The control: a stop that simply worked, and worked means the process is
 gone.
@@ -2335,7 +2335,7 @@ container.
 The clause is its own predicate, and it is not covered by absence: the
 in-progress answer contains none of the "no such …" shapes.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::removal_answer(DAEMON_REMOVAL_IN_PROGRESS),`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::removal_answer(SETTLED_TARGET, DAEMON_REMOVAL_IN_PROGRESS),`
 
 Case-insensitively, because a vendor that recapitalises its prose must
 not turn a convergence into a refusal — and typed, because the cover
@@ -2343,12 +2343,12 @@ review of `8a5f59e8` found this answer read as a completed removal
 (`PR8-R4-REMOVAL-IN-PROGRESS`): it is `RemovalInProgress`, never
 `ProcessGone`.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::stop_answer(DAEMON_REMOVAL_IN_PROGRESS),`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::stop_answer(SETTLED_TARGET, DAEMON_REMOVAL_IN_PROGRESS),`
 
 A `docker kill` racing a removal gets the same answer; the reclaimer
 continues, and learns nothing about the process from it.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::settle_remove(Ok("upstroke-c\n".to_owned())),`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::settle_remove(`
 
 The control: a removal that simply worked, and worked means the process is
 gone.

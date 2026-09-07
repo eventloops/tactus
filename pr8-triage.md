@@ -618,6 +618,16 @@ private functions around them; the `ContainerRuntime` trait's signatures, the fr
 frozen event vocabulary, the effect-site inventory and `src/topology/**` are untouched. Finding 2
 writes a longer string into a field that already exists.
 
+**One thing this round observed and did not fix.** `docs/internals/` headings are grep strings —
+the notes file's own preamble says each heading is "the line of code the comment sat above, spelled
+as it is in the source" — and every heading this round's signature changes made stale was
+repointed, checked by resolving all of them against their modules. That check also found one
+heading that was already stale at the reviewed head and is unrelated to this round:
+`docs/internals/engine/topology/integrate.md`'s `Rejected { sequence: SequenceId, key: TaskKey },`,
+which the source spells across three lines. It is left alone — a round of four findings does not
+edit a notes section it has no other business in — and recorded here so it is not rediscovered as
+new.
+
 ### 9.3 The mutations replayed this round
 
 Each applied by an asserted replacement against the repaired tree, the named tests run, and the file
