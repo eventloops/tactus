@@ -1196,6 +1196,15 @@ const UNREACHABLE_DIAGNOSTICS: &[&str] = &[
 
 #[must_use]
 pub fn is_unreachable_diagnostic(detail: &str) -> bool {
+    // A message the daemon spoke is proof the daemon was reached, whatever the
+    // rest of it quotes. Without this the table below is a phrase search over
+    // text the environment shapes, in the direction that matters: an answered
+    // failure read as unreachable lets `census::proceeds_without` admit a write
+    // command that could not list the containers of a dead owner. Sweeping
+    // finding 1's class, round six.
+    if speaks_for_the_daemon(detail) {
+        return false;
+    }
     let lower = detail.to_ascii_lowercase();
     UNREACHABLE_DIAGNOSTICS
         .iter()
@@ -1239,10 +1248,19 @@ fn daemon_answer_about(target: &str, detail: &str) -> Option<String> {
     if target.is_empty() {
         return None;
     }
+    daemon_lines(detail).find(|line| line.contains(&target))
+}
+
+/// Whether the CLI relayed anything the daemon said, whoever it was about.
+fn speaks_for_the_daemon(detail: &str) -> bool {
+    daemon_lines(detail).next().is_some()
+}
+
+fn daemon_lines(detail: &str) -> impl Iterator<Item = String> + '_ {
     detail
         .lines()
         .map(|line| line.trim().to_ascii_lowercase())
-        .find(|line| line.starts_with(DAEMON_ANSWER) && line.contains(&target))
+        .filter(|line| line.starts_with(DAEMON_ANSWER))
 }
 
 fn is_absent(target: &str, detail: &str) -> bool {

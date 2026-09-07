@@ -3744,6 +3744,41 @@ fn the_two_docker_diagnostic_tables_never_claim_one_message() {
         "Error response from daemon: cannot kill container: c: container 9f is not running";
     assert_eq!(super::stop_answer("c", racing), Some(Settled::ProcessGone));
     assert!(!is_unreachable_diagnostic(racing));
+
+    // The direction that matters: an answered failure read as unreachable lets
+    // `proceeds_without` admit a write command that could not list a dead
+    // owner's containers. The daemon's phrases are its own, but the paths and
+    // label values it quotes back are the environment's.
+    for (what, detail) in [
+        (
+            "a daemon quoting a label value that spells an unreachable diagnostic",
+            "Error response from daemon: invalid filter \
+             'label=upstroke.private_root=/srv/cannot connect to the docker daemon'",
+        ),
+        (
+            "a daemon quoting a mount path that spells one",
+            "Error response from daemon: invalid mount config: bind source path does not exist: \
+             /srv/is the docker daemon running/view",
+        ),
+    ] {
+        assert!(
+            is_unreachable_diagnostic(
+                &format!("{detail} (no daemon line)").replace("Error response from daemon: ", "")
+            ),
+            "{what}: the phrase table itself still matches the quoted text, which is what makes \
+             the daemon line load-bearing"
+        );
+        assert!(
+            !is_unreachable_diagnostic(detail),
+            "{what}: the daemon answered, so it was reached, whatever its message quotes: {detail}"
+        );
+        let error = classify_docker_failure(RuntimeOp::ListByLabel, (*detail).to_owned());
+        assert!(!error.is_unreachable(), "{what}");
+        assert!(
+            !super::census::proceeds_without(&error),
+            "{what}: a census proceeded with no container evidence over a runtime that answered"
+        );
+    }
 }
 
 #[test]
