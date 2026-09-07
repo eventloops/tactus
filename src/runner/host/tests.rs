@@ -5895,14 +5895,23 @@ fn the_lock_protocol_sits_beside_the_type_and_states_both_intervals() {
 
 #[test]
 fn the_notes_do_not_claim_the_hooks_guard_spans_the_whole_run() {
+    // A checkout under `core.autocrlf=true` reads the same as this one.
+    let notes = HOST_NOTES.replace('\r', "");
     assert!(
-        !HOST_NOTES.contains("Held for the whole of one `run`"),
+        !notes.contains("Held for the whole of one `run`"),
         "the notes still claim `hooks` covers the whole of one `run`; \
          `run` composes and resolves with that lock free"
     );
+    // The corrected interval has to be in the section a reader of that claim
+    // lands in, not merely somewhere in the file.
+    let (_, below) = notes
+        .split_once("\n## `HostRunner::hooks`\n")
+        .expect("the notes' `HostRunner::hooks` section");
+    let section = below.split("\n## ").next().unwrap_or(below);
     assert!(
-        HOST_NOTES.contains("from after the program is resolved through subprocess supervision"),
-        "the notes do not state the interval `hooks` is actually held for"
+        section.contains("from after the program is resolved through subprocess supervision"),
+        "the notes' `HostRunner::hooks` section does not state the interval the lock is \
+         actually held for: {section}"
     );
 }
 
