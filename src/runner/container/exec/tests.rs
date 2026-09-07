@@ -14,7 +14,7 @@ use crate::rundir::RunPaths;
 use crate::runner::container::intent::LABEL_PRIVATE_ROOT;
 use crate::runner::container::runtime::{
     ContainerExecution, ContainerTrace, CreatedContainer, DiscoveredContainer, ImageInspection,
-    Liveness, RuntimeOp, StopMode,
+    Liveness, RuntimeOp, Settled, StopMode,
 };
 use crate::runner::container::view::fixtures as repo;
 use crate::runner::container::{
@@ -82,6 +82,8 @@ const VOLUMES: &[(&str, &str)] = &[
     ("codex", "upstroke-creds-codex"),
 ];
 const EVENT_LOG_MARKER: &str = "COORDINATOR-EVENT-LOG-a5f2";
+const REMOVAL_IN_PROGRESS_DIAGNOSTIC: &str =
+    "Error response from daemon: removal of container upstroke-c is already in progress";
 
 const IMAGE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -203,10 +205,10 @@ impl ContainerRuntime for Runtime {
         }
         Ok(())
     }
-    fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {
+    fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         self.0.fake.stop(name, mode)
     }
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         self.0.fake.remove(name)
     }
 }
@@ -323,6 +325,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
         case: &'static str,
         unreachable: &'static [RuntimeOp],
         failing: &'static [RuntimeOp],
+        removal_in_progress: bool,
         hook: Option<(ContainerSite, HookPhase)>,
         mismatch: bool,
         exit_on_start: bool,
@@ -339,6 +342,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the runtime is down before create",
             unreachable: &[RuntimeOp::Create, RuntimeOp::Stop, RuntimeOp::Remove],
             failing: &[],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -352,6 +356,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the runtime refuses to create",
             unreachable: &[],
             failing: &[RuntimeOp::Create],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -365,6 +370,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the created container reports another image",
             unreachable: &[],
             failing: &[],
+            removal_in_progress: false,
             hook: None,
             mismatch: true,
             exit_on_start: false,
@@ -378,6 +384,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the runtime refuses to start and the cancel completes",
             unreachable: &[],
             failing: &[RuntimeOp::Start],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -391,6 +398,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the start is committed and the launch fails after it",
             unreachable: &[],
             failing: &[],
+            removal_in_progress: false,
             hook: Some((ContainerSite::Start, HookPhase::After)),
             mismatch: false,
             exit_on_start: false,
@@ -404,6 +412,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the runtime is lost at start and the cancel establishes nothing",
             unreachable: &[RuntimeOp::Start, RuntimeOp::Stop, RuntimeOp::Remove],
             failing: &[],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -417,6 +426,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the observation is lost and the release completes",
             unreachable: &[RuntimeOp::Observe],
             failing: &[],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -430,6 +440,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the observation and the stop are lost and the forced removal completes",
             unreachable: &[RuntimeOp::Observe, RuntimeOp::Stop],
             failing: &[],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -443,6 +454,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the observation, the stop and the removal are all lost",
             unreachable: &[RuntimeOp::Observe, RuntimeOp::Stop, RuntimeOp::Remove],
             failing: &[],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -456,6 +468,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the exit is observed and then the collection, the stop and the removal are lost",
             unreachable: &[RuntimeOp::Collect, RuntimeOp::Stop, RuntimeOp::Remove],
             failing: &[],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: true,
@@ -469,6 +482,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the gate times out and only the view discard fails",
             unreachable: &[],
             failing: &[],
+            removal_in_progress: false,
             hook: Some((ContainerSite::UnmountGitView, HookPhase::Before)),
             mismatch: false,
             exit_on_start: false,
@@ -482,6 +496,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the gate times out, the stop fails and the forced removal completes",
             unreachable: &[],
             failing: &[RuntimeOp::Stop],
+            removal_in_progress: false,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -495,6 +510,37 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
             case: "the gate times out and neither the stop nor the removal completes",
             unreachable: &[RuntimeOp::Stop, RuntimeOp::Remove],
             failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: Duration::ZERO,
+            expected: ProcessFate::Unresolved,
+            start_attempted: true,
+            survivor: Some(Liveness::Running),
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the observation and the stop are lost and another reclaimer's removal is in \
+                   progress",
+            unreachable: &[RuntimeOp::Observe, RuntimeOp::Stop],
+            failing: &[],
+            removal_in_progress: true,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::Unresolved,
+            start_attempted: true,
+            survivor: Some(Liveness::Running),
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the gate times out, the stop is lost and another reclaimer's removal is in \
+                   progress",
+            unreachable: &[RuntimeOp::Stop],
+            failing: &[],
+            removal_in_progress: true,
             hook: None,
             mismatch: false,
             exit_on_start: false,
@@ -515,6 +561,12 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
         }
         for op in cell.failing {
             fixture.runtime.fake().set_failing(*op);
+        }
+        if cell.removal_in_progress {
+            fixture
+                .runtime
+                .fake()
+                .set_docker_stderr(RuntimeOp::Remove, REMOVAL_IN_PROGRESS_DIAGNOSTIC);
         }
         let request = gate_request(
             ShellKind::Sh.spec(if cell.timeout.is_zero() {
@@ -579,7 +631,7 @@ fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
         }
         seen += 1;
     }
-    assert_eq!(seen, 13, "every cell of the container fate matrix ran");
+    assert_eq!(seen, 15, "every cell of the container fate matrix ran");
 }
 
 #[test]

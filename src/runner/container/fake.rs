@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use super::runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
     DiscoveredContainer, ImageInspection, Liveness, OwnerLiveness, RuntimeError, RuntimeOp,
-    StopMode,
+    Settled, StopMode,
 };
 use super::{ContainerHooks, DockerCli};
 use crate::topology::effects::{EffectSiteId, HookPhase, Injection};
@@ -339,18 +339,28 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
-    fn stop(&self, name: &str, _mode: StopMode) -> Result<(), RuntimeError> {
-        self.enter(RuntimeOp::Stop, name)?;
-        if let Some(container) = self.state().containers.get_mut(name) {
-            container.state = Liveness::Exited;
+    fn stop(&self, name: &str, _mode: StopMode) -> Result<Settled, RuntimeError> {
+        let settled = super::settle_stop(
+            self.enter(RuntimeOp::Stop, name)
+                .map(|()| format!("{name}\n")),
+        )?;
+        if settled.process_gone() {
+            if let Some(container) = self.state().containers.get_mut(name) {
+                container.state = Liveness::Exited;
+            }
         }
-        Ok(())
+        Ok(settled)
     }
 
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
-        self.enter(RuntimeOp::Remove, name)?;
-        self.state().containers.remove(name);
-        Ok(())
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
+        let settled = super::settle_remove(
+            self.enter(RuntimeOp::Remove, name)
+                .map(|()| format!("{name}\n")),
+        )?;
+        if settled.process_gone() {
+            self.state().containers.remove(name);
+        }
+        Ok(settled)
     }
 }
 

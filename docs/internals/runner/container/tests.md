@@ -937,9 +937,10 @@ tolerable: `crash_reconstruction` refuses a write command when the runtime
 "cannot be reached", and swallowing that here would turn a refusal into a
 convergence.
 
-## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `assert_eq!(super::settle_stop(Ok("upstroke-c\n".to_owned())), Ok(()));`
+## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `super::settle_stop(Ok("upstroke-c\n".to_owned())),`
 
-The control: a stop that simply worked.
+The control: a stop that simply worked, and worked means the process is
+gone.
 
 ## `struct DockerLikeStop<'a> {`
 
@@ -952,7 +953,7 @@ is exercising the tolerance rather than a test-local copy of it. Every raw
 answer is recorded, so a test can assert the already-stopped branch actually
 fired instead of hoping it did.
 
-## `fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {` › `let outcome = match self.inner.observe(name)? {`
+## `fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {` › `let outcome = match self.inner.observe(name)? {`
 
 The daemon's own three answers, chosen by the state the container is
 actually in — which is what makes a second reclaimer see the
@@ -2334,19 +2335,24 @@ container.
 The clause is its own predicate, and it is not covered by absence: the
 in-progress answer contains none of the "no such …" shapes.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `assert!(super::remove_already_settled(`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::removal_answer(DAEMON_REMOVAL_IN_PROGRESS),`
 
 Case-insensitively, because a vendor that recapitalises its prose must
-not turn a convergence into a refusal.
+not turn a convergence into a refusal — and typed, because the cover
+review of `8a5f59e8` found this answer read as a completed removal
+(`PR8-R4-REMOVAL-IN-PROGRESS`): it is `RemovalInProgress`, never
+`ProcessGone`.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `assert!(super::stop_already_settled(DAEMON_REMOVAL_IN_PROGRESS));`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::stop_answer(DAEMON_REMOVAL_IN_PROGRESS),`
 
-A `docker kill` racing a removal gets the same answer, and it is on its
-way out either way.
+A `docker kill` racing a removal gets the same answer; the reclaimer
+continues, and learns nothing about the process from it.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `assert_eq!(super::settle_remove(Ok("upstroke-c\n".to_owned())), Ok(()));`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::settle_remove(Ok("upstroke-c\n".to_owned())),`
 
-The control: a removal that simply worked.
+The control: a removal that simply worked, and worked means the process is
+gone.
+
 
 ## `fn real_docker_prints_the_transcribed_removal_in_progress_diagnostic() {`
 

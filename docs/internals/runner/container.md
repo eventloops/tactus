@@ -721,12 +721,26 @@ false only when a container may exist and the runtime confirmed neither.
 The view and the intent surviving is no part of it: they are residue for
 the census.
 
+**A stop or a removal the daemon answered with another reclaimer's removal
+already in progress confirms neither** ([`Settled::RemovalInProgress`]).
+The daemon sets that flag in `containerRm` *before* `cleanupContainer`
+kills, and resets it if the kill fails, so the loser's answer says only
+that somebody else holds the flag. The third repair round read the
+normalized `Ok(())` of that answer as a completed removal, and the cover
+review of `8a5f59e8` measured the result through the production runner:
+fate `Gone`, survivor `Running`, view and intent pruned
+(`PR8-R4-REMOVAL-IN-PROGRESS`). The runtime now says which of the two it
+established, and only `ProcessGone` counts.
+
 ## `pub fn cancel_reached(`
 
 The one exhaustive cleanup in this tree: stop, remove, unmount, remove the
 intent — **attempting every step even after one fails**, and never removing
 the R26 record while it is the only thing that can find the R19 residue.
-Answers a [`CancelResidue`].
+Answers a [`CancelResidue`]. A stop or a removal counts as evidence only
+when the runtime answered [`Settled::ProcessGone`]; a
+[`Settled::RemovalInProgress`] answer is named in the residue as
+establishing nothing, and a failure is named as a failure.
 
 #### Why the view and the intent outlive an unconfirmed container (`PR8-R3-CONTAINER-RETAIN`)
 
@@ -828,7 +842,11 @@ all of them "cannot be observed terminated", which
 
 ## `pub fn reclaim(`
 
-One container reclaimed, in the packet's own order.
+One container reclaimed, in the packet's own order. The evidence that the
+process is gone is [`observe_terminated`] between the kill and the
+removal; what the kill and the removal answered is what lets a racing
+reclaimer continue, and is not read as evidence here.
+
 
 > reclaim = docker kill -> wait until observed exited/removed -> docker rm
 > -> remove Git view -> remove intent, every step idempotent and tolerant of
@@ -1337,16 +1355,25 @@ third state a racing reclaimer sees, and `T-CONTAINER.resume_action`'s
 losing reclaimer would return an error before `rm`, the view prune and the
 intent removal, and the write command driving it would refuse rather than
 converge. `PR6-CONV-002` is the entry; every fake race converged because
-`FakeRuntime::remove` cannot produce this answer at all.
+`FakeRuntime::remove` could not produce this answer at all — it can now,
+through `set_docker_stderr`, and routes it through this very normalizer.
 
-## `fn remove_already_settled(detail: &str) -> bool {`
+It is also **not evidence that the process is gone**. `containerRm` sets
+the flag before `cleanupContainer` kills, so the loser learns only that the
+winner holds it; it normalizes to [`Settled::RemovalInProgress`], which
+lets a reclaimer continue and lets nothing conclude a fate
+(`PR8-R4-REMOVAL-IN-PROGRESS`).
 
-Whether a `docker rm` failure means the container is gone, or is going away
-under somebody else.
+## `fn removal_answer(detail: &str) -> Option<Settled> {`
 
-## `fn settle_remove(outcome: Result<String, RuntimeError>) -> Result<(), RuntimeError> {`
+What a `docker rm` failure established: an absent container is a gone
+process, another reclaimer's removal in progress is nothing, and any other
+failure is a failure.
 
-`docker rm`'s raw answer, as the seam's.
+## `fn settle_remove(outcome: Result<String, RuntimeError>) -> Result<Settled, RuntimeError> {`
+
+`docker rm`'s raw answer, as the seam's: success is a gone process, because
+`docker rm --force` kills and waits before it answers.
 
 A free function for the reason [`settle_stop`] is one: the branch that
 matters is one a real daemon produces **only** in a race, so a gated test is
@@ -1388,7 +1415,7 @@ The id the runtime says it used, read back from the created
 container. Never `spec.image_id`: the whole point of the check the
 caller then performs is that these two can differ.
 
-## `fn remove(&self, name: &str) -> Result<(), RuntimeError>` › `settle_remove(self.exec(`
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>` › `settle_remove(self.exec(`
 
 `--volumes` (`PR6A-ANONYMOUS-VOLUMES-LEAK`). An image declaring
 `VOLUME` gets an **anonymous** volume per container, and `docker rm`
@@ -1403,10 +1430,11 @@ balances. `--volumes` removes only anonymous volumes attached to this
 container and **never a named one**, which is what makes reclaiming it
 here a discharge of R26 rather than a violation of R20.
 
-## `fn stop_already_settled(detail: &str) -> bool {`
+## `fn stop_answer(detail: &str) -> Option<Settled> {`
 
-Whether a `docker stop` / `docker kill` failure means the container has
-already reached the state the caller asked for.
+What a `docker stop` / `docker kill` failure established: a container the
+daemon says is not running or does not exist is a gone process; another
+reclaimer's removal in progress is nothing.
 
 The adjacent source comment retains the daemon's concurrent-reclaimer
 protocol under standards §10 and §13. A stopped or removing container lets a
@@ -1433,16 +1461,17 @@ historical head because the fixtures serialized the reclaimers. That is not
 a claim about the current suite, which directly checks the stop-settlement
 predicate, including the daemon's removal-in-progress response.
 
-## `fn stop_already_settled(detail: &str) -> bool` › `remove_already_settled(detail) || detail.contains("is not running")`
+## `fn stop_answer(detail: &str) -> Option<Settled>` › `removal_answer(detail)`
 
-`remove_already_settled` and not `is_absent`: a `docker kill` issued
-against a container another reclaimer is already removing answers with
-`REMOVAL_IN_PROGRESS` too, and that container is on its way out either
-way.
+`removal_answer` and not `is_absent`: a `docker kill` issued against a
+container another reclaimer is already removing answers with
+`REMOVAL_IN_PROGRESS` too. The reclaimer continues past it, and it says
+nothing about the process: the winner set the flag before it killed.
 
-## `fn settle_stop(outcome: Result<String, RuntimeError>) -> Result<(), RuntimeError> {`
+## `fn settle_stop(outcome: Result<String, RuntimeError>) -> Result<Settled, RuntimeError> {`
 
-`docker stop` / `docker kill`'s raw answer, as the seam's.
+`docker stop` / `docker kill`'s raw answer, as the seam's: success is a
+gone process, because both return after the daemon has seen the exit.
 
 A free function taking the raw outcome rather than a `match` inside
 [`DockerCli::stop`], so the tolerance is reachable **without a daemon**: the

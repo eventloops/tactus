@@ -7868,6 +7868,69 @@ fn a_runner_that_loses_track_of_a_running_gate_refuses_resumably_and_reclaims_no
 }
 
 #[test]
+fn a_removal_another_reclaimer_holds_is_not_proof_the_gate_is_gone() {
+    use crate::runner::container::runtime::RuntimeOp;
+
+    let fixture = Fixture::two_tasks("removal-in-progress");
+    plant_stale_verification(&fixture);
+    let fake = runtime_holding_the_record();
+    for op in [RuntimeOp::Observe, RuntimeOp::Stop] {
+        fake.set_unreachable(op);
+    }
+    fake.set_docker_stderr(
+        RuntimeOp::Remove,
+        "Error response from daemon: removal of container upstroke-gate is already in progress",
+    );
+    let runner = production_container_runner(&fixture, &fake);
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let driven = drive_with(&fixture, &DriveSeams::default(), 1, &runner, &mut hooks);
+
+    let text = message(
+        driven
+            .progress
+            .first()
+            .expect("one step")
+            .as_ref()
+            .expect_err(
+                "a removal another reclaimer holds establishes nothing, so the command ends",
+            ),
+    );
+    assert!(
+        text.contains("may still be running") && text.contains("already in progress"),
+        "the refusal says the process may run and why the removal answer is not evidence: {text}"
+    );
+    let names = fake.container_names();
+    let survivor = names
+        .first()
+        .and_then(|name| fake.container(name))
+        .expect("the gate's container was created and survives the other reclaimer's flag");
+    assert_eq!(names.len(), 1, "exactly the one gate container: {names:?}");
+    assert_eq!(
+        survivor.state,
+        crate::runner::container::runtime::Liveness::Running,
+        "the daemon sets its removal-in-progress flag before it kills, so the gate still runs"
+    );
+    assert!(
+        unavailable_terminals(&driven.log).is_empty(),
+        "no terminal authorized cleanup or readmission over the running gate"
+    );
+    assert_eq!(
+        last_event_kind(&fixture),
+        "merge_verification_started",
+        "the verification stays open for recovery to settle"
+    );
+    assert_eq!(
+        snapshot_intents(&fixture).len(),
+        1,
+        "the gate's snapshot is retained: the container has it mounted"
+    );
+    assert!(
+        driven.transaction_open && driven.pipeline_held == 1,
+        "the open transaction keeps its entitlements"
+    );
+}
+
+#[test]
 fn a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled() {
     use crate::topology::effects::ContainerSite;
 

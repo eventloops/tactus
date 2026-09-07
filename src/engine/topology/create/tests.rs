@@ -2808,7 +2808,11 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
         Ok(())
     }
 
-    fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {
+    fn stop(
+        &self,
+        name: &str,
+        mode: StopMode,
+    ) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
         self.note(format!("stop {name} {}", mode.name()));
         if let Some(entry) = self
             .state
@@ -2818,16 +2822,19 @@ impl crate::runner::container::runtime::ContainerRuntime for Inventory {
         {
             entry.0 = Liveness::Exited;
         }
-        Ok(())
+        Ok(crate::runner::container::runtime::Settled::ProcessGone)
     }
 
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+    fn remove(
+        &self,
+        name: &str,
+    ) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
         self.note(format!("remove {name}"));
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(name);
-        Ok(())
+        Ok(crate::runner::container::runtime::Settled::ProcessGone)
     }
 }
 

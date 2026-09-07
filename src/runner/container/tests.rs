@@ -5,6 +5,7 @@
 #![allow(clippy::disallowed_methods)]
 #![deny(clippy::disallowed_types, clippy::disallowed_macros)]
 
+use super::runtime::Settled;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1087,8 +1088,11 @@ fn a_funnel_api_refuses_a_site_that_does_not_name_its_operation() {
                 start_container(hooks, site, &runtime, proof)
             }
             ContainerSite::MountGitView => mount_git_view(hooks, site, &view, &request).map(|_| ()),
-            ContainerSite::Stop => stop_container(hooks, site, &runtime, &name, StopMode::Graceful),
-            ContainerSite::Remove => remove_container(hooks, site, &runtime, &name),
+            ContainerSite::Stop => {
+                stop_container(hooks, site, &runtime, &name, StopMode::Graceful).map(|_| ())
+            }
+            ContainerSite::Remove => remove_container(hooks, site, &runtime, &name).map(|_| ()),
+
             ContainerSite::UnmountGitView => unmount_git_view(hooks, site, &view, &view_path),
             ContainerSite::RemoveIntent => remove_intent(hooks, site, &root, &name),
         };
@@ -1927,8 +1931,9 @@ fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not(
     for detail in tolerated {
         assert_eq!(
             super::settle_stop(failed(detail)),
-            Ok(()),
-            "a reclaimer that arrives second must converge on `{detail}`"
+            Ok(Settled::ProcessGone),
+            "a reclaimer that arrives second must converge on `{detail}`, and each of these is the \
+             daemon saying the process is not running"
         );
     }
     assert_eq!(
@@ -1954,7 +1959,11 @@ fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not(
     .expect_err("unreachable is never `already settled`");
     assert!(unreachable.is_unreachable(), "{unreachable}");
 
-    assert_eq!(super::settle_stop(Ok("upstroke-c\n".to_owned())), Ok(()));
+    assert_eq!(
+        super::settle_stop(Ok("upstroke-c\n".to_owned())),
+        Ok(Settled::ProcessGone),
+        "`docker stop` and `docker kill` return after the daemon has seen the exit"
+    );
 }
 
 struct DockerLikeStop<'a> {
@@ -2011,7 +2020,7 @@ impl ContainerRuntime for DockerLikeStop<'_> {
         self.inner.start(name)
     }
 
-    fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {
+    fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         let outcome = match self.inner.observe(name)? {
             Liveness::Running => {
                 self.inner.stop(name, mode)?;
@@ -2036,7 +2045,7 @@ impl ContainerRuntime for DockerLikeStop<'_> {
         super::settle_stop(outcome)
     }
 
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         self.inner.remove(name)
     }
 }
@@ -2309,10 +2318,10 @@ impl ContainerRuntime for NeverTerminates<'_> {
     fn start(&self, name: &str) -> Result<(), RuntimeError> {
         self.0.start(name)
     }
-    fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {
+    fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         self.0.stop(name, mode)
     }
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         self.0.remove(name)
     }
 }
@@ -3182,8 +3191,9 @@ fn real_docker_kill_on_an_already_exited_container_is_tolerated() {
         "the daemon's already-stopped wording moved, and the transcribed table in \
          this file no longer matches it: {detail}"
     );
-    assert!(
-        super::stop_already_settled(detail),
+    assert_eq!(
+        super::stop_answer(detail),
+        Some(Settled::ProcessGone),
         "the tolerance does not recognise the daemon's own answer: {detail}"
     );
 
@@ -3542,7 +3552,7 @@ fn the_two_docker_diagnostic_tables_never_claim_one_message() {
     }
     let racing =
         "Error response from daemon: cannot kill container: c: container 9f is not running";
-    assert!(super::stop_already_settled(racing));
+    assert_eq!(super::stop_answer(racing), Some(Settled::ProcessGone));
     assert!(!is_unreachable_diagnostic(racing));
 }
 
@@ -4346,19 +4356,28 @@ fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_
     };
 
     let tolerated = [
-        DAEMON_REMOVAL_IN_PROGRESS,
-        DAEMON_ABSENT_ON_STOP,
-        "Error response from daemon: No such object: upstroke-c",
+        (DAEMON_REMOVAL_IN_PROGRESS, Settled::RemovalInProgress),
+        (DAEMON_ABSENT_ON_STOP, Settled::ProcessGone),
+        (
+            "Error response from daemon: No such object: upstroke-c",
+            Settled::ProcessGone,
+        ),
     ];
-    for detail in tolerated {
+    for (detail, settled) in tolerated {
         assert_eq!(
             super::settle_remove(failed(detail)),
-            Ok(()),
-            "a reclaimer that arrives second must converge on `{detail}`"
+            Ok(settled),
+            "a reclaimer that arrives second must converge on `{detail}`, and only an absent \
+             container says the process is gone: the daemon sets its removal-in-progress flag \
+             before it kills"
         );
     }
     assert_eq!(
-        tolerated.iter().collect::<BTreeSet<_>>().len(),
+        tolerated
+            .iter()
+            .map(|(detail, _)| detail)
+            .collect::<BTreeSet<_>>()
+            .len(),
         3,
         "three distinct daemon answers, not one repeated"
     );
@@ -4367,10 +4386,14 @@ fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_
         "an in-progress removal is not an absent container; if `is_absent` starts covering it, \
          the tolerance below stops being an independently droppable predicate"
     );
-    assert!(super::remove_already_settled(DAEMON_REMOVAL_IN_PROGRESS));
-    assert!(super::remove_already_settled(
-        &DAEMON_REMOVAL_IN_PROGRESS.to_ascii_uppercase()
-    ));
+    assert_eq!(
+        super::removal_answer(DAEMON_REMOVAL_IN_PROGRESS),
+        Some(Settled::RemovalInProgress)
+    );
+    assert_eq!(
+        super::removal_answer(&DAEMON_REMOVAL_IN_PROGRESS.to_ascii_uppercase()),
+        Some(Settled::RemovalInProgress)
+    );
 
     for detail in [
         "Error response from daemon: cannot remove container: upstroke-c: permission denied",
@@ -4388,9 +4411,18 @@ fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_
     .expect_err("unreachable is never `already settled`");
     assert!(unreachable.is_unreachable(), "{unreachable}");
 
-    assert!(super::stop_already_settled(DAEMON_REMOVAL_IN_PROGRESS));
+    assert_eq!(
+        super::stop_answer(DAEMON_REMOVAL_IN_PROGRESS),
+        Some(Settled::RemovalInProgress),
+        "a kill answered with another reclaimer's removal lets the reclaimer continue and \
+         establishes nothing about the process"
+    );
 
-    assert_eq!(super::settle_remove(Ok("upstroke-c\n".to_owned())), Ok(()));
+    assert_eq!(
+        super::settle_remove(Ok("upstroke-c\n".to_owned())),
+        Ok(Settled::ProcessGone),
+        "`docker rm --force` kills and waits before it answers"
+    );
 }
 
 #[test]
@@ -4486,8 +4518,9 @@ fn real_docker_prints_the_transcribed_removal_in_progress_diagnostic() {
             operation: RuntimeOp::Remove,
             detail: detail.clone(),
         })),
-        Ok(()),
-        "the loser of a real removal race does not converge: {detail}"
+        Ok(Settled::RemovalInProgress),
+        "the loser of a real removal race must continue without claiming the process gone: \
+         {detail}"
     );
 }
 

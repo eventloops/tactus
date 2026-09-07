@@ -722,8 +722,11 @@ never started container holds no process, and a `docker create` whose
 answer was lost cannot have started one either. Once `docker start` was
 attempted (`Started`) the cancel's evidence decides — `Gone` when the
 runtime confirmed a stop or a forced removal, `Unresolved` when it
-confirmed neither — because at this seam a start the daemon refused cannot
-be told from a start whose acknowledgement was lost. A refused start whose
+confirmed neither, and an answer that another reclaimer's removal is in
+progress confirms neither (`Settled::RemovalInProgress`, the daemon sets
+that flag before it kills) — because at this seam a start the daemon
+refused cannot be told from a start whose acknowledgement was lost.
+ A refused start whose
 cancel completes therefore settles as an `Infrastructure{Other}` outage
 with the refusal in its detail rather than as `RunnerSpawnFailure`; both
 defer identically. The review of `79ddbffb` measured both directions of

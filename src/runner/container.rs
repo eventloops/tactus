@@ -32,8 +32,8 @@ use crate::runner::InvocationId;
 use intent::{ContainerIntent, ContainerName, INTENT_STAGED_SUFFIX, IntentWritten, containers_dir};
 use runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
-    DiscoveredContainer, DurableStep, Liveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
-    ViewAction,
+    DiscoveredContainer, DurableStep, Liveness, RuntimeError, RuntimeOp, Settled, StopMode,
+    TracePhase, ViewAction,
 };
 
 pub trait ContainerHooks {
@@ -363,7 +363,7 @@ pub fn stop_container(
     runtime: &dyn ContainerRuntime,
     name: &ContainerName,
     mode: StopMode,
-) -> Result<(), UpstrokeError> {
+) -> Result<Settled, UpstrokeError> {
     expect_site(site, Operation::Stop)?;
     funnel(hooks, site, || {
         runtime.stop(name.as_str(), mode).map_err(refused)
@@ -375,7 +375,7 @@ pub fn remove_container(
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
     name: &ContainerName,
-) -> Result<(), UpstrokeError> {
+) -> Result<Settled, UpstrokeError> {
     expect_site(site, Operation::Remove)?;
     funnel(hooks, site, || {
         runtime.remove(name.as_str()).map_err(refused)
@@ -531,11 +531,17 @@ pub fn cancel_reached(
             name,
             StopMode::Graceful,
         ) {
-            Ok(()) => container_gone = true,
+            Ok(Settled::ProcessGone) => container_gone = true,
+            Ok(Settled::RemovalInProgress) => {
+                residue.push(removal_in_progress_establishes_nothing("the stop", name))
+            }
             Err(error) => residue.push(format!("the container could not be stopped: {error}")),
         }
         match remove_container(hooks, ContainerSite::Remove, runtime, name) {
-            Ok(()) => container_gone = true,
+            Ok(Settled::ProcessGone) => container_gone = true,
+            Ok(Settled::RemovalInProgress) => {
+                residue.push(removal_in_progress_establishes_nothing("the removal", name))
+            }
             Err(error) => residue.push(format!("the container could not be removed: {error}")),
         }
     }
@@ -578,6 +584,13 @@ pub fn cancel_reached(
         messages: residue,
         container_gone,
     }
+}
+
+fn removal_in_progress_establishes_nothing(step: &str, name: &ContainerName) -> String {
+    format!(
+        "{step} of `{name}` was answered with another reclaimer's removal already in progress; the \
+         daemon sets that flag before it kills, so this establishes nothing about the process"
+    )
 }
 
 fn render_residue(residue: &[String]) -> String {
@@ -1137,14 +1150,22 @@ fn is_absent(detail: &str) -> bool {
 
 pub const REMOVAL_IN_PROGRESS: &str = "is already in progress";
 
-fn remove_already_settled(detail: &str) -> bool {
-    is_absent(detail) || detail.to_ascii_lowercase().contains(REMOVAL_IN_PROGRESS)
+fn removal_answer(detail: &str) -> Option<Settled> {
+    if is_absent(detail) {
+        return Some(Settled::ProcessGone);
+    }
+    if detail.to_ascii_lowercase().contains(REMOVAL_IN_PROGRESS) {
+        return Some(Settled::RemovalInProgress);
+    }
+    None
 }
 
-fn settle_remove(outcome: Result<String, RuntimeError>) -> Result<(), RuntimeError> {
+fn settle_remove(outcome: Result<String, RuntimeError>) -> Result<Settled, RuntimeError> {
     match outcome {
-        Ok(_) => Ok(()),
-        Err(RuntimeError::Failed { detail, .. }) if remove_already_settled(&detail) => Ok(()),
+        Ok(_) => Ok(Settled::ProcessGone),
+        Err(RuntimeError::Failed { operation, detail }) => {
+            removal_answer(&detail).ok_or(RuntimeError::Failed { operation, detail })
+        }
         Err(error) => Err(error),
     }
 }
@@ -1296,7 +1317,7 @@ impl ContainerRuntime for DockerCli {
             .map(|_| ())
     }
 
-    fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {
+    fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         let verb = match mode {
             StopMode::Graceful => "stop",
             StopMode::Kill => "kill",
@@ -1304,7 +1325,7 @@ impl ContainerRuntime for DockerCli {
         settle_stop(self.exec(RuntimeOp::Stop, name, &[verb, name]))
     }
 
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         settle_remove(self.exec(
             RuntimeOp::Remove,
             name,
@@ -1318,14 +1339,19 @@ impl ContainerRuntime for DockerCli {
 // seeing stopped, removing or absent continues observe/remove/view/intent cleanup.
 // Other failures remain errors so failed or cancelled reclamation can be retried
 // from the retained intent. "Removing" is settled for stop, not proof of absence.
-fn stop_already_settled(detail: &str) -> bool {
-    remove_already_settled(detail) || detail.contains("is not running")
+fn stop_answer(detail: &str) -> Option<Settled> {
+    if detail.contains("is not running") {
+        return Some(Settled::ProcessGone);
+    }
+    removal_answer(detail)
 }
 
-fn settle_stop(outcome: Result<String, RuntimeError>) -> Result<(), RuntimeError> {
+fn settle_stop(outcome: Result<String, RuntimeError>) -> Result<Settled, RuntimeError> {
     match outcome {
-        Ok(_) => Ok(()),
-        Err(RuntimeError::Failed { detail, .. }) if stop_already_settled(&detail) => Ok(()),
+        Ok(_) => Ok(Settled::ProcessGone),
+        Err(RuntimeError::Failed { operation, detail }) => {
+            stop_answer(&detail).ok_or(RuntimeError::Failed { operation, detail })
+        }
         Err(error) => Err(error),
     }
 }
