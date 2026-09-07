@@ -460,7 +460,7 @@ Round four's omission. None of these is reached by a schema-4 run: the legacy co
 | `Workspace::remove_prepared_pin` (`workspace.rs:1136`) | the same pin | `prepared.commit_sha`, from the durable `PreparedCommit` record. Absent is done; any other target refuses naming both ("points at `X`, not the recorded commit `Y`"). The record's value, never the ref's. |
 | `Workspace::remove_orphan_prepared_pin` (`workspace.rs:1155`) | a pin whose attempt has no settlement | Expected-old **is the ref's current target** — the third site in the class, and the one that disproves round four's closing sentence. The authority is the log's absence of a record at exactly that pin: `engine/resume.rs:505` calls it once per `interrupted_attempts()` entry, at `prepared_pin_ref(run_id, task_index, attempt)`, and an interrupted attempt is one with an open `in_flight` and therefore no settlement and no `PreparedCommit`. A pin a record *does* name is the row above's and is compared with the record. The expected-old serves atomicity against a concurrent writer, not authority, exactly as it does for the two schema-4 orphan prunes; a symbolic pin refuses without dereferencing. |
 | `Workspace::advance_prepared_commit` (`workspace.rs:1199`) | the run branch, then the pin | `prepared.parent_sha` → `prepared.commit_sha`, both from the `PreparedCommit` record, after four read-only refusals: the record's branch is the requested one, HEAD is on that branch, the commit object matches its durable prepared identity, and the pin names that commit. The publication is read back before the pin is pruned through the row above. |
-| `cleanup_gate_workspace` from `reclaim_snapshot_intents` (`workspace.rs:737`) | a gate worktree, its hooks directory and its intent file | The durable snapshot intent file the reclaim just listed — the record that authorized the worktree. The name is validated (`valid_snapshot_name`) before it is used as a path, and an unexpected file in the intent directory refuses rather than being deleted. A worktree removal takes no expected-old; what would make this site wrong is deriving *which* worktree from the filesystem rather than from the intent, and it does not. |
+| `cleanup_gate_workspace` from `reclaim_gate_workspaces` (`workspace.rs:737`) | a gate worktree, its hooks directory and its intent file | The durable snapshot intent file the reclaim just listed — the record that authorized the worktree. The name is validated (`valid_snapshot_name`) before it is used as a path, and an unexpected file in the intent directory refuses rather than being deleted. A worktree removal takes no expected-old; what would make this site wrong is deriving *which* worktree from the filesystem rather than from the intent, and it does not. |
 | `cleanup_gate_workspace` from `PendingGateWorkspace::drop` (`workspace.rs:1388`) | the same three | The creating process removing what it created and did not hand over: the guard is armed at creation and disarmed by `finish`. |
 | `cleanup_gate_workspace` from `GateWorkspace::drop` (`workspace.rs:1607`) | the same three | The same process removing the workspace it owns for the duration of the gate run. |
 | `Workspace::create_branch` (`workspace.rs:420`) | creates `refs/heads/<run branch>` and moves HEAD onto it | Round six's addition. Not a cleanup and it takes no expected-old: `git switch --create` refuses if the branch exists, which is the whole of its atomicity. The name is the run's own branch from `coordinator.rs:146`, and two read-only refusals precede it — `refuse_worktree_filters_before` and `refuse_unsafe_checkout_tree` on HEAD's tree. |
@@ -617,6 +617,19 @@ No new Class B change and no Class C. Finding 1 changes the wire commands `Docke
 private functions around them; the `ContainerRuntime` trait's signatures, the frozen fold, the
 frozen event vocabulary, the effect-site inventory and `src/topology/**` are untouched. Finding 2
 writes a longer string into a field that already exists.
+
+**Two things this round observed and did not fix, and one it corrected in passing.** The
+corrected one is in this section: round five's legacy table named the caller of
+`cleanup_gate_workspace` as `reclaim_snapshot_intents`, and the function is
+`reclaim_gate_workspaces` — a census row naming a function that does not exist is the shape of
+defect this section is for, so it is fixed here rather than recorded. What is only recorded:
+`pr8-plan.md` §2's staged-implementation tables cite twelve test names in backticks that no
+longer resolve — `kill_between_prepared_and_cas`, `human_required_verdict_parks_task` and ten
+others — because they are the names the plan *intended* before the code was written and the tests
+landed under different ones (`a_human_required_verdict_parks_the_task` for that one). §2 is a
+historical plan and this round does not rewrite it; a reader should not take a backticked name
+there as a citation. Derived by extracting every backticked snake_case identifier of twenty
+characters or more from the three record files and resolving each against `git ls-files src`.
 
 **One thing this round observed and did not fix.** `docs/internals/` headings are grep strings —
 the notes file's own preamble says each heading is "the line of code the comment sat above, spelled
