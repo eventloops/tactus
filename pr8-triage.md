@@ -817,3 +817,119 @@ re-read against the tree here rather than against a findings list.
   round-by-round review narrative for rounds four and five moves to §§7–8 of this file, where those
   rounds are already recorded in full, leaving its claim, its identifiers and a pointer in the
   body — the move the fifth and sixth rounds made for the same reason.
+
+## 11. Round eight — the dispatch-head witness red on Windows
+
+Not a review round. The seventh round's regression for `PR8-R7-DISPATCH-BASE`,
+`a_dependent_task_is_dispatched_into_its_dependencys_merged_work`, failed on CI's winguest leg at
+`91fe35b0` and again at `fc141710` — two runs, two reds, every other job of both runs green: lint on
+three platforms, msrv on three, `upstroke-pr-policy`, and the same test on ubuntu and macOS. `2299
+passed; 1 failed; 40 ignored` both times. The seventh round filed it open at P1
+(`PR247-DISPATCH-HEAD-WITNESS-RED-ON-WINDOWS`) with its rate unknown; the second red made it
+deterministic, and the question the round answers is whether the repair in `45b5d429` holds on
+Windows at all. The seventh round pushed and read CI, which is how a red on a first-class platform
+reached master's door; this round reproduces on the persistent Windows guest before repairing and
+verifies there before pushing.
+
+### 11.1 The plan of this round (recorded first, so a replaced session inherits it)
+
+| # | Mechanism decided | Where |
+|---|---|---|
+| 1 | Reproduce before touching anything: a fresh clone of this branch's head on the persistent guest, in its own directory with its own `CARGO_TARGET_DIR`, and the failing test run alone as CI runs it. Not `C:\upstroke`, which is a different tree. | the guest, `C:\pr8-fix8`, `C:\pr8-fix8-target` |
+| 2 | Establish the layer before the repair, in the order the brief asks: does `dispatch_head` return the published head, is the worktree created at it, is the file on disk, and does the assertion read it wrongly or is it absent. Two instruments — the same test with exactly one ambient setting changed, and an experiment outside the test that puts an LF blob through `git worktree add` under each configuration. | the guest |
+| 3 | Repair the fixture, not the assertion. The recover fixture's repository pins `core.autocrlf=false` and `core.eol=lf`, the two settings `workspace_manager::fixture` already pins for the reason its comment states. The contents assertion is untouched: a SHA comparison is the shape that passed throughout the defect's life, and a comparison that normalises line endings is a bar lowered by exactly the transformation it forgives. | `engine/topology/recover/tests.rs` (`Fixture::build`), `docs/internals/engine/topology/recover/tests.md` |
+| 4 | The witness is the pair on the guest: the tree without the pin red with the CRLF bytes, the tree with it green — the test alone, then the full suite as CI runs it. The mutation of this repair is the tree without it, which is the reproduction itself. | the guest |
+| 5 | Re-file the finding at the severity a fixture defect carries, with its cause and the change, and give the body's ledger its row. | `reviews/findings/`, `pr8-body.md` |
+| 6 | Make room in the body before writing to it: the ledger's rows through round six are compressed to their identity columns, their full text left in this file's §§1–9 and in `pr8-body.md`'s own history at `fc141710`. | `pr8-body.md` |
+| 7 | The ten gates on this box, which cannot see this defect, and the guest verification, both before the push. | this box, the guest |
+
+### 11.2 The finding
+
+| # | Finding | Disposition | Evidence and repair |
+|---|---|---|---|
+| 1 (P1 → P2) [`PR247-DISPATCH-HEAD-WITNESS-RED-ON-WINDOWS`] | **Alpha's merged file is in beta's worktree with the right content and Windows line endings.** The panic's own text says the checkout held `["candidate.txt", "seed.txt"]`; the two lines the finding file did not quote are `left: Some("the candidate edit\r\n")` and `right: Some("the candidate edit\n")`. Git for Windows installs `core.autocrlf=true` in its system config, the recover fixture's repository inherits it, and `git worktree add` renders alpha's LF blob as CRLF when it populates beta's checkout. The test then compares bytes and the bytes differ. `dispatch_head`, the worktree, and the materialisation are all correct on Windows; the fixture is what is platform-shaped. | **confirmed as a fixture defect**; reclassified P2 `portability` | Reproduced on the guest and attributed by two instruments, each recorded below. Repair: the fixture pins its line endings in the repository config, where production's `git worktree add` reads them. |
+
+**What CI showed, at both heads.** The same panic at `src\engine\topology\recover\tests.rs:9925:5`
+with the same `left`/`right` pair; the second run's log is the one quoted above. The file was never
+absent — the finding file's "alpha's merged file is absent from beta's checkout" was a reading of
+the assertion's message, not of its `left` value, and this round corrects it.
+
+**What the guest showed.** Windows 10.0.26100.1742, git 2.50.1.windows.1, cargo 1.97.1; a fresh
+clone of `fc141710` at `C:\pr8-fix8` with `CARGO_TARGET_DIR=C:\pr8-fix8-target`; the system config
+`C:/Program Files/Git/etc/gitconfig` carries `core.autocrlf=true` and the user has no global config
+(CI's leg sets only `user.name` and `user.email` there). Three results, in order:
+
+1. **The test as CI runs it**, alone with `--exact`: `FAILED`, the same panic, the same
+   `left: Some("the candidate edit\r\n")` and `right: Some("the candidate edit\n")`, the checkout
+   holding both files. The reproduction, and also the mutation of the repair below: this is the
+   tree without the pin.
+2. **The same test with one ambient setting changed and nothing else**: `GIT_CONFIG_COUNT=1`,
+   `GIT_CONFIG_KEY_0=core.autocrlf`, `GIT_CONFIG_VALUE_0=false` in the environment, which every
+   `git` the test binary and the production loop spawn inherits: `ok`. That is the layer proof,
+   because the test's later assertions run only when the contents assertion passes, and they all
+   passed: `worker.head` is `planted.commit` (the worktree was created at the published head, not
+   the run's starting base), `task_dispatched.base_sha` is `planted.commit` (the durable record
+   names it), and the log replays twice equal. So `dispatch_head` returned the published head, the
+   worktree was cut at it, alpha's file was on disk, and the assertion read it correctly — the
+   bytes on disk were CRLF.
+3. **The mechanism outside the test**, in a scratch repository on the guest: `line\n` written as
+   bytes `6c 69 6e 65 0a`; the blob after `git add` and `commit` is `6c 69 6e 65 0a` (Git strips
+   nothing it did not add — an LF blob is an LF blob under any `core.autocrlf`); `git worktree add
+   --detach` under the inherited config produces a file of `6c 69 6e 65 0d 0a`; after
+   `git config core.autocrlf false` and `core.eol lf` **in that repository**, a second
+   `git worktree add` produces `6c 69 6e 65 0a`, and `git config --show-origin` inside the new
+   worktree names the repository's `.git/config` as the source. The repository config is the layer
+   a linked worktree reads, so a pin there governs the checkout production makes.
+
+**Where the setting comes from, and why the sibling fixture never met it.** The recover fixture's
+`Fixture::build` does its own `git init` (since `bcc3a533` on master, 2026-08-24) and pins identity
+and `core.logAllRefUpdates`, nothing about line endings. `workspace_manager::fixture` pins
+`core.autocrlf=false` and `core.eol=lf` with a comment that describes this failure shape exactly —
+"a blob written as `A\n` is checked out as `A\r\n`, so a test comparing checked-out content against
+what it wrote fails on that platform alone while the blob is the one it asked for" — and
+`src/workspace.rs:2676` pins it for one legacy test. Every fixture `git` and every production
+`git` inherits the process environment (`workspace_manager.rs:3017` adds only
+`GIT_NO_REPLACE_OBJECTS=1`; the fixture helper adds nothing), so the repository config is the one
+layer both read, and it is where the pin goes.
+
+**Why this is a fixture defect and not a production one.** Production created beta's worktree at
+the head the log authorized and populated it exactly as a Windows user's Git would: with the
+platform's line-ending policy applied. An agent on that machine reads `candidate.txt` as its
+platform renders every text file, and DESIGN §26 verdict 1 asks for the worktree at the integration
+head at dispatch, which is what it got. The test's byte comparison is the only thing in the path
+that assumed a rendering, and the seventh round's Linux-only verification is why the assumption
+went unnoticed. The original P1, `PR8-R7-DISPATCH-BASE`, is repaired on all three platforms; its
+witness was reading platform-shaped bytes on one of them.
+
+**Why the fixture and not the assertion.** The assertion on contents stays exactly as written. A
+comparison that normalised line endings would pass on a checkout Git had transformed, which is a
+weaker claim than "the bytes alpha committed are the bytes beta reads"; pinning the fixture's
+repository makes the bytes the test observes the bytes it wrote, on every platform, and the
+third result above is the proof that the pin reaches the checkout production makes.
+
+Readings this round records, each a choice and not a deduction:
+
+- **P2, not P1.** The failure sequence reaches no §4 invariant, no trust boundary, no durable
+  state and no user data; it reaches one CI leg, which is a merge blocker and not a product
+  defect. That is the severity every test-fidelity row on this branch carries
+  (`PR8-R7-DRIVER-REF-FUNNEL`, `PR8-R4-REVIEW-ORACLE`, `PR8-R2-SAMPLER-ORACLE`), and P3 is this
+  project's floor for a finding with no failure at all. The finding file moves with a `git mv`, as
+  `reviews/findings/README.md` says a reclassification does, and keeps its id.
+- **`portability`, not `correctness`.** The defect is a platform-shaped fixture, which is the
+  category `PR5-WORKSPACE-003` (a mutation that survives on Windows only) already uses for the
+  same shape.
+- **Provenance `pre_existing`.** The fixture's unpinned repository is master's (`bcc3a533`); this
+  slice's seventh round is the first to compare checkout bytes through it, the same relation
+  `PR8-R7-DRIVER-REF-FUNNEL` records with the ref-funnel double. First bad for the *red* is
+  `45b5d429`, the commit that added the test.
+- **The finding file is updated and re-filed rather than deleted.** The README deletes a resolved
+  finding and lets the body's row and history carry it; the round's brief asks for the file to
+  carry the disposition, the cause and the change, and this round follows the brief. The file
+  says so in its own text, so whoever merges can delete it with nothing lost.
+- **The pin is applied where the observation is and nowhere else.** Thirteen other test fixtures
+  in the tree run their own `git init` — two of them in files this slice touches
+  (`engine/topology/create/tests.rs`, `engine/tests.rs`) — and none pins line endings. Every one
+  of their tests passed on winguest in both red runs, so no other fixture's inheritance of the
+  setting is observed by a test today; they stay byte-identical to master, as code the packet does
+  not name should. A fixture that starts comparing checkout bytes inherits the same obligation,
+  and the notes section beside the pin says so.
