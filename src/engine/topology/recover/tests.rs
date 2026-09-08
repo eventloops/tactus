@@ -3754,12 +3754,8 @@ fn the_driver_takes_over_from_the_recovery_order_and_steps() {
 
     let fixture = Fixture::healthy("driver-steps");
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -3878,12 +3874,8 @@ fn the_driver_carries_an_accepted_attempt_through_the_candidate_sequence() {
 
     let fixture = Fixture::healthy("driver-promotes");
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = TracedHooks::new(&harness);
@@ -3980,12 +3972,8 @@ fn a_runs_spend_is_the_same_live_as_on_replay() {
 
     let fixture = Fixture::healthy("spend-parity");
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -4070,12 +4058,8 @@ fn the_driver_settles_an_outage_from_the_folds_deferral_count() {
         },
     );
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -4165,12 +4149,8 @@ fn the_driver_parks_an_attempt_with_the_question_it_raised() {
 
     let fixture = Fixture::healthy("driver-parks");
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -4275,12 +4255,8 @@ fn the_driver_refuses_a_tree_a_filter_has_transformed() {
 
     let fixture = Fixture::healthy("driver-filtered");
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -4370,12 +4346,8 @@ fn the_retaining_incarnation_retries_in_place() {
         },
     )];
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -4623,11 +4595,8 @@ fn a_retried_worker_is_told_what_the_last_attempt_failed_on() {
     );
 
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -4838,11 +4807,8 @@ fn the_driver_escalates_onto_the_rung_above() {
     );
 
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -4972,11 +4938,8 @@ fn the_driver_dispatches_at_the_rung_the_log_records() {
     );
 
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -5261,11 +5224,8 @@ fn drive_one_attempt(fixture: &Fixture, runner: &RecordingRunner) -> Vec<String>
     use crate::engine::topology::select::Ceiling;
 
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(fixture, &runtime, &certifies);
-    let (outcome, _) = resume_holding(fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -5336,12 +5296,8 @@ fn the_driver_spends_the_allowance_the_log_records() {
         },
     );
     let harness = harness();
-    let runtime = runtime_holding_the_record();
-    let certifies = AlwaysCertifies;
-    let given = Given::healthy(&fixture, &runtime, &certifies);
-
-    let (outcome, _) = resume_holding(&fixture, &harness, &given);
-    let (_recovered, handle) = outcome.expect("the healthy resume completes");
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
 
     let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
