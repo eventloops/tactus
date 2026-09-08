@@ -222,3 +222,20 @@ gate's own comment says so rather than implying coverage it does not have.
 **Why this record stays open.** The repair is not reviewed: the workflow's two
 passes were spent on the earlier heads and this batch does not run a third.
 PR #214 is still not merged. The record closes when the branch lands.
+
+**A second blocker, which a successor meets first.** CI is red at `eb043c9`, and
+not because of the repair. Master gained `3ffd9eb docs(effects): give each
+source blanker its own contract` after this branch's pinned base, and it writes
+three new Rustdoc shortcut references into `docs/internals/effects.md` (lines
+223 and 381 of the merge) and `docs/internals/effects/tests/source_oracles.md`
+(line 837) — the two files at the centre of N5(b)'s converted domain. The gate
+refuses them in the pull request's merge with master, where they exist; none of
+the three is on the branch. The three-way merge of both files is clean, and the
+park head's validator and the repaired one give byte-identical output against
+that merge result, so this red is master's drift into a converted domain rather
+than anything the repair did.
+
+It is the gate header's standing hazard — *widen the domain with the conversion,
+never ahead of it* — arriving from the other side. Resolving it is a merge plus
+the conversion of those three references, which is the first thing a successor
+should do and which this batch was not authorised to do.
