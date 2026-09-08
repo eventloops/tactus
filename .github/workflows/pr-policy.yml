@@ -60,6 +60,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
         run: |
           if [[ "$EVENT_NAME" == "merge_group" ]]; then
@@ -69,6 +70,7 @@ jobs:
             gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq .title > "$RUNNER_TEMP/pr-title"
             gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/pr-body"
             gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid > "$RUNNER_TEMP/pr-head"
+            gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefName --jq .headRefName > "$RUNNER_TEMP/pr-branch"
             # The entry is a merge commit whose second parent is the pull
             # request's head; the API's head must be that commit, or the body
             # being judged belongs to a head the entry does not carry.
@@ -80,8 +82,10 @@ jobs:
             printf '%s' "$PR_TITLE" > "$RUNNER_TEMP/pr-title"
             printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body"
             printf '%s' "$PR_HEAD" > "$RUNNER_TEMP/pr-head"
+            printf '%s' "$PR_BRANCH" > "$RUNNER_TEMP/pr-branch"
           fi
           [[ -s "$RUNNER_TEMP/pr-head" ]] || { echo "no head SHA for pull request $PR_NUMBER" >&2; exit 1; }
+          [[ -s "$RUNNER_TEMP/pr-branch" ]] || { echo "no head branch for pull request $PR_NUMBER" >&2; exit 1; }
 
       - name: Validate title, evidence sections, and finding ledger
         shell: bash
@@ -90,3 +94,22 @@ jobs:
           head="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-body.sh "$title"
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-ledger-evidence.sh "$head"
+
+      # The branch vocabulary. Its findings listing is taken at the base and
+      # not at the head: repairing a finding deletes its file, so a fix-P*/
+      # pull request that has done its job carries no such file, and resolving
+      # the name against its own tree would fail exactly the ones that worked.
+      - name: Validate the head branch name
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          # The base commit, not a remote-tracking ref: `actions/checkout` only
+          # promises the fetched history, and the event carries this SHA on both
+          # triggers. An unresolvable base fails closed rather than skipping.
+          git rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null \
+            || { echo "base commit $BASE_SHA is not in this checkout" >&2; exit 1; }
+          git ls-tree --name-only "$BASE_SHA" reviews/findings/ \
+            | sed "s|.*/||" > "$RUNNER_TEMP/base-findings"
+          bash .github/scripts/validate-pr-branch.sh \
+            "$(cat "$RUNNER_TEMP/pr-branch")" "$RUNNER_TEMP/base-findings"

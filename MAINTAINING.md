@@ -206,6 +206,29 @@ receives neither and, if they are required there, waits on checks that never arr
 `test-docs-consistency.sh` pins the two workflows against its own copy of that list; it does not
 read this file, so changing the contract is a change to this file and to the gate together.
 
+Every head branch is in the vocabulary `.github/scripts/validate-pr-branch.sh` enforces, checked by
+`upstroke-pr-policy` on each pull request and each queue entry. `feature/`, `refactor/`, `docs/`,
+`standards/`, `ci/`, `gate/` and `fix/` take a lower-case name whose words are joined by single
+hyphens. `fix-P<n>/` takes `<category>_<description>` and must name exactly one finding filed under
+`reviews/findings/`, for `n` in 0–3. `bulk-fix-P<n>/` takes a hyphenated name and carries a batch of
+them, for `n` in 2–3; P0 and P1 are never batched. The two are separate prefixes so that each one's
+rule is exact: a single-finding branch resolves to its file and a batch names none. The findings are
+listed at the **base** and never at the head, because repairing a finding deletes its file.
+
+An unrecognised prefix fails rather than defaulting, which is the point of the check: until it
+existed, every prefix outside two `codex/` shapes fell into the audit's catch-all and was silently
+given the most expensive review and the loosest fix set. `test`, `chore`, `perf`, `security` and
+`build` are valid title types with no branch prefix; needing one is a gap to raise here, not a name
+to work around. The rule binds new branches, so `.github/legacy-branches.txt` lists those that
+predate it: a listed branch is accepted with a warning, entries are only ever removed, and the file
+reaching zero is the signal the migration finished.
+
+The lane the audit derives from a prefix is a **separate** mapping, and it is unchanged: it still
+reads `codex/findings-p3-*`, `codex/findings-*` and everything else. A `fix-P<n>/` or
+`bulk-fix-P<n>/` branch would therefore be audited as feature work, which is looser than either is
+meant to be, so those two prefixes are reserved and not yet in use. Widening the lane table is its
+own change.
+
 Readiness to enqueue is the lane rule of 2026-09-06, audited by `scripts/pr-ready-audit.sh`,
 which decides a pull request's lane from its branch prefix alone (`codex/findings-p3-*`,
 `codex/findings-*`, everything else), counts only the owner's review comments, keeps the `lane:*`

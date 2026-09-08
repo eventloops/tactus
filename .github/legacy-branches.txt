@@ -1,0 +1,36 @@
+# Branches that predate the branch vocabulary, one per line.
+#
+# .github/scripts/validate-pr-branch.sh accepts a branch listed here, with a
+# warning, so introducing the rule did not turn 24 open pull requests red at
+# once. MAINTAINING.md states the rule binds new branches: these get renamed as
+# they come up for merge, not retrospectively.
+#
+# This is a to-do list, not an escape hatch. Entries are only ever removed. The
+# file reaching zero entries is the signal the migration finished, and adding a
+# line is a diff the frontier review and the owner read like any other.
+#
+# Taken 2026-09-08 from the open pull requests at master 9cfaf0c8.
+codex/findings-114885184183
+codex/findings-133b25f7d89f
+codex/findings-2b802b011b29
+codex/findings-9dc6604a62e3
+codex/findings-ba8fdc8dec2b
+codex/findings-c710f5cafaab
+codex/findings-cf59b3e9b951
+codex/findings-p3-1a57a2730a12
+codex/findings-p3-1bb1fc36401d
+codex/findings-p3-385dbcf01fd9
+codex/findings-p3-56cbb1aeb0ae
+codex/findings-p3-621f2a6cd705
+codex/findings-p3-66d94cdcc435
+codex/findings-p3-694dbae9c68e
+codex/findings-p3-750914a7cc4e
+codex/findings-p3-99ba62ef037c
+codex/findings-p3-9c8f0bb4a998
+codex/findings-p3-a8600a8a1cad
+codex/findings-p3-aadfa7130302
+codex/findings-p3-b059b187895a
+codex/findings-p3-b6422f58992b
+codex/findings-p3-bf91fcb57980
+codex/sweep-1dcb506fe31f
+sweep/workspace-manager-fixture
