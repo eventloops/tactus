@@ -7373,11 +7373,34 @@ struct DriveSeams {
     review_cost_usd: Option<f64>,
     run_ceiling_usd: Option<f64>,
     answer: Option<crate::ir::Answer>,
+    /// Which read of the answer source delivers `answer`; the other refuses
+    /// or reports nobody there, so a test says which ingestion path it
+    /// exercises and the other cannot stand in for it.
+    answer_delivery: AnswerDelivery,
     /// `RunSeams::halts_run`: a declined question halts the run.
     halts_run: bool,
     /// Answers come from the run directory's `answers/` through the production
     /// `EventLogAnswers` with a zero wait, not from `answer`.
     answers_from_run_dir: bool,
+}
+
+/// How [`DrivenAnswers`] delivers the seam's answer. PR #249's refusals
+/// review found the mock answering `poll` and `resolve` alike, so removing
+/// the pre-step ingestion (M4), replacing the non-blocking poll with the
+/// blocking resolve (M5) and restoring PR8's hard-block refusal (M11) each
+/// passed every topology test: either path satisfied the same assertions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum AnswerDelivery {
+    /// The answer is already delivered: `poll` returns it, and the blocking
+    /// `resolve` is a refusal — it must never be reached while other work
+    /// is runnable, and a test that gets its answer this way proves the
+    /// non-blocking path carried it.
+    #[default]
+    Polled,
+    /// Terminal-style: `poll` finds nobody there and `resolve` — the hard
+    /// block's prompt — delivers the answer, so a test that gets its answer
+    /// this way proves the hard block ingests it.
+    Blocking,
 }
 
 struct Driven {
@@ -7606,6 +7629,7 @@ impl crate::engine::topology::attempt::ReviewInputPolicy for DrivenPolicy {
 
 struct DrivenAnswers {
     answer: Option<crate::ir::Answer>,
+    delivery: AnswerDelivery,
 }
 
 impl crate::interaction::AnswerSource for DrivenAnswers {
@@ -7613,11 +7637,29 @@ impl crate::interaction::AnswerSource for DrivenAnswers {
         "driven"
     }
 
-    fn resolve(&self, _question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
-        Ok(self.answer.clone().unwrap_or(crate::ir::Answer::Unanswered))
+    fn resolve(&self, question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        match (self.delivery, &self.answer) {
+            (AnswerDelivery::Blocking, answer) => {
+                Ok(answer.clone().unwrap_or(crate::ir::Answer::Unanswered))
+            }
+            (AnswerDelivery::Polled, None) => Ok(crate::ir::Answer::Unanswered),
+            (AnswerDelivery::Polled, Some(_)) => Err(UpstrokeError::Refused {
+                message: format!(
+                    "the blocking resolver was asked {} while a delivered answer was there to \
+                     poll: the hard block ran where the non-blocking ingestion should have",
+                    question.id
+                ),
+            }),
+        }
     }
-    fn poll(&self, question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
-        self.resolve(question)
+
+    fn poll(&self, _question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        match self.delivery {
+            AnswerDelivery::Polled => {
+                Ok(self.answer.clone().unwrap_or(crate::ir::Answer::Unanswered))
+            }
+            AnswerDelivery::Blocking => Ok(crate::ir::Answer::Unanswered),
+        }
     }
 }
 
@@ -7796,6 +7838,7 @@ fn drive_handle(
     };
     let driven_answers = DrivenAnswers {
         answer: seams.answer.clone(),
+        delivery: seams.answer_delivery,
     };
     let run_dir_answers = crate::interaction::EventLogAnswers::with_poll(
         paths.answers(),
@@ -9227,8 +9270,18 @@ fn an_over_limit_repair_spends_nothing_until_its_answer_activates_it() {
 #[test]
 fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue()
 {
+    for delivery in [AnswerDelivery::Polled, AnswerDelivery::Blocking] {
+        admission_answer_activates_the_repair(delivery);
+    }
+}
+
+/// The whole of a repair's life at the loop, with the admission answer
+/// arriving by one path only: polled before the step, or resolved at the
+/// hard block. Each path activates on its own, so neither can hide the
+/// other's absence.
+fn admission_answer_activates_the_repair(delivery: AnswerDelivery) {
     let fixture = Fixture::build(
-        "repair-admission-answer",
+        &format!("repair-admission-answer-{delivery:?}"),
         Damage {
             two_tasks: true,
             no_automatic_repairs: true,
@@ -9253,6 +9306,7 @@ fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_
             answer: Some(crate::ir::Answer::Answered {
                 text: question_options[0].clone(),
             }),
+            answer_delivery: delivery,
             ..DriveSeams::default()
         },
         3,
@@ -9421,6 +9475,135 @@ fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_
         Some(merged.proposed_sha.as_str()),
         "the integration ref is at the lineage candidate the publication named"
     );
+
+    // What the worker saw and what was published, as bytes against the
+    // commits, never as SHAs against each other: PR #249's refusals review
+    // (M6) kept the index right and overwrote the checkout, and every SHA
+    // oracle stayed green while the corruption was published.
+    let blob = |commit: &str, path: &str| {
+        String::from_utf8(
+            crate::workspace_manager::fixture::git_out(
+                &fixture.repo_root,
+                &["show", &format!("{commit}:{path}")],
+            )
+            .stdout,
+        )
+        .expect("a text fixture file")
+    };
+    let source_bytes = blob(candidate.commit_sha.as_str(), "candidate.txt");
+    let merged_before = blob(&head_before, "other.txt");
+    assert_eq!(source_bytes, "the candidate edit\n");
+    let worker = driven
+        .runs
+        .iter()
+        .find(|run| run.role == crate::runner::ExecutionRole::Implement)
+        .expect("the repair worker was invoked");
+    assert_eq!(
+        worker.checkout.get("candidate.txt"),
+        Some(&source_bytes),
+        "the clean materialization hands the worker the protected source's bytes: {:?}",
+        worker.checkout
+    );
+    assert_eq!(
+        worker.checkout.get("other.txt"),
+        Some(&merged_before),
+        "and the content already merged at its base, untouched: {:?}",
+        worker.checkout
+    );
+    assert_eq!(
+        blob(merged.proposed_sha.as_str(), "candidate.txt"),
+        source_bytes,
+        "with this fixture's no-edit worker, publishing the repair preserves the source's bytes"
+    );
+    assert_eq!(
+        blob(merged.proposed_sha.as_str(), "other.txt"),
+        merged_before,
+        "and the already merged content"
+    );
+}
+
+/// DESIGN §4 (6): "Questions never stop the runnable frontier", and the
+/// loop's first branch: a delivered answer is ingested before any other work
+/// is admitted. Beta is genuinely runnable and a halting decline is already
+/// delivered — the decline is ingested first, beta never dispatches, and no
+/// process runs. PR #249's refusals review showed the admission fixtures
+/// could not tell: with nothing else runnable, ingestion removed (M4) or the
+/// non-blocking poll replaced by the blocking resolve (M5) both passed,
+/// because the hard block delivered the same answer a step later. Here the
+/// poll is the only source that answers, and beta is what the step spends
+/// on if the poll is skipped.
+#[test]
+fn a_delivered_answer_is_ingested_before_unrelated_runnable_work_dispatches() {
+    let fixture = Fixture::build(
+        "answer-before-frontier",
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let alpha = plant_queued_candidate(&fixture);
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("events parse");
+    let fold = TopologyFold::replay(fixture.inputs(), &events).expect("events replay");
+    let paths = PathSet::Prefixes {
+        paths: vec![GitPath("candidate.txt".to_owned())],
+    };
+    let rejection = crate::engine::topology::repair::merge_rejected(
+        &fold,
+        &FixedIds,
+        &alpha.candidate,
+        fixture.base_sha.clone(),
+        crate::topology::events::SequenceId(0),
+        crate::topology::events::RejectionDisposition::Conflict {
+            paths: paths.clone(),
+        },
+        paths,
+    )
+    .expect("alpha's rejection registers an over-limit repair");
+    let repair = rejection.repair.key;
+    append_events(
+        &fixture,
+        &[TopologyEventBody::MergeRejected {
+            data: Box::new(rejection),
+        }],
+    );
+    let fold = replayed(&fixture);
+    assert!(
+        fold.ready(BETA),
+        "the unrelated task must really be runnable, or this test proves nothing"
+    );
+    assert_eq!(fold.task_state(repair), Some(TaskState::AwaitingInput));
+
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(crate::ir::Answer::Declined),
+            halts_run: true,
+            ..DriveSeams::default()
+        },
+        1,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: true,
+                ..
+            })) if *key == repair
+        ),
+        "an already delivered halting decline is ingested before unrelated work: {:?}",
+        driven.progress
+    );
+    assert!(
+        !driven.log.iter().any(|event| matches!(
+            &event.body,
+            TopologyEventBody::TaskDispatched { data } if data.key == BETA
+        )),
+        "beta must not dispatch after a delivered halting decline"
+    );
+    assert!(driven.runs.is_empty(), "no process ran: {:?}", driven.runs);
+    assert!(replayed(&fixture).run_is_ending());
 }
 
 const BETA: TaskKey = TaskKey(1);
@@ -10675,6 +10858,18 @@ fn a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and
             1,
             "{prefix:?}: the continuation materializes exactly once, whatever the kill left"
         );
+        let worker = runner
+            .runs()
+            .into_iter()
+            .find(|run| run.role == crate::runner::ExecutionRole::Implement)
+            .unwrap_or_else(|| panic!("{prefix:?}: the repair worker was invoked"));
+        assert_eq!(
+            worker.checkout.get("candidate.txt").map(String::as_str),
+            Some("the candidate edit\n"),
+            "{prefix:?}: the worker is handed the protected source's bytes, whatever the kill \
+             left: {:?}",
+            worker.checkout
+        );
         let fold = replayed(&fixture);
         assert_eq!(
             fold.task_state(ALPHA),
@@ -10850,6 +11045,17 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
         1,
         "the closed generation is never re-materialized; the fresh one is, once"
     );
+    let worker = runner
+        .runs()
+        .into_iter()
+        .find(|run| run.role == crate::runner::ExecutionRole::Implement)
+        .expect("the fresh generation's worker was invoked");
+    assert_eq!(
+        worker.checkout.get("candidate.txt").map(String::as_str),
+        Some("the candidate edit\n"),
+        "the fresh generation hands its worker the protected source's bytes: {:?}",
+        worker.checkout
+    );
     let fold = replayed(&fixture);
     assert_eq!(fold.task_state(ALPHA), Some(TaskState::Merged));
     assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
@@ -10961,8 +11167,18 @@ fn answers_of(
 /// that binding.
 #[test]
 fn a_one_off_binding_answer_activates_a_repair_no_frozen_rung_can_run() {
+    for delivery in [AnswerDelivery::Polled, AnswerDelivery::Blocking] {
+        one_off_binding_answer_activates_the_repair(delivery);
+    }
+}
+
+/// `ST-12` with the answer arriving by one path only. The `Blocking` arm is
+/// the one PR8's hard-block refusal would fail: PR #249's refusals review
+/// restored that refusal (M11) and every test passed, because the polled
+/// path had ingested the answer before the block was reached.
+fn one_off_binding_answer_activates_the_repair(delivery: AnswerDelivery) {
     let fixture = Fixture::build(
-        "one-off-binding",
+        &format!("one-off-binding-{delivery:?}"),
         Damage {
             two_tasks: true,
             small_only: true,
@@ -10990,6 +11206,7 @@ fn a_one_off_binding_answer_activates_a_repair_no_frozen_rung_can_run() {
             answer: Some(crate::ir::Answer::Answered {
                 text: AGENT.to_owned(),
             }),
+            answer_delivery: delivery,
             ..DriveSeams::default()
         },
         3,
@@ -11241,7 +11458,10 @@ fn a_binding_answer_naming_no_frozen_option_is_refused_before_any_append() {
 /// `halts_run` the decline is also the run's halt.
 #[test]
 fn declining_a_repairs_admission_fails_its_lineage_and_halts_the_run_only_when_asked_to() {
-    for halts_run in [false, true] {
+    for (halts_run, delivery) in [
+        (false, AnswerDelivery::Polled),
+        (true, AnswerDelivery::Blocking),
+    ] {
         let fixture = Fixture::build(
             &format!("decline-lineage-halts-{halts_run}"),
             Damage {
@@ -11255,6 +11475,7 @@ fn declining_a_repairs_admission_fails_its_lineage_and_halts_the_run_only_when_a
             &fixture,
             &DriveSeams {
                 answer: Some(crate::ir::Answer::Declined),
+                answer_delivery: delivery,
                 halts_run,
                 ..DriveSeams::default()
             },
