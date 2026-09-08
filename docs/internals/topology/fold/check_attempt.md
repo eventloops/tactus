@@ -116,7 +116,11 @@ ST-06: attempts are dense from 1 within a generation.
 ## `pub(super) fn check_attempt_started(&self, started: &Attemp…` › `let mismatch = |detail: String| FoldError::BindingMismatch {`
 
 refusals[11] / INV-19: the binding is the override when one was
-recorded, and the frozen rung binding otherwise.
+recorded, and the frozen rung binding otherwise. An override binds at
+the ladder's frozen floor, pinned — `RungBinding::from_override`, all
+five fields (E2 as the errata read it) — and an override on a ladder
+that records no floor refuses the attempt: there is no tier it could
+have run at.
 
 ## `pub(super) fn check_attempt_started(&self, started: &Attemp…` › `if started.rung != task.rung {`
 

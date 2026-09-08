@@ -132,6 +132,14 @@ Where an answer comes from. Step 8 adds an event-log implementation behind
 
 Called only at a hard block (§12), never mid-frontier.
 
+## `pub trait AnswerSource` › `fn poll(&self, _question: &Question) -> Result<Answer, UpstrokeError> {`
+
+The non-blocking half: what is already there, without waiting or
+prompting. The schema-4 loop asks it before every step, so an answer left
+while the engine was away is ingested ahead of any other branch. The
+default answers `Unanswered`, which is right for a terminal (a prompt is a
+block, not a poll) and for CI; `EventLogAnswers` reads its file.
+
 ## `pub struct UnattendedAnswers;`
 
 CI and every other detached context: nobody is there. Note this returns
@@ -175,6 +183,11 @@ Poll often enough to feel responsive, rarely enough to be free.
 
 The waiting itself is injected, so a test can exercise a bounded wait
 without spending it.
+
+## `impl AnswerSource for EventLogAnswers<'_>` › `fn poll(&self, question: &Question) -> Result<Answer, UpstrokeError> {`
+
+One read of the answer file and no wait: the file is either there or it
+is not, and the budget is `resolve`'s to spend.
 
 ## `pub fn interpret(question: &Question, raw: &str) -> Answer {`
 

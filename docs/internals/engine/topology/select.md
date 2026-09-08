@@ -299,12 +299,11 @@ the same attempt over ground that already exists.
 
 A `ready` task whose origin is `MergeRepair`.
 
-Named as its own step rather than folded into `Dispatch` because the
-checkpoint refuses it and the loop maps it: `checkpoint_refusals` has PR8
-refuse "dispatch of a Repair-origin task … before any append", and the
-refusal has to be taken on a value nothing has acted on. It is selected
-**without** the ceiling check, because a `budget_exceeded` is an append and
-the refusal comes before any.
+Named as its own step rather than folded into `Dispatch` so the loop can
+say what it performs: PR8's checkpoint refused it before any append, and
+PR9 admits it. The ceiling binds it like any dispatch — a repair spends
+like any attempt — so it is selected through `ceiling_or` with the
+repair's own key, and a breach names the repair.
 
 ## `pub enum Step` › `Backoff,`
 
@@ -327,15 +326,16 @@ Run-end closure is due, with the outcome the fold derives.
 
 The branches an **intermediate build** is entitled to perform.
 
-[`Step`] has **nine** variants and this has six, so **three** do not
-cross: `RepairDispatch`, `Closure` and `Poisoned`. The first two are the
-whole of `checkpoint_refusals` for PR8 — there is no value of this type that
-can carry a repair dispatch or a run end, so no caller holding one can
-append the `task_dispatched` of a repair or `run_finished`. That is the
-refusal made unrepresentable rather than remembered. `Integrate` crossed
-when PR8 implemented every terminal of `merge_verification_started`.
+[`Step`] has **nine** variants and this has **seven**, so **two** do not
+cross: `Closure` and `Poisoned`. The first is the whole of
+`checkpoint_refusals` for PR9 — there is no value of this type that can
+carry a run end, so no caller holding one can append `run_finished`. That
+is the refusal made unrepresentable rather than remembered. `Integrate`
+crossed when PR8 implemented every terminal of
+`merge_verification_started`; `RepairDispatch` when PR9 implemented
+`T-REPAIR-DISPATCH`.
 
-The third is not a refusal of a *branch*. `Poisoned` is the absence of one:
+The second is not a refusal of a *branch*. `Poisoned` is the absence of one:
 an append errored, this process's fold is not authoritative, and nothing
 further is selected at all. It is excluded from this type for the same
 reason the other two are — a caller holding an `Admitted` may act — but not
@@ -476,17 +476,14 @@ the *next* integration counts every review the last one ran.
 `checkpoint_refusals`: "an intermediate build refuses, **before any
 append**, any operation whose terminals it does not implement".
 
-PR8 implements every terminal of `merge_verification_started` and of
-`merge_prepared`, so an integration crosses. What it refuses is the two
-operations `checkpoint_refusals` names for it: "dispatch of a Repair-origin
-task and repair-admission answers" — the dispatch here, because it is a
-selected step, and the answer at the hard block, where answers are read.
-Repair execution is `T-REPAIR-DISPATCH`, PR9's, and a build that dispatched
-a repair would append a `task_dispatched` whose terminals it does not
-implement — INV-07's "every checkpoint build implements every terminal
-reachable from any start it appends" read from the other end. Run-end
-closure is refused for the same reason: `run_finished` is a terminal whose
-finalization this build does not perform.
+PR8 implemented every terminal of `merge_verification_started` and of
+`merge_prepared`, so an integration crosses; PR9 implements repair
+execution (`T-REPAIR-DISPATCH`) and every origin's answer ingestion, so a
+repair dispatch crosses too, and answers are read at the hard block and
+before each step. What this build refuses is run-end closure:
+`run_finished` is a terminal whose finalization it does not perform —
+INV-07's "every checkpoint build implements every terminal reachable from
+any start it appends" read from the other end.
 
 The refusal is taken on the [`Step`], which is a value nothing has acted
 on: `select` performed no effect and appended nothing, so "before any

@@ -136,3 +136,18 @@ and review results.
 `VerificationRecord.verdict` is `GatesFailed` when a gate refused,
 `Rejected` when a reviewer did; `gates_passed` is whether every gate
 passed; `reviews` are the pass records; `detail` is the failure's reason.
+
+## `pub fn one_off_binding(`
+
+The `BindingOverride` a `HumanBinding` answer activates, derived once at
+ingest (E2 as the errata read it): the repair ladder's frozen floor is the
+tier, the binding is pinned, the model is the catalogue's lowest for the
+chosen agent at or above that floor, and the effort is the policy's for
+that tier. Refused when the ladder records no floor (nothing to bind at)
+or the catalogue knows no such model, before anything is appended.
+
+## `fn catalogued_model(agent: &str, floor: Tier) -> Option<String> {`
+
+The catalogue's first entry for `agent` at the lowest tier at or above
+`floor`, which is what "the option names an agent, not a model" resolves
+to. `None` when the agent has no model there.

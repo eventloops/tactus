@@ -1973,26 +1973,28 @@ layer for a value no path below this one reads.
 
 ### Errors
 
-[`UpstrokeError::Refused`] for a generation whose lease is an inherited
-lineage — a repair, whose resume action is to re-materialize its source
-candidate, and whose source the fold does not retain. `checkpoint_refusals`
-gives repair execution to PR8, so this build refuses rather than
-reconstructing a materialization it cannot prove. **The arm is unreachable
-in this slice and both walls are measured** by
-`a_repair_generation_cannot_reach_step_g_in_this_slice`: the fold refuses an
-inherited lease on an ordinary task at the barrier's checked replay, and
-`TaskRegistry::originals_with_agents` gives every entry `lineage: None`, so
-there is no task the lease would be legal on. That test fails the day a
-slice admits repairs, which is when this arm becomes reachable. Also
-refused when a generation holding its lease has no recorded region, which
-is a fold that disagrees with itself rather than a state to guess at.
-Otherwise the containment refusals or a Git error from
-[`resume_open_no_attempt`].
+**(g) materializes nothing (`R6`).** A repair generation is verified or
+recreated at its base exactly like an ordinary one; its source is read from
+its own `task_dispatched` (`dispatched_source`) so the loop's continuation
+can re-materialize it once. Materializing here too would run the pick twice
+when the continuation runs, or leave a worktree whose materialization the
+loop could not tell from the kill's. The three states a kill leaves between
+`task_dispatched` and `attempt_started` — no worktree, a worktree with the
+pick's residue, a completed pick — are each driven through this step and
+the continuation by
+`a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once`.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {`
+### Errors
+
+[`UpstrokeError::Refused`] when a repair generation's `task_dispatched`
+names no source candidate: the log disagrees with the registry and nothing
+is recreated from a guess. Otherwise the containment refusals or a Git
+error from [`verify_or_recreate`].
+
+## `fn open_no_attempt(`
 
 Every `OpenNoAttempt` generation the proven prefix records, with what a
-rebuild of it needs.
+rebuild of it needs — for a repair, the source its dispatch recorded.
 
 Sibling of [`retained_idle`] and [`in_flight`], and deliberately shaped like
 them: one enumerator per generation class, so "which class does this step
@@ -2000,12 +2002,16 @@ act on" is a property of the function the step calls rather than of a
 predicate the step re-derives. Two rules that can disagree is the shape this
 slice has paid for repeatedly.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {` › `let Some(open) = fold.open_no_attempt(key) else {`
+## `fn open_no_attempt(` › `let Some(open) = fold.open_no_attempt(key) else {`
 
 The class question is the fold's, through `open_no_attempt`. The
 repair refusal below is recovery's own policy and stays here.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {` › `source: None,`
+## `fn open_no_attempt(` › `let source = match generation.lease {`
+
+A repair's source is read from its own `task_dispatched` — the log, not
+the registry — so what (g) hands the loop is what the interrupted dispatch
+recorded, and a dispatch that names none refuses.
 
 `None` is not a guess. An ordinary generation has no
 materialization to reproduce, and the repair case returned

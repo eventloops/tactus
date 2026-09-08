@@ -1000,3 +1000,23 @@ values, so a malformed one is the tool or the engine misbehaving. Reaching
 `ObjectId::new` with a `?` made it `UpstrokeError::Refused`, which says a
 caller offered something it should not have. Witnessed by restoring that
 `?`: the error becomes `Refused` and the first assertion fails.
+
+## `fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_is_staged() {`
+
+`R9`: a conflicted path still carrying markers is read before staging, so
+nothing is staged and the tree is the base's; the assessment fails
+`AgentError` naming the path, with feedback about the markers, and no gate
+or reviewer runs. Once the worker resolves the file, the capture stages
+the resolution and the index holds no unmerged entry.
+
+## `fn deleting_a_conflicted_file_resolves_it() {`
+
+A conflicted path whose file is gone was resolved by deletion: nothing
+unresolved, and the captured tree records the deletion.
+
+## `fn an_already_present_source_proceeds_as_an_ordinary_attempt_whose_empty_diff_fails_honestly() {`
+
+`repairs.empty_source`: an `Empty` observation proceeds as an ordinary
+attempt; a worker that then changes nothing fails under the existing
+empty-diff rule rather than through a no-candidate settlement that does
+not exist (a deferred decision).

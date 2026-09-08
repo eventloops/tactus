@@ -192,11 +192,18 @@ omission this module exists because of.
 
 **Another slice's, by contract.** Distinct from
 [`Self::RefusedByCheckpoint`], and the distinction is not pedantry:
-`checkpoint_refusals` authorises this build to refuse exactly two things
-— "integration and run end beyond refusal" — and a third refusal wearing
-that name would be a build refusing something the packet never let it
-refuse. It is not [`Self::NotYetImplemented`] either, because that is
-debt this slice owes and this is not.
+`checkpoint_refusals` authorises this build to refuse exactly one thing
+— run end beyond refusal — and a second refusal wearing that name would
+be a build refusing something the packet never let it refuse. It is not
+[`Self::NotYetImplemented`] either, because that is debt this slice owes
+and this is not.
+
+**No arm returns it today.** `IngestAnswers` carried it while answers
+were PR9's; PR9 ingests every origin's answer, so that arm is
+`Performed` and `every_branch_states_what_this_build_does_with_it`
+asserts the set of `NotThisSlice` branches empty. The variant stays,
+`#[allow(dead_code)]`, for the next branch that sits on a slice
+boundary.
 
 ## `pub enum Disposition` › `slice: &'static str,`
 
@@ -259,12 +266,12 @@ reason belongs in the arm, not in prose somewhere else.
 `checkpoint_refusals`: "an intermediate build refuses, before any
 append, any operation whose terminals it does not implement". Run end
 beyond refusal is PR10's, and it is made unrepresentable rather than
-remembered — `Admitted` carries six of `Step`'s nine variants, so no
-value reaching the acting half can name a closure. The other two that
-do not cross are `RepairDispatch`, which is PR8's own checkpoint
-refusal and belongs to the ready-dispatch branch rather than to a
-branch of its own, and `Poisoned`, which is not a branch this build
-declines but the absence of one.
+remembered — `Admitted` carries seven of `Step`'s nine variants, so no
+value reaching the acting half can name a closure. The other one that
+does not cross is `Poisoned`, which is not a branch this build declines
+but the absence of one. `RepairDispatch` crossed when PR9 implemented
+repair execution; it belongs to the ready-dispatch branch rather than
+to a branch of its own.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::Integration => Disposition::Performed,`
 
@@ -316,21 +323,25 @@ questions". The channel decision is `interaction::answers_for`'s;
 this branch asks whatever source it is handed. An answer to a
 **verification-park** question is ingested here — PR8's
 `question_answered`, which the fold routes to `AwaitingMerge` for an
-answer and to a failed lineage for a decline — and an answer to a
-repair-admission or attempt park is refused, because ingesting those
-is PR9's. The `QuestionOrigin` the fold recorded is what tells the two
-apart, so the refusal is a statement about the question's kind rather
-than about the answer.
+answer and to a failed lineage for a decline — and, since PR9, an
+answer to a repair-admission or attempt park too. Every origin goes
+through `answer_for`: for a `HumanBinding` admission the answer must
+name a frozen option and carries the one-off binding derived from it
+(E2), any other origin records its option index, and a decline halts
+or not by the run's seam. The `QuestionOrigin` the fold recorded
+decides whether an override is derived, not whether the answer is
+ingested.
 
-## `pub const fn disposition(self) -> Disposition` › `Self::IngestAnswers => Disposition::NotThisSlice {`
+## `pub const fn disposition(self) -> Disposition` › `Self::IngestAnswers => Disposition::Performed,`
 
-**Refused by contract, not by omission.** `pr_sequence[8]` does
-not contain the word "answer"; PR8 still refuses
-"repair-admission answers before any append"; and PR9 owns
-`question_answered`, `T-ANSWER`, and "AwaitingInput -> Pending
-via validated answer". PR7's `replay_recovery` never names
-`T-ANSWER`. Same shape as `Integration` and `Closure`, whose
-terminals arrive in PR8 and PR10.
+**Performed since PR9**, which owns `question_answered`, `T-ANSWER`
+and "AwaitingInput (limit | human_binding) -> Pending via validated
+answer". Two readers of one path: `step` polls every open question
+through the non-blocking `AnswerSource::poll` before it selects, so an
+answer left in the run directory while the engine was away is ingested
+ahead of any other branch; the hard block resolves (blocking) when
+nothing else can move. Both go through `answer_for` and
+`ingest_answer`, so what an answer means is decided once.
 
 ## `impl LoopBranch` › `pub const fn of(step: &Step) -> Option<Self> {`
 
@@ -350,8 +361,11 @@ cannot be read as "no further transition, therefore end the run".
 
 A repair dispatch is the ready-dispatch branch reaching a Repair-origin
 task: `eligibility_order` names "new ordinary dispatch" and no branch
-for repairs, so the step maps to that branch and the checkpoint refuses
-it there.
+for repairs, so the step maps to that branch, and the branch performs
+it. `dispatch_kind` derives `Repair { root, source }` from the registry
+entry's lineage and the `merge_rejected` that registered it, `dispatch`
+materializes the source in the same call, and `attempt_started` records
+what the materialization observed.
 
 ## `pub const fn of(step: &Step) -> Option<Self>` › `Step::BudgetExceeded(_) => None,`
 
@@ -1010,6 +1024,12 @@ value nothing has acted on, so `checkpoint_refusals`' "before any
 append" holds by construction rather than by this function remembering
 to check early enough.
 
+**Answers first.** Before selecting, `ingest_answers` polls every open
+question through the non-blocking half of the answer source; the first
+answer found is ingested and the step ends there (`Progress::Answered`),
+so an answer a person left while the engine was away moves the run
+before any other branch spends anything.
+
 **Every step runs inside the run lock's cleanup scope.** A Unix reaper
 reads its cleanup-lease paths from the thread-local scope when it is
 spawned, and a reaper spawned with none active holds no lease: the next
@@ -1103,31 +1123,31 @@ Deciding it here rather than in the engine keeps that distinction where
 the channels live." This branch asks the source it is handed and does
 not know which channel it got.
 
-### What it does with an answer, and why that is a refusal
+### What it does with an answer
 
-Nothing, yet. **Ingesting an answer is PR9's.** `pr_sequence[8]` does
-not contain the word *answer*; `pr_sequence[9]` (PR8) still lists
-"repair-admission answers refused before any append"; and
-`pr_sequence[10]` (PR9) owns `question_answered`, `T-ANSWER`, and
-"AwaitingInput (limit | human_binding) -> Pending via validated
-answer". PR7's `replay_recovery` does not name `T-ANSWER` at all.
+Ingests it. Each open question is resolved in id order and the first
+answer goes through `answer_for` and `ingest_answer`: `question_answered`
+is appended and the fold routes it — `AwaitingMerge` for a verification
+park, `Pending` for an admission (a `HumanBinding` one carrying the
+override the answer derived), a failed lineage for a decline, halting
+per the run's `halts_run` seam. `Answer::Unanswered` is not an answer:
+it is the detached case reporting that nobody was there, and the run
+stays blocked, which is exactly what the rule prescribes. The
+non-blocking half of the same path is `ingest_answers`, which `step`
+runs before it selects.
 
-So an answer that arrives is refused **before any append**, which is
-`checkpoint_refusals`' own shape: "an intermediate build refuses, before
-any append, any operation whose terminals it does not implement".
-`Answer::Unanswered` is not an answer and is not refused — it is the
-detached case reporting that nobody was there, and the run stays
-blocked, which is exactly what the rule prescribes.
-
-## `impl TopologyRun` › `fn open_question(&self, id: &QuestionId) -> Result<Question, UpstrokeError> {`
+## `impl TopologyRun` › `fn open_question(&self, id: &QuestionId) -> Result<OpenAsked, UpstrokeError> {`
 
 One open question, in the shape [`crate::interaction::AnswerSource`]
-reads.
+reads, with what `answer_for` needs beside it.
 
 The fold froze the id, kind, context and options when the settlement
 parked; `affected_tasks` is the display id the registry holds for the
 key it froze. Nothing is re-decided — `T-FAILED` is explicit that a
-question is rematerialized from the event and "never re-decided".
+question is rematerialized from the event and "never re-decided". The
+rest of `OpenAsked` is what the fold kept with the question: the key,
+the `QuestionOrigin`, and for a `HumanBinding` admission the authorized
+agents its options index into.
 
 ## `impl TopologyRun` › `fn continue_open(`
 
@@ -1145,10 +1165,19 @@ design was waiting for: recovery step (g) recreated these worktrees and
 nothing then started an attempt in them, so the run stalled with the
 pipeline entitlement held by a generation no branch could select.
 
-## `impl TopologyRun` › `source: None,`
+## `impl TopologyRun` › `source: match &kind {`
 
-Repairs are PR9's; a repair generation is refused by recovery
-before the loop ever sees one.
+A repair's source is the candidate its own `task_dispatched` recorded
+(`dispatched_source`), never re-derived from the registry: the
+continuation re-materializes exactly what the interrupted dispatch
+materialized.
+
+**For a repair the continuation is where the materialization happens
+again (`R6`).** Recovery (g) verifies or recreates the worktree at its
+base and materializes nothing, so a recreated repair worktree is at its
+base when the loop reaches it and `resume_open_no_attempt` re-runs the
+pick once — afresh, or as a no-op onto an index a completed pick already
+left — and its observation is what `attempt_started` records.
 
 ## `impl TopologyRun` › `fn retry_ready(`
 
@@ -1162,6 +1191,12 @@ every step of it — the reservation before the verify, because
 selection decision and its first append" and the verify is already past
 the decision; then `Worktree.Verify` for a worktree that is present,
 quiescent and still holding the retained tree.
+
+A retained repair generation retries in place like any other and
+records `Materialization::Retained` rather than materializing again: the
+worktree it re-enters is the one the previous attempt left, pick
+included (`ST-15`, repair). The materialization funnel clears the pick's
+state files for exactly this verification's sake.
 
 **`Quiescence::HoldsTree`, not `AtBase`.** A retained generation's whole
 point is that the worktree carries the previous attempt's cumulative
@@ -1583,11 +1618,17 @@ The frozen ladder's shape, as `next_step` reads it.
 
 Every field from a record the run already froze: the entry's own ladder
 for the allowance and the rung count, and `run_started(4).limits` for the
-deferral ceiling. None of it is re-derived.
+deferral ceiling. None of it is re-derived. With a validated override the
+rung count is one: E2 binds every later attempt to the override, so there
+is no rung above it to escalate onto.
 
 ## `impl TopologyRun` › `fn dispatch_request(`
 
-What a first ordinary dispatch of `key` asks for.
+What a first dispatch of `key` asks for, ordinary or repair.
+`dispatch_kind` decides which: an entry with a lineage is a repair,
+dispatched inside its root's lineage lease from the candidate the
+latest `merge_rejected` registering it names (`rejected_source`), which
+R11 keeps reachable for as long as the run can resume.
 
 Every field is read from the run's own record, its log or the frozen
 registry, never invented: the base is the run's current authorized
@@ -1667,19 +1708,28 @@ The ceiling's ledger, charged before the terminal is
 appended, as an attempt's reviews are charged in `settle`:
 `Spend::replay` rebuilds it from the terminal's record.
 
-## `fn hard_block(` › `if origin != QuestionOrigin::VerificationPark {`
+## `impl TopologyRun` › `fn answer_for(`
 
-A verification park is PR8's to ingest; a repair-admission or an
-attempt park is PR9's, and `checkpoint_refusals` has this build
-refuse those answers before any append.
+One reading of an answer, for every origin. A decline becomes
+`Declined { decline_halts_run }` from the run's seam. For a
+`HumanBinding` admission the answer must be one of the frozen options
+(`chosen_index`, exact text), the option indexes the authorized agents
+the fold kept beside the question, and the override is
+`repair::one_off_binding`, derived once, here, at ingest (`R2`): the
+repair ladder's frozen floor, pinned, the catalogue's lowest model for
+that agent at or above the floor, the policy's effort for it. Text that
+names no option is refused before anything is appended. Any other
+origin records the chosen option index (0 for free text) and no
+override.
 
-## `impl TopologyRun {` › `fn ingest_verification_answer(`
+## `impl TopologyRun` › `fn ingest_answer(`
 
-Ingest an answer to a verification-park question: append
-`question_answered`, which the fold routes to `AwaitingMerge` (the
-candidate re-verifies under a new sequence) or, for a decline, to a
-failed lineage with its queue position consumed and its lease released,
-halting per `decline_halts_run`.
+Append `question_answered` for whichever origin `answer_for` read, and
+report `Answered { declined }`. The fold does the routing: `AwaitingMerge`
+for a verification park (the candidate re-verifies under a new
+sequence), `Pending` for an admission, a failed lineage for a decline
+with its queue position consumed and its lease released, halting per
+`decline_halts_run`.
 
 ## `impl Verification for IntegrationCx<'_, '_> {` › `match self.judge_proposal(request) {`
 
@@ -1702,3 +1752,53 @@ terminal, so a restart restores a total without it — `PR8-R2-SPEND-REPLAY`,
 which needs a wire-vocabulary change this slice may not make. That gap is about
 a restart; this account is about one incarnation, and holding the cost inside
 it needs no vocabulary at all.
+
+## `struct OpenAsked {`
+
+An open question as the loop reads it: the `Question` the answer source
+sees, and beside it the key, the `QuestionOrigin` and — for a
+`HumanBinding` admission — the authorized agents the fold froze, which
+the chosen option indexes.
+
+## `fn chosen_index(options: &[String], text: &str) -> Option<u32> {`
+
+The option an answer's text names, by exact text. A one-off binding
+activates only through an option the spawn froze, so anything else is
+`None` and refused; for other origins `None` records index 0.
+
+## `impl TopologyRun` › `fn ingest_answers(`
+
+The non-blocking half of answer ingestion: every open question polled in
+id order while the run is not ending, the first answer ingested through
+`answer_for` and `ingest_answer`. `Ok(None)` when nothing has been
+answered, and the step goes on to select.
+
+## `impl TopologyRun` › `fn retry_materialization(&self, key: TaskKey) -> Option<Materialization> {`
+
+What a same-generation retry records as its materialization: `Retained`
+for a lineage member (the worktree keeps the pick the first attempt ran
+on), `None` for an ordinary task. The fold requires the field present
+exactly for lineage members.
+
+## `impl TopologyRun` › `fn dispatch_kind(&self, key: TaskKey) -> Result<DispatchKind, UpstrokeError> {`
+
+Ordinary or repair, from the frozen registry entry: an entry with no
+lineage dispatches on its predicted region; one with a lineage is a
+repair, executed inside the root's lineage lease from the candidate
+`rejected_source` reads.
+
+## `fn rejected_source(events: &[TopologyEvent], key: TaskKey) -> Result<CandidateRef, UpstrokeError> {`
+
+The candidate a repair is materialized from: the latest `merge_rejected`
+whose spawn registered `key`. Read from the log rather than kept on the
+fold (a Class A reading: the fold's tables stay as PR8 froze them), and
+refused when no rejection registered the key, since a repair with no
+recorded source has nothing to run against.
+
+## `pub(super) fn dispatched_source(`
+
+The source a specific generation of a repair was dispatched with: its
+own `task_dispatched`'s `source_candidate`. Recovery (g) and the
+continuation both read this, so what is re-materialized is what the
+interrupted dispatch materialized. Refused when the generation has no
+dispatch or its dispatch names no source.

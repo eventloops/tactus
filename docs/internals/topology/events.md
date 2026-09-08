@@ -704,8 +704,11 @@ One rung's binding as an attempt actually used it.
 
 Comparable against both authorities: the frozen rung the registry holds,
 and an override a human named. The override records no tier — the option
-list it chose from is agents, not tiers — which is why the two comparisons
-are two methods rather than one equality.
+list it chose from is agents, not tiers — so the tier it binds at is
+supplied by the caller: the repair ladder's frozen floor (E2 as the errata
+read it), and the binding is pinned, a person having named it. The two
+comparisons are two methods because the two authorities carry different
+fields, not because either compares fewer than all five.
 
 ## `pub struct RungBinding` › `pub pinned: bool,`
 
@@ -726,15 +729,21 @@ This binding as the frozen ladder would produce it.
 
 Whether this binding is the one the frozen rung names.
 
-## `impl RungBinding` › `pub fn matches_override(&self, binding: &BindingOverride) -> bool {`
+## `impl RungBinding` › `pub fn from_override(binding: &BindingOverride, tier: Tier) -> Self {`
 
-Whether this binding is the one an override names.
+This binding as a validated override produces it at `tier`: the
+override's agent, model and effort, `pinned: true`. There is one
+construction, so the validator, the reader that plans an attempt and the
+attempt that records it cannot disagree about what an override binds.
 
-Tier and pin are not compared: an override chooses an agent from a
-frozen option list, so the tier it lands on is whatever that agent is
-bound at, and a human-named binding has no plan pin behind it at all.
-[`BindingOverride`] records neither, and comparing a field the authority
-does not carry would refuse every valid override.
+## `impl RungBinding` › `pub fn matches_override(&self, binding: &BindingOverride, tier: Tier) -> bool {`
+
+Whether this binding is the one an override names at `tier`: all five
+fields, through [`Self::from_override`]. The earlier reading skipped tier
+and pin, which let a recorded attempt claim any tier and either
+provenance under a valid override; the errata's E2 fixes the tier at the
+repair ladder's floor and the pin at `true`, so both are compared like
+the rest.
 
 ## `pub enum Materialization {`
 
@@ -2165,14 +2174,16 @@ must not match the other — in *both* directions, which one fixture at
 
 ## `fn a_binding_is_compared_against_both_authorities_field_by_field() {` › `let binding = BindingOverride {`
 
-The override comparison ignores tier and nothing else: the option
-list an override chooses from is agents, not tiers.
+The override comparison compares all five fields. The override records
+no tier, so the tier is the caller's — the repair ladder's frozen floor
+(E2 as the errata read it) — and a binding one tier off in either
+direction is refused like a moved agent, model or effort.
 
-## `fn a_binding_is_compared_against_both_authorities_field_by_field() {` › `for pinned in [true, false] {`
+## `fn a_binding_is_compared_against_both_authorities_field_by_field() {` › `pinned: false,`
 
-The pin is ignored for the same reason the tier is, and for both of
-its values: `BindingOverride` records neither, so comparing either
-would refuse a validated one-off binding rather than check it.
+The pin is compared too: a validated one-off binding is pinned, a person
+having named it, so a recording that claims `pinned: false` under an
+override is refused.
 
 ## `mod tests` › `fn a_topology_run_record_projects_to_the_registry_derivation_intact() {`
 

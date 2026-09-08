@@ -301,3 +301,39 @@ The intent is durable before the add, and the add refuses without it.
 dispatch-side statement of what it protects: a worktree created without a
 durable intent is one `reclaim_intents` can never find. Driven by removing
 the intent and re-adding, because the funnel cannot be made to skip it.
+
+## `fn a_repair_dispatch_records_what_its_materialization_observed() {`
+
+The three observations a materialization can make — `Clean`, `Conflict`,
+`Empty` — each recorded on the `Dispatched` value, each generation closed
+at run end with `LineageHeld`, and the log replaying equal.
+
+## `fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {`
+
+`command_internal_sub_effects`, synthetic half, for `Object.RepairMaterialize`:
+each of the four declared elements planted into a fresh worktree at the
+base, classified `Internal`, and recovered by `resume_open_no_attempt` —
+reused or recreated exactly as `element_breaks_quiescence` says, the
+materialization reproduced once, the tree the control's, the planted
+objects untouched.
+
+## `fn sampled_repair_materialization_child_kills_every_residue_classified_and_recovered() {`
+
+The kill-sampling half: N real `cherry-pick --no-commit` children killed at
+spread points, every residue classified and every worktree recovered to the
+control's tree. Its first run found the held `MERGE_MSG.lock` the verifier
+did not read.
+
+## `fn repair_materialization_objects_released_to_git_on_scrub() {`
+
+R9 → R27: a three-way merge's new blob is referenced by the repair index
+and becomes unreachable, still present, when the worktree is scrubbed; the
+candidate commit stays reachable through its ref.
+
+## `fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_states() {`
+
+The two kill points after the pick's index write, pinned deterministically:
+the held `MERGE_MSG.lock` is read as the message's residue and recreated
+from; the merged index with no state file — also the completed after
+phase — is reused, and the re-run pick is a no-op reporting the same
+observation, for a clean source and for a conflicting one.

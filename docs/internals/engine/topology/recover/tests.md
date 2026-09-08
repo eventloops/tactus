@@ -1674,32 +1674,26 @@ observation. This fixture leaves the one state (g) exists for — a generation
 dispatched and never attempted, which is what a crash between
 `task_dispatched` and `attempt_started` leaves.
 
-## `fn a_repair_generation_cannot_reach_step_g_in_this_slice() {`
+## `fn an_inherited_lease_on_an_ordinary_task_is_refused_at_the_barrier_before_step_g() {`
 
-A repair generation cannot reach step (g) in this slice, and the reason is
-measured rather than asserted.
+An inherited lease on an ordinary task is refused by the fold at the
+barrier's checked replay, before (g) sees anything — the consistency rule
+that keeps a `task_dispatched` from claiming a lineage its entry does not
+descend from. Until PR9 this test also stood for "a repair generation
+cannot reach (g)"; repairs now reach it, through entries `merge_rejected`
+registers, and their path is
+`a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once`.
 
-(g) refuses a generation whose lease is an inherited lineage: `T-DISPATCH`'s
-resume action for a repair is to re-run the recorded materialization, whose
-source candidate the fold does not retain, and `checkpoint_refusals` gives
-repair execution to PR8. That arm is **unreachable here**, and this test
-pins both walls that make it so, because "unreachable" written in a comment
-is the same sentence as "I did not check".
+## `fn an_inherited_lease_on_an_ordinary_task_is_refused_at_the_barrier_before_step_g()` › `let repair = {`
 
-The wall this test will lose first is the second one: the day a slice admits
-repairs, `TaskRegistry::from_plan` starts producing entries with a lineage,
-this test fails, and (g)'s arm becomes reachable — which is precisely when
-someone should be made to look at it.
+The fold refuses an inherited lease on an ordinary task, at the barrier's
+checked replay — so the event never becomes fold state at all.
 
-## `fn a_repair_generation_cannot_reach_step_g_in_this_slice()` › `let repair = {`
+## `fn an_inherited_lease_on_an_ordinary_task_is_refused_at_the_barrier_before_step_g()` › `let registry = TaskRegistry::originals_with_agents(`
 
-Wall one: the fold refuses an inherited lease on an ordinary task, at the
-barrier's checked replay — so the event never becomes fold state at all.
-
-## `fn a_repair_generation_cannot_reach_step_g_in_this_slice()` › `let registry = TaskRegistry::originals_with_agents(`
-
-Wall two: and there is no task it *would* be legal on, because this
-slice's registry gives every entry `lineage: None`.
+And no *original* entry could carry one legally: `originals_with_agents`
+gives every entry `lineage: None`; lineage members enter the registry only
+through `merge_rejected`.
 
 ## `fn the_recovery_order_hands_the_run_on_rather_than_dropping_it() {`
 
@@ -3246,12 +3240,13 @@ proposed tree before any reviewer runs.
 The ceiling is checked against `Spend`, so a review an integration ran
 must be charged there, live and on replay of the terminal's record.
 
-## `fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append()` › `let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);`
+## `fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {`
 
-R13: the loop ingests an answer to a verification-park question at the
-hard block — Answered returns the candidate to the queue, and the next
-step integrates it — and refuses an answer to a repair-admission
-question before any append, which is PR9's.
+R13: the loop ingests an answer to a verification-park question —
+Answered returns the candidate to the queue, and the next step integrates
+it. The repair-admission half of PR8's version of this test, a refusal,
+became
+`a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue`.
 
 ## `const BETA: TaskKey = TaskKey(1);`
 
@@ -3414,3 +3409,95 @@ head that has since been published is not substituted, and no second
 `task_dispatched` appears. Mutating `continue_open` to re-derive its base
 through [`super::super::integrate::dispatch_head`] fails it at the worker's
 HEAD.
+
+## `fn plant_rejected_repair(fixture: &Fixture) -> (crate::topology::events::MergeRejected, TaskKey) {`
+
+The one planting every repair test starts from: alpha's candidate,
+stale-verified at beta's published head and rejected by review, so the
+rejection registers alpha's first repair. Its admission is whatever the
+fixture's `max_merge_repairs` decides — `Runnable` at the default of one,
+`HumanRequired` under `no_automatic_repairs`, `HumanBinding` under
+`small_only` (the root's one Small rung leaves the repair's Mid floor
+empty).
+
+## `fn an_over_limit_repair_spends_nothing_until_its_answer_activates_it() {`
+
+An over-limit repair is `AwaitingInput`, the run hard-blocks on its one
+question, and nothing is spent or appended beyond the resume's own record
+until a person answers.
+
+## `fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue() {`
+
+The whole of a repair's life at the loop: the admission answer is ingested
+(`question_answered` before `task_dispatched`), the repair dispatches
+inside its root's lineage lease at the head current at its dispatch,
+materializes the rejected candidate (`Clean`, recorded before the spawn),
+runs to a candidate that widens the lineage, and merges exact-base with
+`satisfies` the canonical closure and the lineage lease released. R11's
+candidates ref is still there afterwards.
+
+## `fn a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once() {`
+
+`T-REPAIR-DISPATCH` across the process boundary, for each of the three
+states a kill leaves between `task_dispatched` and `attempt_started`: no
+worktree, a worktree with the pick's held `MERGE_MSG.lock`, a completed
+pick. Recovery (g) recreates the first two at the base and reuses the
+third, materializing nothing (`R6`); the continuation materializes exactly
+once, in the same generation, and the observation `attempt_started`
+records is the continuation's.
+
+## `fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again() {`
+
+`ST-11` for a repair: (e) closes the retained generation
+`ResumeDiscardsRetainedSession` with `LineageHeld`, the repair opens its
+next generation from the same recorded source, and that generation is
+materialized again, once; the closed one never is.
+
+## `fn a_rejected_candidates_ref_survives_a_budget_stop_and_the_repair_dispatches_after_the_resume() {`
+
+R11 across a budget stop: the candidates ref protecting the repair's source
+is untouched by the stop and by the resume that clears it, and the repair
+dispatches from it in the next epoch.
+
+## `fn a_one_off_binding_answer_activates_a_repair_no_frozen_rung_can_run() {`
+
+`ST-12` at the loop: a `HumanBinding` admission, answered with an agent,
+carries the five-field override derived once at ingest — the repair
+ladder's Mid floor, the catalogue's lowest model for the agent at or above
+it, the policy's Mid effort — and the attempt runs under exactly that
+binding, pinned, at rung 0.
+
+## `fn a_binding_answer_naming_no_frozen_option_is_refused_before_any_append() {`
+
+Text that names no frozen option is refused, the log gains nothing beyond
+the resume's own record, and the question stays open.
+
+## `fn declining_a_repairs_admission_fails_its_lineage_and_halts_the_run_only_when_asked_to() {`
+
+A decline fails the repair and its root, releases the lineage lease, and
+ends the run exactly when `halts_run` says so; what follows is the run's
+closure, which this build refuses.
+
+## `fn a_repairs_same_session_retry_records_retained_and_is_not_materialized_again() {`
+
+`ST-15` for a repair, in the incarnation that retained the session: the
+retry is the same generation's second attempt, resumes the session,
+records `Materialization::Retained`, and the materialization funnel ran
+once. This test is what found the funnel leaving `MERGE_MSG` behind, which
+failed the retry's `HoldsTree` verification and closed the generation.
+
+## `fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step() {`
+
+`T-ANSWER` through the production reader: with no answer file the run
+hard-blocks; an answer staged and published into `answers/` while the
+engine is away is ingested by the next incarnation's first step, `via`
+`event-log`, before anything else is selected.
+
+## `fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {`
+
+Two lineages overlapping on one path, the younger's repair already queued
+when the older's has not started: the younger candidate is queued but
+ineligible (`BehindOlderLineage`), the older repair dispatches and
+publishes first, and the younger publishes onto the head it left —
+lineage order, not queue position, each publication satisfying its own
+closure and releasing its own lineage lease.

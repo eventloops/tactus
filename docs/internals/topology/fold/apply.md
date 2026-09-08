@@ -94,10 +94,19 @@ still holds its queue position until `apply_task_merged` or
 because `check_question_raised` refuses a terminal task and `set_state`
 takes a terminal task out of `deferred_tasks`.
 
+## `fn is_lineage_member(&self, key: TaskKey) -> bool {`
+
+Whether `key` descends from a lineage. A lineage member's terminal
+failure (`attempt_finished` with a `Failed` transition) folds its whole
+lineage through [`fail_lineage`], live and on replay alike (PR9, Class B
+row B2): a repair that has exhausted its ladder leaves nothing for its
+root to wait for.
+
 ## `fn fail_lineage(&mut self, key: TaskKey) {`
 
-Decline terminates all unpublished work in the lineage. Already merged
-work stays merged; a human answer cannot undo a recorded publication.
+Decline, or a member's terminal failure, terminates all unpublished work
+in the lineage. Already merged work stays merged; a human answer cannot
+undo a recorded publication.
 
 ## `fail_lineage` › `TransactionClass::Prepared { .. } => false,`
 

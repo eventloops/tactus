@@ -471,6 +471,14 @@ The tree `git write-tree` printed.
 The commit the tree is judged against, and the parent of every snapshot's
 ephemeral commit.
 
+## `pub struct Capture` › `pub unresolved: Vec<String>,`
+
+The conflicted paths whose working-tree files still carried conflict
+markers when the capture ran (`R9`), read *before* staging: `git add -A`
+would record the markers as the resolution. Non-empty means nothing was
+staged, `tree` is the base's, and the assessment fails the attempt before
+any gate; a conflicted path whose file is gone was resolved by deletion.
+
 ## `fn captured_object_id(source: &str, value: String) -> Result<ObjectId, UpstrokeError> {`
 
 One of the capture's recorded ids as an [`ObjectId`], or a Git error.
@@ -836,6 +844,12 @@ publishing the index or cache-tree". The staged objects are behind the
 **task index** afterwards (R9), which is what makes them recoverable by
 scrubbing the worktree rather than by anything cleverer.
 
+**A repair's unresolved conflicts are read first.** `unresolved_conflicts`
+is a read over the unmerged index entries and their working-tree files;
+when it names any, the capture returns the base's tree with those paths
+and stages nothing, so a worker that left markers behind cannot have them
+captured as its work.
+
 ### Errors
 
 The containment refusals or a Git error.
@@ -843,6 +857,14 @@ The containment refusals or a Git error.
 ## `impl AttemptContext<'_>` › `pub fn assess(`
 
 The ladder's cheap rungs: **outcome sanity, then the diff.**
+
+**An unresolved conflict pre-empts the diff-shaped verdicts.** A completed
+worker that left conflicted paths is reported as that
+(`classify::unresolved_conflict_failure`) ahead of `evaluate_outcome`'s
+empty-diff verdict — an unresolved capture carries the base's tree, so its
+diff is empty for a reason the empty-diff feedback would misdescribe — but
+behind the worker's own end: an error exit, a timeout or a question it
+asked is reported as what it is.
 
 Both answers come from the production authorities rather than being
 formed here — `engine::attempt::evaluate_outcome` for what the worker's

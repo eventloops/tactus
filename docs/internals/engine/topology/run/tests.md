@@ -40,9 +40,12 @@ shrink as branches land; it must never grow.
 
 ## `fn every_branch_states_what_this_build_does_with_it()` › `let elsewhere: Vec<&str> = LoopBranch::ALL`
 
-**What is another slice's, cited rather than owed.** `ingest answers` is
-not debt and is not a checkpoint refusal — the packet authorises exactly
-two of those — so it carries the contract passage that assigns it.
+**What is another slice's, cited rather than owed — and today nothing
+is.** `ingest answers` carried the contract passage that assigned it to
+PR9 for as long as it was PR9's; PR9 performs it, so the set is asserted
+empty. A branch that returns to another slice must come back with the
+passage that assigns it, not as debt and not as a checkpoint refusal,
+of which the packet authorises exactly one (run end).
 
 ## `fn every_branch_states_what_this_build_does_with_it()` › `assert_eq!(`
 
