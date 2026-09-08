@@ -310,7 +310,7 @@ stale-clean or already-present one ran in `merge/s<seq>`, and an
 already-present publication at the candidate's own commit — the head moved
 onto it, the cherry-pick was empty — has `proposed_sha == candidate.commit_sha`
 exactly as a fast one does while still owning a staging worktree. Inferring
-"fast" from that equality leaked the staging (`pr8-triage.md`, crash 5).
+"fast" from that equality leaked the staging.
 
 ## `pub enum TransactionClass` › `prepared_ref: Option<GitRef>,`
 

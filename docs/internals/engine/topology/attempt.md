@@ -900,7 +900,7 @@ its judge leaves every snapshot in place and `integrate` reclaims them once
 `merge_prepared`, `merge_rejected` or `merge_verification_unavailable` is
 durable. A removal that fails can then no longer strand a completed
 judgement behind an unterminated verification, which is what the reviews
-of `3414dc58` found (`pr8-triage.md`, F4).
+of `3414dc58` found.
 
 ### What the name does not carry, and where that is owed
 

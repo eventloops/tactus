@@ -73,7 +73,7 @@ The body is where the contract's "spec embedding evidence, rejecting head"
 its registry entry, and a spec that still described the root task — which
 the reviews of `916852c9` found this builder producing — would have made
 PR9 reconstruct from the enclosing event what the registration was
-required to carry (`pr8-triage.md` §5, record F1).
+required to carry.
 
 ## `fn repair_body(`
 

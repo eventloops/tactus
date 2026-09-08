@@ -2251,7 +2251,7 @@ reasoning is done on and not only on the one it runs on.
 The Linux scanner has no such ambiguity and needs no equivalent: `getdents64`
 answers a failure with a negative value, so its zero — the end of `/proc` — is
 unambiguous. That is why the two platforms' `Some(false)` are not the same
-claim, and why §7.3's row in `pr8-triage.md` now states each separately.
+claim.
 
 ## `#[cfg(target_os = "macos")]` › `fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {`
 

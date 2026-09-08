@@ -199,8 +199,7 @@ integration branch for why the task ceiling is not consulted there. What an
 integration *spends* is another matter: its verification's reviews are
 charged to the candidate's task and to the run at the verification
 ([`Spend::record_reviews`]), so the next check — of either ceiling — sees
-them. The reviews of `3414dc58` found them charged nowhere (`pr8-triage.md`,
-tests 3).
+them. The reviews of `3414dc58` found them charged nowhere.
 
 ## `fn run_breach(&self, spend: &Spend) -> Option<Breach>` › `(spent >= limit).then_some(Breach {`
 
@@ -655,7 +654,7 @@ run and to the task.
 The integration verifications whose terminal carries the
 review record. An unavailable terminal carries none, so a
 verification that ended in a park or an outage is charged
-live and not here (`pr8-plan.md` R22).
+live and not here.
 
 ## `impl Spend {` › `pub fn record_review_cost(&mut self, key: TaskKey, cost_usd: Option<f64>) {`
 

@@ -46,7 +46,7 @@ carried through `integrate::code_record` — the conversion that used to keep
 `code_rejection_record` its own `detail`, which sits **downstream** of that
 conversion, so it proved the spec carries what it was given and nothing about
 what gives it anything; it passed on a head where the evidence was being lost,
-which is how the defect reached a green branch (`pr8-triage.md` §9, finding 2).
+which is how the defect reached a green branch.
 
 The needle is one line of the evidence, because the spec is asserted against its
 JSON encoding and a newline is `\n` there; the fixture keeps a second line so
