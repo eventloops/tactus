@@ -2,16 +2,18 @@
 
 use std::collections::BTreeMap;
 
-use crate::error::UpstrokeError;
+use crate::error::{ProcessFate, UpstrokeError};
 use crate::ir::{Answer, Question, QuestionId};
 use crate::review;
+use crate::topology::events::Answer4;
 use crate::topology::events::TopologyEventBody;
+use crate::topology::fold::QuestionOrigin;
 
 use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
-    AttemptNumber, CandidateLeaseEffect, CommitSha, FrozenQuestion, GenerationId, SessionId,
-    TopologyEvent,
+    AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion, GenerationId,
+    InfrastructureKind, SequenceId, SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -19,7 +21,8 @@ use crate::workspace_manager::WorkspaceManager;
 
 use super::attempt::{
     Assessment, AttemptContext, AttemptPlan, AttemptPlans, AttemptSite, Capture, InputsRequest,
-    Judgement, Judging, PlanRequest, ReviewInputPolicy, ReviewPasses,
+    Judge, JudgeError, JudgeIdentities, JudgeNames, Judgement, Judging, PlanRequest,
+    ReviewInputPolicy, ReviewPasses, SnapshotDisposal, SnapshotOf, Subject, VerificationRequest,
 };
 use super::candidate::{
     CandidateJournal, JudgedTree, append_candidate_created, append_candidate_prepared,
@@ -30,7 +33,12 @@ use super::dispatch::{
     resume_open_no_attempt, task_slot,
 };
 use super::emit::{EmitFailure, EmitState, RunIdentity, emit};
-use super::identity::{InvocationLedger, ReservationKind, Reservations, SlotAssertion};
+use super::identity::{
+    InvocationLedger, ReservationKind, Reservations, SequenceIdentities, SlotAssertion,
+};
+use super::integrate::{
+    self, IntegrationJournal, IntegrationRequest, Terminal, Verification, Verified, VerifyRequest,
+};
 use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
 use super::select::{Admitted, Ceiling, Spend, Step, checkpoint, select};
@@ -70,6 +78,258 @@ impl CandidateJournal for RunJournal<'_, '_> {
 
     fn fold(&self) -> &TopologyFold {
         self.emitter.state.fold
+    }
+}
+
+struct IntegrationCx<'a, 'h> {
+    emitter: RunEmitter<'a>,
+    hooks: &'h mut dyn TopologyHooks,
+    invocations: &'h mut InvocationLedger,
+    slots: &'h mut SlotAssertion,
+    spend: &'h mut Spend,
+    seams: &'h RunSeams<'a>,
+}
+
+impl IntegrationJournal for IntegrationCx<'_, '_> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        self.emitter
+            .emit(body, self.hooks)
+            .map_err(|failure| failure.discharging(self.invocations))
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.emitter.state.fold
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        &mut *self.hooks
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.emitter
+            .state
+            .reservations
+            .convert(key, ReservationKind::Integration)
+    }
+}
+
+fn implementer_binding(
+    fold: &TopologyFold,
+    key: TaskKey,
+) -> Result<crate::review::PassBinding, UpstrokeError> {
+    if let Some(binding) = fold.binding_override(key) {
+        return Ok(crate::review::PassBinding::new(
+            &binding.agent,
+            &binding.model,
+        ));
+    }
+    let rung = fold
+        .task(key)
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!("task {key} is not in this run's fold"),
+        })?
+        .rung;
+    let binding = fold
+        .frozen_rung_binding(key, rung)
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "task {key}'s candidate was produced at rung {rung} and its frozen ladder has no \
+                 such rung, so there is no implementer to select its reviewers against"
+            ),
+        })?;
+    Ok(crate::review::PassBinding::new(
+        &binding.agent,
+        &binding.model,
+    ))
+}
+
+impl Verification for IntegrationCx<'_, '_> {
+    fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
+        match self.judge_proposal(request) {
+            Ok(judgement) => Ok(Verified::Judged(judgement)),
+            Err(JudgeError::Runner(error)) => match error.fate {
+                ProcessFate::NeverStarted => Ok(Verified::Unavailable {
+                    kind: InfrastructureKind::RunnerSpawnFailure,
+                    detail: error.to_string(),
+                }),
+                ProcessFate::Gone => Ok(Verified::Unavailable {
+                    kind: InfrastructureKind::Other {
+                        detail: format!(
+                            "the Runner lost `{}` after its process started and has since \
+                             established the process is gone; nothing was judged",
+                            error.invocation
+                        ),
+                    },
+                    detail: error.to_string(),
+                }),
+                ProcessFate::Unresolved => Err(error.into()),
+            },
+            Err(JudgeError::Other(UpstrokeError::Git { message })) => Ok(Verified::Unavailable {
+                kind: InfrastructureKind::Other {
+                    detail: format!(
+                        "foreign Git state observed by the verification of sequence {}: {message}",
+                        request.sequence.0
+                    ),
+                },
+                detail: message,
+            }),
+            Err(JudgeError::Other(error)) => Err(error),
+        }
+    }
+
+    fn ids(&self) -> &dyn super::seams::IdSource {
+        self.seams.ids
+    }
+}
+
+impl IntegrationCx<'_, '_> {
+    fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {
+        let key = request.candidate.key;
+        let (entry, base, implementer) = {
+            let fold = &*self.emitter.state.fold;
+            let entry = fold
+                .registry()
+                .and_then(|registry| registry.get(key))
+                .cloned()
+                .ok_or_else(|| {
+                    JudgeError::Other(UpstrokeError::Refused {
+                        message: format!("task {key} is not in this run's registry"),
+                    })
+                })?;
+            let base = fold
+                .task(key)
+                .and_then(|task| {
+                    task.generations
+                        .iter()
+                        .find(|generation| generation.id == request.candidate.generation)
+                })
+                .and_then(|generation| generation.candidate.as_ref())
+                .map(|prepared| prepared.base_sha.clone());
+            (
+                entry,
+                base,
+                implementer_binding(fold, key).map_err(JudgeError::Other)?,
+            )
+        };
+
+        let (diff_parent, diff_tree) = if request.already_present {
+            let base = base.ok_or_else(|| {
+                JudgeError::Other(UpstrokeError::Refused {
+                    message: "an already-present verification needs the candidate's recorded \
+                              base to review its original patch"
+                        .to_owned(),
+                })
+            })?;
+            (base.0, request.candidate.commit_sha.0.clone())
+        } else {
+            (request.head.0.clone(), request.proposed.0.clone())
+        };
+        let diff = self
+            .seams
+            .manager
+            .candidate_diff(request.staging, &diff_parent, &diff_tree)
+            .map_err(JudgeError::Other)?;
+
+        let plan = self
+            .seams
+            .plans
+            .verification(&VerificationRequest {
+                entry: &entry,
+                implementer,
+            })
+            .map_err(JudgeError::Other)?;
+
+        let prior_failure =
+            match crate::engine::classify::unjudgeable_diff(&diff, !plan.reviewers.is_empty()) {
+                Some(failure) => Some(failure),
+                None => {
+                    let tree = self
+                        .seams
+                        .manager
+                        .commit_tree_sha(request.proposed.as_str())
+                        .map_err(JudgeError::Other)?
+                        .ok_or_else(|| {
+                            JudgeError::Other(UpstrokeError::Git {
+                                message: format!(
+                                    "the proposed commit {} has no tree; the review-input policy \
+                                     cannot be consulted for it",
+                                    request.proposed
+                                ),
+                            })
+                        })?;
+                    let staging = self.seams.manager.slot_path(request.staging);
+                    self.seams
+                        .input_policy
+                        .problem(&staging, &tree)
+                        .map_err(JudgeError::Other)?
+                        .map(crate::engine::classify::review_input_failure)
+                }
+            };
+
+        let inputs = self
+            .seams
+            .plans
+            .inputs(&InputsRequest {
+                entry: &entry,
+                diff,
+            })
+            .map_err(JudgeError::Other)?;
+
+        let proposed = crate::workspace_manager::ObjectId::new(request.proposed.0.clone())
+            .map_err(|refusal| {
+                JudgeError::Other(UpstrokeError::Refused {
+                    message: format!(
+                        "the recorded proposal of sequence {} is not an object id: {refusal}",
+                        request.sequence.0
+                    ),
+                })
+            })?;
+        let identities = SequenceIdentities::new(request.sequence);
+        let mut judge = Judge {
+            manager: self.seams.manager,
+            hooks: &mut *self.hooks,
+            runner: self.seams.runner,
+            slots: self.slots,
+            ledger: self.invocations,
+            adapters: self.seams.adapters,
+            paths: self.seams.paths,
+            reviews: self.seams.reviews,
+        };
+        let mut account = SpendAccount {
+            spend: &mut *self.spend,
+            key,
+        };
+        judge.judge(
+            &Subject {
+                snapshot: SnapshotOf::Commit(proposed),
+                disposal: SnapshotDisposal::AfterTheTerminal,
+                names: JudgeNames::Integration {
+                    sequence: u64::from(request.sequence.0),
+                },
+                identities: JudgeIdentities::Sequence(identities),
+                stem: format!("integration-s{}", request.sequence.0),
+                gates: &plan.gates,
+                reviewers: &plan.reviewers,
+                inputs: &inputs,
+                prior_failure,
+                invocations: &move |pass| review::ReviewInvocations {
+                    pass: identities.review_pass(pass, 0),
+                    reask: identities.review_reask(pass, 0),
+                },
+            },
+            &mut account,
+        )
+    }
+}
+
+struct SpendAccount<'a> {
+    spend: &'a mut Spend,
+    key: TaskKey,
+}
+
+impl crate::engine::topology::attempt::ReviewAccount for SpendAccount<'_> {
+    fn charge(&mut self, cost_usd: Option<f64>) {
+        self.spend.record_review_cost(self.key, cost_usd);
     }
 }
 
@@ -127,7 +387,8 @@ impl LoopBranch {
     #[must_use]
     pub const fn disposition(self) -> Disposition {
         match self {
-            Self::Integration | Self::Closure => Disposition::RefusedByCheckpoint,
+            Self::Closure => Disposition::RefusedByCheckpoint,
+            Self::Integration => Disposition::Performed,
             Self::DeferBackoff => Disposition::Performed,
             Self::ReadyDispatch => Disposition::Performed,
             Self::ReadyRetry => Disposition::Performed,
@@ -149,7 +410,7 @@ impl LoopBranch {
             Step::BudgetExceeded(_) => None,
             Step::Integrate { .. } => Some(Self::Integration),
             Step::Retry { .. } => Some(Self::ReadyRetry),
-            Step::Dispatch { .. } => Some(Self::ReadyDispatch),
+            Step::Dispatch { .. } | Step::RepairDispatch { .. } => Some(Self::ReadyDispatch),
             Step::Backoff => Some(Self::DeferBackoff),
             Step::HardBlock { .. } => Some(Self::HardBlock),
             Step::Closure(_) => Some(Self::Closure),
@@ -284,6 +545,25 @@ pub enum Progress {
     GenerationClosed {
         key: TaskKey,
     },
+    Integrated {
+        key: TaskKey,
+        sequence: SequenceId,
+        merged_sha: CommitSha,
+    },
+    Rejected {
+        key: TaskKey,
+        sequence: SequenceId,
+    },
+    Unavailable {
+        key: TaskKey,
+        sequence: SequenceId,
+        parked: bool,
+    },
+    Answered {
+        key: TaskKey,
+        question: QuestionId,
+        declined: bool,
+    },
     Blocked {
         questions: usize,
     },
@@ -367,6 +647,11 @@ impl TopologyRun {
     }
 
     #[must_use]
+    pub const fn reservations_cancelled(&self) -> u32 {
+        self.reservations.cancelled()
+    }
+
+    #[must_use]
     #[allow(dead_code)]
     pub fn defer_round(&self) -> u32 {
         self.deferral.round()
@@ -377,7 +662,9 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
+        let _cleanup_scope = self.handle.cleanup_scope();
         let selected = select(&self.handle.fold, &self.ceiling, &self.spend);
+
         let admitted = checkpoint(selected)?;
         match admitted {
             Admitted::BudgetExceeded(exceeded) => {
@@ -398,6 +685,7 @@ impl TopologyRun {
                 )?;
                 Ok(Progress::Waited { waited_ms, round })
             }
+            Admitted::Integrate { candidate } => self.integrate(*candidate, seams, hooks),
             Admitted::Retry {
                 key, generation, ..
             } => self.retry_ready(key, generation, seams, hooks),
@@ -441,7 +729,7 @@ impl TopologyRun {
                     spent_attempt,
                 })
             }
-            Admitted::HardBlock { questions } => self.hard_block(&questions, seams),
+            Admitted::HardBlock { questions } => self.hard_block(&questions, seams, hooks),
         }
     }
 
@@ -452,7 +740,7 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Dispatched, UpstrokeError> {
-        let request = self.dispatch_request(key, generation)?;
+        let request = self.dispatch_request(key, generation, seams)?;
 
         self.reservations.take(key, ReservationKind::Dispatch)?;
 
@@ -462,6 +750,7 @@ impl TopologyRun {
                 state: EmitState {
                     fold: &mut self.handle.fold,
                     log: &mut self.handle.log,
+                    events: &mut self.handle.events,
                     reservations: &mut self.reservations,
                     warnings: &mut self.warnings,
                 },
@@ -483,33 +772,152 @@ impl TopologyRun {
         }
     }
 
+    fn integrate(
+        &mut self,
+        candidate: CandidateRef,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let request =
+            IntegrationRequest::from_log(&self.handle.fold, &self.handle.events, &candidate)?;
+        let key = candidate.key;
+        self.reservations.take(key, ReservationKind::Integration)?;
+
+        let terminal = {
+            let mut cx = IntegrationCx {
+                emitter: RunEmitter {
+                    identity: &self.identity,
+                    state: EmitState {
+                        fold: &mut self.handle.fold,
+                        log: &mut self.handle.log,
+                        events: &mut self.handle.events,
+                        reservations: &mut self.reservations,
+                        warnings: &mut self.warnings,
+                    },
+                    clock: seams.clock,
+                },
+                hooks,
+                invocations: &mut self.invocations,
+                slots: &mut self.slots,
+                spend: &mut self.spend,
+                seams,
+            };
+            integrate::integrate(&mut cx, seams.manager, &request)
+        };
+
+        match terminal {
+            Ok(terminal) => {
+                self.deferral.progressed();
+                Ok(match terminal {
+                    Terminal::Merged(published) => Progress::Integrated {
+                        key: published.key,
+                        sequence: published.sequence,
+                        merged_sha: published.merged_sha,
+                    },
+                    Terminal::Rejected { sequence, key } => Progress::Rejected { key, sequence },
+                    Terminal::Unavailable {
+                        sequence,
+                        key,
+                        parked,
+                    } => Progress::Unavailable {
+                        key,
+                        sequence,
+                        parked,
+                    },
+                })
+            }
+            Err(error) => {
+                if !self.reservations.is_empty() {
+                    self.reservations
+                        .cancel(key, ReservationKind::Integration)?;
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn hard_block(
         &mut self,
         questions: &[QuestionId],
         seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
         for id in questions {
-            let question = self.open_question(id)?;
-            match seams.answers.resolve(&question)? {
-                Answer::Unanswered => {}
-                Answer::Answered { .. } | Answer::Declined => {
-                    return Err(UpstrokeError::Refused {
-                        message: format!(
-                            "question {} was answered, and ingesting an answer is PR9's: \
-                             `question_answered` and `T-ANSWER` are that slice's and this one's \
-                             contract does not name them. Refused before any append",
-                            id.0
-                        ),
-                    });
-                }
+            let (question, origin, key) = self.open_question(id)?;
+            let answer = match seams.answers.resolve(&question)? {
+                Answer::Unanswered => continue,
+                answer => answer,
+            };
+            if origin != QuestionOrigin::VerificationPark {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "question {} is a repair-admission or attempt park, and ingesting its \
+                         answer is PR9's: `pr_sequence[8]` refuses \"repair-admission answers \
+                         before any append\" and `T-ANSWER` is that slice's. Refused before any \
+                         append",
+                        id.0
+                    ),
+                });
             }
+            return self.ingest_verification_answer(id, key, &question, answer, seams, hooks);
         }
         Ok(Progress::Blocked {
             questions: questions.len(),
         })
     }
 
-    fn open_question(&self, id: &QuestionId) -> Result<Question, UpstrokeError> {
+    fn ingest_verification_answer(
+        &mut self,
+        id: &QuestionId,
+        key: TaskKey,
+        question: &Question,
+        answer: Answer,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let answer4 = match answer {
+            Answer::Declined => Answer4::Declined {
+                decline_halts_run: seams.halts_run,
+            },
+            Answer::Answered { text } => Answer4::Answered {
+                option_index: question
+                    .options
+                    .iter()
+                    .position(|option| *option == text)
+                    .and_then(|index| u32::try_from(index).ok())
+                    .unwrap_or(0),
+                binding_override: None,
+            },
+            Answer::Unanswered => {
+                return Err(UpstrokeError::Refused {
+                    message: format!("question {} resolved to no answer to ingest", id.0),
+                });
+            }
+        };
+        let declined = matches!(answer4, Answer4::Declined { .. });
+        self.emit(
+            TopologyEventBody::QuestionAnswered {
+                data: crate::topology::events::QuestionAnswered4 {
+                    key,
+                    question: id.clone(),
+                    answer: answer4,
+                    via: seams.answers.id().to_owned(),
+                },
+            },
+            seams,
+            hooks,
+        )?;
+        Ok(Progress::Answered {
+            key,
+            question: id.clone(),
+            declined,
+        })
+    }
+
+    fn open_question(
+        &self,
+        id: &QuestionId,
+    ) -> Result<(Question, QuestionOrigin, TaskKey), UpstrokeError> {
         let open = self
             .handle
             .fold
@@ -519,13 +927,17 @@ impl TopologyRun {
                 message: format!("question {} is not open in this run's fold", id.0),
             })?;
         let frozen = &open.question;
-        Ok(Question {
-            id: frozen.id.clone(),
-            kind: frozen.kind,
-            affected_tasks: vec![crate::ir::TaskId(self.display_id(frozen.key)?)],
-            context: frozen.context.clone(),
-            options: frozen.options.clone(),
-        })
+        Ok((
+            Question {
+                id: frozen.id.clone(),
+                kind: frozen.kind,
+                affected_tasks: vec![crate::ir::TaskId(self.display_id(frozen.key)?)],
+                context: frozen.context.clone(),
+                options: frozen.options.clone(),
+            },
+            open.origin,
+            frozen.key,
+        ))
     }
 
     fn continue_open(
@@ -749,6 +1161,7 @@ impl TopologyRun {
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
+                events: &mut self.handle.events,
                 reservations: &mut self.reservations,
                 warnings: &mut self.warnings,
             },
@@ -961,6 +1374,7 @@ impl TopologyRun {
                 state: EmitState {
                     fold: &mut self.handle.fold,
                     log: &mut self.handle.log,
+                    events: &mut self.handle.events,
                     reservations: &mut self.reservations,
                     warnings: &mut self.warnings,
                 },
@@ -1085,6 +1499,7 @@ impl TopologyRun {
         &self,
         key: TaskKey,
         generation: GenerationId,
+        seams: &RunSeams<'_>,
     ) -> Result<DispatchRequest, UpstrokeError> {
         let paths = self.handle.fold.predicted_region(key).ok_or_else(|| {
             UpstrokeError::Refused {
@@ -1095,10 +1510,16 @@ impl TopologyRun {
                 ),
             }
         })?;
+        let base = integrate::dispatch_head(
+            seams.manager,
+            &self.handle.started,
+            &self.handle.events,
+            key,
+        )?;
         Ok(DispatchRequest {
             key,
             generation,
-            base: self.handle.started.base_sha.clone(),
+            base,
             kind: DispatchKind::Ordinary { paths },
         })
     }
@@ -1114,6 +1535,7 @@ impl TopologyRun {
             state: EmitState {
                 fold: &mut self.handle.fold,
                 log: &mut self.handle.log,
+                events: &mut self.handle.events,
                 reservations: &mut self.reservations,
                 warnings: &mut self.warnings,
             },

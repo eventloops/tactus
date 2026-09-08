@@ -80,6 +80,7 @@ effect_free = [
     "object_directory",
     "object_exists",
     "private_root",
+    "proposal_state",
     "quiescence",
     "reclaim_intents",
     "refs_under",
@@ -270,6 +271,7 @@ effect_free = [
     "id",
     "incarnation",
     "integration",
+    "integration_review",
     "intent_kind",
     "intent_name",
     "kind",
@@ -787,6 +789,13 @@ funnel = [
     "remove_staged_intent",
     "launch",
     "release",
+    # `release` keeping whether the container itself was stopped and removed,
+    # for the runner's process-fate classification (the reviews of `916852c9`,
+    # regression 1); the same four sites in the same order.
+    "release_classified",
+    # The exhaustive cancel the runner's `cancel` and `release` delegate to,
+    # public since the runner reads its `container_released` fact.
+    "cancel_reached",
     "reclaim",
 ]
 effectful = [
@@ -809,6 +818,9 @@ effect_free = [
     # testable, without a daemon.
     "classify_docker_failure",
     "is_unreachable_diagnostic",
+    # `CancelResidue::is_empty`: whether a cancel or a release had anything
+    # to report; a read of the value it is asked about.
+    "is_empty",
     "closed_by_a_reaper",
     "collect",
     "containers_with_label",
@@ -1042,6 +1054,9 @@ path = "src/agent/proc.rs"
 crate_path = "upstroke::agent::proc"
 funnel = [
     "run_with_timeout_at",
+    # The same funnel keeping the process fate it established
+    # (`ProcessFailure`), for the host Runner's `RunnerError`.
+    "run_with_timeout_classified",
 ]
 effectful = []
 effectful_unnameable = []
@@ -1494,6 +1509,7 @@ not_an_effect = [
     "EINVAL",
     "EIO",
     "ENOENT",
+    "ENOMEM",
     "EPERM",
     "ESRCH",
     "ETXTBSY",

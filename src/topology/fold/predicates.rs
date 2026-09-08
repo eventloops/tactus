@@ -164,4 +164,19 @@ impl TopologyFold {
     pub fn questions_open(&self) -> bool {
         self.run.as_ref().is_some_and(RunState::questions_open)
     }
+
+    #[must_use]
+    pub fn next_sequence(&self) -> Option<SequenceId> {
+        self.run.as_ref().map(|run| SequenceId(run.next_sequence))
+    }
+
+    #[must_use]
+    pub fn satisfies_closure(&self, key: TaskKey) -> Option<Vec<TaskKey>> {
+        self.run.as_ref().map(|run| run.satisfies_closure(key))
+    }
+
+    #[must_use]
+    pub fn lineage_members(&self, root: TaskKey) -> Option<u32> {
+        self.run.as_ref().map(|run| run.lineage_members(root))
+    }
 }

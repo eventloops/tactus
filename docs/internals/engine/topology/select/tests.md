@@ -604,3 +604,27 @@ The retry the selector names is the one the settlement module runs.
 
 Two modules deciding "which generation, which attempt" independently is
 two rules that can disagree; this is the assertion that they do not.
+
+## `fn reported_spend_replays_integration_verification_records() {` › `let verification = |cost: f64| crate::topology::events::VerificationRecord {`
+
+An integration's reviews are charged to the candidate's task at the
+verification, and the terminal's record — merge_prepared's or a code
+rejection's — carries them, so a replay charges the same total.
+
+## `fn reported_spend_replays_integration_verification_records() {` › `let repair_entry = {`
+
+Any registered entry will do: `Spend::replay` reads the record's
+reviews and never the spawn it registers.
+
+## `fn register_runnable_repair(fold: &mut TopologyFold) {`
+
+Reject the queued candidate of `GIMEL` on a conflict, registering a
+runnable repair as task 3 — the only way a Repair-origin task enters a
+registry, and the state `select` offers `RepairDispatch` from.
+
+Every other task is settled so the repair is the first ready key.
+
+## `fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_append() {` › `let mut spend = Spend::new();`
+
+The ceiling is not consulted for a step the checkpoint refuses: a
+`budget_exceeded` is an append, and the refusal is before any.

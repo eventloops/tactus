@@ -1813,7 +1813,28 @@ fn a_windows_spawn_that_fails_after_creation_leaves_no_suspended_stub() {
             !ran,
             "the child executed although the {step} it was waiting behind failed"
         );
+        assert_eq!(
+            error.fate,
+            ProcessFate::Gone,
+            "a process was created behind the failed {step}, so the boundary must carry what \
+             its cleanup established rather than let the funnel claim nothing was started: {error}"
+        );
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn a_windows_spawn_that_fails_before_creation_is_never_started() {
+    let mut command = Command::new("upstroke-no-such-program-a5f2.exe");
+    let error = windows_job::spawn_suspended_in_job_with(
+        &mut command,
+        &mut NoHooks,
+        windows_job::real_assign_to_job,
+        windows_job::resume_only_thread,
+    )
+    .err()
+    .expect("an absent program cannot be created");
+    assert_eq!(error.fate, ProcessFate::NeverStarted, "{error}");
 }
 
 #[cfg(unix)]
@@ -3713,5 +3734,196 @@ fn the_kill_hook_rationale_separates_unwinding_exit_handlers_and_abort() {
         !rationale.contains("both of those run destructors"),
         "the retired claim that `panic!` and `std::process::exit` both run \
          destructors must not come back:\n{rationale}"
+    );
+}
+
+#[test]
+fn a_spawn_that_fails_before_any_process_exists_is_never_started() {
+    let failure = run_with_timeout_classified(
+        ProcessSite::Spawn,
+        ProcessSite::Terminate,
+        Command::new("upstroke-no-such-program-a5f2"),
+        b"",
+        Duration::from_secs(30),
+        &mut NoHooks,
+    )
+    .expect_err("an absent program cannot be spawned");
+    assert_eq!(failure.fate, ProcessFate::NeverStarted, "{}", failure.error);
+    assert!(
+        failure.error.to_string().contains("failed to spawn"),
+        "{}",
+        failure.error
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_containment_failure_after_the_spawn_leaves_the_fate_unresolved() {
+    struct FailAt {
+        point: SubEffectPoint,
+        pid: Option<u32>,
+    }
+
+    impl SpawnHooks for FailAt {
+        fn point(&mut self, point: SubEffectPoint) -> Injection {
+            if point == self.point {
+                Injection::Error
+            } else {
+                Injection::Proceed
+            }
+        }
+
+        fn child_created(&mut self, pid: u32) {
+            self.pid = Some(pid);
+        }
+    }
+
+    for point in [
+        SubEffectPoint::PreExecPgidAndRegister,
+        SubEffectPoint::Exec,
+        SubEffectPoint::Registered,
+    ] {
+        let mut hooks = FailAt { point, pid: None };
+        let failure = run_with_timeout_classified(
+            ProcessSite::Spawn,
+            ProcessSite::Terminate,
+            shell("sleep 30"),
+            b"",
+            Duration::from_secs(30),
+            &mut hooks,
+        )
+        .expect_err("the funnel was made to fail after the spawn");
+        let pid = hooks
+            .pid
+            .and_then(|pid| i32::try_from(pid).ok())
+            .expect("the child was created before the containment point");
+        // SAFETY: the group is the one this test's own child leads; a negative
+        // pid targets that group only, and ESRCH means it is already gone.
+        let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+        assert_eq!(
+            failure.fate,
+            ProcessFate::Unresolved,
+            "a failure at `{point}` returns without observing the tree settled, so the funnel \
+             cannot claim it gone: {}",
+            failure.error
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_reaped_leader_does_not_prove_its_group_gone_when_the_reaper_failed() {
+    use std::io::BufRead;
+    use std::os::unix::process::CommandExt;
+
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", "sleep 600 & echo $!; wait"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = ProcessTree {
+        child: command.spawn().expect("a private group"),
+    };
+    let pgid = i32::try_from(child.id()).expect("a group id");
+    let mut pid_line = String::new();
+    std::io::BufReader::new(child.stdout.take().expect("the pid pipe"))
+        .read_line(&mut pid_line)
+        .expect("the descendant announced itself");
+    let descendant: i32 = pid_line.trim().parse().expect("a descendant pid");
+
+    let fate = std::cell::Cell::new(ProcessFate::Unresolved);
+    let error = settle_failed_supervision(
+        UpstrokeError::Agent {
+            message: format!("Unix cleanup reaper failed while settling process group {pgid}"),
+        },
+        false,
+        &mut child,
+        &fate,
+    );
+
+    let stat = std::fs::read_to_string(
+        PathBuf::from("/proc")
+            .join(descendant.to_string())
+            .join("stat"),
+    )
+    .expect("the descendant still exists");
+    let running = stat
+        .rsplit_once(") ")
+        .and_then(|(_, tail)| tail.chars().next())
+        .is_some_and(|state| state != 'Z' && state != 'X');
+    // SAFETY: this test owns the freshly created private group.
+    let _ = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    assert!(
+        running,
+        "the same-group descendant must survive the direct child's kill and reap for this \
+         to be the cell it claims to be: {stat}"
+    );
+    assert_eq!(
+        fate.get(),
+        ProcessFate::Unresolved,
+        "the leader was reaped but the group was never established empty, so a descendant \
+         ({descendant}) may still be running: {error}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_established_group_settles_gone_whatever_the_leaders_own_reap_says() {
+    let mut child = ProcessTree {
+        child: shell("exit 0").spawn().expect("spawn a child"),
+    };
+    let pid = i32::try_from(child.id()).expect("a pid");
+    let mut status = 0;
+    // SAFETY: `pid` is this test's own child; reaping it here makes the
+    // funnel's later wait fail, which is the cell under test.
+    let reaped = unsafe { libc::waitpid(pid, &mut status, 0) };
+    assert_eq!(reaped, pid, "the child was reaped behind the funnel's back");
+
+    let fate = std::cell::Cell::new(ProcessFate::Unresolved);
+    let error = settle_failed_supervision(
+        UpstrokeError::Agent {
+            message: "supervising agent output: refused".to_owned(),
+        },
+        true,
+        &mut child,
+        &fate,
+    );
+    assert_eq!(
+        fate.get(),
+        ProcessFate::Gone,
+        "the group was established empty, so the fate is Gone whatever the leader's own reap \
+         returned: {error}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("reaping agent after supervision failure"),
+        "the failed reap is still reported as a cleanup failure, not read as evidence: {message}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_lost_group_settles_unresolved_even_when_the_leader_reaps_cleanly() {
+    let mut child = ProcessTree {
+        child: shell("exit 0").spawn().expect("spawn a child"),
+    };
+    let fate = std::cell::Cell::new(ProcessFate::Unresolved);
+    let error = settle_failed_supervision(
+        UpstrokeError::Agent {
+            message: "Unix cleanup reaper failed while settling process group".to_owned(),
+        },
+        false,
+        &mut child,
+        &fate,
+    );
+    assert_eq!(
+        fate.get(),
+        ProcessFate::Unresolved,
+        "a clean reap of the leader is not evidence about the group: {error}"
+    );
+    assert!(
+        matches!(error, UpstrokeError::Agent { .. }),
+        "with the leader reaped there is no cleanup failure to report: {error}"
     );
 }

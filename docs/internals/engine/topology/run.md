@@ -254,15 +254,35 @@ A short name for the branch, for a refusal message and a test.
 What this build does with it, and — for anything but `Performed` — the
 reason belongs in the arm, not in prose somewhere else.
 
-## `pub const fn disposition(self) -> Disposition` › `Self::Integration | Self::Closure => Disposition::RefusedByCheckpoint,`
+## `pub const fn disposition(self) -> Disposition` › `Self::Closure => Disposition::RefusedByCheckpoint,`
 
 `checkpoint_refusals`: "an intermediate build refuses, before any
-append, any operation whose terminals it does not implement
-(PR7: integration and run end beyond refusal)". Both are made
-unrepresentable rather than remembered — `Admitted` carries five
-of `Step`'s eight variants, so no value reaching the acting half
-can name either. (The third that does not cross is `Poisoned`,
-which is not a branch this build declines but the absence of one.)
+append, any operation whose terminals it does not implement". Run end
+beyond refusal is PR10's, and it is made unrepresentable rather than
+remembered — `Admitted` carries six of `Step`'s nine variants, so no
+value reaching the acting half can name a closure. The other two that
+do not cross are `RepairDispatch`, which is PR8's own checkpoint
+refusal and belongs to the ready-dispatch branch rather than to a
+branch of its own, and `Poisoned`, which is not a branch this build
+declines but the absence of one.
+
+## `pub const fn disposition(self) -> Disposition` › `Self::Integration => Disposition::Performed,`
+
+"check the ceiling … then take a provisional integration reservation
+and integrate exactly one", whole: the ceiling is `select`'s, the
+`{pipeline, merge}` reservation is taken in `integrate` before any
+effect, and the sequence itself — the exact-base decision under
+`assert_publishable`, the fast `merge_prepared`, the compare-and-swap
+and `task_merged` — is `super::integrate`'s, appending through the
+same `RunJournal` the candidate sequence uses. A pre-append failure
+cancels the reservation and leaves the candidate queued; a failure
+after the first append leaves the fold-derived holding the append
+created, which recovery resolves — an unresolved verification included:
+its reservation converted at `merge_verification_started`, the open
+transaction is what holds the pipeline entitlement from then on, and the
+`Err` arm's cancellation is not reached (the review of `79ddbffb`
+measured the reservation ledger at 0 there and read it as a release;
+`pr8-triage.md` §6 finding 5).
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::DeferBackoff => Disposition::Performed,`
 
@@ -293,8 +313,14 @@ machinery, reached through the same `attempt` and `settle`.
 
 `loop`'s "attached-terminal prompt or `wait_on_block` for open
 questions". The channel decision is `interaction::answers_for`'s;
-this branch asks whatever source it is handed. An answer that
-arrives is refused, because ingesting one is PR9's.
+this branch asks whatever source it is handed. An answer to a
+**verification-park** question is ingested here — PR8's
+`question_answered`, which the fold routes to `AwaitingMerge` for an
+answer and to a failed lineage for a decline — and an answer to a
+repair-admission or attempt park is refused, because ingesting those
+is PR9's. The `QuestionOrigin` the fold recorded is what tells the two
+apart, so the refusal is a statement about the question's kind rather
+than about the answer.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::IngestAnswers => Disposition::NotThisSlice {`
 
@@ -320,11 +346,101 @@ Not a branch of the loop: the append-error protocol has already
 ended the command. `select` returns it so that a poisoned fold
 cannot be read as "no further transition, therefore end the run".
 
+## `pub const fn of(step: &Step) -> Option<Self>` › `Step::Dispatch { .. } | Step::RepairDispatch { .. } => Some(Self::ReadyDispatch),`
+
+A repair dispatch is the ready-dispatch branch reaching a Repair-origin
+task: `eligibility_order` names "new ordinary dispatch" and no branch
+for repairs, so the step maps to that branch and the checkpoint refuses
+it there.
+
 ## `pub const fn of(step: &Step) -> Option<Self>` › `Step::BudgetExceeded(_) => None,`
 
 A breach is recorded *by* the branch that asked, and every
 asking branch is an admitting one; the ceiling is never consulted
 outside one.
+
+## `impl IntegrationJournal for IntegrationCx<'_, '_>` › `fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {`
+
+The provisional integration reservation converts at the sequence's
+first append, and the ledger it converts in is the one `EmitState`
+borrows for the append-error protocol's cancellation — so the journal
+forwards to it rather than the sequence holding a second borrow.
+
+## `fn implementer_binding(`
+
+The binding the candidate ran under, for `passes_for`'s self-review rule:
+the task's validated override when one exists (E2 binds every later attempt
+to it), else the frozen rung at the fold-derived rung position. The fold
+moves a task's rung only at an escalation settlement and a task at
+`AwaitingMerge` settles no further attempt, so that position is the
+producing attempt's. The reviews of `3414dc58` found the ladder's *last*
+rung passed here, which a candidate produced lower down never ran under —
+so a primary reviewer equal to the real implementer was not swapped for
+the alternative, and a model could be handed its own work to review
+(`pr8-triage.md` C6). `DESIGN.md` §26 verdict item 4 reruns "all recorded
+gates and review passes", and the recorded passes were selected against this
+binding.
+
+## `impl IntegrationCx<'_, '_>` › `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {`
+
+The verification proper, every error typed so [`Verification::verify`]
+can decide what each one means: the review diff, the plan, the input
+classification, the review inputs, and the judge.
+
+The input classification is `classify::unjudgeable_diff` — a review diff
+no reviewer can judge (too large, opaque) — and the review-input policy's
+answer for the proposed tree, read in the staging worktree. Either stands
+in for the gates and reviewers as the judge's prior failure, and the
+sequence parks the candidate `HumanRequired` (R4). Without it the real
+refusal escaped from `review::materialize_prompt` as an error, and a policy
+that refused the tree still published (`pr8-triage.md`, tests 2). The
+attempt path's `diff_failure` also checks a Test task's provenance; that
+is a judgement of the candidate when it was produced, and the reviews of
+`916852c9` reproduced it rejecting a Test candidate whose identical test
+another candidate had published first, so the integration diff is not
+asked it (`pr8-triage.md` §5, adequacy 2).
+
+## `impl Verification for IntegrationCx<'_, '_>` › `self.spend.record_reviews(key, &judgement.reviews);`
+
+The ceiling's ledger, charged before the terminal is appended, exactly as
+an attempt's reviews are charged in `settle`; `Spend::replay` rebuilds it
+from the terminal's record. An unavailable terminal carries no review
+record, so a review that ended in a park or an outage is charged live and
+not on replay (`pr8-plan.md` R22).
+
+## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Runner(error)) => match error.fate {`
+
+What a Runner error means is what the Runner established about the
+process. `NeverStarted` is `invariants[INV-23]`'s mid-run
+`RunnerSpawnFailure`: an observed infrastructure failure with a terminal
+of its own (`transaction_fault_matrix[T-VERIFY].resume_action`); left to
+`?` at `3414dc58`, it escaped after `merge_verification_started`, the
+transaction stayed open, and every repeat bypassed the defer and park
+limit (`pr8-triage.md` C3). `Gone` — a gate process that started and the
+Runner has since established gone — is an outage too, `Other` because it
+is not a spawn failure. `Unresolved` is neither: the repair round settled
+it as a spawn failure, and the reviews of `916852c9` reproduced a gate
+still running in Docker beside a `Deferred` terminal that had released
+both entitlements and removed the snapshot the container had mounted, then
+a second sequence started beside it. A terminal authorizes cleanup and
+readmission, so an error that leaves the process's liveness unknown ends
+the command with the transaction open and nothing appended; the next
+resume's census reclaims the container before recovery step (f) settles
+the verification interrupted. A reviewer's Runner error reaches the
+judgement through `run_review`, which reports it unavailable on the same
+two fates and propagates the third.
+
+## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Other(UpstrokeError::Git { message })) => Ok(Verified::Unavailable {`
+
+Foreign Git state observed by the verification — a corrupt staging index
+under the review-input reader, a proposal whose object cannot be read, a
+snapshot the checkout could not make — is among the failures
+`decisions.repairs.not_repairs` says "at integration terminate in
+merge_verification_unavailable with outcome Deferred or Parked". Every
+Git command the verification issues runs before or between its processes,
+never beside one, so the terminal is safe to settle. R24 at `916852c9`
+excluded these and the `?` propagated them as an interruption
+(`pr8-triage.md` §5, record F3).
 
 ## `impl LoopBranch` › `pub fn owes(self, clause: &str) -> UpstrokeError {`
 
@@ -659,6 +775,29 @@ iteration selects.
 
 Whose generation.
 
+## `pub enum Progress` › `Integrated {`
+
+One candidate published: `merge_prepared`, the compare-and-swap and
+`task_merged` are durable, and every task in `satisfies` is `Merged`.
+
+## `pub enum Progress` › `Rejected {`
+
+One candidate rejected: `merge_rejected` is durable, its repair
+registered, and the rejected task is `AwaitingRepair`. No repair was
+dispatched — that is PR9's.
+
+## `pub enum Progress` › `Unavailable {`
+
+One verification could not be run: `merge_verification_unavailable` is
+durable, deferred (the candidate waits for a wake) or `parked` (a
+question is open and the task is `AwaitingInput`).
+
+## `pub enum Progress` › `Answered {`
+
+One verification-park question ingested: `question_answered` is
+durable, and the candidate is back in the queue (`declined` false) or
+its lineage has failed (`declined` true).
+
 ## `pub enum Progress` › `Blocked {`
 
 Nothing could run and the run is blocked on open questions.
@@ -844,6 +983,15 @@ Exposed so a test can assert the provisional ledger is balanced after a
 branch that refused partway. At `max_parallel = 1` a single leaked
 entitlement is a full pipeline, and nothing is ever selected again.
 
+## `impl TopologyRun` › `pub const fn reservations_cancelled(&self) -> u32 {`
+
+How many provisional reservations this run cancelled.
+
+Exposed so a test can tell a reservation that converted at its append
+from one the failure path cancelled: the review of `79ddbffb` read the
+empty ledger after an unresolved verification as a release, and the count
+is what says it was a conversion (`pr8-triage.md` §6 finding 5).
+
 ## `impl TopologyRun` › `pub fn defer_round(&self) -> u32 {`
 
 Which wait the defer backoff is on.
@@ -861,6 +1009,20 @@ One iteration of `decisions.sequential_substrate.loop`.
 value nothing has acted on, so `checkpoint_refusals`' "before any
 append" holds by construction rather than by this function remembering
 to check early enough.
+
+**Every step runs inside the run lock's cleanup scope.** A Unix reaper
+reads its cleanup-lease paths from the thread-local scope when it is
+spawned, and a reaper spawned with none active holds no lease: the next
+coordinator's exclusive probe (R28, `INV-18.recovery`) then finds nothing
+to refuse on while that reaper still reclaims a gate's process group. The
+v0.1 coordinator enters the scope beside its lock; this loop's attempt
+path never had, and the integration path routed its gates and reviewers
+through the same omission — the cover review of `8a5f59e8` measured a
+real reaper at `ReaperStarted` with the run's hold absent
+(`PR8-R4-CLEANUP-LEASE`). The scope is entered at the top of the step and
+dropped with it, on the thread that drives the step, which is what a
+thread-local registration needs.
+
 
 ### Errors
 
@@ -1427,13 +1589,26 @@ deferral ceiling. None of it is re-derived.
 
 What a first ordinary dispatch of `key` asks for.
 
-Every field is read from the run's own record or the frozen registry,
-never invented: the base is `run_started(4).base_sha`, and the predicted
-region is the task's `path_hints`. **An empty hint list is `RepoWide`,
-not an empty prefix set** — `PathSet::RepoWide` is documented as the
-classification for an absent answer, and a task with no hints has given
-one. An empty `Prefixes` would be a region that overlaps no bounded
-region, which would let every task run against every other.
+Every field is read from the run's own record, its log or the frozen
+registry, never invented: the base is the run's current authorized
+integration head and the predicted region is the task's `path_hints`.
+**An empty hint list is `RepoWide`, not an empty prefix set** —
+`PathSet::RepoWide` is documented as the classification for an absent
+answer, and a task with no hints has given one. An empty `Prefixes` would
+be a region that overlaps no bounded region, which would let every task
+run against every other.
+
+**The base is the head at dispatch, not the head the run started at.**
+This read `run_started(4).base_sha` until the seventh repair round, which
+was the same commit as the integration head at every dispatch of a run
+that could not publish, and stopped being it the moment this slice made
+publication real: a task dispatched after its dependency merged got a
+worktree without the dependency's merged work in it
+(`PR8-R7-DISPATCH-BASE`). [`super::integrate::dispatch_head`] answers with
+the head the log's latest publication put there, having first confirmed
+the integration ref is at it, so a foreign head refuses here — before the
+reservation is taken, before `task_dispatched` is appended and before any
+worktree exists.
 
 ## `impl TopologyRun` › `let paths = self.handle.fold.predicted_region(key).ok_or_else(|| {`
 
@@ -1462,3 +1637,68 @@ The driver owns the ledger, so obligation (3) is discharged here
 and the loop keeps one error type. `emitter` borrows the fold, the
 log, the reservations and the warnings; `invocations` is a disjoint
 field, which is the whole reason it is no longer inside `EmitState`.
+
+## `struct IntegrationCx<'a, 'h> {`
+
+The run's integration context: the emitter for the appends, the hook
+bundle for the funnels, and the seams and ledgers the verification runs
+through. One object, so `emit`, `verify` and `converted` are all `&mut
+self` methods over disjoint fields rather than three overlapping borrows.
+
+## `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {` › `let (diff_parent, diff_tree) = if request.already_present {`
+
+The review diff: the proposal against the head for a stale
+candidate, and the candidate's own patch (base..commit) for an
+already-present one, whose proposal is the head itself.
+
+## `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {` › `match crate::engine::classify::unjudgeable_diff(&diff, !plan.reviewers.is_empty()) {`
+
+What the attempt path decides before it judges (`assess`), less the
+Test-provenance rule: a diff no reviewer can judge — too large, or
+opaque — and the review-input policy's answer for the proposed tree,
+read in the staging worktree. Either stands in for the gates and
+reviewers as the prior failure, and the sequence parks the candidate for
+a person (R4): a Fix task cannot be asked to edit code without code
+evidence, and waiting cannot make the same diff fit.
+
+## `fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {` › `self.spend.record_reviews(key, &judgement.reviews);`
+
+The ceiling's ledger, charged before the terminal is
+appended, as an attempt's reviews are charged in `settle`:
+`Spend::replay` rebuilds it from the terminal's record.
+
+## `fn hard_block(` › `if origin != QuestionOrigin::VerificationPark {`
+
+A verification park is PR8's to ingest; a repair-admission or an
+attempt park is PR9's, and `checkpoint_refusals` has this build
+refuse those answers before any append.
+
+## `impl TopologyRun {` › `fn ingest_verification_answer(`
+
+Ingest an answer to a verification-park question: append
+`question_answered`, which the fold routes to `AwaitingMerge` (the
+candidate re-verifies under a new sequence) or, for a decline, to a
+failed lineage with its queue position consumed and its lease released,
+halting per `decline_halts_run`.
+
+## `impl Verification for IntegrationCx<'_, '_> {` › `match self.judge_proposal(request) {`
+
+The reviews are charged as each pass completes, inside `judge` (`SpendAccount`
+below), and **not** from the judgement returned here: a judgement that fails
+after a paid pass carries no reviews, and the Git-error arm settles the sequence
+*unavailable* rather than ending the command, so the loop would go on to admit
+another sequence in the same incarnation against a total that pass is missing
+from.
+
+## `struct SpendAccount<'a> {`
+
+The run's live account: each completed integration review is charged to the
+run's `Spend` as it returns, so the ceiling the next selection is admitted
+against has already paid for it.
+
+The replay of this path is a separate and deferred matter. A verification that
+reaches `merge_verification_unavailable` carries no review record in the frozen
+terminal, so a restart restores a total without it — `PR8-R2-SPEND-REPLAY`,
+which needs a wire-vocabulary change this slice may not make. That gap is about
+a restart; this account is about one incarnation, and holding the cost inside
+it needs no vocabulary at all.

@@ -8,6 +8,15 @@ struct Trace {
     inputs: FrozenInputs,
 }
 
+const NO_AUTOMATIC_REPAIRS: u32 = 0;
+
+fn without_automatic_repairs(mut event: TopologyEvent) -> TopologyEvent {
+    if let TopologyEventBody::RunStarted { data } = &mut event.body {
+        data.limits.max_merge_repairs = NO_AUTOMATIC_REPAIRS;
+    }
+    event
+}
+
 impl Trace {
     fn started() -> Self {
         Self {
@@ -21,6 +30,28 @@ impl Trace {
         Self {
             fold: wide_started(3),
             events: vec![wide_run_started_event(3)],
+            inputs: wide_inputs(),
+        }
+    }
+
+    fn parking() -> Self {
+        let event = without_automatic_repairs(run_started_event());
+        let mut fold = TopologyFold::new(inputs());
+        apply(&mut fold, &event);
+        Self {
+            fold,
+            events: vec![event],
+            inputs: inputs(),
+        }
+    }
+
+    fn wide_parking() -> Self {
+        let event = without_automatic_repairs(wide_run_started_event(3));
+        let mut fold = TopologyFold::new(wide_inputs());
+        apply(&mut fold, &event);
+        Self {
+            fold,
+            events: vec![event],
             inputs: wide_inputs(),
         }
     }
@@ -63,7 +94,7 @@ fn reject_into_question(root: TaskKey, repair: TaskKey, id: &str) -> TopologyEve
     spawn.entry.deps.clear();
     spawn.entry.display_deps.clear();
     spawn.admission = SpawnAdmission::HumanRequired {
-        limit: run_started().limits.max_merge_repairs,
+        limit: NO_AUTOMATIC_REPAIRS,
         question: question(id, repair),
     };
     ev(TopologyEventBody::MergeRejected {
@@ -185,7 +216,7 @@ fn a_durable_wake_reaches_a_deferred_task_hidden_by_questions() {
 #[test]
 fn declining_a_repair_admission_fails_the_lineage_and_allows_the_run_to_end() {
     let repair = TaskKey(3);
-    let mut trace = Trace::started();
+    let mut trace = Trace::parking();
     trace.queue(ALPHA);
     trace.record(reject_into_question(ALPHA, repair, "repair-admission"));
     trace.record(answered(
@@ -435,7 +466,7 @@ fn a_decline_cannot_cancel_a_prepared_publication_and_preserves_its_merged_ances
 
 #[test]
 fn a_lineage_question_blocks_related_work_and_decline_preserves_an_unrelated_transaction() {
-    let mut trace = Trace::started();
+    let mut trace = Trace::parking();
     trace.queue(ALPHA);
     trace.record(reject_into_question(ALPHA, TaskKey(3), "admission"));
     trace.record(spawn_event(runnable_repair(TaskKey(4))));
@@ -510,7 +541,7 @@ fn a_new_bare_or_standalone_admission_question_cannot_enter_an_active_lineage_tr
 fn engine_selection_skips_a_candidate_whose_lineage_has_a_question() {
     use crate::engine::topology::select::{Ceiling, Spend, Step, select};
 
-    let mut trace = Trace::wide_started();
+    let mut trace = Trace::wide_parking();
     trace.queue(ALPHA);
     trace.record(reject_into_question(ALPHA, TaskKey(4), "admission"));
     trace.record(answer(TaskKey(4), "admission"));
@@ -616,10 +647,9 @@ fn open_continuation_controls_before_and_after_a_lineage_answer() {
     let (mut trace, continuation) = open_continuation_prefix();
     assert!(matches!(
         select(&trace.fold, &Ceiling::unlimited(), &Spend::new()),
-        Step::Dispatch {
+        Step::RepairDispatch {
             key: TaskKey(3),
             generation: GenerationId(0),
-            continuing: true,
         }
     ));
     trace.record(park_sibling());
@@ -629,10 +659,9 @@ fn open_continuation_controls_before_and_after_a_lineage_answer() {
     accepts(&trace.fold, &continuation);
     assert!(matches!(
         select(&trace.fold, &Ceiling::unlimited(), &Spend::new()),
-        Step::Dispatch {
+        Step::RepairDispatch {
             key: TaskKey(3),
             generation: GenerationId(0),
-            continuing: true,
         }
     ));
     trace.record(continuation);
@@ -699,7 +728,7 @@ fn declining_one_of_two_embedded_questions_closes_the_whole_lineages_questions()
 
 #[test]
 fn declining_a_lineage_preserves_unrelated_verification_and_its_candidate() {
-    let mut trace = Trace::started();
+    let mut trace = Trace::parking();
     trace.queue(ALPHA);
     trace.record(reject_into_question(ALPHA, TaskKey(3), "admission"));
     trace.queue(MID);
@@ -752,7 +781,7 @@ fn declining_a_lineage_preserves_unrelated_verification_and_its_candidate() {
 #[test]
 fn bare_questions_and_active_generations_exclude_each_other_across_a_lineage() {
     for queried in [ALPHA, TaskKey(3), TaskKey(4)] {
-        let mut trace = Trace::started();
+        let mut trace = Trace::parking();
         trace.queue(ALPHA);
         trace.record(reject_into_question(ALPHA, TaskKey(3), "admission"));
         trace.record(answer(TaskKey(3), "admission"));
@@ -771,7 +800,7 @@ fn bare_questions_and_active_generations_exclude_each_other_across_a_lineage() {
         refuse(&trace.fold, &raised("reserved", queried));
         let mut spawn = runnable_repair(TaskKey(5));
         spawn.admission = SpawnAdmission::HumanRequired {
-            limit: run_started().limits.max_merge_repairs,
+            limit: NO_AUTOMATIC_REPAIRS,
             question: question("admission-active", TaskKey(5)),
         };
         refuse(&trace.fold, &spawn_event(spawn));

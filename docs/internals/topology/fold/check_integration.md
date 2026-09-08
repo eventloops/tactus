@@ -197,6 +197,23 @@ The lease effect and the repair are one decision: a non-lineage
 candidate's lease becomes the new lineage's, and a lineage member's
 rejection widens the lineage it already belongs to.
 
+## `pub(super) fn check_merge_rejected(&self, rejected: &MergeR…` › `let limit = self.started.limits.max_merge_repairs;`
+
+INV-11: "Repair lineage is … bounded per root by the frozen limit",
+enforced because "the fold counts automatic rejections per root".
+Every `merge_rejected` registers exactly one member, so the members a
+lineage already holds are its automatic rejections so far, and the
+member being registered is the one that would consume the next unit.
+`DESIGN.md` §26.4: "When the next repair would exceed the limit,
+`merge_rejected` still atomically registers its complete task but gives
+it `human_required` admission". Both directions are held: a runnable
+repair past the limit is refused, and a human-required repair below it
+is refused, because a person asked when the run had budget left is a
+run stopping early for no recorded reason. A `HumanBinding` admission
+is accepted on either side of the limit — an empty tier intersection
+means nothing can run whatever the limit says, and the question it
+asks resolves what runs, not whether to continue.
+
 ## `impl RunState` › `pub(super) fn lineage_members(&self, root: TaskKey) -> u32 {`
 
 How many repairs lineage `root` already holds.

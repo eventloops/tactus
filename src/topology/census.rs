@@ -799,6 +799,7 @@ mod tests {
             Some(TransactionClass::Prepared {
                 proposed_sha,
                 satisfies,
+                ..
             }) => (proposed_sha.clone(), satisfies.clone()),
             _ => (candidate_of(key, generation).commit_sha, vec![key]),
         };

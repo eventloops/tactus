@@ -688,6 +688,19 @@ impl Slot {
 mod worktree;
 pub use self::worktree::{Quiescence, VerifyFailure, WorktreeRecord};
 
+/// What a failed proposal cherry-pick left behind; see
+/// [`WorkspaceManager::proposal_state`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProposalState {
+    /// The pick stopped on unmerged entries at these paths.
+    Conflict { paths: PathSet },
+    /// The candidate's change is already wholly present on the head.
+    Empty,
+    /// Neither shape: the pick failed for a reason the inspection does not
+    /// classify, described as what was seen.
+    Unclassified { detail: String },
+}
+
 /// The owner of an execution root and everything inside it.
 #[derive(Debug, Clone)]
 pub struct WorkspaceManager {
@@ -1771,9 +1784,12 @@ impl WorkspaceManager {
     ///
     /// `diff-index --cached` asks the question `write-tree` was being used to
     /// answer — *does the index hold this exact tree* — and answers it by
-    /// reading. `--no-optional-locks` is what makes that read-only rather than
-    /// nearly: without it `diff-index` takes the index lock to write back a
-    /// refreshed stat cache, which is a write to `.git/index`.
+    /// reading. What makes that read-only rather than nearly is
+    /// `--no-optional-locks`, which [`read_only_git`] now passes for every read
+    /// the manager makes: without it `diff-index` takes the index lock to write
+    /// back a refreshed stat cache, which is a write to `.git/index`. It is
+    /// passed there and not also here, so that dropping it is a single change
+    /// a test can witness.
     ///
     /// Three outcomes, because `--quiet` implies `--exit-code`: 0 is "holds it",
     /// 1 is "differs", and anything else is a Git failure — of which one case is
@@ -1786,19 +1802,13 @@ impl WorkspaceManager {
     ///
     /// A Git error other than "the index differs" or "the tree is absent".
     fn index_differs_from(&self, path: &Path, tree: &str) -> Result<Option<String>, UpstrokeError> {
-        const READ_ONLY: &str = "--no-optional-locks";
-        let quiet = read_only_git(
-            path,
-            &[READ_ONLY, "diff-index", "--cached", "--quiet", tree, "--"],
-        )?;
+        let quiet = read_only_git(path, &["diff-index", "--cached", "--quiet", tree, "--"])?;
         match quiet.status.code() {
             Some(0) => return Ok(None),
             Some(1) => {}
             _ => {
-                let present = read_only_git(
-                    path,
-                    &[READ_ONLY, "cat-file", "-e", &format!("{tree}^{{tree}}")],
-                )?;
+                let present =
+                    read_only_git(path, &["cat-file", "-e", &format!("{tree}^{{tree}}")])?;
                 if present.status.success() {
                     return Err(UpstrokeError::Git {
                         message: format!(
@@ -1818,15 +1828,7 @@ impl WorkspaceManager {
         // that split on one would name paths that do not exist.
         let names = read_only_git_ok(
             path,
-            &[
-                READ_ONLY,
-                "diff-index",
-                "--cached",
-                "--name-only",
-                "-z",
-                tree,
-                "--",
-            ],
+            &["diff-index", "--cached", "--name-only", "-z", tree, "--"],
         )?;
         let differing: Vec<String> = String::from_utf8_lossy(&names)
             .split('\0')
@@ -2568,6 +2570,114 @@ impl WorkspaceManager {
         )
     }
 
+    /// What a failed `Object.ProposalCherryPick` left in its staging worktree,
+    /// read after the fact.
+    ///
+    /// A read, like [`Self::changed_paths`]: it takes no hooks and names no
+    /// effect site, because it creates no object, moves no ref and touches no
+    /// index. Git reports an already-present change and a textual conflict
+    /// the same way — a non-zero exit with `CHERRY_PICK_HEAD` left behind —
+    /// and the two are opposite dispositions (`DESIGN.md` §26.3), so the
+    /// worktree is inspected rather than the message parsed:
+    ///
+    /// * unmerged index entries (`git diff-files --name-status
+    ///   --diff-filter=U`, NUL-delimited and decoded byte-safely) are a
+    ///   conflict, and their paths are what the repair lineage takes a lease
+    ///   on;
+    ///
+    /// **`diff-files` rather than the porcelain `git diff`, so that the
+    /// paragraph above is true.** Porcelain `git diff` against the working
+    /// tree silently runs `update-index --refresh` first — `diff.autoRefreshIndex`,
+    /// which defaults to true — and that refresh *writes*: measured on git
+    /// 2.43, `open(index.lock, O_RDWR|O_CREAT|O_EXCL)` then
+    /// `rename(index.lock, index)`, changing the 209-byte index's hash after
+    /// nothing but an unchanged file's timestamp moved. A function that claims
+    /// to touch no index and takes no hooks was therefore writing one outside
+    /// the effect funnel, which is the observation
+    /// `decisions.effect_site_inventory.{mechanism,identity,claim_scope}`
+    /// exists to make impossible. The read is made genuinely read-only rather
+    /// than routed through the funnel because there is no site to route it to:
+    /// the frozen `EffectSiteId` names no classification read, and adding one
+    /// is a change under the `src/topology/**` freeze for a function that
+    /// creates nothing to account for. `diff.autoRefreshIndex`'s own
+    /// documentation is what makes `diff-files` the answer rather than a
+    /// configuration override — it "affects only `git diff` Porcelain, not
+    /// lower level `diff` commands such as `git diff-files`" — and the two
+    /// produce byte-identical `--name-status --diff-filter=U -z` records for
+    /// the same unmerged entries, measured. The `--cached` diff below compares
+    /// the index with `HEAD` and never consults the working tree, so no
+    /// refresh applies to it; the regression test hashes the index across the
+    /// whole call and so covers both.
+    /// * no unmerged entry, `HEAD` still at `head`, `CHERRY_PICK_HEAD` present
+    ///   and the index equal to `HEAD` is the empty pick — measured on git
+    ///   2.43, "The previous cherry-pick is now empty", exit 1;
+    /// * anything else is reported as [`ProposalState::Unclassified`] with
+    ///   what was seen, so the caller can surface the pick's own error.
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals or a Git error from the inspections.
+    pub fn proposal_state(&self, slot: &Slot, head: &str) -> Result<ProposalState, UpstrokeError> {
+        self.revalidate()?;
+        let path = self.slot_target(slot)?;
+        let unmerged = self.git_ok(
+            &path,
+            &[
+                OsString::from("diff-files"),
+                OsString::from("--name-status"),
+                OsString::from("--diff-filter=U"),
+                OsString::from("-z"),
+            ],
+        )?;
+        let paths = decode_changed_paths(&unmerged);
+        let conflicted = paths.prefixes().is_none_or(|prefixes| !prefixes.is_empty());
+        if conflicted {
+            return Ok(ProposalState::Conflict { paths });
+        }
+        let at = self.git_line(&path, &["rev-parse", "HEAD"])?;
+        if at != head {
+            return Ok(ProposalState::Unclassified {
+                detail: format!("no unmerged entry, and HEAD is {at} where the head was {head}"),
+            });
+        }
+        let picking = self
+            .git(
+                &path,
+                &[
+                    OsString::from("rev-parse"),
+                    OsString::from("--verify"),
+                    OsString::from("--quiet"),
+                    OsString::from("CHERRY_PICK_HEAD"),
+                ],
+            )?
+            .status
+            .success();
+        if !picking {
+            return Ok(ProposalState::Unclassified {
+                detail: "no unmerged entry and no CHERRY_PICK_HEAD".to_owned(),
+            });
+        }
+        let index_clean = self
+            .git(
+                &path,
+                &[
+                    OsString::from("diff"),
+                    OsString::from("--cached"),
+                    OsString::from("--quiet"),
+                ],
+            )?
+            .status
+            .success();
+        if !index_clean {
+            return Ok(ProposalState::Unclassified {
+                detail: "no unmerged entry, CHERRY_PICK_HEAD present, and the index differs \
+                         from HEAD"
+                    .to_owned(),
+            });
+        }
+        Ok(ProposalState::Empty)
+    }
+
     /// `Object.RepairMaterialize` — `git cherry-pick --no-commit` in a repair
     /// worktree.
     ///
@@ -3189,11 +3299,22 @@ fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
         .map(|target| PathBuf::from(target.trim())))
 }
 
+/// Run one of the manager's reads.
+///
+/// **`--no-optional-locks` on every one of them**, which is what makes these
+/// reads read-only rather than nearly. Git's porcelain takes the index lock
+/// opportunistically to write back a refreshed stat cache, and that is a write
+/// to `.git/index`: measured on git 2.43, `git status --porcelain` moves the
+/// index's hash after nothing but an unchanged file's timestamp did, and the
+/// flag stops it. `PR5-CONF-002` established the rule at one call site
+/// ([`WorkspaceManager::index_differs_from`]); it belongs here, where a read
+/// added later inherits it, because a read that writes the index writes it
+/// outside every effect hook.
 fn read_only_git(cwd: &Path, args: &[&str]) -> Result<Output, UpstrokeError> {
     Command::new("git")
         .arg("-C")
         .arg(cwd)
-        .args(["-c", "core.fsmonitor=false"])
+        .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
         .args(args)
         .stdin(Stdio::null())
         .output()

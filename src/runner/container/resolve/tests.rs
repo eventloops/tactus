@@ -1525,12 +1525,15 @@ impl ContainerRuntime for LoggingRuntime {
         &self,
         name: &str,
         mode: crate::runner::container::runtime::StopMode,
-    ) -> Result<(), RuntimeError> {
+    ) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
         logged!(self, RuntimeOp::Stop);
         self.inner.stop(name, mode)
     }
 
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+    fn remove(
+        &self,
+        name: &str,
+    ) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
         logged!(self, RuntimeOp::Remove);
         self.inner.remove(name)
     }

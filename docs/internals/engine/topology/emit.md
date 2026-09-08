@@ -116,7 +116,7 @@ prove anything about.
 
 The mutable state one emit touches, borrowed for the call.
 
-**Four** borrows rather than one `&mut TopologyRun` because this module is
+**Five** borrows rather than one `&mut TopologyRun` because this module is
 deliberately not the run: `emit` is called from creation, from recovery, and
 from the loop, and each of those holds its own surrounding state. What every
 one of them must hand over is exactly this.
@@ -124,7 +124,8 @@ one of them must hand over is exactly this.
 **It said five, and said the protocol's obligations were each a statement
 about one of them.** Both halves stopped being true when `bcc5c2f` moved
 obligation (3) to the caller and deleted the `invocations` field: the count
-is four, and obligation (3) is now *not* a statement about a field here —
+was four until the event mirror below made it five, and obligation (3) is
+now *not* a statement about a field here —
 [`AppendError`]'s own protocol note says so in as many words. `9b6fef1`
 removed that field's stranded doc lines from `warnings` and left this
 sentence seven lines above them unread. `R5-SEAMS-005`.
@@ -136,6 +137,16 @@ The derived state. Poisoned by the protocol, never mutated by it.
 ## `pub struct EmitState<'a>` › `pub log: &'a mut EventLog,`
 
 The append handle the stable-prefix barrier entitled this command to.
+
+## `pub struct EmitState<'a>` › `pub events: &'a mut Vec<TopologyEvent>,`
+
+The events the fold was derived from, extended by every append that
+succeeds — in the same arm that applies the delta to the fold, so the two
+cannot disagree about what is durable. The loop reads the authorized
+integration head off this list ([`super::integrate::authorized_head`]),
+and recovery's own appends land on it before the `RunHandle` is handed
+over, which is why it is a field here rather than something each caller
+remembers to maintain.
 
 ## `pub struct EmitState<'a>` › `pub reservations: &'a mut Reservations,`
 
@@ -151,7 +162,8 @@ cancelling the *processes* is the caller's." `bcc5c2f` deleted the
 `invocations: &'a mut InvocationLedger` field they documented and left
 them stranded on this one, so rustdoc rendered a warnings sink as a
 ledger. `PR7-R3-EMIT-003`; confirmed against the tree and removed
-2026-08-26. `EmitState` has four fields and each now documents itself.
+2026-08-26. `EmitState` has five fields and each now documents itself.
+
 (The first draft of this note opened "the two lines **above this one**",
 which resolves only against the version it replaced — S5 round 5's
 `seams` lens, filed to the standards work-list.)

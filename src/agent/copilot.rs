@@ -54,7 +54,9 @@ impl AgentAdapter for CopilotAdapter {
                 probe_ordinal::VERSION,
                 PROBE_TIMEOUT,
             )?)
-            .map_err(|cause| bin::boundary_refused(CLI, INSTALL_HINT, &cause))?;
+            .map_err(|cause| {
+                bin::boundary_refused(CLI, INSTALL_HINT, &UpstrokeError::from(cause))
+            })?;
         if out.output_limited {
             return Err(UpstrokeError::Agent {
                 message: format!(

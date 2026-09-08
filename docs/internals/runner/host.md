@@ -196,6 +196,21 @@ ordering predicate ("resolved once per spawn, before any of the spawn") and the 
 
 ## `impl Runner for HostRunner` — `run`
 
+### What the error says about the process
+
+Every error is a `RunnerError` carrying a [`ProcessFate`]. The environment
+composition and the name resolution happen before anything is spawned, so
+their refusals are `NeverStarted`; everything after is the funnel's own
+classification through `proc::run_with_timeout_classified` — `NeverStarted`
+for a spawn that created nothing, `Gone` once the process group (Unix) or
+the job (Windows) was established empty, `Unresolved` where the funnel
+returned without that: a containment failure after the spawn, a reaper
+that failed, a Windows job cleanup that failed after the direct child
+exited. A reaped direct child is never the evidence, because it says
+nothing about the descendants that shared its group. The distinction
+exists for the integration verification, which may settle an outage
+terminal only on a fate that says no process survives.
+
 ### Where the program name is resolved
 
 Which file the program *name* is, decided in `run` and nowhere else.

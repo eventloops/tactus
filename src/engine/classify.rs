@@ -7,19 +7,26 @@ use crate::ladder::{AttemptFailure, FailureKind};
 use crate::review;
 
 #[must_use]
+pub(crate) fn unjudgeable_diff(diff: &str, has_reviewers: bool) -> Option<AttemptFailure> {
+    let error = review::complete_diff_error(diff)?;
+    if matches!(error, review::CompleteDiffError::Opaque) || has_reviewers {
+        let failure_kind = match error {
+            review::CompleteDiffError::Opaque => FailureKind::ReviewInputOpaque,
+            review::CompleteDiffError::TooLarge { .. } => FailureKind::ReviewInputTooLarge,
+        };
+        return Some(AttemptFailure::new(failure_kind, error.to_string()).from_reviewer());
+    }
+    None
+}
+
+#[must_use]
 pub(crate) fn diff_failure(
     diff: &str,
     kind: TaskKind,
     has_reviewers: bool,
 ) -> Option<AttemptFailure> {
-    if let Some(error) = review::complete_diff_error(diff) {
-        if matches!(error, review::CompleteDiffError::Opaque) || has_reviewers {
-            let failure_kind = match error {
-                review::CompleteDiffError::Opaque => FailureKind::ReviewInputOpaque,
-                review::CompleteDiffError::TooLarge { .. } => FailureKind::ReviewInputTooLarge,
-            };
-            return Some(AttemptFailure::new(failure_kind, error.to_string()).from_reviewer());
-        }
+    if let Some(failure) = unjudgeable_diff(diff, has_reviewers) {
+        return Some(failure);
     }
     if kind == TaskKind::Test && !gates::diff_adds_tests(diff) {
         return Some(

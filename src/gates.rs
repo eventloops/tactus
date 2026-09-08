@@ -643,17 +643,20 @@ mod tests {
         fn run(
             &self,
             request: &crate::runner::RunnerRequest,
-        ) -> Result<crate::agent::ProcessOutput, UpstrokeError> {
+        ) -> Result<crate::agent::ProcessOutput, crate::runner::RunnerError> {
             self.seen
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(request.clone());
             match &self.answer {
                 Scripted::Output(out) => Ok((**out).clone()),
-                Scripted::SpawnFailure => Err(UpstrokeError::Agent {
-                    message: "failed to spawn `sh`: No such file or directory (os error 2)"
-                        .to_owned(),
-                }),
+                Scripted::SpawnFailure => Err(crate::runner::RunnerError::never_started(
+                    &request.invocation,
+                    UpstrokeError::Agent {
+                        message: "failed to spawn `sh`: No such file or directory (os error 2)"
+                            .to_owned(),
+                    },
+                )),
             }
         }
     }

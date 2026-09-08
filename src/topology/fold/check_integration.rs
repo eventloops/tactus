@@ -466,6 +466,27 @@ impl RunState {
                 lineage.index
             )));
         }
+        let limit = self.started.limits.max_merge_repairs;
+        let over_limit = index >= limit;
+        match &rejected.repair.admission {
+            SpawnAdmission::Runnable if over_limit => {
+                return Err(inconsistent(format!(
+                    "lineage {root} has consumed its {limit} automatic repair(s), and the {} \
+                     member is registered runnable; a repair past the frozen limit is registered \
+                     with human admission",
+                    ordinal(index)
+                )));
+            }
+            SpawnAdmission::HumanRequired { .. } if !over_limit => {
+                return Err(inconsistent(format!(
+                    "lineage {root} has consumed {index} of {limit} automatic repair(s), and this \
+                     repair asks a person as if the limit were reached"
+                )));
+            }
+            SpawnAdmission::Runnable
+            | SpawnAdmission::HumanRequired { .. }
+            | SpawnAdmission::HumanBinding { .. } => {}
+        }
         Ok(())
     }
 
@@ -485,6 +506,7 @@ impl RunState {
         let TransactionClass::Prepared {
             proposed_sha,
             satisfies,
+            ..
         } = &transaction.class
         else {
             return Err(FoldError::InconsistentRecord {
