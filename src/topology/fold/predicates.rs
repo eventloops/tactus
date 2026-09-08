@@ -146,6 +146,15 @@ impl TopologyFold {
     }
 
     #[must_use]
+    pub fn rung_binding(&self, key: TaskKey, rung: u32) -> Option<RungBinding> {
+        let entry = self.registry()?.get(key)?;
+        match self.binding_override(key) {
+            Some(binding) => Some(RungBinding::from_override(binding, entry.ladder.floor?)),
+            None => self.frozen_rung_binding(key, rung),
+        }
+    }
+
+    #[must_use]
     pub fn open_no_attempt(&self, key: TaskKey) -> Option<GenerationId> {
         self.task(key)?
             .open()

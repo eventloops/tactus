@@ -681,8 +681,18 @@ impl RungBinding {
         *self == Self::from_frozen(rung, effort)
     }
 
-    pub fn matches_override(&self, binding: &BindingOverride) -> bool {
-        self.agent == binding.agent && self.model == binding.model && self.effort == binding.effort
+    pub fn from_override(binding: &BindingOverride, tier: Tier) -> Self {
+        Self {
+            tier,
+            agent: binding.agent.clone(),
+            model: binding.model.clone(),
+            pinned: true,
+            effort: binding.effort,
+        }
+    }
+
+    pub fn matches_override(&self, binding: &BindingOverride, tier: Tier) -> bool {
+        *self == Self::from_override(binding, tier)
     }
 }
 
@@ -3789,18 +3799,25 @@ mod tests {
             model: "gpt-5.6-sol".to_owned(),
             effort: Effort::XHigh,
         };
-        assert!(frozen.matches_override(&binding));
-        let mut other_tier = frozen.clone();
-        other_tier.tier = Tier::Frontier;
-        assert!(other_tier.matches_override(&binding));
-        for pinned in [true, false] {
-            let mut either = frozen.clone();
-            either.pinned = pinned;
-            assert!(
-                either.matches_override(&binding),
-                "an override was refused for a pin it does not record ({pinned})"
-            );
-        }
+        let floor = Tier::Mid;
+        let authorized = RungBinding::from_override(&binding, floor);
+        assert_eq!(
+            authorized,
+            RungBinding {
+                tier: floor,
+                agent: "codex".to_owned(),
+                model: "gpt-5.6-sol".to_owned(),
+                pinned: true,
+                effort: Effort::XHigh,
+            },
+            "errata E2: agent, model and effort come from the payload, the tier from the ladder's \
+             frozen floor, and the pin from the fact that a human named it"
+        );
+        assert!(authorized.matches_override(&binding, floor));
+        assert!(
+            frozen.matches_override(&binding, floor),
+            "the fixture's frozen rung is exactly the binding this override authorizes at mid"
+        );
         for (name, move_field) in [
             (
                 "agent",
@@ -3808,14 +3825,21 @@ mod tests {
             ),
             ("model", |b: &mut RungBinding| b.model = "gpt-4".to_owned()),
             ("effort", |b: &mut RungBinding| b.effort = Effort::Medium),
+            ("tier", |b: &mut RungBinding| b.tier = Tier::Frontier),
+            ("pinned", |b: &mut RungBinding| b.pinned = false),
         ] {
-            let mut moved = frozen.clone();
+            let mut moved = authorized.clone();
             move_field(&mut moved);
             assert!(
-                !moved.matches_override(&binding),
-                "moving {name} still matched the override"
+                !moved.matches_override(&binding, floor),
+                "moving {name} still matched the override: E2 binds all five fields, and tier and \
+                 pin were the two the shipped half-rule left unbound"
             );
         }
+        assert!(
+            !authorized.matches_override(&binding, Tier::Frontier),
+            "one payload authorizes different bindings on ladders with different floors"
+        );
     }
 
     #[test]
