@@ -5982,26 +5982,70 @@ fn run_takes_the_hooks_guard_after_it_has_resolved_the_program() {
     );
 }
 
-/// A request for a program that resolves on every platform, so a refusal in the
-/// two tests below comes from the observer rather than from program resolution.
-fn shell_request(workspace: &Path) -> RunnerRequest {
-    let template = native().command("exit 0");
-    RunnerRequest {
-        command: CommandSpec {
-            program: template.get_program().to_string_lossy().into_owned(),
-            args: template
-                .get_args()
-                .map(|arg| arg.to_string_lossy().into_owned())
-                .collect(),
+/// The child the two observer tests below spawn: a test that does nothing and
+/// exits 0, so what those tests measure is what the runner's containment
+/// callbacks did on the way to it and not anything the child went on to do.
+#[test]
+#[ignore = "subprocess helper"]
+fn observer_child_helper() {}
+
+/// The filter that names [`observer_child_helper`] to a child test binary. It
+/// is the harness path and not the bare function name: with `--exact`, a bare
+/// name matches nothing, runs nothing, and still exits 0.
+const OBSERVER_CHILD: &str = "runner::host::tests::observer_child_helper";
+
+/// A request whose program is this test binary itself, at the absolute path
+/// this process was launched from, running [`observer_child_helper`]. Nothing
+/// about it is resolved through `PATH` — `resolve_program` returns a name that
+/// is not bare without consulting one — so a refusal in either test below
+/// comes from the observer rather than from program resolution. That is what
+/// the earlier `sh`/`cmd` request only appeared to give: it resolved through
+/// whatever `PATH` the suite happened to inherit, which §12 forbids a test to
+/// depend on, and with `PATH` emptied both tests failed at their first `run`
+/// without reaching a callback.
+fn observer_request(workspace: &Path) -> RunnerRequest {
+    crate::runner::gate_request(
+        CommandSpec {
+            program: std::env::current_exe()
+                .expect("the test binary knows where it is")
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![
+                OBSERVER_CHILD.to_owned(),
+                "--ignored".to_owned(),
+                "--exact".to_owned(),
+            ],
             env: Vec::new(),
             stdin: Vec::new(),
         },
-        workspace: workspace.to_path_buf(),
-        role: ExecutionRole::Gate,
-        timeout: Duration::from_secs(30),
-        agent: None,
-        invocation: gate_invocation(),
-    }
+        workspace.to_path_buf(),
+        Duration::from_secs(120),
+        gate_invocation(),
+    )
+}
+
+/// The environment the two observer tests below compose their child's from:
+/// this process's own, with `PATH` replaced by one directory that does not
+/// exist. [`observer_request`] names its program absolutely and never consults
+/// it, so the replacement takes nothing away from the child — what it removes
+/// is the suite's ambient `PATH`, and with it any chance that a bare program
+/// name resolves here by accident. A request that went back to a bare `sh` or
+/// `cmd` now fails on every machine rather than only on one whose `PATH`
+/// happens not to have one.
+fn observer_environment(root: &Path) -> HostEnvironment {
+    environment_on_path(&[&root.join("nothing-here")], None)
+}
+
+/// The child ran the helper, rather than the harness matching nothing and
+/// exiting 0 on an empty run — which would leave every assertion about the
+/// spawn measuring a spawn that observed nothing.
+fn assert_ran_the_helper(output: &ProcessOutput) {
+    assert_eq!(output.code, Some(0), "{output:?}");
+    assert!(
+        output.stdout.contains("1 passed"),
+        "the child did not run `{OBSERVER_CHILD}`, so this measured a spawn of \
+         something other than the helper: {output:?}"
+    );
 }
 
 /// Asks, from inside a containment callback, whether the runner that is calling
@@ -6068,13 +6112,17 @@ impl SpawnHooks for GuardProbe {
 fn a_spawn_callback_runs_while_this_runner_holds_the_hooks_guard() {
     let root = FixtureRoot(scratch("hooks-callback-interval"));
     let probe = GuardProbe::default();
-    let runner = Arc::new(HostRunner::new().with_hooks(Box::new(probe.clone())));
+    let runner = Arc::new(
+        HostRunner::new()
+            .with_environment(observer_environment(&root.0))
+            .with_hooks(Box::new(probe.clone())),
+    );
     *probe.runner.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&runner);
 
     let output = runner
-        .run(&shell_request(&root.0))
+        .run(&observer_request(&root.0))
         .expect("the probe proceeds at every containment point");
-    assert_eq!(output.code, Some(0), "{output:?}");
+    assert_ran_the_helper(&output);
 
     let observations = probe
         .holds_the_guard
@@ -6156,13 +6204,17 @@ fn a_poisoned_hooks_guard_hands_back_the_damaged_observer_unrepaired() {
     // The control: the same observer, never driven through a panic, runs the
     // same request to completion. The refusal below is the damage, not the
     // fixture.
-    let control = HostRunner::new().with_hooks(Box::new(RequiresItsOwnState::healthy()));
+    let control = HostRunner::new()
+        .with_environment(observer_environment(&root.0))
+        .with_hooks(Box::new(RequiresItsOwnState::healthy()));
     let output = control
-        .run(&shell_request(&root.0))
+        .run(&observer_request(&root.0))
         .expect("an undamaged observer of this shape proceeds");
-    assert_eq!(output.code, Some(0), "{output:?}");
+    assert_ran_the_helper(&output);
 
-    let runner = HostRunner::new().with_hooks(Box::new(RequiresItsOwnState::panics()));
+    let runner = HostRunner::new()
+        .with_environment(observer_environment(&root.0))
+        .with_hooks(Box::new(RequiresItsOwnState::panics()));
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut hooks = runner.hooks.lock().unwrap_or_else(PoisonError::into_inner);
         let _ = (**hooks).point(point);
@@ -6176,7 +6228,7 @@ fn a_poisoned_hooks_guard_hands_back_the_damaged_observer_unrepaired() {
     // Recovery, and its limit: `run` gets past the poisoned lock rather than
     // being refused by it, and what it gets is the same damaged observer.
     let refused = runner
-        .run(&shell_request(&root.0))
+        .run(&observer_request(&root.0))
         .expect_err("the observer the acquisition recovers is the damaged one");
     let message = refused.to_string();
     assert!(
