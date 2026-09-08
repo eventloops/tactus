@@ -371,12 +371,18 @@ offer, the entry now says so and cites the passage that settles it.
   even then it only proposes: the settlement is established against a `docker ps` listing that had
   to succeed to answer, which is also what `observe` now reads. What `ProcessGone` means and what
   it is worth are unchanged.
-- **R29. One rule for the authorized integration head.** The live exact-base decision and the
-  resume's startup check read the same rule: the log's latest `task_merged.merged_sha`, or the
-  recorded base before any publication (`integrate::authorized_head`). `decide` requires the head
+- **R29. One rule for the authorized integration head.** The live exact-base decision, the
+  resume's startup check and a fresh dispatch read the same rule: the log's latest
+  `task_merged.merged_sha`, or the recorded base before any publication
+  (`integrate::authorized_head`). `decide` requires the head
   it reads to be that value before choosing fast or stale — a head the log did not put there is
   the foreign ref `decisions.coordinator_integration.integration_sequence` says refuses at this
-  read — and `ensure_recorded_integration_ref` requires the same value at resume (R23). The live
+  read — `ensure_recorded_integration_ref` requires the same value at resume (R23), and
+  `integrate::dispatch_head` requires it before a worktree is created for a newly ready task
+  (DESIGN §26 verdict 1, "the run's integration HEAD at dispatch"; the seventh repair round,
+  `pr8-triage.md` §10). The third caller was added last and the rule was not changed for it:
+  `run.rs` read `run_started.base_sha` directly, which was the same commit as the authorized head
+  at every dispatch of a run that could not publish. The live
   engine derives it from the event list `RunHandle` carries, which the one `emit` funnel extends
   on every successful append for the loop and for recovery alike; the fold is not asked to retain
   a publication, so no new Class B change is made. (The first implementation compared the head
@@ -605,6 +611,40 @@ Three readings this round records, because each was a choice and not a deduction
   state is the conforming shape but a behaviour change to PR6 code with no reproduction behind it.
   That ruling still holds; this round changes where the *absence* answer comes from and nothing
   about how a state that is present is classified.
+
+### The seventh repair round (2026-09-08)
+
+The merge decision on `eb4e2997` and its triage are `pr8-triage.md` §10. **One defect and no
+others** — the first review of this branch asked whether to merge rather than for a findings list,
+and it returned a single P1 with no P2 and no P3. The reviewed head was green on all eleven CI
+checks across the full ubuntu/macOS/Windows matrix and on the ten gates locally, and the defect
+survived every one of them:
+
+| Commit | Findings |
+|---|---|
+| `fix(engine): a dispatch takes the run's current integration head` | finding 1 (`PR8-R7-DISPATCH-BASE`) and its two regressions |
+| `test(engine): the dispatch head's guard, and the notes for both witnesses` | the refusal arm's four readings against a real repository, and §13's move of the round's prose to the modules' notes |
+| `test(engine): the driver tests resume through the real ref funnel` | the row this round raised (`PR8-R7-DRIVER-REF-FUNNEL`) |
+| `docs(pr8): the plan and findings of the seventh repair round` | this file, `pr8-triage.md` §10, and `pr8-body.md` |
+
+Nothing in the round is Class A, B or C: `src/topology/**` is untouched, the frozen event
+vocabulary is untouched, and the two new `Refusal` variants are in an engine module outside the
+freeze. `task_dispatched.base_sha` already existed and already carried the base a dispatch used,
+which is the whole reason a runtime correction was enough. The round adds no v0.1 surface:
+`run.rs`'s topology loop and `integrate.rs` are schema-4 only, and no v0.1 entry point reaches
+either.
+
+Three readings this round records, each a choice rather than a deduction; `pr8-triage.md` §10.2
+carries them with their reasons.
+
+- **"Validate and use" is two obligations.** Using the authorized head repairs the defect;
+  confirming the integration ref is at it is a guard, and it is taken because a dispatch spends an
+  agent.
+- **`assert_publishable` is included**, so the rule's three callers do the same thing in the same
+  order rather than two of them doing slightly more than the third.
+- **Replay is tested in its own direction.** A repair that is right going forward and wrong on
+  replay is the worst outcome available here, so the log shape the engine wrote *before* this
+  change has its own regression, and it is the one the over-correcting mutation fails.
 
 ## 3. `src/topology/**` changes: Class A / B / C
 
@@ -962,13 +1002,21 @@ from a tracked file. The body keeps the claim and the list of obligation names, 
 - **Verification isolation.** The integration verification runs on fresh snapshots of the proposal
   or head commit, creates no new object, and the recording runner's workspace HEAD is the proposal
   for every verifying shape (`integrate::tests`).
-- **The head the log authorizes, live** (the fourth repair round).
+- **The head the log authorizes, live and at dispatch** (the fourth and seventh repair rounds).
   `integrate::tests::a_foreign_reset_of_the_integration_ref_refuses_before_any_append_and_keeps_the_merged_task`:
   alpha published, the ref reset to the base by an external writer, beta refused before any
   append with the refusal naming the base, alpha's commit and sequence 0; nothing appended, no
   staging effect, no object, the ref untouched, alpha still `Merged`; the ref put back, beta
-  integrates and its publication still carries alpha's change. The rule is one function with two
-  callers (`authorized_head`, read by `decide` and by `ensure_recorded_integration_ref`).
+  integrates and its publication still carries alpha's change. The rule is one function with three
+  callers (`authorized_head`, read by `decide`, by `ensure_recorded_integration_ref` and by
+  `dispatch_head`). At dispatch:
+  `recover::tests::a_dependent_task_is_dispatched_into_its_dependencys_merged_work` drives the
+  loop end to end — alpha published, beta ready only then — and asserts that beta's agent was
+  handed a checkout **containing alpha's merged file**, not that a SHA matched;
+  `a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded` holds the other
+  direction, that a log written before the rule changed replays to the decisions it recorded; and
+  `integrate::tests::a_dispatch_takes_the_published_head_and_refuses_one_the_log_did_not_authorize`
+  reads the head four ways against a real repository, including the two refusals.
 - **A removal another reclaimer holds is not evidence.**
   `the_runner_reports_what_it_established_about_the_process_when_it_fails` is now a sixteen-cell
   matrix: the two cells with the daemon's removal-in-progress answer are `Unresolved` with the
@@ -1005,4 +1053,9 @@ from a tracked file. The body keeps the claim and the list of obligation names, 
   survived the suite at `79ddbffb` (M3, the host's post-spawn `Unresolved` made `Gone`; M4, a
   timed-out output with a failed release made `Gone`) and one mutation per repair of the round
   (`pr8-plan.md` §5); and, for the fourth round, the seven mutations of `pr8-triage.md` §7.5,
-  the reviewer's staging mutation among them.
+  the reviewer's staging mutation among them; and, for the fifth, sixth and seventh rounds, the
+  tables at `pr8-triage.md` §8.3, §9.3 and §10.3 — the seventh's three being the dispatch base put
+  back, a resume made to re-derive its base instead of reading the record, and the dispatch head's
+  confirmation dropped, each caught by exactly one of the round's three tests and by no other.
+  (This bullet stopped at the fourth round until the seventh; the later rounds' tables were
+  recorded in the triage and not named here.)

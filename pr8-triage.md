@@ -687,3 +687,116 @@ which is how the first attempt at the last of these silently discarded the repai
 | `listed_state`'s exact comparison relaxed to `contains` | `a_listing_answers_for_exactly_the_container_it_was_asked_about`; `real_docker_lists_the_state_the_settlement_observation_reads` (the live collision) |
 | the daemon-line guard dropped from `is_unreachable_diagnostic` | `the_two_docker_diagnostic_tables_never_claim_one_message` |
 | `rejection_detail` returning `failure.reason` again | `a_failing_gates_own_output_reaches_the_frozen_repair_spec`, `a_rejecting_reviewers_required_change_reaches_the_frozen_repair_spec`, **and** `the_frozen_repair_spec_embeds_the_rejection_evidence_and_both_shas` — which is the point of repairing that test: under the same mutation its old form passed, and the head it passed on is this branch's, green on eleven CI checks |
+
+## 10. Round seven — the merge decision on `eb4e2997` (the whole slice against master)
+
+The latest frontier review, and the first asked for a **merge decision** rather than a findings
+list (`review-pr247-eb4e299-merge.md`). It is the **eleventh** review of this branch's heads that
+this record names — three at `3414dc58`, three at `916852c9`, one at `79ddbffb`, and one each at
+`8a5f59e8`, `716cf89a` and `9ee9784e` — and the twelfth frontier pass over the branch if the
+`gpt-6-astra` record pass of 2026-09-07 is counted with them, which is how the round's brief
+counted. The ordinal is recorded rather than asserted because the two counts differ by that one
+pass; ten review records are in `tactus-artifacts/` and the `79ddbffb` one is not among them. It returned `CHANGES_REQUIRED` with **exactly one defect
+and no others** — no P2, no P3 — reproduced against unchanged production sources in an isolated
+copy, using the production loop, real Git repositories and a recording Runner. All eleven CI checks
+were green on the reviewed head across the full ubuntu/macOS/Windows matrix and the ten gates
+passed locally; the defect survived every one of them, and so did 374 topology and 212 container
+tests.
+
+Because the question put to the reviewer was whether to merge, the absence of P2s and P3s is not
+evidence that none exist: a cosmetic inaccuracy it would previously have listed had no reason to be
+reported here. So the round's second half is a verification pass over the record rather than a
+reply to findings, and it is recorded in §10.4.
+
+What the review cleared, each time naming the oracle that would catch the regression: live
+append-before-CAS ordering and recovery's stable-prefix barrier; foreign integration-head resets
+and substituted pins; fast-path resource absence, stale proposal verification and snapshot
+disposal after durable terminals; queue positions, candidate leases, reservation conversion and
+transaction entitlements across publication, rejection, deferred and parked verification, decline
+and interruption; and the frozen layer — the three approved Class B descriptions matching the code,
+with no undeclared Class C change.
+
+The reviewer's witness is `r6-evidence/reviewer-witness.patch` with `REVIEW-EVIDENCE.md`. It is
+evidence and specification, not code to paste; the regression was written properly here.
+
+### 10.1 The plan of this round (recorded first, so a replaced session inherits it)
+
+| # | Mechanism decided | Where |
+|---|---|---|
+| 1 | A fresh dispatch stops taking the run's *starting* base. `integrate::dispatch_head` answers with the head the log's latest publication put there — through `authorized_head`, so this is that rule's third caller and not a third rule — after confirming the integration ref is at it, in the same order the two existing callers use (`assert_publishable`, the read, the comparison). A head the log did not put there refuses before the reservation, before `task_dispatched` and before any worktree exists. | `engine/topology/integrate.rs` (`dispatch_head`, two `Refusal` variants), `engine/topology/run.rs` (`dispatch_request`) |
+| 2 | The regression is a composition test that drives the loop end to end and asserts on **the contents of beta's worktree**, not on a recorded SHA: the durable record and the worktree agreed with each other for the whole life of this defect, and both were wrong. `DrivenRunner` therefore records what the workspace held when it was invoked. | `engine/topology/recover/tests.rs` (`checkout_of`, `DrivenRun::checkout`, `Damage::beta_depends_on_alpha`) |
+| 3 | Replay is tested in its own direction, because a repair that is right going forward and wrong on replay is the worst outcome available here: a log in the shape the engine wrote *before* this change must replay to the decisions it recorded. | `engine/topology/recover/tests.rs` |
+| 4 | The refusal arm gets its own guard against a real repository, beside the sequence's foreign-head test. | `engine/topology/integrate/tests.rs` |
+| 5 | Twelve driver tests stepped the live loop against a repository the recovery they faked had never written the integration ref into. They resume through the real ref funnel instead. | `engine/topology/recover/tests.rs` |
+| 6 | The record is re-verified against the code — completeness claims, both census domains, the Validation section — and the body makes room for the round before it writes, as the fifth and sixth did. | `pr8-body.md`, `pr8-plan.md`, this file |
+
+### 10.2 The findings
+
+| # | Finding | Disposition | Evidence and repair |
+|---|---|---|---|
+| 1 (P1) [`PR8-R7-DISPATCH-BASE`] | **Freshly dispatched tasks could not see their merged dependencies.** `dispatch_request` built every `DispatchRequest` with `run_started.base_sha`, unconditionally the run's starting base and never the current integration head. Start at B with beta depending on alpha; alpha produces P and integrates; beta becomes ready, and its durable `task_dispatched.base_sha` and its actual worktree HEAD are both still B, so alpha's newly committed file is absent from beta's checkout. No concurrent writer, hostile filename, crash or injected failure is required — this is the base case of a dependency chain. It erases nothing and records no publication falsely; it runs dependent work without its prerequisite, which surfaces downstream as wasted paid attempts and eventual failure or parking, and because a fresh generation selects B again a retry does not correct it. The line predates this slice (`199dc1dc`, 2026-08-24): before publication existed, `run_started.base_sha` **was** the integration head at every dispatch, and PR8 is what turns a correct assumption into a wrong one — the same shape as `PR8-R4-CLEANUP-LEASE`. | **confirmed** | The reviewer executed it against unchanged production sources with a recording Runner: alpha's publication stayed on the integration ref while beta's checkout lacked it, and changing only the dispatch-base selection made the same witness pass. `design/26_design_merge_queue_protocol.md` verdict 1 ("a detached linked worktree at the run's **integration HEAD at dispatch**") and `decisions.pr_sequence[9].slice_contract.invariants_preserved[0]`. Repair: `integrate::dispatch_head` — `authorized_head`'s third caller, confirming the ref is at the head the log authorizes before anything is appended, refusing with `DispatchHeadForeign` or `DispatchHeadAbsent` otherwise. No frozen vocabulary changed and no Class B or C change was needed: `task_dispatched.base_sha` already exists and already carries the base, which is why replay needs nothing. Tests: `a_dependent_task_is_dispatched_into_its_dependencys_merged_work` (the composition regression, asserting on beta's checkout), `a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded` (the replay direction), `a_dispatch_takes_the_published_head_and_refuses_one_the_log_did_not_authorize` (the four readings of the guard, against a real repository). |
+| 2 [`PR8-R7-DRIVER-REF-FUNNEL`] | **Raised here, not by the reviewer, and found by finding 1's repair.** Twelve tests resumed with `RecordingRefs` — an in-memory double of the integration-ref funnel — and then stepped the live loop against the real `WorkspaceManager`. The repository therefore lacked the integration ref the recovery they faked had recorded creating: a state production cannot reach, since P8 creates it at run start and `ensure_recorded_integration_ref` ensures it at every resume. Nothing in the loop read that ref before this round, so nothing noticed. | **confirmed (test fidelity)** | No production defect: the log and the repository disagreed only inside those fixtures. Repair: they resume through `resume_with_real_refs`, which the drive harness and twenty-odd sibling tests already use, so the repository holds what the log says it holds before the loop steps. The double stays where it is the subject — the funnel's own creation, injection and zero-old tests, which model the ref's absence deliberately. The two tests that step and do **not** dispatch are left alone and were checked for a false pass: `a_refused_step_leaves_no_entitlement_held` refuses at the ceiling before any dispatch, and `the_loop_continues_an_attempt_recovery_recreated` continues an open generation through `continue_open`, which reads its base from the record. |
+
+Neither deferred finding is reopened, repaired or narrowed. Finding 1 is not adjacent to
+`PR8-R2-SPEND-REPLAY` or `PR8-CRASH-002`: it adds no field to the frozen vocabulary and touches
+neither the unavailable terminal nor a `Ref.*` residue class.
+
+**No Class A, B or C change.** Nothing under `src/topology/**` is touched. The two new `Refusal`
+variants are in `src/engine/topology/integrate.rs`, an engine module outside the freeze, and the
+three approved Class B changes and their descriptions are unchanged.
+
+Three readings this round records, because each was a choice and not a deduction:
+
+- **"Validate and use" is two obligations and the repair meets both.** Using the authorized head is
+  the defect's repair; confirming the ref is at it is a guard, and a guard adds a refusal mode a
+  dispatch did not have before. It is taken because a dispatch spends an agent: a run whose
+  integration ref has moved under it should refuse rather than pay for work on a foreign head, and
+  that is the posture both existing callers already take. The guard has its own test, and a guard
+  holding is not a defect witness — §10.3's third mutation is what makes it one.
+- **`assert_publishable` is included, so the three callers are one rule rather than two and a
+  bit.** It is what `decide` and `ensure_recorded_integration_ref` both do before the read, and its
+  cost is one `git worktree list` per dispatch against a subprocess that is about to be spawned.
+- **The replay direction is tested separately, and it is the direction a correct-going-forward
+  repair gets wrong.** `task_dispatched.base_sha` is durable and the fold reads it from the log, so
+  nothing about replay changes; the test that proves it is the one that fails when `continue_open`
+  is made to re-derive its base instead of reading the record.
+
+### 10.3 The mutations replayed this round
+
+Each applied by an asserted replacement against the repaired tree, the named tests run, and the
+file restored from the commit that carries the repair — never by `git checkout` over an uncommitted
+one. The unmutated control is the same three tests passing on the repaired tree before each
+mutation was applied.
+
+| Mutation | Fails |
+|---|---|
+| `dispatch_request`'s base back to `self.handle.started.base_sha.clone()` — the defect itself | `a_dependent_task_is_dispatched_into_its_dependencys_merged_work`, at the checkout assertion, with beta's worktree holding only `seed.txt` |
+| `continue_open` re-deriving its base through `dispatch_head` instead of reading the generation's record — the repair that is right going forward and wrong on replay | `a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded`, at the worker's HEAD |
+| `dispatch_head`'s confirmation dropped, the log's head returned unread | `a_dispatch_takes_the_published_head_and_refuses_one_the_log_did_not_authorize` |
+
+Each mutation is caught by exactly one of the three tests and by no other, which is what says the
+three are measuring three different things.
+
+### 10.4 The record re-verified against the code
+
+The merge-decision question means the review reported no record findings, so the record was
+re-read against the tree here rather than against a findings list.
+
+- **Both census domains re-derived at this head and diffed against the reviewed head.** §7.3's
+  domain (`ProcessFate::Gone`, `ProcessFate::NeverStarted`, `Liveness::Gone`, `Settled::ProcessGone`
+  outside test modules) is byte-identical between `eb4e2997` and this head. §7.4's domain (the six
+  manager primitives, `update-ref`, `worktree` + `remove`, and round six's `commit`, `switch`,
+  `branch`, `merge`, `cherry-pick`, `reset` argv strings, test regions excluded) differs only in
+  the line numbers of eight `integrate.rs` hits, which this round's insertion moved by 59 lines;
+  the set of sites is identical. Neither section's claim is touched by this round's change:
+  `dispatch_head` reads a ref, and a read is neither a cleanup, an expected-old value nor a
+  conclusion about a process.
+- **Line-number citations checked for staleness.** Every `path:line` citation in the three record
+  files is bound to the reviewed SHA in its own row or sentence, so the eight hits this round moved
+  make none of them wrong; no citation names a coordinate at the current head.
+- **The Validation section's counts re-taken**, on this round's own baseline rather than carried
+  forward: the test count moves from 2373 to 2376, which is this round's three new tests.
+- **Room made before writing.** The body was 64470 characters against GitHub's 65536 limit. The
+  round-by-round review narrative for rounds four and five moves to §§7–8 of this file, where those
+  rounds are already recorded in full, leaving its claim, its identifiers and a pointer in the
+  body — the move the fifth and sixth rounds made for the same reason.
