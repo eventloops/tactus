@@ -574,6 +574,7 @@ ubuntu/macOS/Windows matrix and on the ten gates locally, and the P1 survived ev
 | `docs(pr8): the record says which runs measured this worktree` | three full runs late in the round executed a sibling worktree's binary out of the shared slot pool; the closing baseline is re-taken on a private target base and §9 records the incident. Also corrects how the native reproduction is described |
 | `docs(pr8): the census names the function that exists` | `reclaim_gate_workspaces`, and the twelve stale test names in §2's own tables recorded rather than rewritten |
 | `docs(pr8): the observed-and-left notes read as one count` | three paragraphs stating two counts of one set of observations become one |
+| `docs(pr8): a new sampler fingerprint is filed, not called a flake` | CI's winguest leg refused one of eight cherry-pick samples on a locked `index.lock`; a third fingerprint, filed as `PR247-SAMPLER-REFUSED-A-LOCKED-INDEX-ON-WINDOWS` |
 | `docs(pr8): the sampler sentence says which runs it counts` | "every full test run passed clean at the first attempt" was false once three runs measured another worktree; it now says every run that measured this one |
 
 Nothing in the round is Class B or Class C. Finding 1 changes the wire commands `DockerCli` issues

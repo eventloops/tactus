@@ -641,6 +641,19 @@ is left alone — a round of four findings does not edit a notes section it has 
 — and recorded so it is not rediscovered as new. Every heading *this* round's signature changes
 made stale was repointed.
 
+**One CI sighting this round filed rather than explained away.** The pushed head is green on ten
+of eleven checks; `test (winguest)` failed once, in
+`recover::tests::sampled_cherry_pick_child_kills_every_residue_classified_and_recovered`, with the
+classifier refusing one of eight samples on
+`failed to read …\.git\worktrees\s1\index.lock: Access is denied. (os error 5)` while the same
+test passed on ubuntu and macOS in that run. It is a **different fingerprint** from the two the
+branch already carries — `PR172-…-TORN-WORKTREE-LIST-RECORD` is the workspace sampler's
+`git worktree list` read and `PR136-…-DOES-NOT-CONVERGE` is `DirectoryNotEmpty`, both in a
+different sampler — so it is filed as `PR247-SAMPLER-REFUSED-A-LOCKED-INDEX-ON-WINDOWS` in
+`reviews/findings/` rather than counted against either. One red is not a rate, this token cannot
+re-run a job, and neither of the round's code changes reaches Git, a worktree or the residue
+classifier.
+
 **One thing this round measured twice, and the second measurement is the one quoted.** The
 box's `upstroke-build` allocates from a shared pool of slot target directories, and this crate's
 cargo `-C metadata` hash is identical across worktrees, so a sibling worktree's build of the same

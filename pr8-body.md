@@ -173,10 +173,15 @@ The residue sampler, in a module this branch does not touch, was red twice acros
 runs — once at `287563f0` and once at `cdcea656` — each time with one of its two filed
 fingerprints (`PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD` and
 `PR136-SAMPLER-FORCED-REMOVAL-DOES-NOT-CONVERGE`, both in `reviews/findings/`), each time passing
-alone and on a full rerun at the same head, with the ten gates green on that rerun. The fifth and
-sixth rounds saw neither fingerprint, and every run of either that measured this worktree passed
-clean at the first attempt, so the sampler is counted against neither. The sightings in full, which the standing
-findings ask for before anything is called a flake, are `pr8-plan.md` §5.
+alone and on a full rerun at the same head, with the ten gates green on that rerun. Neither
+fingerprint appeared in the fifth or sixth rounds, and every local run of either that measured this
+worktree passed clean at the first attempt. A **third** did, once, on CI's winguest leg at this
+head: the *cherry-pick* sampler's classifier refused one of eight samples reading a staging
+worktree's `index.lock` with `Access is denied (os error 5)`, with the run's other ten checks green
+and that test passing on ubuntu and macOS within it. Filed as
+`PR247-SAMPLER-REFUSED-A-LOCKED-INDEX-ON-WINDOWS` (`reviews/findings/`) rather than called a flake:
+one red is not a rate, and neither of the round's code changes reaches Git, a worktree or the
+residue classifier. The earlier sightings in full are `pr8-plan.md` §5.
 
 The run above is on a target directory private to this worktree, and every step's log names
 `Compiling`/`Checking upstroke v0.1.0 (/srv/worktrees/pr8)`. The box's shared slot pool gives two
@@ -205,8 +210,8 @@ a pull-request description and the ledger below, which the policy gate greps fro
 body, cannot move. The sixth round moved two more passages the same way and for the same reason —
 the residue sampler's sightings in full, to `pr8-plan.md` §5, and the round-by-round review
 narrative for the first three rounds, to `pr8-triage.md` §§2–6 — each leaving its claim, its
-identifiers and a pointer here. The published body is 63880 characters, so a seventh round has
-about two thousand to spend before it has to move something of its own. Nothing was dropped: the twenty-two obligations are real-repository CAS, orphan
+identifiers and a pointer here. The published body is 64335 characters. A seventh round has little room and should move
+something of its own out before it writes, the way the fifth and sixth did. Nothing was dropped: the twenty-two obligations are real-repository CAS, orphan
 and third-SHA publication; fast with no staging; the three fast mismatches live and on replay; the
 stale path; the two-crash proof; completed publications resuming; the terminal-shape coverage
 table; kill and residue for the cherry-pick class; outages, parks and answers driven through the
