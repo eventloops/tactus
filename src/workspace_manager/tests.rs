@@ -2520,7 +2520,7 @@ impl SubstitutionCase {
             P::ProposalCherryPick => manager
                 .proposal_cherry_pick(hooks, slot_of(), side)
                 .map(drop),
-            P::RepairMaterialize => manager.repair_materialize(hooks, slot_of(), side),
+            P::RepairMaterialize => manager.repair_materialize(hooks, slot_of(), side).map(drop),
             P::CreateRef => {
                 manager.create_ref_zero_old(hooks, RefSite::CreateCandidates, &self.refname, head)
             }
@@ -3474,6 +3474,10 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
         (
             "proposal_state",
             Box::new(|slot| manager.proposal_state(slot, &head).map(drop)),
+        ),
+        (
+            "unresolved_conflicts",
+            Box::new(|slot| manager.unresolved_conflicts(slot).map(drop)),
         ),
     ];
 

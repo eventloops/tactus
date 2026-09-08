@@ -95,6 +95,7 @@ effect_free = [
     "slot_path",
     "temporary_object_files",
     "unreachable_objects",
+    "unresolved_conflicts",
     "worktree_records",
     "write_intent",
 ]
@@ -506,6 +507,7 @@ effectful = [
 ]
 effectful_unnameable = [
     "ask",
+    "poll",
     "resolve",
 ]
 effect_free = [

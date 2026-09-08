@@ -20,9 +20,10 @@ use crate::topology::registry::TaskKey;
 use crate::workspace_manager::WorkspaceManager;
 
 use super::create::{IntegrationRefs, ensure_integration_ref};
-use super::dispatch::{OpenGeneration, Reuse, resume_open_no_attempt, task_slot};
+use super::dispatch::{OpenGeneration, Reuse, task_slot, verify_or_recreate};
 use super::emit::{EmitState, RunIdentity};
 use super::identity::{InvocationLedger, Reservations};
+use super::run::dispatched_source;
 use super::seams::{TimeSource, TopologyHooks};
 
 pub use chain::{
@@ -1553,14 +1554,17 @@ pub fn recreate_open_no_attempt(
     hooks: &mut dyn TopologyHooks,
 ) -> Result<Vec<(TaskKey, GenerationId, Reuse)>, UpstrokeError> {
     let mut rebuilt = Vec::new();
-    for open in open_no_attempt(fold_of(certified))? {
-        let reuse = resume_open_no_attempt(manager, hooks, &open)?;
+    for open in open_no_attempt(fold_of(certified), events_of(certified))? {
+        let reuse = verify_or_recreate(manager, hooks, &open, &open.quiescence())?;
         rebuilt.push((open.key, open.generation, reuse));
     }
     Ok(rebuilt)
 }
 
-fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {
+fn open_no_attempt(
+    fold: &TopologyFold,
+    events: &[TopologyEvent],
+) -> Result<Vec<OpenGeneration>, UpstrokeError> {
     let mut found = Vec::new();
     for key in task_keys(fold) {
         let Some(task) = fold.task(key) else { continue };
@@ -1568,23 +1572,18 @@ fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeE
             continue;
         };
         for generation in task.generations.iter().filter(|held| held.id == open) {
-            if let GenerationLease::InheritedLineage { root } = generation.lease {
-                return Err(UpstrokeError::Refused {
-                    message: format!(
-                        "task {} generation {} is a repair executing inside lineage {}'s lease, \
-                         and its resume action is to re-materialize the candidate it was \
-                         dispatched from, which the fold does not record; repair execution is \
-                         not implemented by this build",
-                        key.0, generation.id.0, root.0
-                    ),
-                });
-            }
+            let source = match generation.lease {
+                GenerationLease::Own => None,
+                GenerationLease::InheritedLineage { .. } => {
+                    Some(dispatched_source(events, key, generation.id)?)
+                }
+            };
             found.push(OpenGeneration {
                 key,
                 generation: generation.id,
                 base: generation.base_sha.clone(),
                 slot: task_slot(key, generation.id),
-                source: None,
+                source,
             });
         }
     }

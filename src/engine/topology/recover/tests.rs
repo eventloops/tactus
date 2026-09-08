@@ -7484,6 +7484,9 @@ impl crate::interaction::AnswerSource for DrivenAnswers {
     fn resolve(&self, _question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
         Ok(self.answer.clone().unwrap_or(crate::ir::Answer::Unanswered))
     }
+    fn poll(&self, question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        self.resolve(question)
+    }
 }
 
 fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {
@@ -8904,8 +8907,7 @@ fn an_integration_reviews_cost_reaches_the_run_spend() {
 }
 
 #[test]
-fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append()
- {
+fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {
     let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);
     let fixture = Fixture::two_tasks("park-answered");
     plant_stale_verification(&fixture);
@@ -8963,16 +8965,10 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
         "an answered park returns the candidate to the queue and it re-verifies: {:?}",
         driven.progress
     );
+}
 
-    let fixture = Fixture::build(
-        "repair-admission-answer",
-        Damage {
-            two_tasks: true,
-            no_automatic_repairs: true,
-            ..Damage::default()
-        },
-    );
-    let (candidate, head, _pin) = plant_stale_verification(&fixture);
+fn plant_over_limit_repair(fixture: &Fixture) -> (crate::topology::events::MergeRejected, TaskKey) {
+    let (candidate, head, _pin) = plant_stale_verification(fixture);
     let rejection = {
         let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
         let fold = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
@@ -9002,6 +8998,74 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
         ),
         "with no automatic repairs the first repair asks a person"
     );
+    let key = rejection.repair.key;
+    append_events(
+        fixture,
+        &[TopologyEventBody::MergeRejected {
+            data: Box::new(rejection.clone()),
+        }],
+    );
+    (rejection, key)
+}
+
+#[test]
+fn an_over_limit_repair_spends_nothing_until_its_answer_activates_it() {
+    let fixture = Fixture::build(
+        "over-limit-waits",
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (_rejection, repair) = plant_over_limit_repair(&fixture);
+    let kinds_before = durable_kinds(&fixture);
+
+    let driven = drive(&fixture, &DriveSeams::default(), 2);
+    for (index, progress) in driven.progress.iter().enumerate() {
+        assert!(
+            matches!(progress, Ok(Progress::Blocked { questions: 1 })),
+            "step {index}: an over-limit repair is `AwaitingInput` and the run hard-blocks on \
+             its one question with nothing to spend on: {progress:?}"
+        );
+    }
+    assert_eq!(
+        durable_kinds(&fixture),
+        {
+            let mut expected = kinds_before;
+            expected.push("run_resumed".to_owned());
+            expected
+        },
+        "beyond the resume's own `run_resumed`, nothing was appended while the question stood: \
+         no dispatch, no attempt, no spend"
+    );
+    assert!(
+        driven.runs.is_empty(),
+        "no process ran for a repair a person has not approved: {:?}",
+        driven.runs
+    );
+    assert!(
+        (driven.spend_after - driven.spend_before).abs() < 1e-9,
+        "and no spend was recorded"
+    );
+    let fold = replayed(&fixture);
+    assert_eq!(fold.task_state(repair), Some(TaskState::AwaitingInput));
+    assert_eq!(fold.task_state(ALPHA), Some(TaskState::AwaitingRepair));
+}
+
+#[test]
+fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue()
+{
+    let fixture = Fixture::build(
+        "repair-admission-answer",
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_over_limit_repair(&fixture);
+    let candidate = rejection.candidate.clone();
     let question_options = rejection
         .repair
         .admission
@@ -9009,12 +9073,9 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
         .expect("a human admission carries its question")
         .options
         .clone();
-    append_events(
-        &fixture,
-        &[TopologyEventBody::MergeRejected {
-            data: Box::new(rejection),
-        }],
-    );
+    let head_before =
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).expect("the ref exists");
+
     let driven = drive(
         &fixture,
         &DriveSeams {
@@ -9023,26 +9084,171 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
             }),
             ..DriveSeams::default()
         },
-        1,
-    );
-    let text = message(
-        driven
-            .progress
-            .first()
-            .expect("one step")
-            .as_ref()
-            .expect_err("a repair-admission answer is refused before any append"),
+        3,
     );
     assert!(
-        text.contains("repair-admission") && text.contains("Refused before any append"),
-        "{text}"
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "step 1 ingests the over-limit activation: {:?}",
+        driven.progress
     );
     assert!(
-        driven
-            .log
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "step 2 dispatches the activated repair, materializes its source candidate and runs its \
+         first attempt through to a candidate: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(2),
+            Some(Ok(Progress::Integrated {
+                key,
+                sequence: crate::topology::events::SequenceId(2),
+                ..
+            })) if *key == repair
+        ),
+        "step 3 integrates the lineage candidate through the same queue: {:?}",
+        driven.progress
+    );
+
+    let kinds: Vec<&str> = driven.log.iter().map(|event| event.body.kind()).collect();
+    let position = |kind: &str| {
+        kinds
             .iter()
-            .all(|event| !matches!(event.body, TopologyEventBody::QuestionAnswered { .. })),
-        "nothing was appended for the refused answer"
+            .rposition(|seen| *seen == kind)
+            .unwrap_or_else(|| panic!("`{kind}` is not in the log: {kinds:?}"))
+    };
+    assert!(
+        position("question_answered") < position("task_dispatched"),
+        "`question_answered` before dispatch of an activated repair \
+         (`side_effect_vs_event_ordering`): {kinds:?}"
+    );
+
+    let dispatched = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::TaskDispatched { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the repair was dispatched");
+    assert_eq!(
+        dispatched.lease,
+        LeaseGrant::InheritedLineage { root: ALPHA },
+        "a repair executes inside its root's lineage lease"
+    );
+    assert_eq!(
+        dispatched.source_candidate.as_ref(),
+        Some(&candidate),
+        "and records the rejected candidate as the source it was materialized from"
+    );
+    assert_eq!(
+        dispatched.base_sha.0, head_before,
+        "at the integration head current at its actual dispatch"
+    );
+
+    let started = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::AttemptStarted { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the repair's attempt started");
+    assert_eq!(
+        started.materialization_observed,
+        Some(crate::topology::events::Materialization::Clean),
+        "the candidate's change applied cleanly onto the moved head, and the observation is \
+         recorded before the spawn"
+    );
+    assert_eq!(started.resume_session, None, "a first attempt, not a retry");
+
+    let prepared = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::CandidatePrepared { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the repair's candidate was prepared");
+    assert!(
+        matches!(
+            &prepared.lease_effect,
+            crate::topology::events::CandidateLeaseEffect::WidensLineage { root, .. } if *root == ALPHA
+        ),
+        "a lineage member's candidate widens its lineage and takes no lease of its own: {:?}",
+        prepared.lease_effect
+    );
+
+    let merged = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::MergePrepared { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the lineage candidate was published");
+    assert_eq!(
+        merged.disposition,
+        crate::topology::events::PreparedDisposition::Fast,
+        "the repair's base is the head it merges onto, so the publication is exact-base"
+    );
+    assert_eq!(
+        merged.satisfies,
+        vec![ALPHA, repair],
+        "`satisfies` is the canonical ordered closure: the root and its repair"
+    );
+    let task_merged = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::TaskMerged { data }
+                if data.sequence == crate::topology::events::SequenceId(2) =>
+            {
+                Some(data)
+            }
+            _ => None,
+        })
+        .expect("task_merged");
+    assert_eq!(
+        task_merged.lease_release,
+        crate::topology::events::MergeLeaseRelease::Lineage { root: ALPHA },
+        "the publication that settles the root releases the lineage lease"
+    );
+
+    let fold = replayed(&fixture);
+    assert_eq!(fold.task_state(ALPHA), Some(TaskState::Merged));
+    assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
+    assert!(
+        !fold.leases().expect("started").any_candidate_or_lineage(),
+        "no lineage lease survives the publication"
+    );
+    assert!(fold.queue().expect("started").is_empty());
+    assert!(!driven.transaction_open);
+    assert_eq!(driven.pipeline_held, 0);
+    assert_eq!(driven.entitlements_held, 0);
+    assert!(driven.invocations_balance);
+    assert!(
+        ref_target(&fixture, candidate.candidate_ref.as_str()).is_some(),
+        "R11: the rejected candidate's candidates ref is never pruned while the run can resume"
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(merged.proposed_sha.as_str()),
+        "the integration ref is at the lineage candidate the publication named"
     );
 }
 

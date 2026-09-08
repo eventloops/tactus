@@ -6,11 +6,11 @@ use crate::error::UpstrokeError;
 use crate::events::RunOutcome;
 use crate::topology::events::{
     CandidateRef, CommitSha, GenerationCloseReason, GenerationClosed, GenerationId,
-    LeaseDisposition, LeaseGrant, TaskDispatched, TopologyEventBody,
+    LeaseDisposition, LeaseGrant, Materialization, TaskDispatched, TopologyEventBody,
 };
 use crate::topology::paths::PathSet;
 use crate::topology::registry::TaskKey;
-use crate::workspace_manager::{Quiescence, Slot, VerifyFailure, WorkspaceManager};
+use crate::workspace_manager::{Materialized, Quiescence, Slot, VerifyFailure, WorkspaceManager};
 
 use super::seams::TopologyHooks;
 
@@ -67,6 +67,7 @@ pub struct Dispatched {
     pub slot: Slot,
     pub worktree: PathBuf,
     pub kind: DispatchKind,
+    pub materialized: Option<Materialization>,
 }
 
 impl Dispatched {
@@ -159,11 +160,16 @@ pub fn dispatch(
         slot,
         worktree,
         kind: request.kind.clone(),
+        materialized: None,
     };
     dispatched.worktree = create_worktree(manager, hooks, &dispatched.open_generation())?;
 
     if dispatched.source().is_some() {
-        materialize_repair(manager, hooks, &dispatched.open_generation())?;
+        dispatched.materialized = Some(materialize_repair(
+            manager,
+            hooks,
+            &dispatched.open_generation(),
+        )?);
     }
     Ok(dispatched)
 }
@@ -260,7 +266,7 @@ pub fn materialize_repair(
     manager: &WorkspaceManager,
     hooks: &mut dyn TopologyHooks,
     open: &OpenGeneration,
-) -> Result<(), UpstrokeError> {
+) -> Result<Materialization, UpstrokeError> {
     let Some(source) = open.source.as_ref() else {
         return Err(UpstrokeError::Refused {
             message: format!(
@@ -270,19 +276,39 @@ pub fn materialize_repair(
             ),
         });
     };
-    manager.repair_materialize(hooks.effects(), &open.slot, &source.commit_sha.0)
+    let observed = manager.repair_materialize(hooks.effects(), &open.slot, &source.commit_sha.0)?;
+    Ok(observed_kind(observed))
+}
+
+const fn observed_kind(observed: Materialized) -> Materialization {
+    match observed {
+        Materialized::Clean => Materialization::Clean,
+        Materialized::Conflict => Materialization::Conflict,
+        Materialized::Empty => Materialization::Empty,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resumed {
+    pub reuse: Reuse,
+    pub materialized: Option<Materialization>,
 }
 
 pub fn resume_open_no_attempt(
     manager: &WorkspaceManager,
     hooks: &mut dyn TopologyHooks,
     open: &OpenGeneration,
-) -> Result<Reuse, UpstrokeError> {
+) -> Result<Resumed, UpstrokeError> {
     let reuse = verify_or_recreate(manager, hooks, open, &open.quiescence())?;
-    if open.source.is_some() {
-        materialize_repair(manager, hooks, open)?;
-    }
-    Ok(reuse)
+    let materialized = if open.source.is_some() {
+        Some(materialize_repair(manager, hooks, open)?)
+    } else {
+        None
+    };
+    Ok(Resumed {
+        reuse,
+        materialized,
+    })
 }
 
 pub fn close_at_run_end(

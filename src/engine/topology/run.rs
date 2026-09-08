@@ -13,7 +13,7 @@ use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
     AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion, GenerationId,
-    InfrastructureKind, SequenceId, SessionId, TopologyEvent,
+    InfrastructureKind, Materialization, SequenceId, SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -117,12 +117,6 @@ fn implementer_binding(
     fold: &TopologyFold,
     key: TaskKey,
 ) -> Result<crate::review::PassBinding, UpstrokeError> {
-    if let Some(binding) = fold.binding_override(key) {
-        return Ok(crate::review::PassBinding::new(
-            &binding.agent,
-            &binding.model,
-        ));
-    }
     let rung = fold
         .task(key)
         .ok_or_else(|| UpstrokeError::Refused {
@@ -130,11 +124,12 @@ fn implementer_binding(
         })?
         .rung;
     let binding = fold
-        .frozen_rung_binding(key, rung)
+        .rung_binding(key, rung)
         .ok_or_else(|| UpstrokeError::Refused {
             message: format!(
-                "task {key}'s candidate was produced at rung {rung} and its frozen ladder has no \
-                 such rung, so there is no implementer to select its reviewers against"
+                "task {key}'s candidate was produced at rung {rung} and neither a validated \
+                 one-off binding nor a frozen rung binds it, so there is no implementer to \
+                 select its reviewers against"
             ),
         })?;
     Ok(crate::review::PassBinding::new(
@@ -349,6 +344,7 @@ pub enum Disposition {
     Performed,
     RefusedByCheckpoint,
     NotYetImplemented,
+    #[allow(dead_code)]
     NotThisSlice {
         slice: &'static str,
         citation: &'static str,
@@ -393,13 +389,7 @@ impl LoopBranch {
             Self::ReadyDispatch => Disposition::Performed,
             Self::ReadyRetry => Disposition::Performed,
             Self::HardBlock => Disposition::Performed,
-            Self::IngestAnswers => Disposition::NotThisSlice {
-                slice: "PR9",
-                citation: "`pr_sequence[8]` does not contain the word `answer`; PR8 still \
-                           refuses `repair-admission answers before any append`; PR9 owns \
-                           `question_answered`, `T-ANSWER`, and `AwaitingInput -> Pending via \
-                           validated answer`. PR7's `replay_recovery` never names `T-ANSWER`",
-            },
+            Self::IngestAnswers => Disposition::Performed,
         }
     }
 
@@ -477,6 +467,22 @@ struct RunAs {
     rung: u32,
     resume_session: Option<SessionId>,
     announced: bool,
+    materialized: Option<Materialization>,
+}
+
+#[derive(Debug, Clone)]
+struct OpenAsked {
+    question: Question,
+    origin: QuestionOrigin,
+    key: TaskKey,
+    binding: Option<Vec<String>>,
+}
+
+fn chosen_index(options: &[String], text: &str) -> Option<u32> {
+    options
+        .iter()
+        .position(|option| option == text)
+        .and_then(|index| u32::try_from(index).ok())
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -663,6 +669,9 @@ impl TopologyRun {
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
         let _cleanup_scope = self.handle.cleanup_scope();
+        if let Some(answered) = self.ingest_answers(seams, hooks)? {
+            return Ok(answered);
+        }
         let selected = select(&self.handle.fold, &self.ceiling, &self.spend);
 
         let admitted = checkpoint(selected)?;
@@ -693,44 +702,88 @@ impl TopologyRun {
                 key,
                 generation,
                 continuing,
+            }
+            | Admitted::RepairDispatch {
+                key,
+                generation,
+                continuing,
             } => {
                 let dispatched = if continuing {
                     self.continue_open(key, generation, seams, hooks)?
                 } else {
                     self.dispatch_ready(key, generation, seams, hooks)?
                 };
-                let (plan, capture, assessed, judgement) = self.attempt(
-                    dispatched.site(),
-                    RunAs {
-                        attempt: Self::FIRST_ATTEMPT,
-                        rung: self.ladder_position(key)?.0,
-                        resume_session: None,
-                        feedback: self.brief.lines(key),
-                        announced: false,
-                    },
-                    seams,
-                    hooks,
-                )?;
-                let accepted = judgement.accepted();
-                let spent_attempt = self.settle(
-                    dispatched.site(),
-                    &plan,
-                    Produced {
-                        capture: &capture,
-                        assessed: &assessed,
-                        judgement: &judgement,
-                    },
-                    seams,
-                    hooks,
-                )?;
-                Ok(Progress::Settled {
-                    key,
-                    accepted,
-                    spent_attempt,
-                })
+                self.run_first_attempt(&dispatched, seams, hooks)
             }
             Admitted::HardBlock { questions } => self.hard_block(&questions, seams, hooks),
         }
+    }
+
+    fn run_first_attempt(
+        &mut self,
+        dispatched: &Dispatched,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let key = dispatched.key;
+        let (plan, capture, assessed, judgement) = self.attempt(
+            dispatched.site(),
+            RunAs {
+                attempt: Self::FIRST_ATTEMPT,
+                rung: self.ladder_position(key)?.0,
+                resume_session: None,
+                feedback: self.brief.lines(key),
+                announced: false,
+                materialized: dispatched.materialized,
+            },
+            seams,
+            hooks,
+        )?;
+        let accepted = judgement.accepted();
+        let spent_attempt = self.settle(
+            dispatched.site(),
+            &plan,
+            Produced {
+                capture: &capture,
+                assessed: &assessed,
+                judgement: &judgement,
+            },
+            seams,
+            hooks,
+        )?;
+        Ok(Progress::Settled {
+            key,
+            accepted,
+            spent_attempt,
+        })
+    }
+
+    fn ingest_answers(
+        &mut self,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Option<Progress>, UpstrokeError> {
+        if self.handle.fold.is_poisoned() || self.handle.fold.run_is_ending() {
+            return Ok(None);
+        }
+        let open: Vec<QuestionId> = self
+            .handle
+            .fold
+            .open_questions()
+            .map(|questions| questions.keys().cloned().collect())
+            .unwrap_or_default();
+        for id in &open {
+            let asked = self.open_question(id)?;
+            let answer = match seams.answers.poll(&asked.question)? {
+                Answer::Unanswered => continue,
+                answer => answer,
+            };
+            let answer4 = self.answer_for(id, &asked, answer, seams)?;
+            return self
+                .ingest_answer(id, asked.key, answer4, seams, hooks)
+                .map(Some);
+        }
+        Ok(None)
     }
 
     fn dispatch_ready(
@@ -843,57 +896,98 @@ impl TopologyRun {
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Progress, UpstrokeError> {
         for id in questions {
-            let (question, origin, key) = self.open_question(id)?;
-            let answer = match seams.answers.resolve(&question)? {
+            let asked = self.open_question(id)?;
+            let answer = match seams.answers.resolve(&asked.question)? {
                 Answer::Unanswered => continue,
                 answer => answer,
             };
-            if origin != QuestionOrigin::VerificationPark {
-                return Err(UpstrokeError::Refused {
-                    message: format!(
-                        "question {} is a repair-admission or attempt park, and ingesting its \
-                         answer is PR9's: `pr_sequence[8]` refuses \"repair-admission answers \
-                         before any append\" and `T-ANSWER` is that slice's. Refused before any \
-                         append",
-                        id.0
-                    ),
-                });
-            }
-            return self.ingest_verification_answer(id, key, &question, answer, seams, hooks);
+            let answer4 = self.answer_for(id, &asked, answer, seams)?;
+            return self.ingest_answer(id, asked.key, answer4, seams, hooks);
         }
         Ok(Progress::Blocked {
             questions: questions.len(),
         })
     }
 
-    fn ingest_verification_answer(
-        &mut self,
+    fn answer_for(
+        &self,
         id: &QuestionId,
-        key: TaskKey,
-        question: &Question,
+        asked: &OpenAsked,
         answer: Answer,
         seams: &RunSeams<'_>,
-        hooks: &mut dyn TopologyHooks,
-    ) -> Result<Progress, UpstrokeError> {
-        let answer4 = match answer {
-            Answer::Declined => Answer4::Declined {
-                decline_halts_run: seams.halts_run,
-            },
-            Answer::Answered { text } => Answer4::Answered {
-                option_index: question
-                    .options
-                    .iter()
-                    .position(|option| *option == text)
-                    .and_then(|index| u32::try_from(index).ok())
-                    .unwrap_or(0),
-                binding_override: None,
-            },
+    ) -> Result<Answer4, UpstrokeError> {
+        let text = match answer {
+            Answer::Declined => {
+                return Ok(Answer4::Declined {
+                    decline_halts_run: seams.halts_run,
+                });
+            }
+            Answer::Answered { text } => text,
             Answer::Unanswered => {
                 return Err(UpstrokeError::Refused {
                     message: format!("question {} resolved to no answer to ingest", id.0),
                 });
             }
         };
+        let (Some(authorized), QuestionOrigin::Admission) = (&asked.binding, asked.origin) else {
+            return Ok(Answer4::Answered {
+                option_index: chosen_index(&asked.question.options, &text).unwrap_or(0),
+                binding_override: None,
+            });
+        };
+        let option_index =
+            chosen_index(&asked.question.options, &text).ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "question {} asks which agent runs task {}, and `{text}` is none of the {} \
+                     it offers; a one-off binding activates only through an option the spawn \
+                     froze, so nothing was appended",
+                    id.0,
+                    asked.key.index(),
+                    asked.question.options.len()
+                ),
+            })?;
+        let agent = authorized
+            .get(usize::try_from(option_index).unwrap_or(usize::MAX))
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "question {} offers {} option(s) and authorizes {} binding(s); option \
+                     {option_index} exists in one and not the other, so nothing was appended",
+                    id.0,
+                    asked.question.options.len(),
+                    authorized.len()
+                ),
+            })?;
+        let entry = self
+            .handle
+            .fold
+            .registry()
+            .and_then(|registry| registry.get(asked.key))
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "task {} is not in this run's frozen registry",
+                    asked.key.index()
+                ),
+            })?;
+        Ok(Answer4::Answered {
+            option_index,
+            binding_override: Some(super::repair::one_off_binding(
+                entry,
+                asked.key,
+                id,
+                option_index,
+                agent,
+            )?),
+        })
+    }
+
+    fn ingest_answer(
+        &mut self,
+        id: &QuestionId,
+        key: TaskKey,
+        answer4: Answer4,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
         let declined = matches!(answer4, Answer4::Declined { .. });
         self.emit(
             TopologyEventBody::QuestionAnswered {
@@ -914,10 +1008,7 @@ impl TopologyRun {
         })
     }
 
-    fn open_question(
-        &self,
-        id: &QuestionId,
-    ) -> Result<(Question, QuestionOrigin, TaskKey), UpstrokeError> {
+    fn open_question(&self, id: &QuestionId) -> Result<OpenAsked, UpstrokeError> {
         let open = self
             .handle
             .fold
@@ -927,17 +1018,18 @@ impl TopologyRun {
                 message: format!("question {} is not open in this run's fold", id.0),
             })?;
         let frozen = &open.question;
-        Ok((
-            Question {
+        Ok(OpenAsked {
+            question: Question {
                 id: frozen.id.clone(),
                 kind: frozen.kind,
                 affected_tasks: vec![crate::ir::TaskId(self.display_id(frozen.key)?)],
                 context: frozen.context.clone(),
                 options: frozen.options.clone(),
             },
-            open.origin,
-            frozen.key,
-        ))
+            origin: open.origin,
+            key: frozen.key,
+            binding: open.binding.clone(),
+        })
     }
 
     fn continue_open(
@@ -960,15 +1052,25 @@ impl TopologyRun {
                     generation.0
                 ),
             })?;
+        let kind = match self.dispatch_kind(key)? {
+            DispatchKind::Ordinary { paths } => DispatchKind::Ordinary { paths },
+            DispatchKind::Repair { root, .. } => DispatchKind::Repair {
+                root,
+                source: dispatched_source(&self.handle.events, key, generation)?,
+            },
+        };
         let slot = task_slot(key, generation);
         let open = OpenGeneration {
             key,
             generation,
             base: base.clone(),
             slot: slot.clone(),
-            source: None,
+            source: match &kind {
+                DispatchKind::Ordinary { .. } => None,
+                DispatchKind::Repair { source, .. } => Some(source.clone()),
+            },
         };
-        resume_open_no_attempt(seams.manager, hooks, &open)?;
+        let resumed = resume_open_no_attempt(seams.manager, hooks, &open)?;
         self.deferral.progressed();
         Ok(Dispatched {
             key,
@@ -976,13 +1078,8 @@ impl TopologyRun {
             base,
             worktree: seams.manager.slot_path(&slot),
             slot,
-            kind: DispatchKind::Ordinary {
-                paths: self.handle.fold.predicted_region(key).ok_or_else(|| {
-                    UpstrokeError::Refused {
-                        message: format!("task {} has no predicted region", key.index()),
-                    }
-                })?,
-            },
+            kind,
+            materialized: resumed.materialized,
         })
     }
 
@@ -1009,10 +1106,11 @@ impl TopologyRun {
         let binding = self
             .handle
             .fold
-            .frozen_rung_binding(key, position.0)
+            .rung_binding(key, position.0)
             .ok_or_else(|| UpstrokeError::Refused {
                 message: format!(
-                    "task {} has no rung {} in its frozen ladder",
+                    "task {} has neither a validated one-off binding nor a rung {} in its \
+                     frozen ladder",
                     key.index(),
                     position.0
                 ),
@@ -1020,6 +1118,7 @@ impl TopologyRun {
         let slot_for_run = task_slot(key, generation);
         let slot = slot_for_run.clone();
         let pool = seams.plans.pool_for(&binding.agent);
+        let materialization = self.retry_materialization(key);
 
         let outcome = {
             let worktrees = ManagedWorktrees::new(seams.manager);
@@ -1035,7 +1134,7 @@ impl TopologyRun {
                     binding,
                     rung: position.0,
                     pool: pool.clone(),
-                    materialization: None,
+                    materialization,
                 },
             )?
         };
@@ -1048,6 +1147,7 @@ impl TopologyRun {
                     resume_session: started.resume_session.clone(),
                     feedback: self.brief.lines(key),
                     announced: true,
+                    materialized: started.materialization_observed,
                 };
                 self.emit(
                     TopologyEventBody::AttemptStarted { data: *started },
@@ -1110,6 +1210,15 @@ impl TopologyRun {
         Ok(Progress::GenerationClosed { key })
     }
 
+    fn retry_materialization(&self, key: TaskKey) -> Option<Materialization> {
+        self.handle
+            .fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .and_then(|entry| entry.lineage)
+            .map(|_| Materialization::Retained)
+    }
+
     const FIRST_ATTEMPT: crate::topology::events::AttemptNumber =
         crate::topology::events::AttemptNumber(1);
 
@@ -1124,11 +1233,11 @@ impl TopologyRun {
         let binding = self
             .handle
             .fold
-            .frozen_rung_binding(key, run_as.rung)
+            .rung_binding(key, run_as.rung)
             .ok_or_else(|| UpstrokeError::Refused {
                 message: format!(
-                    "task {} has no rung {} in its frozen ladder, so there is no binding to \
-                     run it under",
+                    "task {} has neither a validated one-off binding nor a rung {} in its \
+                     frozen ladder, so there is no binding to run it under",
                     key.index(),
                     run_as.rung
                 ),
@@ -1153,7 +1262,7 @@ impl TopologyRun {
             workspace: site.worktree,
             resume_session: run_as.resume_session.clone(),
             feedback: run_as.feedback.clone(),
-            materialization_observed: None,
+            materialization_observed: run_as.materialized,
         })?;
 
         let mut emitter = RunEmitter {
@@ -1264,7 +1373,9 @@ impl TopologyRun {
                 rung: position.0 as usize,
                 attempts_on_rung,
                 defers,
-                resumable: plan.session_resume && assessed.outcome.session_id.is_some(),
+                resumable: plan.session_resume
+                    && assessed.outcome.session_id.is_some()
+                    && capture.unresolved.is_empty(),
             },
             &policy,
         );
@@ -1338,9 +1449,15 @@ impl TopologyRun {
                 self.display_id(key)?,
                 plan.attempt.0
             ),
-            actual_paths,
-            lease_effect: CandidateLeaseEffect::ReplacesPredicted {
-                paths: seams.manager.changed_paths(site.slot, &capture.parent)?,
+            actual_paths: actual_paths.clone(),
+            lease_effect: match self.lineage_root(key) {
+                Some(root) => CandidateLeaseEffect::WidensLineage {
+                    root,
+                    paths: actual_paths,
+                },
+                None => CandidateLeaseEffect::ReplacesPredicted {
+                    paths: actual_paths,
+                },
             },
         };
 
@@ -1490,9 +1607,22 @@ impl TopologyRun {
             .limits;
         Ok(crate::ladder::LadderPolicy {
             attempts_per: entry.ladder.attempts_per,
-            rungs: entry.ladder.rungs.len(),
+            rungs: if self.handle.fold.binding_override(key).is_some() {
+                1
+            } else {
+                entry.ladder.rungs.len()
+            },
             max_defers: limits.max_defers,
         })
+    }
+
+    fn lineage_root(&self, key: TaskKey) -> Option<TaskKey> {
+        self.handle
+            .fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .and_then(|entry| entry.lineage)
+            .map(|lineage| lineage.root)
     }
 
     fn dispatch_request(
@@ -1501,15 +1631,7 @@ impl TopologyRun {
         generation: GenerationId,
         seams: &RunSeams<'_>,
     ) -> Result<DispatchRequest, UpstrokeError> {
-        let paths = self.handle.fold.predicted_region(key).ok_or_else(|| {
-            UpstrokeError::Refused {
-                message: format!(
-                    "the fold selected task {} for dispatch and the frozen registry has no such \
-                     entry; the two disagree and nothing is dispatched",
-                    key.0
-                ),
-            }
-        })?;
+        let kind = self.dispatch_kind(key)?;
         let base = integrate::dispatch_head(
             seams.manager,
             &self.handle.started,
@@ -1520,7 +1642,36 @@ impl TopologyRun {
             key,
             generation,
             base,
-            kind: DispatchKind::Ordinary { paths },
+            kind,
+        })
+    }
+
+    fn dispatch_kind(&self, key: TaskKey) -> Result<DispatchKind, UpstrokeError> {
+        let entry = self
+            .handle
+            .fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: format!(
+                    "the fold selected task {} for dispatch and the frozen registry has no such \
+                     entry; the two disagree and nothing is dispatched",
+                    key.0
+                ),
+            })?;
+        let Some(lineage) = entry.lineage else {
+            let paths =
+                self.handle
+                    .fold
+                    .predicted_region(key)
+                    .ok_or_else(|| UpstrokeError::Refused {
+                        message: format!("task {} has no predicted region", key.index()),
+                    })?;
+            return Ok(DispatchKind::Ordinary { paths });
+        };
+        Ok(DispatchKind::Repair {
+            root: lineage.root,
+            source: rejected_source(&self.handle.events, key)?,
         })
     }
 
@@ -1545,6 +1696,59 @@ impl TopologyRun {
             .emit(body, hooks)
             .map_err(|failure| failure.discharging(&mut self.invocations))
     }
+}
+
+fn rejected_source(events: &[TopologyEvent], key: TaskKey) -> Result<CandidateRef, UpstrokeError> {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::MergeRejected { data } if data.repair.key == key => {
+                Some(data.candidate.clone())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "task {} is a repair and no `merge_rejected` in this log registered it, so the \
+                 candidate it is materialized from is not known; nothing is dispatched",
+                key.index()
+            ),
+        })
+}
+
+pub(super) fn dispatched_source(
+    events: &[TopologyEvent],
+    key: TaskKey,
+    generation: GenerationId,
+) -> Result<CandidateRef, UpstrokeError> {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::TaskDispatched { data }
+                if data.key == key && data.generation == generation =>
+            {
+                Some(data.source_candidate.clone())
+            }
+            _ => None,
+        })
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "task {} generation {} has no `task_dispatched` in this log, so there is no \
+                 record of what it was materialized from; nothing is continued",
+                key.index(),
+                generation.0
+            ),
+        })?
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: format!(
+                "task {} generation {} is a repair whose `task_dispatched` names no source \
+                 candidate; the log disagrees with the registry and nothing is continued",
+                key.index(),
+                generation.0
+            ),
+        })
 }
 
 #[cfg(test)]

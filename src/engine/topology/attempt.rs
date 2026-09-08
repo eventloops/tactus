@@ -151,6 +151,7 @@ pub struct AttemptRun {
 pub struct Capture {
     pub tree: String,
     pub parent: String,
+    pub unresolved: Vec<String>,
 }
 
 fn captured_object_id(source: &str, value: String) -> Result<ObjectId, UpstrokeError> {
@@ -324,6 +325,24 @@ impl AttemptContext<'_> {
     }
 
     pub fn capture(&mut self, site: AttemptSite<'_>) -> Result<Capture, UpstrokeError> {
+        let unresolved = self.manager.unresolved_conflicts(site.slot)?;
+        if !unresolved.is_empty() {
+            let tree = self
+                .manager
+                .commit_tree_sha(site.base.as_str())?
+                .ok_or_else(|| UpstrokeError::Git {
+                    message: format!(
+                        "the recorded base {} has no tree; an unresolved capture cannot name \
+                         the tree the worktree started from",
+                        site.base
+                    ),
+                })?;
+            return Ok(Capture {
+                tree,
+                parent: site.base.0.clone(),
+                unresolved,
+            });
+        }
         self.manager
             .candidate_stage(self.hooks.effects(), site.slot)?;
         let tree = self
@@ -332,6 +351,7 @@ impl AttemptContext<'_> {
         Ok(Capture {
             tree,
             parent: site.base.0.clone(),
+            unresolved,
         })
     }
 
@@ -357,6 +377,11 @@ impl AttemptContext<'_> {
         outcome.diff = diff.to_owned();
 
         let mut failure = crate::engine::attempt::evaluate_outcome(&outcome, &run.worker);
+        if failure.is_none() && !capture.unresolved.is_empty() {
+            failure = Some(crate::engine::classify::unresolved_conflict_failure(
+                &capture.unresolved,
+            ));
+        }
         if failure.is_none() {
             failure = crate::engine::classify::diff_failure(
                 &outcome.diff,

@@ -1046,6 +1046,7 @@ fn adopted_generation(run: &Run) -> Dispatched {
         kind: DispatchKind::Ordinary {
             paths: run.predicted(ALPHA),
         },
+        materialized: None,
     }
 }
 

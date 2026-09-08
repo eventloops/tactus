@@ -200,6 +200,14 @@ pub fn notifiers_for(ids: &[String], warnings: &mut Vec<String>) -> Vec<&'static
 pub trait AnswerSource {
     fn id(&self) -> &'static str;
     fn resolve(&self, question: &Question) -> Result<Answer, UpstrokeError>;
+
+    // The non-blocking half: what an answer already delivered says, without
+    // prompting anyone or waiting for anything. The schema-4 loop's ingest branch
+    // asks this before every selection while other work is runnable; `resolve`
+    // is the hard block's "attached-terminal prompt or wait_on_block".
+    fn poll(&self, _question: &Question) -> Result<Answer, UpstrokeError> {
+        Ok(Answer::Unanswered)
+    }
 }
 
 pub struct UnattendedAnswers;
@@ -275,6 +283,10 @@ impl<'a> EventLogAnswers<'a> {
 impl AnswerSource for EventLogAnswers<'_> {
     fn id(&self) -> &'static str {
         "event-log"
+    }
+
+    fn poll(&self, question: &Question) -> Result<Answer, UpstrokeError> {
+        Ok(read_answer(&self.dir, &question.id)?.unwrap_or(Answer::Unanswered))
     }
 
     fn resolve(&self, question: &Question) -> Result<Answer, UpstrokeError> {

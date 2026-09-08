@@ -375,6 +375,7 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             kind: DispatchKind::Ordinary {
                 paths: run.predicted(ALPHA),
             },
+            materialized: None,
         };
 
         let existed = dispatched.worktree.is_dir();
@@ -389,7 +390,8 @@ fn kill_after_dispatch_recreates_worktree_without_spend() {
             &mut run.hooks,
             &dispatched.open_generation(),
         )
-        .expect("recover");
+        .expect("recover")
+        .reuse;
         assert_eq!(
             reuse.reused(),
             site == "after_add",
@@ -508,6 +510,7 @@ fn repair_materialization_reproduced_after_kill() {
                 root: ALPHA,
                 source: source.clone(),
             },
+            materialized: None,
         };
 
         resume_open_no_attempt(
@@ -529,6 +532,7 @@ fn repair_materialization_reproduced_after_kill() {
                 root: ALPHA,
                 source,
             },
+            materialized: None,
         };
         run.fixture
             .manager

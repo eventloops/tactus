@@ -1567,14 +1567,17 @@ mod tests {
             ),
             (
                 "src/engine/classify.rs",
-                4,
+                5,
                 3,
                 "what was INLINE in `run_attempt`'s verification ladder: the \
                  diff's two observations and a failed gate, plus the three \
                  arms that decide a review pass's outcome, plus the \
-                 review-input refusal the ladder's third cheap rung raises. \
-                 Both engines read these, and this is the only production site \
-                 that CONSTRUCTS a `ReviewPassOutcome`",
+                 review-input refusal the ladder's third cheap rung raises, \
+                 plus the unresolved-conflict refusal a repair's capture \
+                 raises before any gate runs (`repairs.dispatch`: unresolved \
+                 index entries fail capture before gates). Both engines read \
+                 these, and this is the only production site that CONSTRUCTS \
+                 a `ReviewPassOutcome`",
             ),
             (
                 "src/engine/coordinator.rs",

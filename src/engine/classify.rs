@@ -131,3 +131,25 @@ pub(crate) fn attempt_record(attempt: u32, facts: AttemptFacts<'_>) -> AttemptRe
 pub(crate) fn review_input_failure(problem: String) -> AttemptFailure {
     AttemptFailure::new(FailureKind::ReviewInputOpaque, problem).from_reviewer()
 }
+
+pub(crate) fn unresolved_conflict_failure(paths: &[String]) -> AttemptFailure {
+    AttemptFailure::new(
+        FailureKind::AgentError,
+        format!(
+            "the worker left {} conflicted path(s) unresolved: {}",
+            paths.len(),
+            paths
+                .iter()
+                .map(|path| format!("`{path}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )
+    .with_feedback(format!(
+        "The repair worktree was materialized with the rejected candidate and these paths still \
+         carry conflict markers: {}. Resolve every conflict in the working tree — remove the \
+         `<<<<<<<`/`=======`/`>>>>>>>` markers and keep the behaviour already merged — and do \
+         not commit.",
+        paths.join(", ")
+    ))
+}
