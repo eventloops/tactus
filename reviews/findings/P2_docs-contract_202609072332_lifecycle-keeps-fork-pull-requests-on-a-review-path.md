@@ -32,8 +32,8 @@ request; the underlying contradiction is not, and is what this row holds open.
 
 Two sentences in `CONTRIBUTING.md` were left conditional on purpose and are not part of this
 finding. The `DESIGN.md` §21 clause says when reopening will be reconsidered, and the licence terms
-now say plainly that they bind whether or not a pull request is read, which is the P1 repair on this
-same head. Neither leaves a reader guessing about the current rule.
+now say plainly that they bind whatever route a contribution arrives by and whether or not anyone
+reads it, which is the P1 repair carried on this same branch. Neither leaves a reader guessing about the current rule.
 
 ## What the change that takes this up should do
 

@@ -6,8 +6,8 @@ owner, and opening it to other contributors is a question for later, once the v0
 issues. A pull request from outside the project will be closed without review.
 
 The rest of this file records how a change enters `master` today, and the licence terms every
-contribution carries. Those terms are not conditional on the decision above. Opening a pull
-request accepts them whether or not the pull request is ever read.
+contribution carries. Those terms are not conditional on the decision above. Sending a
+contribution accepts them whether or not anyone reads it.
 
 Every change enters `master` the same way: a draft pull request opened early, the deterministic CI
 and PR-policy gates green, one independent frontier-model review of the exact green head, findings
@@ -47,10 +47,16 @@ commands above are the automated baseline, not the whole standard.
 
 ## Contributor Licence Agreement
 
-By submitting a contribution you agree to the terms below. There is nothing to sign: opening a
-pull request is your acceptance, and it applies to every contribution you make to this project.
+By submitting a contribution you agree to the terms below. There is nothing to sign: sending a
+contribution is your acceptance, and it applies to every contribution you make to this project. A
+contribution is material you offer for inclusion in upstroke, such as a patch or a code sample
+meant to be used, and the route it takes does not change what it is. A pull request is the
+ordinary way to send one; an issue is another. Apache-2.0 §1, where this project's own licence
+defines the word, names issue trackers among the places a contribution is submitted from.
+
 That rule does not pause while outside contributions are closed. An uninvited pull request accepts
-these terms the moment it is opened, and closing it unreviewed does not undo that.
+these terms the moment it is opened, and closing it unreviewed does not undo that. An issue that
+carries material for inclusion accepts them the same way, whether or not anyone acts on it.
 
 1. **You keep your copyright.** You are not assigning ownership of anything.
 
@@ -80,5 +86,6 @@ contributor.
 The trade is explicit and worth stating plainly: your contribution may later be offered under
 terms you did not choose. Everything you contribute also remains available to everyone under
 the Apache License 2.0, permanently — that cannot be taken back. If clause 2 isn't acceptable to
-you, don't open a pull request; opening one is what accepts these terms. Raising an issue is not
-opening a pull request, and asks nothing of you here.
+you, don't send a contribution by either route; sending one is what accepts these terms. A bug
+report or a question that proposes no material for inclusion is not a contribution, and asks
+nothing of you here.
