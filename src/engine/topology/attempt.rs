@@ -21,7 +21,8 @@ use crate::topology::events::{
     TopologyEventBody,
 };
 use crate::workspace_manager::{
-    ObjectId, Slot, Snapshot, SnapshotInput, SnapshotName, WorkspaceManager,
+    DeclaredResolution, ObjectId, ResolutionKind, ResolutionManifest, Slot, Snapshot,
+    SnapshotInput, SnapshotName, WorkspaceManager,
 };
 
 use super::dispatch::{self, Dispatched, EventEmitter};
@@ -152,6 +153,55 @@ pub struct Capture {
     pub tree: String,
     pub parent: String,
     pub unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResolutionPlan {
+    staged: Vec<DeclaredResolution>,
+    refused: Vec<String>,
+}
+
+fn plan_resolutions(unmerged: &[String], manifest: &ResolutionManifest) -> ResolutionPlan {
+    let declarations = match manifest {
+        ResolutionManifest::Absent => &[][..],
+        ResolutionManifest::Declared(declarations) => declarations.as_slice(),
+        ResolutionManifest::Malformed { detail } => {
+            let mut refused = unmerged.to_vec();
+            refused.push(format!("({detail})"));
+            return ResolutionPlan {
+                staged: Vec::new(),
+                refused,
+            };
+        }
+    };
+    let mut plan = ResolutionPlan::default();
+    for path in unmerged {
+        let declared = |kind: ResolutionKind| {
+            declarations
+                .iter()
+                .any(|declaration| declaration.kind == kind && declaration.names(path))
+        };
+        match (
+            declared(ResolutionKind::Resolved),
+            declared(ResolutionKind::Deleted),
+        ) {
+            (false, false) => plan.refused.push(path.clone()),
+            (true, true) => plan.refused.push(format!(
+                "{path} (declared both `{}` and `{}`)",
+                crate::workspace_manager::RESOLVED_KEYWORD,
+                crate::workspace_manager::DELETED_KEYWORD
+            )),
+            (resolved, _) => plan.staged.push(DeclaredResolution {
+                path: path.clone(),
+                kind: if resolved {
+                    ResolutionKind::Resolved
+                } else {
+                    ResolutionKind::Deleted
+                },
+            }),
+        }
+    }
+    plan
 }
 
 fn captured_object_id(source: &str, value: String) -> Result<ObjectId, UpstrokeError> {
@@ -325,33 +375,53 @@ impl AttemptContext<'_> {
     }
 
     pub fn capture(&mut self, site: AttemptSite<'_>) -> Result<Capture, UpstrokeError> {
-        let unresolved = self.manager.unresolved_conflicts(site.slot)?;
-        if !unresolved.is_empty() {
-            let tree = self
-                .manager
-                .commit_tree_sha(site.base.as_str())?
-                .ok_or_else(|| UpstrokeError::Git {
-                    message: format!(
-                        "the recorded base {} has no tree; an unresolved capture cannot name \
-                         the tree the worktree started from",
-                        site.base
-                    ),
-                })?;
-            return Ok(Capture {
-                tree,
-                parent: site.base.0.clone(),
-                unresolved,
-            });
-        }
+        let unmerged = self.manager.unresolved_conflicts(site.slot)?;
+        let resolutions = if unmerged.is_empty() {
+            Vec::new()
+        } else {
+            let manifest = self.manager.resolution_manifest(site.slot)?;
+            let plan = plan_resolutions(&unmerged, &manifest);
+            if !plan.refused.is_empty() {
+                let tree = self
+                    .manager
+                    .commit_tree_sha(site.base.as_str())?
+                    .ok_or_else(|| UpstrokeError::Git {
+                        message: format!(
+                            "the recorded base {} has no tree; an unresolved capture cannot \
+                             name the tree the worktree started from",
+                            site.base
+                        ),
+                    })?;
+                return Ok(Capture {
+                    tree,
+                    parent: site.base.0.clone(),
+                    unresolved: plan.refused,
+                });
+            }
+            plan.staged
+        };
         self.manager
-            .candidate_stage(self.hooks.effects(), site.slot)?;
+            .candidate_stage(self.hooks.effects(), site.slot, &resolutions)?;
+        if !resolutions.is_empty() {
+            let left = self.manager.unresolved_conflicts(site.slot)?;
+            if !left.is_empty() {
+                return Err(UpstrokeError::Git {
+                    message: format!(
+                        "the capture staged every declared resolution and the index of {} \
+                         still holds unmerged entries: {}",
+                        site.worktree.display(),
+                        left.join(", ")
+                    ),
+                });
+            }
+        }
         let tree = self
             .manager
             .candidate_write_tree(self.hooks.effects(), site.slot)?;
         Ok(Capture {
             tree,
             parent: site.base.0.clone(),
-            unresolved,
+            unresolved: Vec::new(),
         })
     }
 

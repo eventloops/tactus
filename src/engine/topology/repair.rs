@@ -139,11 +139,17 @@ fn repair_body(
         RejectionDisposition::Conflict { paths } => {
             body.push_str("\nThe cherry-pick onto that head conflicted in: ");
             body.push_str(&render_paths(paths));
-            body.push_str(
-                ".\nEach conflicted path is left unmerged in the index for you to resolve: edit \
-                 it, then stage the resolution with `git add <path>` (or `git rm <path>`). A \
-                 result with an unmerged entry is refused before any gate runs.\n",
-            );
+            body.push_str(&format!(
+                ".\nEach conflicted path is left unmerged in the index for you to resolve with \
+                 your file tools. Then record it in the resolution manifest `{}` at the root of \
+                 the worktree, one line per path: `{} <path>` when the file's working-tree \
+                 content is the resolution, `{} <path>` to resolve it by deleting the file. The \
+                 engine stages what you declare; run no git command. A result with an unmerged \
+                 entry you did not declare is refused before any gate runs.\n",
+                crate::workspace_manager::RESOLUTION_MANIFEST,
+                crate::workspace_manager::RESOLVED_KEYWORD,
+                crate::workspace_manager::DELETED_KEYWORD,
+            ));
         }
         RejectionDisposition::CodeRejected { verification } => {
             body.push_str(&format!(

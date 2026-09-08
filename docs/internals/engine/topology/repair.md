@@ -80,9 +80,14 @@ required to carry (`pr8-triage.md` §5, record F1).
 The root's body followed by a merge-repair section: the rejected
 candidate's commit, ref, task and generation, the sequence, the rejecting
 head, and the evidence — the conflict paths, or the verification's
-verdict, gate outcome, review passes and detail. The other facts of the
-rejection (the lease effect, the admission) are the event's and the
-fold's, not the worker's.
+verdict, gate outcome, review passes and detail. For a conflict it also
+states the resolution protocol: resolve each path with file tools, declare
+it in the resolution manifest (`workspace_manager::RESOLUTION_MANIFEST`, as
+`resolved <path>` or `deleted <path>`), run no git command; the engine
+stages what is declared and refuses what is not (DESIGN §26.4). It once told
+the worker to `git add`/`git rm` the path, which no edit profile can. The
+other facts of the rejection (the lease effect, the admission) are the
+event's and the fold's, not the worker's.
 
 ## `fn render_paths(paths: &PathSet) -> String {`
 

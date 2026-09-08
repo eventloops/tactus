@@ -1683,8 +1683,8 @@ coordinator died is not retried in place, it is settled `interrupted` and
 its generation closed, so the next dispatch opens a fresh generation at the
 task's base — and "the task worktree scrubbed with force", which is the
 same resume action's next clause: the closed generation owns its worktree
-and intent (R9) and a Closed generation owns nothing, so both go with the
-close, after the append ([`reclaim_closed_generation`]).
+and intent (R9) and a Closed generation owns nothing, so both are reclaimed
+once the close is durable ([`reclaim_closed_generations`], after (e)).
 
 ### Errors
 
@@ -1708,22 +1708,34 @@ closed generation's checkout and durable intent still there: nothing
 reclaimed a generation (e) had closed, so every retained generation a dead
 incarnation left accumulated for the life of the run. `cleanup` allows a
 task worktree to be scrubbed once "the generation is Closed", R9 owns it by
-generation, and the same omission sat in (d); both steps now hand the closed
-generation to [`reclaim_closed_generation`] after the append. The live
-retry close (`RetryOutcome::Close`, `WorktreeMissing`) is the arm not
-changed: the attempt-level test pins that a retry itself removes nothing,
-and a live run's closed worktree is run-end closure's to reclaim (PR10).
+generation, and the same omission sat in (d). The first repair scrubbed
+after each append, and the adequacy review then stopped a recovery between
+that append and its scrub: the next recovery found the generation already
+`Closed`, neither (d) nor (e) selected it, and the leak was back. So the
+reclaim is no longer the closing step's own: [`reclaim_closed_generations`]
+runs once after (e) over the durable state — every `Closed` generation whose
+intent the execution root still carries — whichever incarnation appended the
+close. The live retry close (`RetryOutcome::Close`, `WorktreeMissing`) still
+scrubs nothing in the live run: the attempt-level test pins that a retry
+itself removes nothing, and a live run's closed worktree is run-end
+closure's (PR10); the next resume's sweep reclaims it like any other closed
+generation's.
 
 ### Errors
 
 Whatever [`emit`] refuses or fails at, or the scrub's containment refusals
 or Git error.
 
-## `fn reclaim_closed_generation(`
+## `fn reclaim_closed_generations(`
 
-Scrub the worktree and intent a generation recovery has just closed. The
-scrub is `dispatch::scrub`, forced and idempotent, so a generation whose
-worktree the kill never created is reclaimed as cheaply as one it did.
+Scrub the worktree and intent of every closed generation the execution root
+still carries, from the durable state: the fold's `Closed` generations
+against `intents()`, not a list of what this recovery closed. The scrub is
+`dispatch::scrub`, forced and idempotent. A generation whose intent is gone
+is not touched, so a resume with nothing to reclaim executes no
+`Worktree.Remove`; a generation closed by a recovery that died before its
+scrub, by the live loop, or by this pass's own (d) and (e) is reclaimed here
+alike. Task slots only: staging and snapshot residue have their own steps.
 
 ## `pub fn run_resumed(`
 

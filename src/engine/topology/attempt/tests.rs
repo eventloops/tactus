@@ -2032,10 +2032,40 @@ fn tree_of(run: &Run, commit: &str) -> String {
     )
 }
 
+/// The worker's whole conflict-resolution vocabulary: a file write. It
+/// resolves a conflicted file with its file tools and writes the resolution
+/// manifest with the same tools; it runs no git command, because an edit
+/// profile has none to run (DESIGN §16, §20) and the engine owns git (§4).
+fn declare(worktree: &Path, manifest: &str) {
+    write_file(
+        &worktree.join(crate::workspace_manager::RESOLUTION_MANIFEST),
+        manifest.as_bytes(),
+    );
+}
+
+fn tree_names(worktree: &Path, tree: &str) -> Vec<String> {
+    git(worktree, &["ls-tree", "-r", "--name-only", tree])
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn unmerged_paths(worktree: &Path) -> Vec<String> {
+    let mut paths: Vec<String> = git(worktree, &["diff-files", "--name-only", "--diff-filter=U"])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 #[test]
-fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_is_staged() {
+fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_declared_one_is_staged_by_the_engine()
+ {
     use crate::ladder::{FailureKind, FailureOrigin};
     use crate::topology::events::Materialization;
+    use crate::workspace_manager::{DELETED_KEYWORD, RESOLUTION_MANIFEST, RESOLVED_KEYWORD};
 
     let mut run = Run::started("unresolved-conflict");
     let head = run.fixture.head.clone();
@@ -2054,7 +2084,7 @@ fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_i
     assert_eq!(
         capture.unresolved,
         vec!["c.txt".to_owned()],
-        "the worker touched nothing, so the conflicted path still carries its markers"
+        "the worker touched nothing and declared nothing, so the conflicted path is refused"
     );
     assert_eq!(
         run.count_after(mark, STAGE, HookPhase::Before),
@@ -2101,12 +2131,18 @@ fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_i
         "the failure names the paths: {}",
         failure.reason
     );
+    let feedback = failure.feedback.clone().unwrap_or_default();
     assert!(
-        failure.feedback.as_deref().is_some_and(|feedback| {
-            feedback.contains("conflict markers") && feedback.contains("`git add <path>`")
-        }),
-        "and the worker is told what to do next time, staging included: {:?}",
-        failure.feedback
+        feedback.contains(RESOLUTION_MANIFEST)
+            && feedback.contains(&format!("`{RESOLVED_KEYWORD} <path>`"))
+            && feedback.contains(&format!("`{DELETED_KEYWORD} <path>`"))
+            && feedback.contains("Run no git command"),
+        "the worker is told what to do next time — resolve with file tools and declare in the \
+         manifest, never a git command: {feedback}"
+    );
+    assert!(
+        !feedback.contains("git add") && !feedback.contains("git rm"),
+        "no worker can run either (PR #249, second round): {feedback}"
     );
 
     let review_inputs = run.review_inputs();
@@ -2144,28 +2180,30 @@ fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_i
     let mark = run.mark();
     let capture = context!(run, process)
         .capture(dispatched.site())
-        .expect("an edited but unstaged conflict still captures as unresolved");
+        .expect("an edited but undeclared conflict still captures as unresolved");
     assert_eq!(
         capture.unresolved,
         vec!["c.txt".to_owned()],
         "a file rewritten without its markers is still an unmerged index entry until the \
-         worker stages it: the rule is the index's, not the file's"
+         worker declares it resolved: the rule is the index's and the manifest's, not the \
+         file's — a `-merge` binary resolved keep-ours is byte-identical to one abandoned"
     );
     assert_eq!(run.count_after(mark, STAGE, HookPhase::Before), 0);
 
-    git(&dispatched.worktree, &["add", "--", "c.txt"]);
+    declare(&dispatched.worktree, "resolved c.txt\n");
     let mark = run.mark();
     let capture = context!(run, process)
         .capture(dispatched.site())
-        .expect("a staged resolution captures");
+        .expect("a declared resolution captures");
     assert!(
         capture.unresolved.is_empty(),
-        "the worker's `git add` resolved the entry"
+        "the engine staged the resolution the worker declared"
     );
     assert_eq!(
         run.count_after(mark, STAGE, HookPhase::After),
         1,
-        "the engine's own staging records the worker's resolution"
+        "one `Object.CandidateStage` execution: the declared `git add` and the `add -A` are \
+         children of the same funnel invocation"
     );
     assert_eq!(
         git(&dispatched.worktree, &["ls-files", "--unmerged"]),
@@ -2180,12 +2218,21 @@ fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_i
         "resolved by the worker",
         "the captured tree carries the resolution"
     );
+    let names = tree_names(&dispatched.worktree, &capture.tree);
+    assert!(
+        !names.iter().any(|name| name == RESOLUTION_MANIFEST),
+        "the manifest is the engine's protocol file, never part of a candidate: {names:?}"
+    );
+    assert!(
+        dispatched.worktree.join(RESOLUTION_MANIFEST).is_file(),
+        "and it stays where the worker wrote it, untracked"
+    );
     assert!(process.balances());
     run.replay_twice_equal();
 }
 
 #[test]
-fn a_staged_deletion_resolves_a_conflict_and_an_unstaged_one_does_not() {
+fn a_declared_deletion_resolves_a_conflict_and_an_undeclared_missing_file_does_not() {
     use crate::topology::events::Materialization;
 
     let mut run = Run::started("resolved-by-deletion");
@@ -2199,33 +2246,34 @@ fn a_staged_deletion_resolves_a_conflict_and_an_unstaged_one_does_not() {
         .expect("the repair's attempt starts");
 
     remove_file(&dispatched.worktree.join("c.txt"));
+    let mark = run.mark();
     let capture = context!(run, process)
         .capture(dispatched.site())
         .expect("capture");
     assert_eq!(
         capture.unresolved,
         vec!["c.txt".to_owned()],
-        "a conflicted path whose file is gone is still unmerged: the index has not been told"
+        "a conflicted path whose file is gone is still unmerged: nothing has said the \
+         absence is the resolution"
     );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::Before), 0);
 
-    git(&dispatched.worktree, &["rm", "-q", "--", "c.txt"]);
+    declare(&dispatched.worktree, "deleted c.txt\n");
     let capture = context!(run, process)
         .capture(dispatched.site())
         .expect("capture");
     assert!(
         capture.unresolved.is_empty(),
-        "a deletion the worker staged with `git rm` resolves the entry"
+        "a deletion the worker declared is staged by the engine's `git rm`"
     );
     assert_eq!(git(&dispatched.worktree, &["ls-files", "--unmerged"]), "");
     assert!(
-        !git(
-            &dispatched.worktree,
-            &["ls-tree", "--name-only", &capture.tree]
-        )
-        .lines()
-        .any(|name| name == "c.txt"),
+        !tree_names(&dispatched.worktree, &capture.tree)
+            .iter()
+            .any(|name| name == "c.txt"),
         "the captured tree records the deletion"
     );
+    assert!(process.balances());
 }
 
 /// PR #249's conformance review, finding 2: a conflict rendered with a
@@ -2287,10 +2335,10 @@ fn a_conflict_rendered_with_a_longer_marker_size_is_unresolved_at_capture() {
     );
 
     write_file(&dispatched.worktree.join("c.txt"), b"resolved\n");
-    git(&dispatched.worktree, &["add", "--", "c.txt"]);
+    declare(&dispatched.worktree, "resolved c.txt\n");
     let capture = context!(run, process)
         .capture(dispatched.site())
-        .expect("a staged resolution captures");
+        .expect("a declared resolution captures");
     assert!(capture.unresolved.is_empty());
     assert_eq!(
         git(
@@ -2306,9 +2354,12 @@ fn a_conflict_rendered_with_a_longer_marker_size_is_unresolved_at_capture() {
 /// PR #249's conformance review, finding 2, the other format: a path whose
 /// `-merge` attribute makes Git leave the current side in place with no
 /// marker at all. Untouched, it is as unresolved as a text conflict, and an
-/// oracle that reads markers would pass it and publish the wrong side.
+/// oracle that reads markers would pass it and publish the wrong side. And
+/// the resolution a worker most often wants for it — keep the published
+/// side — leaves the bytes exactly as abandonment does, which is why the
+/// declaration and not the content carries the intent.
 #[test]
-fn an_untouched_binary_conflict_is_unresolved_at_capture() {
+fn an_untouched_binary_conflict_is_unresolved_at_capture_and_a_declared_keep_ours_is_staged() {
     use crate::topology::events::Materialization;
 
     let mut run = Run::started("unresolved-binary");
@@ -2329,9 +2380,10 @@ fn an_untouched_binary_conflict_is_unresolved_at_capture() {
     );
     let (dispatched, plan) = repair_from(&mut run, &base, &source_commit);
     assert_eq!(dispatched.materialized, Some(Materialization::Conflict));
+    let published = b"\0\x01the published side\n";
     assert_eq!(
         std::fs::read(dispatched.worktree.join("c.bin")).expect("the conflicted file"),
-        b"\0\x01the published side\n",
+        published,
         "Git leaves the current side in the working tree, with no marker to read"
     );
     let mut process = Process::new();
@@ -2347,19 +2399,18 @@ fn an_untouched_binary_conflict_is_unresolved_at_capture() {
     assert_eq!(
         capture.unresolved,
         vec!["c.bin".to_owned()],
-        "an unmerged binary path is unresolved until the worker resolves it"
+        "an unmerged binary path is unresolved until the worker declares it resolved"
     );
     assert_eq!(run.count_after(mark, STAGE, HookPhase::Before), 0);
     assert_eq!(capture.tree, tree_of(&run, &base));
 
-    write_file(
-        &dispatched.worktree.join("c.bin"),
-        b"\0\x01the candidate side\n",
-    );
-    git(&dispatched.worktree, &["add", "--", "c.bin"]);
+    // Keep-ours: the worker changes not one byte and declares the path
+    // resolved. Abandonment and this resolution are the same bytes on disk;
+    // only the declaration tells them apart.
+    declare(&dispatched.worktree, "resolved c.bin\n");
     let capture = context!(run, process)
         .capture(dispatched.site())
-        .expect("a staged resolution captures");
+        .expect("a declared resolution captures");
     assert!(capture.unresolved.is_empty());
     assert_eq!(
         crate::workspace_manager::fixture::git_out(
@@ -2367,10 +2418,618 @@ fn an_untouched_binary_conflict_is_unresolved_at_capture() {
             &["cat-file", "-p", &format!("{}:c.bin", capture.tree)]
         )
         .stdout,
-        b"\0\x01the candidate side\n",
-        "the captured tree carries the side the worker chose"
+        published,
+        "the captured tree carries the side the worker chose, which is the published one"
     );
     assert!(process.balances());
+}
+
+/// The four conflict shapes the design names at once — default markers,
+/// `conflict-marker-size=8`, a `-merge` binary, and a delete/modify — in one
+/// worktree: the base changes four files the ancestor had, and the one
+/// candidate commit changes three of them differently and deletes the fourth.
+fn four_shapes(run: &mut Run) -> (String, String) {
+    let head = run.fixture.head.clone();
+    let attributes = run.commit_with(
+        &head,
+        ".gitattributes",
+        "c.bin -merge\nm8.txt conflict-marker-size=8\n",
+        "four-attrs",
+    );
+    let mut ancestor = attributes;
+    for (file, content) in [
+        ("c.txt", "shared\n"),
+        ("m8.txt", "shared\n"),
+        ("c.bin", "\u{0}\u{1}shared\n"),
+        ("d.txt", "shared\n"),
+    ] {
+        ancestor = run.commit_with(&ancestor, file, content, &format!("four-ancestor-{file}"));
+    }
+    let mut base = ancestor.clone();
+    for (file, content) in [
+        ("c.txt", "published\n"),
+        ("m8.txt", "published\n"),
+        ("c.bin", "\u{0}\u{1}published\n"),
+        ("d.txt", "published\n"),
+    ] {
+        base = run.commit_with(&base, file, content, &format!("four-base-{file}"));
+    }
+    let source = run.commit_changing(
+        &ancestor,
+        &[
+            ("c.txt", Some("candidate\n")),
+            ("m8.txt", Some("candidate\n")),
+            ("c.bin", Some("\u{0}\u{1}candidate\n")),
+            ("d.txt", None),
+        ],
+        "four-source",
+    );
+    (base, source)
+}
+
+const FOUR_PATHS: [&str; 4] = ["c.bin", "c.txt", "d.txt", "m8.txt"];
+
+fn four_shape_conflict(run: &mut Run) -> (Dispatched, AttemptPlan) {
+    use crate::topology::events::Materialization;
+
+    let (base, source) = four_shapes(run);
+    let (dispatched, plan) = repair_from(run, &base, &source);
+    assert_eq!(dispatched.materialized, Some(Materialization::Conflict));
+    assert_eq!(
+        unmerged_paths(&dispatched.worktree),
+        FOUR_PATHS.map(str::to_owned).to_vec(),
+        "all four shapes conflicted"
+    );
+    let m8 = std::fs::read_to_string(dispatched.worktree.join("m8.txt")).expect("m8.txt");
+    assert!(
+        m8.lines().any(|line| line.starts_with("<<<<<<<< ")),
+        "m8.txt carries eight-character markers:\n{m8}"
+    );
+    assert_eq!(
+        std::fs::read(dispatched.worktree.join("c.bin")).expect("c.bin"),
+        b"\0\x01published\n",
+        "the binary is left as the published side, with no marker"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dispatched.worktree.join("d.txt")).expect("d.txt"),
+        "published\n",
+        "modify/delete leaves the modified side in the working tree"
+    );
+    (dispatched, plan)
+}
+
+#[test]
+fn four_conflict_shapes_declared_at_once_are_staged_by_the_engine_into_one_tree() {
+    use crate::workspace_manager::RESOLUTION_MANIFEST;
+
+    let mut run = Run::started("four-shapes-declared");
+    let (dispatched, plan) = four_shape_conflict(&mut run);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+
+    // The worker: two files rewritten, the binary kept as it is, the deleted
+    // side chosen for d.txt — and every one of them declared. File writes and
+    // nothing else; its tools cannot even remove d.txt.
+    write_file(&dispatched.worktree.join("c.txt"), b"resolved c\n");
+    write_file(&dispatched.worktree.join("m8.txt"), b"resolved m8\n");
+    declare(
+        &dispatched.worktree,
+        "# the paths this repair resolved\nresolved c.txt\nresolved m8.txt\nresolved c.bin\ndeleted d.txt\n",
+    );
+
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("four declared resolutions capture");
+    assert!(capture.unresolved.is_empty(), "{:?}", capture.unresolved);
+    assert_eq!(
+        run.count_after(mark, STAGE, HookPhase::After),
+        1,
+        "three `git add`, one `git rm` and the `add -A`: one funnel invocation"
+    );
+    assert_eq!(unmerged_paths(&dispatched.worktree), Vec::<String>::new());
+    assert!(
+        !dispatched.worktree.join("d.txt").exists(),
+        "the engine's `git rm` removed the file the worker declared deleted"
+    );
+    let names = tree_names(&dispatched.worktree, &capture.tree);
+    assert!(
+        names.iter().any(|name| name == "c.txt")
+            && names.iter().any(|name| name == "m8.txt")
+            && names.iter().any(|name| name == "c.bin")
+            && !names.iter().any(|name| name == "d.txt")
+            && !names.iter().any(|name| name == RESOLUTION_MANIFEST),
+        "the tree carries the three kept paths, not the deleted one and not the manifest: \
+         {names:?}"
+    );
+    for (path, content) in [
+        ("c.txt", &b"resolved c\n"[..]),
+        ("m8.txt", b"resolved m8\n"),
+        ("c.bin", b"\0\x01published\n"),
+    ] {
+        assert_eq!(
+            crate::workspace_manager::fixture::git_out(
+                &dispatched.worktree,
+                &["cat-file", "-p", &format!("{}:{path}", capture.tree)]
+            )
+            .stdout,
+            content,
+            "{path}"
+        );
+    }
+    assert!(process.balances());
+    run.replay_twice_equal();
+}
+
+#[test]
+fn four_conflict_shapes_undeclared_are_all_refused_before_any_gate_and_nothing_is_staged() {
+    use crate::ladder::{FailureKind, FailureOrigin};
+    use crate::workspace_manager::RESOLUTION_MANIFEST;
+
+    let mut run = Run::started("four-shapes-undeclared");
+    let (dispatched, plan) = four_shape_conflict(&mut run);
+    let base_tree = git(&dispatched.worktree, &["rev-parse", "HEAD^{tree}"]);
+    let mut process = Process::new();
+    let started = context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+
+    // A worker that resolves nothing and declares nothing: refused on all four.
+    agent_edits(&dispatched.worktree);
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert_eq!(capture.unresolved, FOUR_PATHS.map(str::to_owned).to_vec());
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::Before), 0);
+    assert_eq!(capture.tree, base_tree);
+    let diff = run
+        .fixture
+        .manager
+        .candidate_diff(&dispatched.slot, &capture.parent, &capture.tree)
+        .expect("diff");
+    let assessed = context!(run, process)
+        .assess(
+            dispatched.site(),
+            &plan,
+            &started,
+            &capture,
+            &diff,
+            crate::ir::TaskKind::Fix,
+        )
+        .expect("assessed");
+    let failure = assessed.failure.clone().expect("refused before any gate");
+    assert_eq!(failure.kind, FailureKind::AgentError);
+    assert_eq!(failure.origin, FailureOrigin::Worker);
+    for path in FOUR_PATHS {
+        assert!(
+            failure.reason.contains(path),
+            "the refusal names `{path}`: {}",
+            failure.reason
+        );
+    }
+    let review_inputs = run.review_inputs();
+    let judgement = context!(run, process)
+        .judge(
+            dispatched.site(),
+            &plan,
+            Judging {
+                run: &started,
+                capture: &capture,
+                assessed: &assessed,
+            },
+            &review_inputs,
+            &|pass| crate::review::ReviewInvocations {
+                pass: started.identities.review_pass(pass, 0),
+                reask: started.identities.review_reask(pass, 0),
+            },
+        )
+        .expect("judged");
+    assert!(judgement.gates.is_empty() && judgement.reviews.is_empty());
+    assert_eq!(run.runner.ran().len(), 1, "only the worker ran");
+
+    // A worker that resolved three of the four and forgot to declare the
+    // fourth: the capture is all or nothing, so the three are not staged and
+    // the one undeclared path is what it is told about.
+    write_file(&dispatched.worktree.join("c.txt"), b"resolved c\n");
+    write_file(&dispatched.worktree.join("m8.txt"), b"resolved m8\n");
+    declare(
+        &dispatched.worktree,
+        "resolved c.txt\nresolved m8.txt\ndeleted d.txt\n",
+    );
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert_eq!(
+        capture.unresolved,
+        vec!["c.bin".to_owned()],
+        "only the undeclared path is refused, and it is named"
+    );
+    assert_eq!(
+        run.count_after(mark, STAGE, HookPhase::Before),
+        0,
+        "an unresolved capture stages nothing, declared paths included"
+    );
+    assert_eq!(
+        unmerged_paths(&dispatched.worktree),
+        FOUR_PATHS.map(str::to_owned).to_vec()
+    );
+    assert!(
+        dispatched.worktree.join("d.txt").exists(),
+        "and removes nothing: the declared deletion waits for a capture that proceeds"
+    );
+
+    // A manifest with a line the grammar does not admit: nothing is staged
+    // from it, every unmerged path is refused, and the line is quoted back.
+    declare(
+        &dispatched.worktree,
+        "resolved c.txt\nresolved m8.txt\nfixed c.bin\ndeleted d.txt\n",
+    );
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert_eq!(capture.unresolved.len(), 5, "{:?}", capture.unresolved);
+    assert_eq!(&capture.unresolved[..4], &FOUR_PATHS.map(str::to_owned)[..]);
+    assert!(
+        capture.unresolved[4].contains("line 3")
+            && capture.unresolved[4].contains(RESOLUTION_MANIFEST)
+            && capture.unresolved[4].contains("fixed c.bin"),
+        "the manifest's problem is one refused entry naming the line: {}",
+        capture.unresolved[4]
+    );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::Before), 0);
+    assert!(process.balances());
+}
+
+/// PR #249's regression review, the P1, in the reviewer's own shape: the
+/// production worker command for a Claude Code edit profile is assembled, its
+/// generated permissions read back, Copilot's checked beside it — neither
+/// admits a git command — and the conflict repair is then completed through
+/// the one kind of operation both admit, a file write. No privileged helper
+/// stands in for anything the real worker cannot do.
+#[test]
+fn an_edit_only_worker_completes_a_conflict_repair_through_file_writes_alone() {
+    use crate::engine::assembly::{
+        ImplementerBinding, WorkerAssembly, WorkerSubject, implementer_profile,
+    };
+    use crate::topology::events::Materialization;
+    use crate::workspace_manager::RESOLUTION_MANIFEST;
+
+    let mut run = Run::started("edit-only-worker");
+    let head = run.fixture.head.clone();
+    let conflicting = run.commit_with(&head, "c.txt", "conflicting current side\n", "c-current");
+    let (dispatched, plan) = repair_at(&mut run, &conflicting);
+    assert_eq!(dispatched.materialized, Some(Materialization::Conflict));
+
+    let profile = implementer_profile(ImplementerBinding::of_frozen(&plan.binding), None);
+    let gates = vec!["cargo test".to_owned()];
+    let registry = run.emitter.fold().registry().expect("registry");
+    let entry = registry.get(dispatched.key).expect("the repair's entry");
+    let command = WorkerAssembly {
+        adapter: &crate::agent::claude::ClaudeCodeAdapter,
+        profile: &profile,
+        task: WorkerSubject::of_frozen(&entry.spec),
+        gate_cmds: &gates,
+        paths: &run.paths,
+        stem: "edit-only-worker",
+        attempt: 1,
+        retry: None,
+        workspace: &dispatched.worktree,
+        resume_session: None,
+    }
+    .command()
+    .expect("the production worker command and its permission file");
+    assert!(
+        command
+            .args
+            .windows(2)
+            .any(|args| args == ["--permission-mode", "dontAsk"])
+    );
+    let settings_path = command
+        .args
+        .windows(2)
+        .find(|args| args[0] == "--settings")
+        .expect("the settings flag")[1]
+        .clone();
+    let settings: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&settings_path).expect("the materialized settings"))
+            .expect("settings JSON");
+    let allow: Vec<&str> = settings["permissions"]["allow"]
+        .as_array()
+        .expect("allow list")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert_eq!(
+        allow,
+        vec![
+            "Read",
+            "Glob",
+            "Grep",
+            "Edit",
+            "Write",
+            "NotebookEdit",
+            "Bash(cargo test)"
+        ],
+        "file tools and the gate, nothing else: no rule admits a git command"
+    );
+    assert!(allow.iter().all(|rule| !rule.contains("git")), "{allow:?}");
+    let denied: Vec<&str> = settings["permissions"]["deny"]
+        .as_array()
+        .expect("deny list")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    assert!(
+        !RESOLUTION_MANIFEST.contains('/')
+            && denied.iter().all(|rule| {
+                // `Write(.upstroke/**)` and its siblings deny directories; the
+                // manifest is a root-level file under none of them.
+                let prefix = rule
+                    .trim_start_matches("Write(")
+                    .trim_start_matches("Edit(")
+                    .trim_start_matches("Read(")
+                    .trim_start_matches("**/")
+                    .trim_end_matches(')')
+                    .trim_end_matches("**");
+                prefix.is_empty() || !RESOLUTION_MANIFEST.starts_with(prefix)
+            }),
+        "the worker can write the manifest under the production deny list {denied:?}"
+    );
+    assert_eq!(
+        crate::agent::copilot::permission_args(&profile, &gates),
+        vec!["--allow-tool=write", "--allow-tool=shell(cargo test)"],
+        "Copilot's grant is the same shape: writes and the gate"
+    );
+    let prompt = String::from_utf8(command.stdin).expect("the prompt");
+    assert!(
+        prompt.contains("any other shell command is denied")
+            && prompt.contains("NEVER run git commit, branch, merge, push, or reset")
+    );
+
+    // What such a worker can do, and all it needs to do.
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the attempt starts");
+    write_file(
+        &dispatched.worktree.join("c.txt"),
+        b"resolved by permitted file edit\n",
+    );
+    declare(&dispatched.worktree, "resolved c.txt\n");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert!(
+        capture.unresolved.is_empty(),
+        "a worker with the generated allow list completed the repair through file writes, \
+         and capture refused {:?}",
+        capture.unresolved
+    );
+    assert_eq!(
+        git(&dispatched.worktree, &["show", ":c.txt"]),
+        "resolved by permitted file edit"
+    );
+    assert!(process.balances());
+}
+
+/// The index spells a path; the manifest may spell it a little differently,
+/// and the staging command must name it exactly.
+#[test]
+fn a_declared_path_is_staged_literally_whatever_characters_it_holds() {
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("literal-paths");
+    let head = run.fixture.head.clone();
+    let ancestor = run.commit_with(&head, "a[1].txt", "shared\n", "glob-ancestor");
+    let ancestor = run.commit_with(&ancestor, "sp ace.txt", "shared\n", "space-ancestor");
+    let base = run.commit_with(&ancestor, "a[1].txt", "published\n", "glob-base");
+    let base = run.commit_with(&base, "sp ace.txt", "published\n", "space-base");
+    let source = run.commit_changing(
+        &ancestor,
+        &[
+            ("a[1].txt", Some("candidate\n")),
+            ("sp ace.txt", Some("candidate\n")),
+        ],
+        "literal-source",
+    );
+    let (dispatched, plan) = repair_from(&mut run, &base, &source);
+    assert_eq!(dispatched.materialized, Some(Materialization::Conflict));
+    assert_eq!(
+        unmerged_paths(&dispatched.worktree),
+        vec!["a[1].txt".to_owned(), "sp ace.txt".to_owned()]
+    );
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the attempt starts");
+
+    write_file(&dispatched.worktree.join("a[1].txt"), b"resolved glob\n");
+    // Quoted, `./`-prefixed, a Windows worker's CRLF: the grammar's tolerances.
+    declare(
+        &dispatched.worktree,
+        "resolved `./a[1].txt`\r\ndeleted \"sp ace.txt\"\r\n",
+    );
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert!(capture.unresolved.is_empty(), "{:?}", capture.unresolved);
+    assert_eq!(unmerged_paths(&dispatched.worktree), Vec::<String>::new());
+    assert_eq!(
+        git(&dispatched.worktree, &["show", ":a[1].txt"]),
+        "resolved glob",
+        "`a[1].txt` was staged as itself, not as the glob `a[1].txt` would be"
+    );
+    assert!(
+        !tree_names(&dispatched.worktree, &capture.tree)
+            .iter()
+            .any(|name| name == "sp ace.txt")
+    );
+    assert!(process.balances());
+}
+
+#[test]
+fn a_resolution_manifest_written_where_nothing_conflicted_is_ignored_and_stays_out_of_the_candidate()
+ {
+    use crate::workspace_manager::RESOLUTION_MANIFEST;
+
+    let mut run = Run::started("manifest-without-conflict");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let plan = run.attempt_plan(ALPHA, 1);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the attempt starts");
+    agent_edits(&dispatched.worktree);
+    declare(&dispatched.worktree, "resolved worked.txt\n");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert!(capture.unresolved.is_empty());
+    let names = tree_names(&dispatched.worktree, &capture.tree);
+    assert!(
+        names.iter().any(|name| name == WORKED_PATH)
+            && !names.iter().any(|name| name == RESOLUTION_MANIFEST),
+        "the work is captured and the manifest is not: {names:?}"
+    );
+    assert!(process.balances());
+}
+
+#[test]
+fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_rest() {
+    use crate::workspace_manager::{
+        Declaration, DeclaredResolution, ResolutionKind, ResolutionManifest,
+    };
+
+    let declared = |text: &str| match ResolutionManifest::parse(text) {
+        ResolutionManifest::Declared(declared) => declared,
+        other => panic!("{text:?} parsed as {other:?}"),
+    };
+    let entry = |path: &str, kind| Declaration {
+        path: path.to_owned(),
+        kind,
+    };
+    assert_eq!(
+        declared("resolved c.txt\n"),
+        vec![entry("c.txt", ResolutionKind::Resolved)]
+    );
+    assert_eq!(
+        declared("# comment\n\nresolved c.txt\r\ndeleted d.txt\r\n"),
+        vec![
+            entry("c.txt", ResolutionKind::Resolved),
+            entry("d.txt", ResolutionKind::Deleted),
+        ],
+        "CRLF, comments and blank lines"
+    );
+    assert_eq!(
+        declared("- resolved: `c.txt`\n* deleted \"sp ace.txt\"\n  resolved ./dir/e.txt  \n"),
+        vec![
+            entry("c.txt", ResolutionKind::Resolved),
+            entry("sp ace.txt", ResolutionKind::Deleted),
+            entry("dir/e.txt", ResolutionKind::Resolved),
+        ],
+        "bullets, a colon, quotes, `./` and surrounding whitespace"
+    );
+    assert_eq!(
+        declared(""),
+        Vec::<Declaration>::new(),
+        "an empty file declares nothing"
+    );
+    for (text, line) in [
+        ("fixed c.txt\n", 1),
+        ("resolved c.txt\nresolved\n", 2),
+        ("resolved c.txt\n\nc.txt\n", 3),
+        ("resolved ``\n", 1),
+    ] {
+        let ResolutionManifest::Malformed { detail } = ResolutionManifest::parse(text) else {
+            panic!("{text:?} parsed");
+        };
+        assert!(
+            detail.contains(&format!("line {line} of")),
+            "{text:?}: {detail}"
+        );
+    }
+
+    let names =
+        |declared: &str, index: &str| entry(declared, ResolutionKind::Resolved).names(index);
+    assert!(names("dir/f.txt", "dir/f.txt"));
+    assert!(!names("dir/g.txt", "dir/f.txt"));
+    assert!(!names("f.txt", "dir/f.txt"));
+    assert_eq!(
+        names("dir\\f.txt", "dir/f.txt"),
+        cfg!(windows),
+        "a backslash is a separator exactly where the platform's Git reads it as one"
+    );
+
+    let unmerged = ["c.txt".to_owned(), "d.txt".to_owned()];
+    assert_eq!(
+        plan_resolutions(&unmerged, &ResolutionManifest::Absent),
+        ResolutionPlan {
+            staged: Vec::new(),
+            refused: unmerged.to_vec(),
+        },
+        "no manifest: every unmerged entry is refused"
+    );
+    assert_eq!(
+        plan_resolutions(
+            &unmerged,
+            &ResolutionManifest::Declared(vec![
+                entry("c.txt", ResolutionKind::Resolved),
+                entry("d.txt", ResolutionKind::Deleted),
+                entry("unrelated.txt", ResolutionKind::Deleted),
+            ])
+        ),
+        ResolutionPlan {
+            staged: vec![
+                DeclaredResolution {
+                    path: "c.txt".to_owned(),
+                    kind: ResolutionKind::Resolved,
+                },
+                DeclaredResolution {
+                    path: "d.txt".to_owned(),
+                    kind: ResolutionKind::Deleted,
+                },
+            ],
+            refused: Vec::new(),
+        },
+        "each unmerged entry takes the kind declared for it; a declaration of a path that \
+         is not unmerged is nothing"
+    );
+    let plan = plan_resolutions(
+        &unmerged,
+        &ResolutionManifest::Declared(vec![
+            entry("c.txt", ResolutionKind::Resolved),
+            entry("c.txt", ResolutionKind::Deleted),
+        ]),
+    );
+    assert!(plan.staged.is_empty());
+    assert_eq!(plan.refused.len(), 2);
+    assert!(
+        plan.refused[0].starts_with("c.txt (declared both"),
+        "a path declared both ways is refused, not guessed: {:?}",
+        plan.refused
+    );
+    assert_eq!(plan.refused[1], "d.txt");
+    let plan = plan_resolutions(
+        &unmerged,
+        &ResolutionManifest::Malformed {
+            detail: "line 1 is odd".to_owned(),
+        },
+    );
+    assert!(plan.staged.is_empty());
+    assert_eq!(
+        plan.refused,
+        vec![
+            "c.txt".to_owned(),
+            "d.txt".to_owned(),
+            "(line 1 is odd)".to_owned()
+        ],
+        "a malformed manifest refuses everything and says why"
+    );
 }
 
 #[test]

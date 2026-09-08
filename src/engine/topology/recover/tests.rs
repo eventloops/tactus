@@ -2535,6 +2535,166 @@ fn an_interrupted_attempts_worktree_and_intent_are_reclaimed_by_recovery() {
     );
 }
 
+/// PR #249's adequacy review, finding 4's second half. Recovery stops right
+/// after its closing append is durable — `attempt_interrupted` for an
+/// in-flight attempt, `generation_closed` for a retained generation — and
+/// before the scrub. The next recovery finds the generation already `Closed`,
+/// so neither (d) nor (e) selects it: the reclaim has to be derived from the
+/// durable closed state itself, or the checkout and intent outlive every
+/// later resume ([`reclaim_closed_generations`]).
+fn a_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next(retained: bool) {
+    let fixture = Fixture::build(
+        if retained {
+            "retained-close-then-death"
+        } else {
+            "interrupted-close-then-death"
+        },
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_rejected_repair(&fixture);
+    let worktree = plant_repair_worktree(&fixture, repair, rejection.rejecting_head.as_str());
+    let slot = crate::engine::topology::dispatch::task_slot(repair, GEN);
+    let mut planted = vec![
+        repair_dispatched(&rejection, repair, GEN),
+        repair_attempt_started(repair, 1),
+    ];
+    if retained {
+        planted.push(for_task(
+            repair,
+            "repair",
+            attempt_finished(1, retained_by_the_creator("retained-session")),
+        ));
+    }
+    append_events(&fixture, &planted);
+    let has_intent = || {
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+    };
+    assert!(worktree.exists() && has_intent());
+    let expected = if retained {
+        "generation_closed"
+    } else {
+        "attempt_interrupted"
+    };
+
+    // The first recovery: its closing append returns an error at `Synced`,
+    // so the close is durable and nothing after the append runs.
+    let first = harness();
+    first
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(
+            EffectSiteId::Event(EventSite::Append),
+            SubEffectPoint::Synced,
+            InjectionMode::ErrorReturn,
+        )
+        .expect("Event.Append has a Synced point");
+    let mut first_hooks = HarnessTopologyHooks::new(Arc::clone(&first));
+    let Err(error) = resume_as(
+        &fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &mut first_hooks,
+    ) else {
+        panic!("the first recovery stops at its durable close append");
+    };
+    assert!(
+        error.to_string().contains(expected),
+        "the interruption is the {expected} append: {error}"
+    );
+    let closed = replayed(&fixture);
+    assert!(
+        matches!(
+            closed
+                .task(repair)
+                .expect("the repair")
+                .generations
+                .first()
+                .expect("its generation")
+                .class,
+            crate::topology::fold::GenerationClass::Closed
+        ),
+        "the close is durable"
+    );
+    assert!(
+        worktree.exists() && has_intent(),
+        "and the interruption precedes the scrub"
+    );
+
+    // The next recovery has nothing in flight and nothing retained to close,
+    // and reclaims the closed generation's checkout and intent all the same.
+    let removes = |harness: &Arc<Mutex<HookHarness>>| {
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(
+                EffectSiteId::Worktree(WorktreeSite::Remove),
+                HookPhase::After,
+            )
+    };
+    let second = harness();
+    let mut second_hooks = HarnessTopologyHooks::new(Arc::clone(&second));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &mut second_hooks,
+    )
+    .expect("the next recovery resumes");
+    assert_eq!(recovered.interrupted, 0, "(d) closes nothing");
+    assert_eq!(recovered.retained_closed, 0, "(e) closes nothing");
+    drop(handle);
+    assert!(
+        !worktree.exists() && !has_intent(),
+        "{expected}: a durable close whose scrub never ran is reclaimed by the next recovery \
+         from the closed state (worktree={}, intent={})",
+        worktree.exists(),
+        has_intent()
+    );
+
+    assert!(
+        removes(&second) >= 1,
+        "the reclaim went through `Worktree.Remove`, as every scrub does"
+    );
+
+    // A third recovery finds nothing left to reclaim — not the closed
+    // generation's checkout and nothing else — so the reclaim was complete.
+    // (The second also finished the promotions the interrupted first never
+    // reached, step (f), which is why its removals are not counted exactly.)
+    let third = harness();
+    let mut third_hooks = HarnessTopologyHooks::new(Arc::clone(&third));
+    let (_, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut third_hooks,
+    )
+    .expect("another complete resume");
+    drop(handle);
+    assert_eq!(
+        removes(&third),
+        0,
+        "after the reclaim a further recovery removes no worktree at all"
+    );
+    assert!(!worktree.exists() && !has_intent());
+}
+
+#[test]
+fn an_interrupted_attempts_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next() {
+    a_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next(false);
+}
+
+#[test]
+fn a_retained_generations_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next() {
+    a_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next(true);
+}
+
 #[test]
 fn retry_refused_after_resume() {
     let fixture = Fixture::build(

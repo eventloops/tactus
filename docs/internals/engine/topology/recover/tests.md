@@ -1121,6 +1121,19 @@ worktree scrubbed with force". Step (d) closes the generation and its
 worktree and intent go with it — the sibling arm of (e)'s reclaim, found by
 asking whether the class had another member.
 
+## `fn a_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next(retained: bool) {`
+
+PR #249's adequacy review, finding 4's second half, in both arms. The first
+recovery's closing append — `attempt_interrupted` or `generation_closed` —
+returns an error at its `Synced` point, so the close is durable and the
+scrub never ran: the generation is `Closed` and its checkout and intent are
+still there. The next recovery closes nothing and reclaims them all the
+same, from the closed state (`reclaim_closed_generations`); a third removes
+no worktree at all. The review's witness failed at `3bce2c6a` with
+`worktree=true, intent=true` after the second recovery. The second
+recovery's removals are not counted exactly, because it also finishes the
+promotions the interrupted first never reached (step (f)).
+
 ## `fn run_resumed_records_identical_runner_identity() {`
 
 `run_resumed(4).runner` equals `run_started(4).runner` field for field.

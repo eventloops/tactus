@@ -473,11 +473,29 @@ ephemeral commit.
 
 ## `pub struct Capture` › `pub unresolved: Vec<String>,`
 
-The conflicted paths whose working-tree files still carried conflict
-markers when the capture ran (`R9`), read *before* staging: `git add -A`
-would record the markers as the resolution. Non-empty means nothing was
-staged, `tree` is the base's, and the assessment fails the attempt before
-any gate; a conflicted path whose file is gone was resolved by deletion.
+What kept the capture from proceeding (`R9`): every path the index still
+held unmerged that the worker's resolution manifest did not declare resolved
+(or that could not be decoded), and the manifest's own problem, in
+parentheses, when it had one. Read *before* staging: `git add -A` would
+record the markers as the resolution. Non-empty means nothing was staged,
+`tree` is the base's, and the assessment fails the attempt before any gate.
+
+## `struct ResolutionPlan {`
+
+The capture's reconciliation of the index's unmerged entries with the
+worker's manifest: `staged`, the unmerged paths the manifest declared, each
+with how, spelt as the index spells them; `refused`, every unmerged entry it
+did not declare, plus the manifest's problem when it has one. A plan with
+anything refused stages nothing.
+
+## `fn plan_resolutions(unmerged: &[String], manifest: &ResolutionManifest) -> ResolutionPlan {`
+
+No manifest: everything refused. A malformed one: everything refused and
+the detail appended as one more entry, so the worker is told the line. A
+parsed one: each unmerged path takes the kind declared for it
+(`Declaration::names`, a path comparison); a path declared both `resolved`
+and `deleted` is refused rather than guessed; a declaration of a path that
+is not unmerged is nothing.
 
 ## `fn captured_object_id(source: &str, value: String) -> Result<ObjectId, UpstrokeError> {`
 
@@ -844,13 +862,28 @@ publishing the index or cache-tree". The staged objects are behind the
 **task index** afterwards (R9), which is what makes them recoverable by
 scrubbing the worktree rather than by anything cleverer.
 
-**A repair's unresolved conflicts are read first.** `unresolved_conflicts`
-is a read of the index's unmerged entries — the paths the worker has not
-resolved with `git add` or `git rm`, whatever their working-tree files look
-like; when it names any, the capture returns the base's tree with those
-paths and stages nothing, so an unresolved conflict cannot be captured as
-the worker's work. It once read the files for `<<<<<<< ` markers instead;
-PR #249's conformance review materialized conflicts under
+**A repair's unresolved conflicts are read first, and the worker's
+resolutions are staged for it.** `unresolved_conflicts` is a read of the
+index's unmerged entries, whatever their working-tree files look like. When
+it names any, the capture reads the worker's resolution manifest
+(`workspace_manager::RESOLUTION_MANIFEST`, a root-level file the worker
+writes with its file tools) and reconciles the two (`plan_resolutions`):
+every unmerged path the manifest declares `resolved` or `deleted` is staged
+by the engine's own `git add -- :(literal)<path>` or `git rm` inside
+`Object.CandidateStage`, before the `add -A`; any unmerged path it does not
+declare — or a manifest that does not parse, or a path declared both ways —
+refuses the whole capture, which returns the base's tree with those entries
+and stages nothing, so an unresolved conflict cannot be captured as the
+worker's work and a declared subset is never staged beside a refused one.
+After staging, the index is read once more and an unmerged entry left is a
+Git error, never a passing capture. The worker runs no git command (DESIGN
+§26.4): PR #249's regression review assembled the production Claude Code and
+Copilot permissions and found file tools and gate commands only, so a rule
+that needed the worker's `git add` — the first repair round's — could be
+met by no supported adapter, and the design-staging decision measured that
+Codex's `workspace-write` sandbox cannot admit staging without admitting
+`commit`. Before that the capture read the files for `<<<<<<< ` markers;
+the conformance review materialized conflicts under
 `conflict-marker-size=8` and `-merge`, both of which the scan read as
 resolved and the capture staged.
 

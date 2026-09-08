@@ -8,7 +8,8 @@ use crate::engine::topology::scaffold::{
     ALPHA, BETA, OUTCOME, Run, kill_child_and_adopt, kill_child_environment, kill_dir,
 };
 use crate::topology::effects::{
-    EffectSiteId, HookPhase, Injection, ObjectSite, RefSite, ResidueElement, WorktreeSite,
+    EffectSiteId, HookPhase, Injection, ObjectResidue, ObjectSite, RefSite, ResidueElement,
+    WorktreeSite,
 };
 use crate::topology::events::{CandidateRef, GitRef};
 use crate::topology::fold::{GenerationClass, TaskState};
@@ -1168,7 +1169,6 @@ fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {
 /// synthetic half, not required here.
 #[test]
 fn sampled_repair_materialization_child_kills_every_residue_classified_and_recovered() {
-    use crate::topology::effects::ObjectResidue;
     use crate::workspace_manager::fixture::{KillableGitChild, died_by_kill};
     use crate::workspace_manager::{ResidueTarget, classify_object_residue};
 
@@ -1203,11 +1203,13 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
     let expected_files = expected_checkout(&run, &head, &source.commit_sha.0, &["c.txt"]);
     assert_checkout_is(&probe, &expected_files, "probe");
 
-    let mut killed_classes = Vec::new();
+    let mut kills = Vec::new();
     let mut completed_classes = Vec::new();
     let mut refusals = Vec::new();
     let mut spawns = 0_u32;
-    while killed_classes.len() < SAMPLING_N as usize && spawns < MAX_SPAWNS {
+    while (kills.len() < SAMPLING_N as usize || !kills.iter().any(KilledSample::while_writing))
+        && spawns < MAX_SPAWNS
+    {
         let sample = spawns;
         spawns += 1;
         let key = TaskKey(90 + sample);
@@ -1251,6 +1253,10 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
                 None
             }
         };
+        // Read before recovery clears it: a completed `--no-commit` pick
+        // always leaves `MERGE_MSG` (R5), so its absence beside a published
+        // index is a kill between the publish and the pick's last write.
+        let merge_msg_written = git_dir(&worktree).join("MERGE_MSG").is_file();
 
         let open = OpenGeneration {
             key,
@@ -1290,7 +1296,10 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
 
         if let Some(class) = class {
             if killed {
-                killed_classes.push(class);
+                kills.push(KilledSample {
+                    class,
+                    merge_msg_written,
+                });
             } else {
                 completed_classes.push(class);
             }
@@ -1302,13 +1311,13 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
         "the classifier refused {} of {spawns} samples: {refusals:?}",
         refusals.len()
     );
-    assert_eq!(
-        killed_classes.len(),
-        SAMPLING_N as usize,
+    let killed_classes: Vec<ObjectResidue> = kills.iter().map(|sample| sample.class).collect();
+    assert!(
+        kills.len() >= SAMPLING_N as usize,
         "{} children died by the kill in {spawns} spawns; {} picks completed before their kill \
-         and are controls, not samples of an interruption: killed={killed_classes:?}, \
+         and are controls, not samples of an interruption: killed={kills:?}, \
          completed={completed_classes:?}",
-        killed_classes.len(),
+        kills.len(),
         completed_classes.len()
     );
     assert!(
@@ -1321,9 +1330,49 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
         killed_classes
             .iter()
             .any(|class| *class != ObjectResidue::After),
-        "every one of the {SAMPLING_N} kills landed after the index was published, so the \
-         sample interrupted no materialization the site registers: {killed_classes:?}"
+        "every one of the {} kills landed after the index was published, so the sample \
+         interrupted no materialization the site registers: {killed_classes:?}",
+        kills.len()
     );
+    assert!(
+        kills.iter().any(KilledSample::while_writing),
+        "none of the {} kills in {spawns} spawns landed while the pick was writing — each \
+         found a child that had not begun (`None`, nothing written) or one that had finished \
+         (`After` with `MERGE_MSG` in place) — so the sample interrupted no materialization \
+         under way: {kills:?}",
+        kills.len()
+    );
+}
+
+/// One child the sampler killed: what it left, and whether it had finished.
+#[derive(Debug, Clone, Copy)]
+struct KilledSample {
+    class: ObjectResidue,
+    /// Whether `MERGE_MSG` was in place when the kill was observed — the last
+    /// thing a completed `--no-commit` pick writes.
+    merge_msg_written: bool,
+}
+
+impl KilledSample {
+    /// Whether the kill landed while the pick was writing: after its first
+    /// write (`index.lock`, so `Internal`) and before its last (`MERGE_MSG`).
+    ///
+    /// PR #249's adequacy review removed the sampler's delay so that every
+    /// child was killed the instant it was spawned, and the floor "at least
+    /// one kill before the index was published" accepted eight `None`s — kills
+    /// that interrupted processes which had not started. A kill before the
+    /// first write interrupted nothing; a kill after `MERGE_MSG` interrupted a
+    /// pick that had finished; only one between them is the interruption of a
+    /// materialization already under way that the sample is advertised as
+    /// evidence of, and the loop keeps sampling, within `MAX_SPAWNS`, until it
+    /// has seen one.
+    fn while_writing(&self) -> bool {
+        match self.class {
+            ObjectResidue::Internal => true,
+            ObjectResidue::After => !self.merge_msg_written,
+            ObjectResidue::None => false,
+        }
+    }
 }
 
 /// PR #249's crash review, finding 1: a coordinator dies after the pick

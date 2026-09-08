@@ -2515,7 +2515,7 @@ impl SubstitutionCase {
                 .verify_worktree(hooks, slot_of(), &Quiescence::AtBase(head.clone()))
                 .map(drop),
             P::RemoveWorktree => manager.remove_worktree(hooks, slot_of()),
-            P::CandidateStage => manager.candidate_stage(hooks, slot_of()),
+            P::CandidateStage => manager.candidate_stage(hooks, slot_of(), &[]),
             P::CandidateWriteTree => manager.candidate_write_tree(hooks, slot_of()).map(drop),
             P::ProposalCherryPick => manager
                 .proposal_cherry_pick(hooks, slot_of(), side)
@@ -3441,7 +3441,7 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
         ),
         (
             "candidate_stage",
-            Box::new(|slot| manager.candidate_stage(&mut NoHooks, slot)),
+            Box::new(|slot| manager.candidate_stage(&mut NoHooks, slot, &[])),
         ),
         (
             "candidate_write_tree",
@@ -3478,6 +3478,10 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
         (
             "unresolved_conflicts",
             Box::new(|slot| manager.unresolved_conflicts(slot).map(drop)),
+        ),
+        (
+            "resolution_manifest",
+            Box::new(|slot| manager.resolution_manifest(slot).map(drop)),
         ),
     ];
 
@@ -6725,7 +6729,7 @@ fn changed_paths_honour_the_recorded_base_after_head_has_moved_off_it() {
     fs::write(path.join("staged.rs"), "fn main() {}\n").expect("add");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     // Move the worktree's HEAD to the seed, keeping the index. `head` is
@@ -6880,7 +6884,7 @@ fn changed_paths_come_from_the_index_of_the_recorded_worktree() {
     fs::write(path.join("nested/new.rs"), "fn main() {}\n").expect("add");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     let captured = fixture
@@ -6935,7 +6939,7 @@ fn every_change_kind_reaches_the_region_including_both_rename_endpoints() {
 
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     // Git really did detect a rename here, rather than reporting a delete
@@ -7022,7 +7026,7 @@ fn the_candidate_diff_is_of_the_recorded_objects_and_survives_operator_diff_conf
     fs::write(path.join("bin.dat"), [0_u8, 1, 2, 0xff]).expect("a binary file");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
     let tree = fixture
         .manager
@@ -7115,7 +7119,7 @@ fn a_repository_path_a_string_cannot_carry_makes_the_region_repo_wide() {
     }
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
     assert!(
         fixture
@@ -7151,7 +7155,7 @@ fn after_each_object_primitive_the_object_is_referenced_by_the_row_row_names() {
     let blob = git(&task_path, &["hash-object", "staged.txt"]);
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &task)
+        .candidate_stage(&mut NoHooks, &task, &[])
         .expect("stage");
     assert_eq!(ObjectSite::CandidateStage.row(), ResourceRow::R9);
     assert!(
@@ -8013,7 +8017,7 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
             // `after_reference_present`.
             fixture
                 .manager
-                .candidate_stage(&mut NoHooks, &slot)
+                .candidate_stage(&mut NoHooks, &slot, &[])
                 .expect("stage, so the index already reflects the tree");
             fs::write(git_dir.join("index.lock"), "").expect("plant the lock");
             let internal = classify(site, &ResidueTarget::new(&base).at(&path));
@@ -8021,7 +8025,7 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
             fs::write(path.join("a.txt"), "edited again\n").expect("a second unstaged change");
             fixture
                 .manager
-                .candidate_stage(&mut NoHooks, &slot)
+                .candidate_stage(&mut NoHooks, &slot, &[])
                 .expect("stage");
             let after = classify(site, &ResidueTarget::new(&base).at(&path));
             [none, internal, after]
@@ -8955,7 +8959,15 @@ fn no_sampled_funnel_builds_its_argv_from_a_literal() {
             "the commit is the dynamic argument, the path is a PathBuf; the one literal is \
              the `operation: \"create\"` field of a Filesystem error, not a Git argument",
         ),
-        ("pub fn candidate_stage(", 0, 0, "none of either"),
+        (
+            "pub fn candidate_stage(",
+            0,
+            0,
+            "none of either: the declared-resolution children it runs before the sampled \
+             `add -A` take their argv from `DeclaredResolution::argv`, whose fixed words are \
+             `RESOLUTION_ADD_ARGV` and `RESOLUTION_RM_ARGV`, and the shared list carries the \
+             manifest exclusion",
+        ),
         ("pub fn candidate_write_tree(", 0, 0, "none of either"),
         (
             "pub fn proposal_cherry_pick(",
@@ -9795,7 +9807,7 @@ fn every_site_this_lane_owns_executes_both_hook_phases() {
         .expect("quiescent");
     fs::write(task_path.join("worker.txt"), "worker\n").expect("worker edit");
     manager
-        .candidate_stage(&mut hooks, &task)
+        .candidate_stage(&mut hooks, &task, &[])
         .expect("Object.CandidateStage");
     let tree = manager
         .candidate_write_tree(&mut hooks, &task)
@@ -9902,7 +9914,7 @@ fn every_site_this_lane_owns_executes_both_hook_phases() {
         .expect("worktree");
     fs::write(fast_path.join("fast.txt"), "fast\n").expect("edit");
     manager
-        .candidate_stage(&mut hooks, &fast_task)
+        .candidate_stage(&mut hooks, &fast_task, &[])
         .expect("stage");
     let fast_tree = manager
         .candidate_write_tree(&mut hooks, &fast_task)

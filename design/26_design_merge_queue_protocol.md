@@ -318,13 +318,22 @@ engine emitter's exclusive mutable ownership and call order enforce the live
 protocol.
 
 At actual dispatch, the engine records the then-current integration head as the
-repair's generation base. For a text conflict, it applies the candidate there
-without committing, leaving the unmerged index for the worker to resolve. For a
-semantic rejection, it materializes the clean proposal against that current
-head and supplies the original failed evidence. The payload's rejecting head
-remains immutable lineage evidence, not a promise to start later work from a
-stale tree. The worker may edit but never commit; the engine refuses a result
-with unresolved index entries and then runs the ordinary gates and reviews.
+repair's generation base. For a text or binary conflict, it applies the
+candidate there without committing, leaving the unmerged index and the
+conflicted files for the worker to resolve. The worker resolves each conflicted
+file with its file tools and records the paths it resolved in the run's
+resolution manifest; it runs no git command, because the engine owns git (§4).
+At capture the engine reads the index's unmerged entries as the sole record of
+what is still conflicted — no file is scanned for markers, which have no
+canonical form under `conflict-marker-size` or `-merge` — and for each it
+stages on the worker's behalf the resolution the manifest declares (`git add`,
+or `git rm` for a resolution by deletion). The engine refuses a result with any
+unmerged index entry the manifest did not declare resolved, before any gate or
+review runs; a declared resolution that is wrong is caught by the ordinary
+gates and review, since ground truth is the diff. For a semantic rejection, it
+materializes the clean proposal against that current head and supplies the
+original failed evidence. The payload's rejecting head remains immutable
+lineage evidence, not a promise to start later work from a stale tree.
 
 The repair holds leases on its **actual** affected paths. The queue may continue
 publishing candidates whose known changed paths are disjoint, so one hard merge

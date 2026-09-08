@@ -348,13 +348,24 @@ found the held `MERGE_MSG.lock` the verifier did not read.
 **A completed pick is a control, not a sample.** PR #249's refusals review
 killed one child at spawn and let seven picks finish (M3); the floor of
 "eight classified samples and one kill" accepted `killed=1/8,
-observed=[None, After ×7]`. The populations are now kept apart: kills are
+observed=[None, After ×7]`. The populations are kept apart: kills are
 collected over a bounded number of spawns until `SAMPLING_N` of them have
-been observed, a completed pick is verified to converge and counted as
-nothing, and at least one kill must have landed before the index was
-published. `Internal` is reported, not required: three runs on the build
-box before the change measured 5/8, 7/8 and 7/8 kills, with `Internal`
-observed in two of them and `None` and `After` in all three.
+been observed, and a completed pick is verified to converge and counted as
+nothing.
+
+**A kill of a child that had not begun is a sample of nothing.** The
+adequacy review then removed the sampler's delay so that every child was
+killed the instant it was spawned, and "at least one kill before the index
+was published" accepted `killed=[None ×8]`. So each kill records whether it
+landed while the pick was writing (`KilledSample::while_writing`): after its
+first write — `index.lock`, so `Internal` — and before its last, `MERGE_MSG`,
+which a completed `--no-commit` pick always leaves; the loop keeps sampling,
+within `MAX_SPAWNS`, until it has seen one, and the test fails when none of
+its kills did. Measured on the build box, ten runs after the change: every
+run saw one or two such kills among its eight, in ten or eleven spawns, the
+rest `None`; `Internal` is what they were in nine runs, `After` without
+`MERGE_MSG` in the tenth, and two kills in all found a pick that had
+finished.
 
 ## `fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {`
 

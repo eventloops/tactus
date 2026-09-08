@@ -1005,9 +1005,10 @@ pub fn run_recovery_order(
         ensure_recorded_integration_ref(&certified, seams.refs, context.hooks)?;
     }
 
-    let interrupted = settle_interrupted(&mut certified, seams.manager, &mut context)?;
+    let interrupted = settle_interrupted(&mut certified, &mut context)?;
     steps.push(RecoveryStep::D);
-    let retained_closed = close_retained_idle(&mut certified, seams.manager, &mut context)?;
+    let retained_closed = close_retained_idle(&mut certified, &mut context)?;
+    reclaim_closed_generations(&certified, seams.manager, context.hooks)?;
     steps.push(RecoveryStep::E);
 
     finish_integration(&mut certified, seams.manager, &mut context)?;
@@ -1359,7 +1360,6 @@ pub struct EmitContext<'a> {
 
 pub fn settle_interrupted(
     certified: &mut PreflightCertified,
-    manager: &WorkspaceManager,
     context: &mut EmitContext<'_>,
 ) -> Result<usize, UpstrokeError> {
     let mut settled = 0;
@@ -1377,7 +1377,6 @@ pub fn settle_interrupted(
             },
         };
         emit(certified, context, body)?;
-        reclaim_closed_generation(manager, context.hooks, key, generation)?;
         settled += 1;
     }
     Ok(settled)
@@ -1385,7 +1384,6 @@ pub fn settle_interrupted(
 
 pub fn close_retained_idle(
     certified: &mut PreflightCertified,
-    manager: &WorkspaceManager,
     context: &mut EmitContext<'_>,
 ) -> Result<usize, UpstrokeError> {
     let mut closed = 0;
@@ -1399,19 +1397,33 @@ pub fn close_retained_idle(
             },
         };
         emit(certified, context, body)?;
-        reclaim_closed_generation(manager, context.hooks, key, generation)?;
         closed += 1;
     }
     Ok(closed)
 }
 
-fn reclaim_closed_generation(
+fn reclaim_closed_generations(
+    certified: &PreflightCertified,
     manager: &WorkspaceManager,
     hooks: &mut dyn TopologyHooks,
-    key: TaskKey,
-    generation: GenerationId,
-) -> Result<(), UpstrokeError> {
-    crate::engine::topology::dispatch::scrub(manager, hooks, &task_slot(key, generation))
+) -> Result<usize, UpstrokeError> {
+    let fold = fold_of(certified);
+    let intents = manager.intents()?;
+    let mut reclaimed = 0;
+    for key in task_keys(fold) {
+        let Some(task) = fold.task(key) else { continue };
+        for generation in &task.generations {
+            if generation.class != GenerationClass::Closed {
+                continue;
+            }
+            let slot = task_slot(key, generation.id);
+            if intents.contains(&slot) {
+                crate::engine::topology::dispatch::scrub(manager, hooks, &slot)?;
+                reclaimed += 1;
+            }
+        }
+    }
+    Ok(reclaimed)
 }
 
 pub fn run_resumed(

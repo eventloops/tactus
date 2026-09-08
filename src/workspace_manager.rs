@@ -709,6 +709,190 @@ pub enum Materialized {
     Empty,
 }
 
+/// The resolution manifest: the file a repair worker writes at the root of
+/// its worktree to say which conflicted paths it resolved, and how.
+///
+/// `DESIGN.md` §26.4: the worker "resolves each conflicted file with its file
+/// tools and records the paths it resolved in the run's resolution manifest;
+/// it runs no git command, because the engine owns git (§4)". The manifest is
+/// what makes that sentence hold. An edit profile has file tools and gate
+/// commands and nothing else (§16, §20), so no worker can stage a resolution
+/// — PR #249's second repair round measured it for all three adapters, and
+/// Codex's `workspace-write` sandbox keeps `.git` read-only, the one switch
+/// that admits `git add` admitting `git commit` with it. And the index alone
+/// cannot say whether an unmerged entry was *resolved* or *abandoned*: a
+/// `-merge` binary conflict resolved keep-ours is, in the file bytes,
+/// identical to one the worker never touched. So the declaration carries the
+/// intent: the engine stages what is declared
+/// ([`WorkspaceManager::candidate_stage`]) and refuses what is not.
+///
+/// One line per path: `resolved <path>` for a path whose working-tree content
+/// (or absence) is the resolution, `deleted <path>` for a path resolved by
+/// deleting it. Blank lines and `#` comments are skipped. A leading list
+/// bullet, a colon after the keyword, and backticks or double quotes around
+/// the path are tolerated; `./` in front of the path is dropped; a Windows
+/// worker's `\r\n` and backslashes read as their Unix spellings. Anything
+/// else is a malformed manifest, from which nothing is staged
+/// ([`ResolutionManifest::parse`]).
+///
+/// A root-level file, deliberately: the Claude adapter denies the worker
+/// every write under `.upstroke/`, `.git/` and `.claude/`, and the run
+/// directory is not in a task worktree at all. It never becomes part of a
+/// candidate: [`WorkspaceManager::CANDIDATE_STAGE_ARGV`] excludes it from the
+/// capture, so it stays an untracked file of the worktree it was written in.
+pub const RESOLUTION_MANIFEST: &str = ".upstroke-resolved";
+
+/// The manifest word for a path whose working-tree content is the resolution.
+pub const RESOLVED_KEYWORD: &str = "resolved";
+
+/// The manifest word for a path resolved by deleting it.
+pub const DELETED_KEYWORD: &str = "deleted";
+
+/// How the worker declared one conflicted path resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionKind {
+    /// `resolved <path>`: whatever the working tree holds at the path is the
+    /// resolution — the bytes the worker wrote, or, where its tools removed
+    /// the file, its absence (`git add` stages a removal too).
+    Resolved,
+    /// `deleted <path>`: the path is resolved by deleting it, whether or not
+    /// the file is still there. A worker whose file tools cannot delete says
+    /// so here, and the engine's `git rm` removes it.
+    Deleted,
+}
+
+/// One line of a parsed manifest: a path as the worker spelt it, and how it
+/// says the path is resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declaration {
+    pub path: String,
+    pub kind: ResolutionKind,
+}
+
+impl Declaration {
+    /// Whether this declaration names `index_path`, an unmerged entry as the
+    /// index spells it (forward slashes, relative to the worktree root).
+    ///
+    /// Compared as paths, not as strings: `std::path` reads a Windows
+    /// worker's backslashes as separators on Windows and as ordinary bytes
+    /// elsewhere, which is what each platform's Git does with them too.
+    #[must_use]
+    pub fn names(&self, index_path: &str) -> bool {
+        Path::new(&self.path)
+            .components()
+            .eq(Path::new(index_path).components())
+    }
+}
+
+/// One conflicted path's declared resolution, reconciled against the index
+/// and ready to be staged by [`WorkspaceManager::candidate_stage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredResolution {
+    /// The path as the index spells it, never as the manifest did.
+    pub path: String,
+    pub kind: ResolutionKind,
+}
+
+impl DeclaredResolution {
+    /// The staging command the engine runs for this resolution inside
+    /// `Object.CandidateStage`: `git add -- :(literal)<path>` or
+    /// `git rm --quiet -- :(literal)<path>`.
+    ///
+    /// `:(literal)` because the path is an exact index entry and not a
+    /// pattern: without it `a[1].txt` is a glob, and a path beginning with
+    /// `:` is pathspec magic. The fixed words are
+    /// [`WorkspaceManager::RESOLUTION_ADD_ARGV`] and
+    /// [`WorkspaceManager::RESOLUTION_RM_ARGV`], kept as lists for the reason
+    /// [`WorkspaceManager::CANDIDATE_STAGE_ARGV`] gives.
+    #[must_use]
+    pub fn argv(&self) -> Vec<OsString> {
+        let fixed: &[&str] = match self.kind {
+            ResolutionKind::Resolved => &WorkspaceManager::RESOLUTION_ADD_ARGV,
+            ResolutionKind::Deleted => &WorkspaceManager::RESOLUTION_RM_ARGV,
+        };
+        let mut argv: Vec<OsString> = fixed.iter().map(OsString::from).collect();
+        argv.push(OsString::from(format!(":(literal){}", self.path)));
+        argv
+    }
+}
+
+/// What the worker's resolution manifest said, as read at capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionManifest {
+    /// No manifest was written: nothing is declared resolved.
+    Absent,
+    /// Every line parsed. Duplicates are kept as written; the capture
+    /// reconciles them against the index's unmerged entries.
+    Declared(Vec<Declaration>),
+    /// A line that is neither form, or a file that is not UTF-8. Nothing is
+    /// staged from such a manifest; `detail` is what the worker is told.
+    Malformed { detail: String },
+}
+
+impl ResolutionManifest {
+    /// Read a manifest's text under the grammar [`RESOLUTION_MANIFEST`]
+    /// states.
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        let mut declared = Vec::new();
+        for (index, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // A list bullet in front of the line is tolerated, once.
+            let line = line
+                .strip_prefix('-')
+                .or_else(|| line.strip_prefix('*'))
+                .map_or(line, str::trim_start);
+            let Some((keyword, rest)) = line.split_once(char::is_whitespace) else {
+                return Self::malformed(index, raw);
+            };
+            let kind = match keyword.trim_end_matches(':') {
+                RESOLVED_KEYWORD => ResolutionKind::Resolved,
+                DELETED_KEYWORD => ResolutionKind::Deleted,
+                _ => return Self::malformed(index, raw),
+            };
+            let path = unquoted(rest.trim());
+            if path.is_empty() {
+                return Self::malformed(index, raw);
+            }
+            declared.push(Declaration {
+                path: path.to_owned(),
+                kind,
+            });
+        }
+        Self::Declared(declared)
+    }
+
+    fn malformed(index: usize, raw: &str) -> Self {
+        Self::Malformed {
+            detail: format!(
+                "line {} of `{RESOLUTION_MANIFEST}` is neither `{RESOLVED_KEYWORD} <path>` nor \
+                 `{DELETED_KEYWORD} <path>`: {}",
+                index + 1,
+                raw.trim_end()
+            ),
+        }
+    }
+}
+
+/// A manifest path without the quoting and the `./` a worker may have put
+/// around it.
+fn unquoted(path: &str) -> &str {
+    let path = ['`', '"']
+        .into_iter()
+        .find_map(|quote| path.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(path)
+        .trim();
+    let path = path.strip_prefix("./").unwrap_or(path);
+    if cfg!(windows) {
+        path.strip_prefix(".\\").unwrap_or(path)
+    } else {
+        path
+    }
+}
+
 /// What a failed proposal cherry-pick left behind; see
 /// [`WorkspaceManager::proposal_state`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1626,7 +1810,21 @@ impl WorkspaceManager {
     /// `PR5D-PROCESS-FUNNEL-TAKES-NO-SITE` in `reviews/findings/`, owned by
     /// PR6/PR7 with `src/runner/**` frozen — and this comment does not claim it
     /// does.
-    pub(crate) const CANDIDATE_STAGE_ARGV: [&str; 4] = ["add", "-A", "--", "."];
+    ///
+    /// The last element keeps the worker's resolution manifest
+    /// ([`RESOLUTION_MANIFEST`]) out of every candidate: `:(exclude,top)`
+    /// names it from the worktree root whatever the working directory, and
+    /// an exclusion that matches nothing excludes nothing, so an ordinary
+    /// capture is unchanged by it.
+    pub(crate) const CANDIDATE_STAGE_ARGV: [&str; 5] =
+        ["add", "-A", "--", ".", ":(exclude,top).upstroke-resolved"];
+    /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes the `:(literal)` pathspec of
+    /// one declared resolution ([`DeclaredResolution::argv`]); run inside the
+    /// same `Object.CandidateStage` funnel, before the list above, and not
+    /// sampled — the sampled child of that site is the `add -A`.
+    pub(crate) const RESOLUTION_ADD_ARGV: [&str; 2] = ["add", "--"];
+    /// See [`Self::RESOLUTION_ADD_ARGV`]: the resolution by deletion.
+    pub(crate) const RESOLUTION_RM_ARGV: [&str; 3] = ["rm", "--quiet", "--"];
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes no dynamic argument.
     pub(crate) const CANDIDATE_WRITE_TREE_ARGV: [&str; 1] = ["write-tree"];
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes the commit to pick.
@@ -2401,10 +2599,26 @@ impl WorkspaceManager {
     // The Object group (R9 / R10 / R24 / R27)
     // -----------------------------------------------------------------------
 
-    /// `Object.CandidateStage` — `git add -A` in the task worktree.
+    /// `Object.CandidateStage` — the worker's declared conflict resolutions
+    /// staged one by one, then `git add -A` in the task worktree.
     ///
     /// The blob objects it writes are referenced by that worktree's index: R9,
     /// which is exactly what `ObjectSite::CandidateStage.row()` answers.
+    ///
+    /// # The engine stages the worker's resolutions
+    ///
+    /// `resolutions` is what the capture reconciled between the index's
+    /// unmerged entries and the worker's manifest ([`RESOLUTION_MANIFEST`]):
+    /// each is staged by its own `git add -- :(literal)<path>` or `git rm
+    /// --quiet -- :(literal)<path>` ([`DeclaredResolution::argv`]) before the
+    /// `add -A`, because `add -A` collapses every unmerged entry
+    /// unconditionally — an untouched conflicted file is staged with its
+    /// markers inside — and so destroys the very record of what was still
+    /// conflicted. The engine runs these and the worker never does: §4, "the
+    /// engine creates branches, stages, commits". The caller stages nothing
+    /// while any unmerged entry is undeclared (`AttemptContext::capture`
+    /// refuses first), so an ordinary capture passes an empty list and runs
+    /// the one `add -A` it always ran.
     ///
     /// # Errors
     ///
@@ -2413,6 +2627,7 @@ impl WorkspaceManager {
         &self,
         hooks: &mut dyn EffectHooks,
         slot: &Slot,
+        resolutions: &[DeclaredResolution],
     ) -> Result<(), UpstrokeError> {
         self.revalidate()?;
         let path = self.slot_target(slot)?;
@@ -2421,6 +2636,9 @@ impl WorkspaceManager {
             EffectSiteId::Object(ObjectSite::CandidateStage),
             || {
                 self.revalidate_acted_through(Primitive::CandidateStage, Some(slot), None)?;
+                for resolution in resolutions {
+                    self.git_ok(&path, &resolution.argv())?;
+                }
                 self.git_ok(
                     &path,
                     &Self::CANDIDATE_STAGE_ARGV
@@ -2710,8 +2928,9 @@ impl WorkspaceManager {
     /// `Clean | Conflict | Empty | Retained`, and a repair of a
     /// `RejectionDisposition::Conflict` is *expected* to conflict: leaving the
     /// conflict in the worktree is what gives the agent something to resolve,
-    /// and [`Self::unresolved_conflicts`] is the rule that catches an agent
-    /// that does not stage a resolution. So a non-zero exit whose index
+    /// and [`Self::unresolved_conflicts`] is the rule that catches a worker
+    /// that resolves nothing, or declares nothing resolved
+    /// ([`RESOLUTION_MANIFEST`]). So a non-zero exit whose index
     /// carries unmerged entries is [`Materialized::Conflict`], and only a
     /// non-zero exit *without* them is the Git error it was before.
     ///
@@ -2905,19 +3124,18 @@ impl WorkspaceManager {
     /// no object.
     ///
     /// `repairs.dispatch`: "unresolved index entries fail capture before gates";
-    /// DESIGN §26.4: the materialization leaves "the unmerged index for the
-    /// worker to resolve" and "the engine refuses a result with unresolved
-    /// index entries". The rule is read where it is stated, in the index: an
-    /// entry is resolved when the worker has staged its resolution (`git add
-    /// <path>`, or `git rm <path>` for a resolution by deletion), exactly as
-    /// Git's own hint after a conflicting pick says, and it is unresolved while
-    /// the stage entries remain — whatever the working-tree file looks like.
-    /// This deliberately does **not** read the file for conflict markers:
-    /// PR #249's conformance review materialized a conflict under a legitimate
-    /// `conflict-marker-size=8` attribute, and another under `-merge`, which
-    /// leaves the current side in place with no marker at all; a marker scan
-    /// read both as resolved, the capture staged them, and unresolved work
-    /// reached the gates. The index has no formats.
+    /// DESIGN §26.4: the engine "reads the index's unmerged entries as the
+    /// sole record of what is still conflicted — no file is scanned for
+    /// markers". The rule is read where it is stated, in the index: an entry
+    /// is conflicted while its stage entries remain, whatever the working-tree
+    /// file looks like, and it stops being one when the engine stages the
+    /// resolution the worker declared for it ([`RESOLUTION_MANIFEST`],
+    /// [`Self::candidate_stage`]). This deliberately does **not** read the
+    /// file for conflict markers: PR #249's conformance review materialized a
+    /// conflict under a legitimate `conflict-marker-size=8` attribute, and
+    /// another under `-merge`, which leaves the current side in place with no
+    /// marker at all; a marker scan read both as resolved, the capture staged
+    /// them, and unresolved work reached the gates. The index has no formats.
     ///
     /// A path that does not decode is reported as one unresolved entry naming
     /// the reason, because it cannot be inspected and a capture must not pass
@@ -2939,6 +3157,37 @@ impl WorkspaceManager {
                 "(an unmerged entry this process cannot inspect: {error})"
             )]),
         }
+    }
+
+    /// The worker's resolution manifest, read from the root of the slot's
+    /// worktree ([`RESOLUTION_MANIFEST`]).
+    ///
+    /// **A read, so it takes no hooks and names no effect site**, like
+    /// [`Self::unresolved_conflicts`]. An absent file is
+    /// [`ResolutionManifest::Absent`]; a file that is not UTF-8 is
+    /// [`ResolutionManifest::Malformed`], the worker's failure rather than
+    /// this process's; any other failure to read it is the I/O error it is.
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals, or an I/O error other than the file's
+    /// absence.
+    pub fn resolution_manifest(&self, slot: &Slot) -> Result<ResolutionManifest, UpstrokeError> {
+        self.revalidate()?;
+        let path = self.slot_target(slot)?.join(RESOLUTION_MANIFEST);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ResolutionManifest::Absent);
+            }
+            Err(source) => return Err(UpstrokeError::Io { path, source }),
+        };
+        Ok(match String::from_utf8(bytes) {
+            Ok(text) => ResolutionManifest::parse(&text),
+            Err(_) => ResolutionManifest::Malformed {
+                detail: format!("`{RESOLUTION_MANIFEST}` is not UTF-8"),
+            },
+        })
     }
 
     /// Whether `object` is an object this repository has.

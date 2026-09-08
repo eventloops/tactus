@@ -1001,32 +1001,109 @@ values, so a malformed one is the tool or the engine misbehaving. Reaching
 caller offered something it should not have. Witnessed by restoring that
 `?`: the error becomes `Refused` and the first assertion fails.
 
-## `fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_is_staged() {`
+## `fn declare(worktree: &Path, manifest: &str) {`
+
+The worker's whole conflict-resolution vocabulary, a file write: the
+manifest goes where the engine designates it, with the tools an edit profile
+has. Nothing here shells out to git, because the real worker cannot — the
+helper this replaced (`git(&worktree, &["add", "--", "c.txt"])`, PR #249's
+first repair round) staged through a privilege production lacks, and the
+regression review's witness passed before that round and failed after it.
+
+## `fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_declared_one_is_staged_by_the_engine() {`
 
 `R9`: a path the index still holds unmerged is read before staging, so
 nothing is staged and the tree is the base's; the assessment fails
-`AgentError` naming the path, with feedback that says to resolve and stage
-it, and no gate or reviewer runs. Rewriting the file without its markers
-changes nothing until the worker stages it; once it has, the capture stages
-the resolution and the index holds no unmerged entry.
+`AgentError` naming the path, with feedback that names the manifest, its two
+words and "run no git command", and no gate or reviewer runs. Rewriting the
+file without its markers changes nothing until the worker declares it; once
+it has, the engine stages the resolution in the one `Object.CandidateStage`
+execution, the index holds no unmerged entry, the tree carries the
+resolution and not the manifest, and the manifest stays untracked.
 
-## `fn a_staged_deletion_resolves_a_conflict_and_an_unstaged_one_does_not() {`
+## `fn a_declared_deletion_resolves_a_conflict_and_an_undeclared_missing_file_does_not() {`
 
-A conflicted path whose file is gone is still an unmerged entry; `git rm`
-resolves it, and the captured tree then records the deletion.
+A conflicted path whose file is gone is still an unmerged entry; `deleted
+<path>` in the manifest has the engine `git rm` it, and the captured tree
+then records the deletion.
 
 ## `fn a_conflict_rendered_with_a_longer_marker_size_is_unresolved_at_capture() {`
 
 PR #249's conformance review, finding 2: the unmerged entry is what makes a
 path unresolved, not the seven-character marker a scan would look for. A
 `conflict-marker-size=8` conflict the worker left alone is refused before
-staging while its other edit stands, and a staged resolution captures.
+staging while its other edit stands, and a declared resolution captures.
 
-## `fn an_untouched_binary_conflict_is_unresolved_at_capture() {`
+## `fn an_untouched_binary_conflict_is_unresolved_at_capture_and_a_declared_keep_ours_is_staged() {`
 
 The same finding's other format: a `-merge` path Git leaves as the current
-side with no marker at all. Untouched it is refused; replaced and staged it
-captures with the side the worker chose.
+side with no marker at all. Untouched it is refused; declared resolved with
+not one byte changed — keep-ours, byte-identical to abandonment — it
+captures with the published side, which is why the declaration and not the
+content carries the intent.
+
+## `fn four_shapes(run: &mut Run) -> (String, String) {`
+
+Default markers, `conflict-marker-size=8`, a `-merge` binary and a
+delete/modify in one worktree: the base changes four files the ancestor had
+and one candidate commit (`commit_changing`) changes three differently and
+deletes the fourth. A cherry-pick applies one commit's change against its
+parent, so a chain of one-file source commits would conflict in its tip
+alone — the first draft of this fixture did, and only `d.txt` was unmerged.
+
+## `fn four_conflict_shapes_declared_at_once_are_staged_by_the_engine_into_one_tree() {`
+
+Two files rewritten, the binary kept, the deletion chosen for the fourth,
+all four declared: one `Object.CandidateStage` execution stages three
+`git add`s and one `git rm`, the index holds no unmerged entry, the engine
+removed the file the worker declared deleted (its tools could not), and the
+tree carries the three kept paths, not the fourth and not the manifest.
+
+## `fn four_conflict_shapes_undeclared_are_all_refused_before_any_gate_and_nothing_is_staged() {`
+
+The refusal side of the same conflict. Nothing declared: all four refused,
+named in the `AgentError`, no gate and no reviewer. Three declared and one
+forgotten: only the forgotten path is refused, and the three are not staged
+either — a capture is all or nothing, and the declared deletion removes
+nothing until a capture proceeds. A manifest with a line the grammar does
+not admit: every path refused and the line quoted back as a fifth entry.
+
+## `fn an_edit_only_worker_completes_a_conflict_repair_through_file_writes_alone() {`
+
+PR #249's regression review, the P1, in the reviewer's own shape. The
+production Claude Code worker command is assembled through
+`WorkerAssembly`, its generated `permissions.allow` read back — file tools
+and `Bash(cargo test)`, no rule naming git — and its deny list checked not
+to cover the manifest's root-level path; Copilot's `permission_args` are
+writes and the gate. The repair is then completed through the one operation
+both admit, a file write: the resolved bytes and the manifest. The review's
+witness did the same and failed at `3bce2c6a` with `unresolved == ["c.txt"]`.
+
+## `fn a_declared_path_is_staged_literally_whatever_characters_it_holds() {`
+
+`a[1].txt` is a glob to a pathspec and a file to the index; `sp ace.txt` is
+one path. Declared in backticks, with `./` in front and CRLF line endings —
+the grammar's tolerances — both are staged as themselves through
+`:(literal)`.
+
+## `fn a_resolution_manifest_written_where_nothing_conflicted_is_ignored_and_stays_out_of_the_candidate() {`
+
+An ordinary attempt's worker that writes a manifest anyway: the capture has
+no unmerged entry to reconcile it against, the work is captured, and the
+manifest is not — `CANDIDATE_STAGE_ARGV`'s exclusion holds for every
+capture.
+
+## `fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_rest() {`
+
+`ResolutionManifest::parse` against what a worker is likely to write —
+CRLF, comments, blank lines, a list bullet, a colon after the keyword,
+backticks and quotes around the path, `./`, surrounding whitespace — and
+what it refuses, each with the line named; `Declaration::names` as a path
+comparison, a backslash a separator exactly where the platform's Git reads
+it as one; and `plan_resolutions`: no manifest refuses everything, a
+declaration of a path that is not unmerged is nothing, a path declared both
+ways is refused rather than guessed, a malformed manifest refuses everything
+and says why.
 
 ## `fn an_already_present_source_proceeds_as_an_ordinary_attempt_whose_empty_diff_fails_honestly() {`
 
