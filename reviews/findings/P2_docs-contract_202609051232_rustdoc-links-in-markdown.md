@@ -9,7 +9,7 @@ reviewed_sha: 976eae7b49e10b3560a96d2c28eb343c82cea016
 location: docs/internals/effects/tests.md:65
 provenance: introduced_by_feature
 first_bad: 5a864e153c2b290014ed42866fbd9ac2b921e54f
-guard: Convert Rustdoc references when the effects notes next receive a navigation update. PR #214 does the conversion and adds gate N5; it is parked, not merged, and this record stays open until it or a successor lands.
+guard: Convert Rustdoc references when the effects notes next receive a navigation update. PR #214 does the conversion and adds gate N5, whose destination scan was repaired on 2026-09-08; it is not merged, and this record stays open until it or a successor lands.
 ---
 
 Deferred by owner authorization on 2026-09-05 under DOCS_FAST_TRACK.md and
@@ -189,3 +189,36 @@ available.
   `f25eeedc816336e4995c6575ac1b626197c8801d`, 156 violations, exit 1.
 - `evidence/inventory-before.txt`, `evidence/github-rendering.txt`,
   `evidence/links-added.txt`, `evidence/commonmark-scan.py`, `evidence/baseline-*.log`.
+
+## Status, 2026-09-08: the blocker is repaired; the record stays open
+
+`PR214-N5-DESTINATION-DELIMITERS` is **fixed on the branch**, under the owner's
+findings-lane instruction that a P2 in this lane is repaired rather than logged.
+Both witnesses were reproduced against the parked head first and both now fail
+the gate for their own reason.
+
+N5's inline destination is no longer found by counting every parenthesis after
+the label. One function reads it with the delimiters CommonMark gives it: an
+angle-bracket destination ends at its `>`, a bare one at the first space or at
+the `)` that unbalances it, and a title is closed by the quote or the
+parenthesis that opened it, with every parenthesis inside a title belonging to
+the title. A candidate those delimiters do not describe is now **reported**,
+where the counting scan dropped it in silence — that silent drop was the defect,
+not the arithmetic. The second reading of the same destination, in Bash, is gone
+with it: the scanner prints the destination as written and nothing re-splits it.
+
+Seventeen fixtures join the harness, 83 cases in total. They carry both
+witnesses, a resolvable counterpart for each, a nested parenthesised title and a
+title following no whitespace (neither is a title, so neither is a link), and
+six candidates no delimiter describes — unbalanced, unclosed title, unclosed
+angle bracket, junk after the destination, a backslash separator inside and
+outside angle brackets, and one torn by a blank line. Eleven of fourteen
+mutations of the new rules are each killed by a named fixture. The three
+survivors are defensive guards — two on a delimiter that never closes, one on an
+angle-bracket destination holding what an angle-bracket destination cannot —
+where every input that reaches them is already refused for another reason. The
+gate's own comment says so rather than implying coverage it does not have.
+
+**Why this record stays open.** The repair is not reviewed: the workflow's two
+passes were spent on the earlier heads and this batch does not run a third.
+PR #214 is still not merged. The record closes when the branch lands.

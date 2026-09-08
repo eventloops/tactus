@@ -237,6 +237,97 @@ fixture capacity
 note "An angle-bracket destination [source](<$link>)."
 check 0 angle_bracket_destination_is_read_without_its_brackets
 
+# A title and an angle-bracket destination are each closed by their own
+# delimiter, and each may hold a parenthesis the destination does not. A gate
+# that counts every parenthesis between `](` and `)` reads that one as
+# destination nesting, never balances, and emits nothing at all -- so the
+# retired destination beside it passes where the same link without the title
+# fails. The rejections and their resolvable counterparts pin both halves.
+
+fixture capacity
+note 'Behind a title: [`census_domain`](crate::effects::census_domain "(").'
+check 1 rustdoc_destination_behind_a_titles_parenthesis_is_rejected
+
+fixture capacity
+note "The same shape, resolvable: [source]($link \"(\")."
+check 0 a_parenthesis_in_a_title_leaves_its_destination_alone
+
+fixture capacity
+note "A title holds the closing one too: [source]($link \"a) b\")."
+check 0 a_closing_parenthesis_in_a_title_does_not_end_the_link
+
+fixture capacity
+note "A parenthesised title closes itself: [source]($link (a note))."
+check 0 a_parenthesised_title_is_read_to_its_own_close
+
+# A parenthesised title takes no unescaped parenthesis of its own, so this is
+# not a title and the whole thing is not a link. Read the first `)` as the
+# title's close and the rest balances, the destination resolves, and the form
+# passes.
+
+fixture capacity
+note "A nested one is no title: [source]($link (x(y)))."
+check 1 a_nested_parenthesised_title_is_not_a_title
+
+# A title follows whitespace. Without that rule the angle destination below
+# ends at its `>`, `"a"` is taken for its title, and the link is read as one
+# CommonMark does not read at all.
+
+fixture capacity
+note "No space before it: [source](<$link>\"a\")."
+check 1 a_title_that_follows_no_whitespace_is_not_a_title
+
+fixture capacity
+note 'In angle brackets: [`census_domain`](<crate::effects::census_domain(>).'
+check 1 rustdoc_destination_in_angle_brackets_is_rejected
+
+fixture capacity
+printf 'notes\n' > "$tree/other(1).md"
+note 'Angle brackets keep it: [notes](<../../other(1).md>).'
+check 0 an_angle_destination_holds_the_parenthesis_it_carries
+
+fixture capacity
+printf 'notes\n' > "$tree/other(1).md"
+note 'A balanced pair is the path: [notes](../../other(1).md).'
+check 0 a_balanced_parenthesis_resolves_as_part_of_the_path
+
+# A candidate these delimiters do not describe is reported, never dropped. A
+# silent drop is exactly where a retired destination hides: the scan that
+# walked off the end of the file emitted no record and the gate passed.
+
+for context in unbalanced_destination unclosed_title unclosed_angle junk_after_destination escaped_destination_separator escaped_separator_in_angle_brackets; do
+  fixture capacity
+  case "$context" in
+    unbalanced_destination)       note "Unbalanced: [source]($link( )." ;;
+    unclosed_title)               note "Unclosed title: [source]($link \"a title)." ;;
+    unclosed_angle)               note "Unclosed angle: [source](<$link)." ;;
+    junk_after_destination)       note "Junk after it: [source]($link and more)." ;;
+    escaped_destination_separator) note 'Escaped: [source](..\..\src\capacity.rs).' ;;
+    # Angle brackets are a delimiter, not an exemption: the same escape is
+    # refused inside them. It names a path only a path layer that reads a
+    # backslash as a separator resolves to the module.
+    escaped_separator_in_angle_brackets) note 'Escaped: [source](<..\..\src\capacity.rs>).' ;;
+  esac
+  check 1 "${context}_is_reported_rather_than_dropped"
+done
+
+# A line ending inside a link is legal CommonMark; a blank line is the end of
+# the paragraph, so what follows it is prose and there is no link to read.
+
+fixture capacity
+note "A blank line before it: [source](
+
+$link)."
+check 1 a_blank_line_before_the_destination_is_no_link
+
+# An unresolved candidate must not reach the exemptions either: a URL and a
+# same-file anchor are skipped without resolution, so a malformed one that is
+# read as either is a silent pass rather than a refusal.
+
+fixture capacity
+note 'Unbalanced beside an anchor: [source](#section( ).'
+check 1 an_unbalanced_candidate_does_not_reach_the_anchor_exemption
+
 fixture capacity
 note '```a code span```'
 note 'A Rustdoc destination [`census_domain`](crate::effects::census_domain).'

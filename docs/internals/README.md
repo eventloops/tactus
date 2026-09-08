@@ -195,6 +195,20 @@ reading before it found any in the notes. Each fix was correct and each left the
 next corner. `.github/scripts/test-docs-consistency.sh` records four review
 rounds learning the same thing about the same kind of surface.
 
+Lexical is about *where* a form is refused, not about how carefully it is read.
+Where the bytes say a link opens, its destination is read with the delimiters
+CommonMark gives it: an angle-bracket destination ends at its `>`, a bare one at
+the first space or at the `)` that unbalances it, and a title is closed by the
+quote or the parenthesis that opened it. Counting every parenthesis between the
+label and the closing `)` instead is not conservative but blind. A title may
+hold an unbalanced `(`, and so may an angle-bracket destination; counted as
+destination nesting it never balances, the scan runs off the end of the file,
+and the retired destination beside it passes a check the same link without the
+title fails. A candidate those delimiters do not describe is therefore reported,
+never dropped: a link opening nobody can classify is the one place a retired
+destination could still hide. Write the destination, and any title, the way
+CommonMark delimits them, or spell the whole thing as prose.
+
 A false refusal is therefore a form quoted rather than used, and this README is
 the only file whose job is to quote them. The validator lists its three by exact
 text, so a new quotation is a reviewed line in that list rather than a silent
@@ -209,7 +223,11 @@ them, one below `effects/`, one wrapped across a line break, one inside a fenced
 block; an inline link; a Rustdoc destination with and without `crate::`, one
 wrapped onto the next line, one inside a fence, one inside a code span, an
 unresolvable relative destination, one that leaves the repository, external and
-anchor destinations, a destination carrying a title and one in angle brackets; a
+anchor destinations, a destination carrying a title and one in angle brackets, a
+title holding a parenthesis and an angle-bracket destination holding one, a
+nested parenthesised title, a title following no whitespace, and the candidates
+no delimiter describes — unbalanced, unclosed, escaped, or torn by a blank
+line — each reported rather than dropped; a
 quoted destination in this README and an unlisted one beside it; and an effects
 module whose notes are gone.
 

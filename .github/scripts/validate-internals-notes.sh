@@ -201,6 +201,17 @@ done < <(find "$notes_root" -name '*.md' 2>/dev/null | sort)
 # refusal too many costs one reviewed line, a refusal too few is the defect
 # coming back.
 #
+# Lexical is not the same as careless about delimiters. Where the bytes say a
+# link opens, its destination is read with CommonMark's own delimiters: an
+# angle-bracket destination ends at its `>`, a bare one at the first space or
+# at the `)` that unbalances it, and a title is closed by the quote or the
+# parenthesis that opened it. Counting every parenthesis between `](` and `)`
+# instead is what let `](crate::effects::census_domain "(")` through -- the
+# title's `(` read as destination nesting, the scan running off the end of the
+# file, and a retired destination passing in silence. A candidate these
+# delimiters do not describe is REPORTED, never dropped: a `](` nobody can
+# classify is the one place a retired destination could still hide.
+#
 # Two things this deliberately does not do. It does not resolve `#anchor`s: a
 # heading's slug belongs to the renderer, these headings repeat verbatim
 # within a file, and which one an anchor names is a review duty rather than a
@@ -234,17 +245,15 @@ while IFS= read -r notes; do
       error "$notes:$at: [$text] is a Rustdoc shortcut reference; CommonMark renders it as bracketed code. Make it an inline Markdown link or drop the brackets"
       continue
     fi
-    # CommonMark's destination, then its optional title: `<dest>` keeps
-    # spaces, a bare destination ends at the first one. A destination may be
-    # written on the line after its `(`, so leading whitespace is stripped
-    # rather than read as an empty path.
-    dest="${text#"${text%%[![:space:]]*}"}"
-    if [[ "$dest" == '<'*'>'* ]]; then
-      dest="${dest#<}"
-      dest="${dest%%>*}"
-    else
-      dest="${dest%%[[:space:]]*}"
+    if [[ "$kind" == UNREAD ]]; then
+      error "$notes:$at: '$text' opens an inline link whose destination this gate cannot delimit -- an unbalanced parenthesis, an unclosed title or angle bracket, a backslash, or junk between the destination and the ')'. Spell the destination, and any title, the way CommonMark delimits them"
+      continue
     fi
+    # The scanner below delimits the destination the way CommonMark delimits
+    # it and prints it exactly as written, so there is nothing left to strip
+    # here. Reading it twice, in two languages, is how the delimiters came
+    # apart in the first place.
+    dest="$text"
     quoted=0
     for entry in "${quoted_destinations[@]}"; do
       if [[ "$notes|$dest" == "$entry" ]]; then
@@ -274,6 +283,107 @@ while IFS= read -r notes; do
     function lineof(p,   k) {
       for (k = 1; k <= last; k++) if (p <= nl[k]) return k
       return last
+    }
+    # Whitespace inside an inline link. CommonMark allows one line ending
+    # there, so wrapped prose is read whole; a blank line is not whitespace
+    # but the end of the paragraph, and there is no link to read past it.
+    # Returns the first position that is not whitespace, or 0 for a blank
+    # line -- 0 is never a position, so a caller cannot mistake it for one.
+    function past_space(p,   ch, breaks) {
+      breaks = 0
+      while (p <= n) {
+        ch = substr(doc, p, 1)
+        if (ch == "\n") { breaks++; if (breaks > 1) return 0 }
+        else if (ch != " " && ch != "\t") break
+        p++
+      }
+      return p
+    }
+    # The inline link whose "](" begins at p, read with the delimiters
+    # CommonMark gives it rather than by counting every parenthesis between
+    # the two.
+    # Sets link_dest to the destination exactly as written and link_end to
+    # the position after the ")" that closes the link.
+    #
+    # Returns 0 for a candidate these delimiters do not describe. The caller
+    # reports that rather than dropping it: a "](" nobody can classify is
+    # exactly where a retired destination hides, and the gate that counted
+    # parentheses read `](crate::effects::census_domain "(")` as a scan that
+    # never balances and passed it in silence.
+    function read_link(p,   q, ch, shut, depth, closer, spaced) {
+      p = past_space(p + 2)
+      if (p == 0) return 0
+      ch = substr(doc, p, 1)
+      if (ch == "<") {
+        # An angle-bracket destination ends at its ">" and holds no line
+        # ending and no unescaped "<". A parenthesis inside it is part of the
+        # destination, never nesting to count through.
+        shut = index(substr(doc, p + 1), ">")
+        if (shut == 0) return 0
+        link_dest = substr(doc, p + 1, shut - 1)
+        # A "<" or a line ending here is not an angle destination at all; a
+        # tab would split the tab-separated record this prints. Both are
+        # record hygiene: every input that reaches them is already refused
+        # further down, so no fixture can tell them from their absence.
+        if (index(link_dest, "<") > 0 || index(link_dest, "\n") > 0) return 0
+        if (index(link_dest, "\t") > 0) return 0
+        # A backslash is refused rather than modelled, as it is everywhere in
+        # this gate: an escaped delimiter closes nothing, and a separator only
+        # a path layer that reads a backslash as one resolves is not a path.
+        if (index(link_dest, "\\") > 0) return 0
+        p = p + shut + 1
+      } else {
+        # A bare destination runs to the first whitespace and holds a
+        # parenthesis only as part of a balanced pair. One that never closes
+        # is not deeper nesting; it is a candidate this cannot read.
+        link_dest = ""
+        depth = 0
+        while (p <= n) {
+          ch = substr(doc, p, 1)
+          if (ch == " " || ch == "\t" || ch == "\n") break
+          if (ch == "(") depth++
+          else if (ch == ")") { if (depth == 0) break; depth-- }
+          link_dest = link_dest ch
+          p++
+        }
+        if (depth != 0) return 0
+        if (index(link_dest, "\\") > 0) return 0
+      }
+      q = past_space(p)
+      if (q == 0) return 0
+      spaced = (q > p)
+      ch = substr(doc, q, 1)
+      # A title follows whitespace and closes with its own delimiter. Every
+      # parenthesis inside it belongs to the title, and a parenthesised title
+      # takes neither an unescaped "(" nor an unescaped ")".
+      if (spaced && (ch == "\"" || ch == "'"'"'" || ch == "(")) {
+        if (ch == "(") closer = ")"; else closer = ch
+        p = q + 1
+        shut = 0
+        while (p <= n) {
+          if (substr(doc, p, 2) == "\n\n") return 0
+          ch = substr(doc, p, 1)
+          if (ch == "\\") return 0
+          if (ch == closer) { shut = p; break }
+          if (closer == ")" && ch == "(") return 0
+          p++
+        }
+        if (shut == 0) return 0
+        q = past_space(shut + 1)
+        if (q == 0) return 0
+      }
+      if (substr(doc, q, 1) != ")") return 0
+      link_end = q + 1
+      return 1
+    }
+    # Enough of an unreadable candidate to find it by, on one line. It starts
+    # at the "]" so the report names the same position the line number does.
+    function snippet(p,   s, cut) {
+      s = substr(doc, p, 48)
+      cut = index(s, "\n")
+      if (cut > 0) s = substr(s, 1, cut - 1)
+      gsub(/\t/, " ", s)
+      return s
     }
     { sub(/\r$/, ""); doc = doc $0 "\n"; nl[NR] = length(doc); last = NR }
     END {
@@ -310,27 +420,17 @@ while IFS= read -r notes; do
             continue
           }
         }
-        # An inline destination. Parentheses balance, a line break inside is
-        # legal CommonMark and common in wrapped prose, and a blank line ends
-        # the search rather than running the rest of the file into it.
+        # An inline destination. A line break inside it is legal CommonMark
+        # and common in wrapped prose; a blank line is not. Everything about
+        # where the destination ends is in `read_link`, which reads one set
+        # of delimiters once, and reports what it cannot read.
         if (c == "]" && substr(doc, i + 1, 1) == "(") {
-          depth = 1
-          k = i + 2
-          torn = 0
-          while (k <= n) {
-            if (substr(doc, k, 2) == "\n\n") { torn = 1; break }
-            ch = substr(doc, k, 1)
-            if (ch == "(") depth++
-            else if (ch == ")") { depth--; if (depth == 0) break }
-            k++
-          }
-          if (!torn && k <= n && substr(doc, k, 1) == ")") {
-            dst = substr(doc, i + 2, k - i - 2)
-            gsub(/[\n\t]/, " ", dst)
-            printf "DEST\t%d\t%s\n", lineof(i), dst
-            i = k + 1
+          if (read_link(i)) {
+            printf "DEST\t%d\t%s\n", lineof(i), link_dest
+            i = link_end
             continue
           }
+          printf "UNREAD\t%d\t%s\n", lineof(i), snippet(i)
         }
         i++
       }
