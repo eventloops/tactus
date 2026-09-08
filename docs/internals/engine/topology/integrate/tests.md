@@ -203,3 +203,21 @@ through the production loop to a durable `merge_rejected`, and read both the
 `VerificationRecord` and the frozen repair spec's body. Each asserts the summary
 is still there beside the evidence, so a repair that replaced one with the other
 fails too, and each ends `replay_twice_equal`.
+
+## `fn a_dispatch_takes_the_published_head_and_refuses_one_the_log_did_not_authorize() {`
+
+The guard on [`dispatch_head`], beside the sequence's own foreign-head test and
+against the same real repository. Three readings of one run: with nothing
+published the head is the run's base, which is why reading `run_started`
+straight was right for as long as nothing could publish; after alpha's
+publication it is the published commit; and with the ref reset behind the log's
+back it refuses, naming what it found, what the log authorizes and the sequence
+that put it there, without moving or recreating the ref. The deleted arm is the
+fourth: a published run's ref is never recreated from its base to supply a
+dispatch with a head.
+
+The defect this guards against is `PR8-R7-DISPATCH-BASE`; the regression that
+witnesses the defect itself is a composition test,
+`a_dependent_task_is_dispatched_into_its_dependencys_merged_work` in
+`super::super::recover::tests`, because what went wrong was what a second task's
+agent could read and not what a SHA said.

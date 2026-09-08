@@ -1548,6 +1548,92 @@ fn a_rejected_or_unavailable_terminal_refuses_to_delete_a_pin_another_writer_sub
 }
 
 #[test]
+fn a_dispatch_takes_the_published_head_and_refuses_one_the_log_did_not_authorize() {
+    let mut run = Run::started("dispatch-head");
+    let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");
+    let started = run
+        .emitter
+        .fold()
+        .started()
+        .expect("the run started")
+        .clone();
+    assert_eq!(
+        dispatch_head(
+            &run.fixture.manager,
+            &started,
+            &run.emitter.durable_events(),
+            BETA
+        )
+        .expect("before any publication the run's base is the head, and the ref is at it"),
+        run.base(),
+        "with nothing published the two readings are the same commit, which is why the line \
+         this replaced was right for as long as nothing could publish"
+    );
+
+    published(integrate_through(&mut run, &first).expect("alpha is exact-base"));
+    assert_eq!(run.head().as_deref(), Some(first.commit_sha.as_str()));
+    let after_publication = run.emitter.durable_events();
+    assert_eq!(
+        dispatch_head(&run.fixture.manager, &started, &after_publication, BETA)
+            .expect("the ref is where the log says it is"),
+        first.commit_sha,
+        "and after one, a dispatch takes the head the publication put there"
+    );
+
+    git(
+        &run.fixture.base,
+        &[
+            "update-ref",
+            "--no-deref",
+            run.integration_ref().as_str(),
+            run.base().as_str(),
+            first.commit_sha.as_str(),
+        ],
+    );
+    let kinds_before = run.emitter.durable_kinds();
+    let foreign = dispatch_head(&run.fixture.manager, &started, &after_publication, BETA)
+        .expect_err("a head the log did not put there refuses");
+    let text = foreign.to_string();
+    assert!(
+        text.contains(run.base().as_str())
+            && text.contains(first.commit_sha.as_str())
+            && text.contains("sequence 0"),
+        "the refusal names what it found, what the log authorizes and the publication that put \
+         it there: {text}"
+    );
+    assert_eq!(
+        run.head().as_deref(),
+        Some(run.base().as_str()),
+        "and the ref is neither moved nor recreated to make a dispatch possible"
+    );
+
+    git(
+        &run.fixture.base,
+        &[
+            "update-ref",
+            "--no-deref",
+            "-d",
+            run.integration_ref().as_str(),
+            run.base().as_str(),
+        ],
+    );
+    let absent = dispatch_head(&run.fixture.manager, &started, &after_publication, BETA)
+        .expect_err("a ref that names nothing refuses as well");
+    assert!(
+        absent.to_string().contains("names nothing"),
+        "a published run's ref is not recreated from its base to supply a dispatch with one: \
+         {absent}"
+    );
+    assert_eq!(
+        run.emitter.durable_kinds(),
+        kinds_before,
+        "no refusal of this read appended anything"
+    );
+    assert_eq!(run.task_state(ALPHA), TaskState::Merged);
+    run.replay_twice_equal();
+}
+
+#[test]
 fn a_foreign_reset_of_the_integration_ref_refuses_before_any_append_and_keeps_the_merged_task() {
     let mut run = Run::started("foreign-head-reset");
     let first = run.queue_candidate_editing(ALPHA, "a.txt", "alpha\n");

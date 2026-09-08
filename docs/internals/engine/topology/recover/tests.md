@@ -3359,3 +3359,34 @@ which the generic mapping turns into `ReviewUnavailable` — a statement about
 the reviewer where the invariant names one about the runner. Deferral and
 containment were right, and the `Gone` arm is the control that says this repair
 changed only the attribution of the one fate the invariant names.
+
+## `fn checkout_of(workspace: &Path) -> BTreeMap<String, String> {`
+
+What the workspace held when the process was invoked: every tracked file and its
+content, read at the moment `DrivenRunner` stands in for the agent. The
+dependency regression asserts on this rather than on a recorded SHA, because a
+SHA assertion is the shape that would have passed for the whole life of
+`PR8-R7-DISPATCH-BASE` — the durable record and the worktree agreed with each
+other throughout, and both were wrong.
+
+## `fn a_dependent_task_is_dispatched_into_its_dependencys_merged_work() {`
+
+The regression for `PR8-R7-DISPATCH-BASE`, driven end to end: alpha queued and
+published, beta ready only then, and beta's agent handed a checkout that
+contains alpha's merged file. Nothing exotic is planted — no concurrent writer,
+no hostile filename, no crash, no injected failure — because the defect is the
+base case of a dependency chain. Mutating `dispatch_request` back to
+`run_started.base_sha` fails it at the checkout assertion with the worktree
+holding only `seed.txt`.
+
+## `fn a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded() {`
+
+The other direction, and the one a repair that is right going forward can still
+get wrong: a log in the shape the engine wrote before the rule changed — a task
+dispatched at the run's starting base while a publication had already moved the
+head — must replay to the decisions it recorded. The base is
+`task_dispatched.base_sha`, so `continue_open` rebuilds the worktree at it, the
+head that has since been published is not substituted, and no second
+`task_dispatched` appears. Mutating `continue_open` to re-derive its base
+through [`super::super::integrate::dispatch_head`] fails it at the worker's
+HEAD.
