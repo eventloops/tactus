@@ -2462,7 +2462,8 @@ daemon's own answer, and what proves a refused proposal costs no second command.
 The three shapes a diagnostic can have that must never settle anything, each
 one refused by a different half of the mechanism. Dropping the line-start
 requirement admits the first two; dropping the target requirement admits the
-first and the third.
+first and the third. Both mutations have been executed against this test and
+each one kills it, so the guard is measured and not merely argued.
 
 ## `fn the_two_docker_diagnostic_tables_never_claim_one_message() {` › `for (what, detail) in [`
 

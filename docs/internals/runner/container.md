@@ -1546,7 +1546,8 @@ is text the environment shapes. With TLS material missing under a directory
 named `no such container`, the CLI fails **before contacting the daemon** and
 quotes that path back; every phrase table in this file matched the quoted path,
 so a local failure settled `Gone` and `ProcessGone` beside a container that was
-still running.
+still running. That sequence was reproduced against the real CLI, not inferred
+from the phrase tables.
 
 Two things have to hold before a phrase means anything at all. The message has
 to be one the daemon spoke, which the CLI marks by opening the line with
@@ -1620,16 +1621,20 @@ The vocabulary and the fallthrough are PR6's, unchanged: a container being
 removed counts as running until its record is gone, and a status this does not
 enumerate lands on the terminated side.
 
-That fallthrough is the weakest arm in the class and is not a defect today.
-Docker's status vocabulary is closed and every member of it is classified —
-`created`, `exited` and `dead` are all states with no live process — and every
-way the query can fail is an `Err` before the match is reached. What would make
-it a defect is a runtime state that means a process is still running and is not
-one of the four this arm reads as `Running`: the census would then observe a
-live container terminated and `reclaim` would remove it. Refusing an
-unenumerated state rather than assuming it terminated is the conforming shape,
-but it is a behaviour change to PR6 code with no reproduction behind it, so it
-is not made here.
+That fallthrough is the weakest arm in the class. The states read as `Running`
+are the four this arm enumerates; every other non-empty status falls through to
+the terminated side, including one this code has never seen. Of the statuses
+named here, `created`, `exited` and `dead` carry no live process.
+
+What would make the fallthrough a defect is a runtime status that means a
+process is still running and is not one of the four: the census would then
+observe a live container terminated, and `reclaim` would remove it. No such
+status is known today. This file does not establish that none can exist — the
+status set belongs to the daemon and nothing in the tree pins it — so the arm
+rests on an absence of evidence rather than on a proof. Refusing an unenumerated
+state instead of assuming it terminated is the conforming shape, but it is a
+behaviour change to PR6 code with no reproduction behind it, so it is not made
+here.
 
 ## `const CONTAINER_STATE_FORMAT: &str = "{{.Names}}\u{1f}{{.State}}";`
 
