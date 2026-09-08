@@ -933,3 +933,51 @@ Readings this round records, each a choice and not a deduction:
   setting is observed by a test today; they stay byte-identical to master, as code the packet does
   not name should. A fixture that starts comparing checkout bytes inherits the same obligation,
   and the notes section beside the pin says so.
+
+### 11.3 The witnesses replayed this round
+
+The mutation of this repair is the tree without it, so the pair is the reproduction and the
+repaired tree on the same guest, the same target directory, the same ambient config
+(`core.autocrlf=true` from the system file, confirmed by `git config --show-origin` in both):
+
+| Tree on the guest | Run | Result |
+|---|---|---|
+| `fc141710`, without the pin | the test alone, `--exact`, as CI runs it | `FAILED`; `left: Some("the candidate edit\r\n")`, `right: Some("the candidate edit\n")`, the checkout holding `["candidate.txt", "seed.txt"]` |
+| `fc141710`, without the pin, `core.autocrlf=false` in the environment | the test alone | `ok` — the attribution, not a repair |
+| `aaf289f1`, with the pin | the test alone | `ok` (`1 passed; 0 failed`) |
+| `aaf289f1`, with the pin | `engine::topology::recover::tests` | `101 passed; 0 failed; 2 ignored` |
+| `aaf289f1`, with the pin | `cargo test --all-targets --all-features`, the CI leg's command | `2300 passed; 0 failed; 40 ignored` in the library harness (the two red runs: `2299 passed; 1 failed; 40 ignored`), `2313` passing across the three harnesses against the leg's floor of 1700, exit 0, 131 s |
+
+The guest's tree is a fresh clone at `C:\pr8-fix8` with `CARGO_TARGET_DIR=C:\pr8-fix8-target`,
+fetched forward by bundle to `aaf289f1` with `git status --porcelain` empty at both heads; nothing
+was copied from another target directory (a copied binary keeps its mtime and Cargo reuses it).
+No sampler fingerprint appeared in the guest run.
+
+On this box, which cannot see the defect, the ten gates were run on the pushed head before the push
+through `w1-eight-iso`'s private target base after a touch inside the gate lock, plus
+`test-pr-ready-audit.sh` as the tenth; `pr8-body.md`'s Validation section carries the head and the
+counts.
+
+### 11.4 The record
+
+- **The finding file** is moved to `P2_portability_202609080230_dispatch-head-witness-red-on-windows.md`
+  with `git mv`, its id kept, its disposition `fixed`, its failure sequence corrected — the file
+  was present — and the cause, the change and the reclassification written in. It stays in the
+  directory on the brief's instruction and says so in its own `guard` field.
+- **The body's ledger** gets the finding's row, bound to `91fe35b008a0a612bb37ed43a9eb3b5b7487c8a3` and `tests.rs:9925` where the
+  red was observed, and makes room first: the rows through round seven — one round further than §11.1's row 6
+  planned, because the prose this round adds needed the room — are compressed to their
+  identity columns — id, severity, reviewed SHA and location, a one-line failure sequence,
+  provenance, category, first bad, the guard's backticked identifiers, disposition — with every
+  structured column byte-identical to the row it replaces. The two deferred rows and this round's
+  are unabridged. Each compressed row's full text is in this file's §§1–10 and in `pr8-body.md`'s
+  own history at `fc141710`, which the ledger's preface names. The body went from 65467 to
+  57440 characters, which is the headroom a round needs to write anything at all.
+- **The Validation section** names the new last code commit, carries the Windows verification as
+  a platform check that executed, and its statement about what runs first on CI's macOS and
+  winguest legs is unchanged for the macOS scanner and the Windows job funnel, which this round
+  did not run.
+- **`pr8-plan.md` §2** carries the round's commit table and its one-paragraph account.
+- **No `design/` change is owed and none is made.** §26 verdict 1 says what the worktree is at;
+  Windows line endings are how that platform's Git renders it, and nothing in the design speaks
+  of bytes.

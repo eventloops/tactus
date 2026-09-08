@@ -648,6 +648,40 @@ carries them with their reasons.
   replay is the worst outcome available here, so the log shape the engine wrote *before* this
   change has its own regression, and it is the one the over-correcting mutation fails.
 
+### The eighth repair round (2026-09-08)
+
+Not a review round. The seventh round's own witness for `PR8-R7-DISPATCH-BASE` failed on CI's
+winguest leg at `91fe35b0` and again at `fc141710`, deterministic, every other job of both runs green,
+and was filed open at P1 with its rate unknown. `pr8-triage.md` §11 is the round: the reproduction
+on the persistent Windows guest, the attribution, the repair and its two witnesses.
+
+| Commit | Findings |
+|---|---|
+| `docs(pr8): the eighth round's plan, and the cause of the Windows red established on the guest` | §11.1–11.2 of the triage, recorded before the repair |
+| `test(engine): the recover fixture pins its line endings` | `PR247-DISPATCH-HEAD-WITNESS-RED-ON-WINDOWS` — the fixture's repository pins `core.autocrlf=false` and `core.eol=lf`, the two settings `workspace_manager::fixture` pins for the same stated reason; the contents assertion is untouched, and the module's notes carry why |
+| `docs(findings): the dispatch-head witness red was the fixture's line endings, re-filed at P2` | the finding file: disposition, cause and change, moved to `P2_portability_…` with its id kept |
+| `docs(pr8): the findings and record of the eighth repair round` | this file, `pr8-triage.md` §11.3–11.4, and `pr8-body.md` — its ledger's rows through round seven compressed to make room, its row for the finding, and its Validation carrying the Windows verification |
+
+What the round established, in one paragraph: alpha's `candidate.txt` **was** in beta's worktree,
+with the right content and Windows line endings — `left: Some("the candidate edit\r\n")`. Git for
+Windows installs `core.autocrlf=true` in its system config; the recover fixture's repository
+inherited it, having pinned identity and `core.logAllRefUpdates` and nothing about line endings
+since `bcc3a533` on master; and `git worktree add` rendered the LF blob as CRLF when it populated
+beta's checkout. With `core.autocrlf=false` injected through the environment and nothing else
+changed, every assertion in the test passed on the guest — the worktree at the published head, the
+durable `task_dispatched.base_sha` naming it, the log replaying twice equal — so `dispatch_head`
+and the worktree it leads to are correct on Windows and the original P1 is repaired on all three
+platforms. A scratch experiment outside the test showed the repository config is the layer a
+linked worktree reads, which is why the pin goes there and not into the fixture helper's
+environment.
+
+Nothing in the round is Class A, B or C: `src/topology/**` is untouched and no production code
+changes. The round adds no v0.1 surface. The finding is re-filed from P1 `correctness` to P2
+`portability` with provenance `pre_existing` — a fixture defect, master's, first observed by this
+slice's seventh round — and the file is kept and updated rather than deleted because the round's
+brief asked for the cause and the change to be recorded in it; the README's rule would delete it
+on resolution, and whoever merges may.
+
 ## 3. `src/topology/**` changes: Class A / B / C
 
 Rule applied: a read-only accessor that exposes a derivation the fold already makes is
