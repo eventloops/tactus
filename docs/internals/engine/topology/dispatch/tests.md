@@ -317,12 +317,44 @@ reused or recreated exactly as `element_breaks_quiescence` says, the
 materialization reproduced once, the tree the control's, the planted
 objects untouched.
 
+## `fn checkout_bytes(worktree: &Path) -> BTreeMap<String, Vec<u8>> {`
+
+The checkout the worker is handed, read from disk: every path the index
+names, with the bytes its file holds. Never `write-tree`, which reads the
+index and not the files — PR #249's refusals review kept the index right and
+overwrote the files (mutation M6), and every SHA oracle in this module
+passed.
+
+## `fn expected_checkout(`
+
+What one pick of `source` onto `base` must leave on disk, derived from the
+two commits and nothing the materialization wrote: `base`'s files, with the
+paths `source` adds or changes read from `source`. The independent expected
+value the byte oracles compare against.
+
+## `fn assert_checkout_is(worktree: &Path, expected: &BTreeMap<String, Vec<u8>>, label: &str) {`
+
+The worktree's files are exactly `expected`, and the index agrees with them
+(`diff-files --quiet`): the two reads that together pin what the worker
+sees. Every materialization test in this module ends in it.
+
 ## `fn sampled_repair_materialization_child_kills_every_residue_classified_and_recovered() {`
 
-The kill-sampling half: N real `cherry-pick --no-commit` children killed at
-spread points, every residue classified and every worktree recovered to the
-control's tree. Its first run found the held `MERGE_MSG.lock` the verifier
-did not read.
+The kill-sampling half: `SAMPLING_N` real `cherry-pick --no-commit`
+children that died by the kill, at spread points, every residue classified
+and every worktree recovered to the control's tree and bytes. Its first run
+found the held `MERGE_MSG.lock` the verifier did not read.
+
+**A completed pick is a control, not a sample.** PR #249's refusals review
+killed one child at spawn and let seven picks finish (M3); the floor of
+"eight classified samples and one kill" accepted `killed=1/8,
+observed=[None, After ×7]`. The populations are now kept apart: kills are
+collected over a bounded number of spawns until `SAMPLING_N` of them have
+been observed, a completed pick is verified to converge and counted as
+nothing, and at least one kill must have landed before the index was
+published. `Internal` is reported, not required: three runs on the build
+box before the change measured 5/8, 7/8 and 7/8 kills, with `Internal`
+observed in two of them and `None` and `After` in all three.
 
 ## `fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {`
 
