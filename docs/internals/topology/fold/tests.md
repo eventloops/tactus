@@ -2924,3 +2924,45 @@ The four open-generation classes refuse a bare question with identical live and 
 Terminal tasks refuse new questions. Quiet parked tasks and repair lineages permit multiple questions; answering one preserves any remaining question and restores the state implied by the candidate or lineage. A queued candidate returns to AwaitingMerge and cannot dispatch another generation.
 
 The repair-member trace checks both an ordinary answer and a nonhalting decline, live and by replay. Decline fails both unmerged members and avoids FoldError; this is fold state evidence, not proof of operating-system process termination. The attempt settlement trace separately checks a halting decline, released lease, and accepted run_finished. These tests use the broader question contract implemented by PR #152; the earlier blanket lineage and answer-state restrictions are superseded.
+
+## `fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {` › `let verifying = |limit: u32| -> (TopologyFold, Vec<TopologyEvent>) {`
+
+A run frozen at `limit`, with alpha merged and mid's candidate under
+verification, built as a log so the refusals can be checked on replay.
+
+## `fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {` › `let (under, log) = verifying(1);`
+
+Below the limit: the first repair of a run that allows one automatic
+repair is runnable, and a `HumanRequired` admission — asking a person
+for an allowance the lineage still has — is refused. A `HumanBinding`
+admission is accepted on either side of the limit: it is the empty
+intersection's shape, not the exhausted allowance's (`pr8-plan.md` R8).
+
+## `fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {` › `let (at_limit, log) = verifying(0);`
+
+At the limit: a run that allows no automatic repair registers the first
+repair with human admission, and a runnable one is refused.
+
+## `fn a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_repair() {` › `let base = sha("base");`
+
+INV-11: "bounded per root by the frozen limit". With one automatic
+repair allowed, the first rejection of `mid` registers a runnable
+repair (member 0); that repair's own candidate is then rejected, and the
+second repair (member 1) may only ask a person — a runnable admission
+refuses, live and on replay. Distinct from the limit-of-zero case
+because a positive limit is consumed by a lineage that actually ran.
+
+## `fn a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_repair() {` › `let mut first = repair_spawn(first_repair, MID, MID);`
+
+Member 0: the one automatic repair the run allows.
+
+## `fn a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_repair() {` › `let mut dispatched = dispatch(first_repair, 0, &base);`
+
+The repair runs and produces its replacement candidate, which is
+verified and rejected in turn.
+
+## `fn an_empty_intersection_ladder_records_no_tier_no_ceiling_and_the_raised_floor() {` › `let waiting = FrozenLadder {`
+
+The shape a merge repair freezes when `mid` intersects the root's
+ladder empty (`pr8-plan.md` R10): the fold's own ladder check accepts
+it, because an absent ceiling is the maximum of no tier.

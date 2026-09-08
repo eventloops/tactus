@@ -790,9 +790,12 @@ of each, over the states the census actually reached.
 
 ## `fn the_publication_relations_are_exercised_in_both_directio…` › `assert!(census.transitions().iter().any(|transition| {`
 
-A fast publication with a prepared pin is refused everywhere, which
-is the one of the three fast clauses that is about a field's
-presence rather than about two SHAs agreeing.
+A fast publication with a prepared pin is refused everywhere. Of the
+four fast clauses, two are about a field's presence rather than about
+two SHAs agreeing: the prepared pin, checked here, and the
+verification record, whose own hostile candidate
+(`merge_prepared/fast/with-verification`) is asserted refused the same
+way.
 
 ## `fn no_offer_is_unmapped_and_every_class_is_offered_everywhe…` › `let census = census();`
 

@@ -357,6 +357,11 @@ Whether a reservation is held.
 
 The entitlements the held reservation accounts for, zero when none is.
 
+## `impl Reservations` › `pub const fn cancelled(&self) -> u32 {`
+
+How many reservations were cancelled, so a test can tell a reservation
+that converted from one that was cancelled: both leave nothing held.
+
 ## `impl Reservations` › `pub const fn balances(&self) -> bool {`
 
 Whether every reservation was converted or cancelled exactly once.

@@ -194,8 +194,13 @@ which number to raise.
 The run ceiling alone.
 
 Split out because one branch checks this and not [`Self::breach`]: an
-integration spawns no worker and is charged to no task. See
-[`select`]'s integration branch for why that is not an omission.
+integration is admitted against the run ceiling alone. See [`select`]'s
+integration branch for why the task ceiling is not consulted there. What an
+integration *spends* is another matter: its verification's reviews are
+charged to the candidate's task and to the run at the verification
+([`Spend::record_reviews`]), so the next check — of either ceiling — sees
+them. The reviews of `3414dc58` found them charged nowhere (`pr8-triage.md`,
+tests 3).
 
 ## `fn run_breach(&self, spend: &Spend) -> Option<Breach>` › `(spent >= limit).then_some(Breach {`
 
@@ -290,6 +295,17 @@ Not a new branch: `eligibility_order` names "new ordinary dispatch",
 and a continuation is not a new one. It is the same branch reaching
 the same attempt over ground that already exists.
 
+## `pub enum Step` › `RepairDispatch {`
+
+A `ready` task whose origin is `MergeRepair`.
+
+Named as its own step rather than folded into `Dispatch` because the
+checkpoint refuses it and the loop maps it: `checkpoint_refusals` has PR8
+refuse "dispatch of a Repair-origin task … before any append", and the
+refusal has to be taken on a value nothing has acted on. It is selected
+**without** the ceiling check, because a `budget_exceeded` is an append and
+the refusal comes before any.
+
 ## `pub enum Step` › `Backoff,`
 
 Deferred work and nothing else. Sleep the defer backoff, then append
@@ -311,12 +327,13 @@ Run-end closure is due, with the outcome the fold derives.
 
 The branches an **intermediate build** is entitled to perform.
 
-[`Step`] has **eight** variants and this has five, so **three** do not
-cross: `Integrate`, `Closure` and `Poisoned`. The first two are the whole of
-`checkpoint_refusals` for PR7 — there is no value of this type that can
-carry an integration or a run end, so no caller holding one can append
-`merge_verification_started` or `run_finished`. That is the refusal made
-unrepresentable rather than remembered.
+[`Step`] has **nine** variants and this has six, so **three** do not
+cross: `RepairDispatch`, `Closure` and `Poisoned`. The first two are the
+whole of `checkpoint_refusals` for PR8 — there is no value of this type that
+can carry a repair dispatch or a run end, so no caller holding one can
+append the `task_dispatched` of a repair or `run_finished`. That is the
+refusal made unrepresentable rather than remembered. `Integrate` crossed
+when PR8 implemented every terminal of `merge_verification_started`.
 
 The third is not a refusal of a *branch*. `Poisoned` is the absence of one:
 an append errored, this process's fold is not authoritative, and nothing
@@ -329,14 +346,19 @@ Both counts are computed, per §22:
 
 ```text
 $ awk '/^pub enum Step \{/,/^\}/'     src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-8
+9
 $ awk '/^pub enum Admitted \{/,/^\}/' src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-5
+6
 ```
 
 ## `pub enum Admitted` › `BudgetExceeded(Box<BudgetExceeded4>),`
 
 [`Step::BudgetExceeded`].
+
+## `pub enum Admitted` › `Integrate {`
+
+[`Step::Integrate`]. The candidate crosses with it, so the acting half
+integrates exactly the candidate the queue chose and re-derives nothing.
 
 ## `pub enum Admitted` › `Retry {`
 
@@ -442,20 +464,29 @@ An integration also spawns no worker, and the identities its
 verification passes carry are `(sequence, role, ordinal)` rather
 than a task's. The run ceiling still binds, because `loop` puts the
 check inside every admitting branch and a run at its overall
-ceiling is done whatever the branch would have been.
+ceiling is done whatever the branch would have been — and what the
+verification then spends on its reviews is charged, to the
+candidate's task and to the run, before its terminal is appended
+([`Spend::record_reviews`]; `Spend::replay` reads it back off
+`merge_prepared` and `merge_rejected`), so the run ceiling that admits
+the *next* integration counts every review the last one ran.
 
 ## `pub fn checkpoint(step: Step) -> Result<Admitted, UpstrokeError> {`
 
 `checkpoint_refusals`: "an intermediate build refuses, **before any
 append**, any operation whose terminals it does not implement".
 
-PR7 appends `attempt_started` and implements its terminals; it does not
-implement `merge_prepared`, `merge_rejected` or `task_merged`, so it never
-appends `merge_verification_started` — INV-07's "every checkpoint build
-implements every terminal reachable from any start it appends" is that
-sentence read from the other end. Run-end closure is refused for the same
-reason: `run_finished` is a terminal whose finalization PR7 does not
-perform.
+PR8 implements every terminal of `merge_verification_started` and of
+`merge_prepared`, so an integration crosses. What it refuses is the two
+operations `checkpoint_refusals` names for it: "dispatch of a Repair-origin
+task and repair-admission answers" — the dispatch here, because it is a
+selected step, and the answer at the hard block, where answers are read.
+Repair execution is `T-REPAIR-DISPATCH`, PR9's, and a build that dispatched
+a repair would append a `task_dispatched` whose terminals it does not
+implement — INV-07's "every checkpoint build implements every terminal
+reachable from any start it appends" read from the other end. Run-end
+closure is refused for the same reason: `run_finished` is a terminal whose
+finalization this build does not perform.
 
 The refusal is taken on the [`Step`], which is a value nothing has acted
 on: `select` performed no effect and appended nothing, so "before any
@@ -464,8 +495,15 @@ enough.
 
 ### Errors
 
-[`UpstrokeError::Refused`] naming the operation and the terminals PR7 does
-not implement.
+[`UpstrokeError::Refused`] naming the operation and the slice that owns
+what this build does not implement.
+
+## `fn is_repair(fold: &TopologyFold, key: TaskKey) -> bool {`
+
+Whether `key` is a Repair-origin task: registered by a `merge_rejected`
+rather than by the plan. Read from the registry entry's origin, which the
+rejection froze, so the selector and the checkpoint agree on what a repair
+is by construction.
 
 ## `fn eligible_integration(fold: &TopologyFold) -> Option<CandidateRef> {`
 
@@ -605,3 +643,26 @@ coexist and the packet will have to say which wins.
 ## `first_ready` › `return None;`
 
 This task cannot name another generation in the event format.
+
+## `impl Spend {` › `pub fn record_reviews(&mut self, key: TaskKey, reviews: &[crate::events::ReviewRecord]) {`
+
+The reviews an integration verification ran for `key`'s candidate,
+charged as an attempt's reviews are: each pass's reported cost, to the
+run and to the task.
+
+## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `TopologyEventBody::MergePrepared { data } => {`
+
+The integration verifications whose terminal carries the
+review record. An unavailable terminal carries none, so a
+verification that ended in a park or an outage is charged
+live and not here (`pr8-plan.md` R22).
+
+## `impl Spend {` › `pub fn record_review_cost(&mut self, key: TaskKey, cost_usd: Option<f64>) {`
+
+Charge one review pass, whose reported cost may be unknown.
+
+The live integration account charges here as each pass completes
+(`topology::attempt::ReviewAccount`), and [`Spend::record_reviews`] charges the
+same way from the records a durable terminal carries, so a replayed total
+accumulates by the same additions in the same order as the total the
+incarnation that wrote them held.

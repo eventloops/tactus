@@ -880,13 +880,13 @@ way to know the directory exists.
 The phrase [`super::cancel_created`] uses for each step, so the assertion
 above reads the message rather than the enum that wrote it.
 
-## `const DAEMON_ALREADY_STOPPED: &str = "Error response from daemon: cannot kill container: \`
+## `fn daemon_already_stopped(name: &str) -> String {`
 
 ---------------------------------------------------------------------------
 5b. Two reclaimers that actually race
 ---------------------------------------------------------------------------
 
-## `const DAEMON_ALREADY_STOPPED: &str = "Error response from daemon: cannot kill container: \`
+## `fn daemon_already_stopped(name: &str) -> String {`
 
 What `docker` 29.7.2 writes to stderr, measured on the build box.
 
@@ -930,16 +930,17 @@ the container.
 Real failures stay failures. `--force` removal and a kill the daemon could
 not deliver are things a reclaimer must NOT report as convergence.
 
-## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `let unreachable = super::settle_stop(Err(RuntimeError::Unreachable {`
+## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `let unreachable = super::settle_stop(`
 
 And unreachable is a different answer even when its text would be
 tolerable: `crash_reconstruction` refuses a write command when the runtime
 "cannot be reached", and swallowing that here would turn a refusal into a
 convergence.
 
-## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `assert_eq!(super::settle_stop(Ok("upstroke-c\n".to_owned())), Ok(()));`
+## `fn a_stop_answer_meaning_already_settled_is_tolerated_and_a_real_failure_is_not() {` › `Ok("upstroke-c\n".to_owned()),`
 
-The control: a stop that simply worked.
+The control: a stop that simply worked, and worked means the process is
+gone.
 
 ## `struct DockerLikeStop<'a> {`
 
@@ -952,7 +953,7 @@ is exercising the tolerance rather than a test-local copy of it. Every raw
 answer is recorded, so a test can assert the already-stopped branch actually
 fired instead of hoping it did.
 
-## `fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {` › `let outcome = match self.inner.observe(name)? {`
+## `fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {` › `let outcome = match self.inner.observe(name)? {`
 
 The daemon's own three answers, chosen by the state the container is
 actually in — which is what makes a second reclaimer see the
@@ -2334,19 +2335,24 @@ container.
 The clause is its own predicate, and it is not covered by absence: the
 in-progress answer contains none of the "no such …" shapes.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `assert!(super::remove_already_settled(`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::removal_answer(SETTLED_TARGET, DAEMON_REMOVAL_IN_PROGRESS),`
 
 Case-insensitively, because a vendor that recapitalises its prose must
-not turn a convergence into a refusal.
+not turn a convergence into a refusal — and typed, because the cover
+review of `8a5f59e8` found this answer read as a completed removal
+(`PR8-R4-REMOVAL-IN-PROGRESS`): it is `RemovalInProgress`, never
+`ProcessGone`.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `assert!(super::stop_already_settled(DAEMON_REMOVAL_IN_PROGRESS));`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::stop_answer(SETTLED_TARGET, DAEMON_REMOVAL_IN_PROGRESS),`
 
-A `docker kill` racing a removal gets the same answer, and it is on its
-way out either way.
+A `docker kill` racing a removal gets the same answer; the reclaimer
+continues, and learns nothing about the process from it.
 
-## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `assert_eq!(super::settle_remove(Ok("upstroke-c\n".to_owned())), Ok(()));`
+## `fn a_removal_answer_meaning_already_in_progress_is_tolerated_and_a_real_failure_is_not() {` › `super::settle_remove(`
 
-The control: a removal that simply worked.
+The control: a removal that simply worked, and worked means the process is
+gone.
+
 
 ## `fn real_docker_prints_the_transcribed_removal_in_progress_diagnostic() {`
 
@@ -2425,3 +2431,73 @@ which release step was armed.
 ## `fn a_release_whose_cleanup_fails_still_attempts_every_remaining_step() {` › `assert!(!fixture.runtime.container_names().is_empty());`
 
 The control: everything the release has to remove is really there.
+
+## `fn daemon_already_stopped(name: &str) -> String {`
+
+The daemon's three transcribed answers, each **naming the container it is
+about**, which is how a reclaimer tells an answer about its own container from
+an answer — or a path — that merely spells the phrase. They were literals until
+round six; a literal `upstroke-c` beside a fixture whose container has a
+generated name is a fixture the repaired normalizers correctly refuse, and
+making them functions of the name is what keeps the doubles honest rather than
+what works around the check.
+
+## `const SETTLED_TARGET: &str = "upstroke-c";`
+
+The container every transcribed diagnostic in this file is about.
+
+## `fn observed(liveness: Liveness) -> impl FnOnce(&str) -> Result<Liveness, RuntimeError> {`
+
+The observation a proposed settlement is established against, for the tests
+whose subject is the diagnostic rather than the observation.
+
+## `fn never_observed(target: &str) -> Result<Liveness, RuntimeError> {`
+
+An observer that must not be reached: the outcome settles, or refuses to,
+without asking the runtime anything. It is what proves a success settles on the
+daemon's own answer, and what proves a refused proposal costs no second command.
+
+## `const SETTLES_NOTHING: &[(&str, &str)] = &[`
+
+The three shapes a diagnostic can have that must never settle anything, each
+one refused by a different half of the mechanism. Dropping the line-start
+requirement admits the first two; dropping the target requirement admits the
+first and the third. Both mutations are replayed in `pr8-triage.md` §9.3 and
+each kills this test.
+
+## `fn the_two_docker_diagnostic_tables_never_claim_one_message() {` › `for (what, detail) in [`
+
+The direction that matters: an answered failure read as unreachable lets
+`census::proceeds_without` admit a write command that could not list a dead
+owner's containers. The daemon's phrases are its own, but the paths and label
+values it quotes back are the environment's.
+
+Each case asserts twice: that the quoted text **still matches the phrase table**
+when the daemon line is taken away, and that it does not match with the line
+there. Without the first assertion the second would pass for a table that no
+longer contains the phrase at all, and the guard would be measuring nothing.
+
+## `fn real_docker_fails_locally_without_ever_saying_a_container_is_gone() {`
+
+The reviewer's witness, reproduced against the live CLI: TLS material that is
+not there, under a directory named for the phrase each normalizer used to search
+the whole of stderr for. The CLI fails before it contacts the daemon and quotes
+the path back, so the phrase is in stderr and nothing about the container was
+ever asked.
+
+`host::test_support::build_command` with `DOCKER_TLS_VERIFY`, `DOCKER_CERT_PATH`
+and `DOCKER_HOST` set on the child, so the reproduction needs no process-wide
+environment mutation and cannot race another test. Six phrase directories over
+four commands, and the assertion that the CLI still quotes the path it could not
+read — the day it stops, this test stops reproducing the finding and says so
+rather than passing quietly.
+
+## `fn real_docker_lists_the_state_the_settlement_observation_reads() {`
+
+The listing the settlement observation reads, measured on the daemon: an absent
+container, a created one, a running one and an exited one, the second kill
+established against the listing rather than against its own diagnostic, and the
+`name=` filter's regular expression returning a longer name that the exact
+comparison then discards. The colliding container is created deliberately, and
+the test fails if the filter stops matching it, so the comparison the repair
+rests on is never left untested.

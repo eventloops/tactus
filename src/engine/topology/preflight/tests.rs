@@ -57,15 +57,18 @@ impl Recording {
 }
 
 impl Runner for Recording {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, crate::runner::RunnerError> {
         self.seen
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(request.clone());
         if self.refuses {
-            return Err(UpstrokeError::Refused {
-                message: "the boundary refused to start this process".to_owned(),
-            });
+            return Err(crate::runner::RunnerError::never_started(
+                &request.invocation,
+                UpstrokeError::Refused {
+                    message: "the boundary refused to start this process".to_owned(),
+                },
+            ));
         }
         Ok(ProcessOutput {
             code: Some(

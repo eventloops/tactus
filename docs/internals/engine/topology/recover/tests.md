@@ -168,6 +168,30 @@ cut at. Step (g) recreates `OpenNoAttempt` worktrees "at their bases",
 and a base that names no object makes the step's own funnel fail for
 a reason that has nothing to do with what is being tested.
 
+## `fn build(tag: &str, damage: Damage) -> Self` › `["config", "core.autocrlf", "false"],`
+
+Line endings are pinned in the repository's own config, for the reason
+`workspace_manager::fixture` pins them (§12, and
+`PR126-REVIEW2-NULL-TESTS-INHERIT-THE-HASH-FORMAT`): an ambient Git setting
+that silently changes what a test observes. Git for Windows installs
+`core.autocrlf=true` in its system config, and under it a blob written as
+`A\n` is checked out as `A\r\n` — by `git worktree add` as much as by
+`git checkout`, because a linked worktree reads this repository's config —
+so a test that compares a checkout's bytes against what it committed fails
+on that platform alone while the commit is the one it asked for. That is
+what happened to
+`a_dependent_task_is_dispatched_into_its_dependencys_merged_work` on CI's
+winguest leg (`PR247-DISPATCH-HEAD-WITNESS-RED-ON-WINDOWS`): alpha's
+`candidate.txt` was in beta's worktree with the right content and Windows
+line endings, and the dispatch it witnesses was correct.
+
+The pin is in the repository rather than in the environment of the
+fixture's `git` helper because the checkout that matters is production's:
+`WorkspaceManager` runs `git worktree add` with the process's own
+environment, and the repository config is the one layer both read. A test
+that compares checkout bytes through any other fixture inherits the same
+obligation.
+
 ## `fn build(tag: &str, damage: Damage) -> Self` › `let marker = CreatingMarker {`
 
 P1: the `.creating` marker the creator published and never removed,
@@ -1367,11 +1391,10 @@ them checkable rather than asserted in prose:
 * **(c)** the repository is touched only once the recorded Runner has been
   rebuilt and its probes have answered, so a resume that cannot run leaves
   the object store as it found it;
-* **(f)** an unresolved promotion — and, by the same clause, an unresolved
-  integration transaction — is a prefix whose integration ref may be
-  mid-move, and "present == base continue" would adopt one under a
-  transaction this build cannot resolve. This case is also the first
-  coverage [`refuse_unimplemented_terminals`] has had.
+* **(f)** an unresolved integration transaction is a prefix whose
+  integration ref may be mid-move, so the P7/P8 step is skipped when the
+  proven prefix carries one and [`finish_integration`] owns the ref; an
+  unresolved promotion is completed by [`finish_promotions`], not refused.
 
 The fourth bound, "**before (d)**", is not here: it is asserted positively by
 [`kill_after_run_started_creates_integration_ref`], which reads the log at
@@ -2820,3 +2843,574 @@ clause's definition out of the tree left it green — measured, S5
 round 4. Not pinned to exactly one definition, because
 `settle_interrupted` legitimately names three items and `form` is
 what separates them.
+
+## `struct Damage {` › `alternative_reviewer: bool,`
+
+The review plan names an alternative reviewer, so a candidate whose
+implementer is the primary reviewer is reviewed by someone else.
+
+## `struct Damage {` › `no_automatic_repairs: bool,`
+
+`max_merge_repairs = 0`: the first rejection registers its repair with
+human admission.
+
+## `impl Fixture {` › `fn two_tasks(tag: &str) -> Self {`
+
+A healthy two-task run: what every stale-verification fixture needs,
+since only a publication moves the integration head past the base.
+
+## `struct PlantedTransaction {`
+
+--- integration-transaction recovery fixtures (PR8, step (f)) -------------
+
+A planted integration transaction: the candidate it publishes and the
+commit the fast path proposes.
+
+
+## `fn append_events(fixture: &Fixture, bodies: &[TopologyEventBody]) {`
+
+Append event bodies to the fixture's already-committed log, the way a live
+run would have, so a resume folds them as part of its proven prefix.
+
+## `fn alpha_commit(fixture: &Fixture) -> (CommitSha, CommitSha) {`
+
+A commit for ALPHA on the fixture base, adding `candidate.txt`, left in the
+object store with the worktree restored to the base.
+
+## `fn obliged_reviews_for(fixture: &Fixture, key: TaskKey) -> Vec<crate::events::ReviewRecord> {`
+
+The review passes ALPHA is frozen to require, as records that pass — read
+off the registry the current log folds to, exactly as a live candidate's
+would be.
+
+## `fn alpha_candidate_prepared(`
+
+The `candidate_prepared` for ALPHA's generation 0 at `commit`/`tree`.
+
+## `fn candidate_prepared_for(`
+
+The `candidate_prepared` of `key`'s generation 0 at `commit`/`tree`, whose
+attempt edited exactly `path` on the fixture base.
+
+## `fn plant_queued_candidate(fixture: &Fixture) -> PlantedTransaction {`
+
+Plant a queued candidate for ALPHA on the base: its objects and refs, the
+integration ref at the base, and the log through `task_candidate_created`.
+
+## `fn plant_queued_candidate_events(fixture: &Fixture) -> PlantedTransaction {`
+
+ALPHA's queued candidate on the base — its objects, refs and events —
+leaving the integration ref wherever it is.
+
+## `fn fast_prepared(fixture: &Fixture, planted: &PlantedTransaction) -> TopologyEventBody {`
+
+The `merge_prepared(fast)` of sequence 0 for a planted candidate at the
+base.
+
+## `fn plant_prepared_fast(fixture: &Fixture) -> PlantedTransaction {`
+
+Plant a fast integration transaction: the candidate objects and refs, the
+integration ref at the base, and the log through `merge_prepared(fast)` with
+no `task_merged` — the exact durable state a crash after the stable-prefix
+barrier but before the compare-and-swap leaves.
+
+## `fn a_resume_completes_a_prepared_fast_transaction_through_the_barrier_and_cas() {` › `let fixture = Fixture::healthy("finish-fast");`
+
+The two-crash shape: `merge_prepared(fast)` is durable in the log (the
+stable-prefix barrier held before the process died) and the integration
+ref is still at the base (the compare-and-swap had not run when power was
+lost). A resume must finish the one authorized publication.
+
+## `fn resume_with_real_refs(`
+
+Resume through the real `WorkspaceManager` as *both* ref interfaces — the
+P7/P8 startup repair reads the same refs the transaction recovery moves.
+
+The `RecordingRefs` double every other resume here supplies answers
+"absent" to the startup repair whatever the repository holds, which is
+exactly how a resume that refused its own published head stayed green
+(`pr8-triage.md` C1). A publication test resumes through this.
+
+## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `let fixture = Fixture::healthy("published-head");`
+
+`transaction_fault_matrix[T-RESUME].durable_state` counts "CAS
+completions" among what recovery continues from: once sequence 0 has
+published, the integration ref legitimately names the proposal, not
+`run_started.base_sha`, and the next resume must accept it rather than
+refuse its own work as foreign history.
+
+## `fn a_resume_after_a_completed_publication_accepts_its_own_head() {` › `drop(first);`
+
+The first resumer exits, releasing its locks; the next incarnation must
+accept the durable result of the publication it finds.
+
+## `fn a_resume_after_a_publication_refuses_a_ref_that_disagrees_with_the_log() {` › `let fixture = Fixture::healthy("published-disagrees");`
+
+DESIGN §26: "`task_merged` exists but the ref disagrees — refuse; the
+log and integration branch no longer describe the same run". Neither a
+ref moved elsewhere nor a deleted one is repaired from the base.
+
+## `fn commit_on(`
+
+A commit on `parent` that adds `file` with `content`, left in the object
+store with the worktree restored.
+
+## `fn plant_staging_intent(fixture: &Fixture, sequence: u32) {`
+
+Write a staging intent for `sequence` through the manager, the record a live
+stale cherry-pick would have left.
+
+## `fn plant_staging_worktree(fixture: &Fixture, sequence: u32, head: &str) -> PathBuf {`
+
+Write a staging intent for `sequence` and add its worktree at `head`
+through the manager: the residue a live stale sequence leaves.
+
+## `fn plant_snapshot(fixture: &Fixture, sequence: u64, commit: &str) -> PathBuf {`
+
+Add the integration gate snapshot of `sequence` at `commit` through the
+manager, as a verification that was killed mid-gate leaves it.
+
+## `fn plant_stale_verification(`
+
+Plant an interrupted stale-clean verification: BETA published fast at
+sequence 0 (the only way the integration head moves), ALPHA's candidate on
+the base and therefore stale, its cherry-pick proposal pinned under
+`prepared/1`, the staging worktree at the proposal with its intent, and the
+log through `merge_verification_started` for sequence 1 with no terminal —
+the state a crash mid-verify leaves. Needs a two-task fixture.
+
+## `fn plant_stale_verification(` › `let proposal = commit_on(`
+
+The cherry-pick produced a proposal on the moved head.
+
+## `fn append_event_hooked(`
+
+Append one event through the hooked Event funnel, so an injection armed
+on `harness` fires inside the append exactly as it would in a live run.
+
+## `fn proven_durable_len(hooks: &HarnessTopologyHooks, fixture: &Fixture) -> u64 {`
+
+The length the durability ledger proves durable for the fixture's log: the
+last file length a sync reported, after which every write is unsynced.
+
+## `fn lose_unsynced_writes(fixture: &Fixture, durable: u64) {`
+
+A simulated power loss: every byte no sync proved durable is gone.
+
+## `fn crash_with_unsynced_merge_prepared(`
+
+The first crash of the two-crash proof: `merge_prepared(fast)` is written
+to the log as one complete line and never synced — the append's flush was
+made to fail after the full write — and the process ends under the
+append-error protocol. Returns the hooks whose ledger recorded it.
+
+## `struct ReportingHooks {`
+
+A hook bundle for a child that will be killed: it forwards to the harness
+bundle and writes, in order, every sync of the log file and every entry
+into the integration compare-and-swap to a report file the parent reads
+after the kill — the durability oracle carried across the process
+boundary, since the child's ledger dies with it.
+
+## `fn two_crash_kill_child() {` › `let repo_root = PathBuf::from(`
+
+The restart of the two-crash proof, in a process of its own: the
+barrier, the compare-and-swap, and then a kill at `Written` of the
+task_merged append — the whole line in the file, nothing having synced
+it — reported to the parent as it happens.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let fixture = Fixture::healthy("two-crash");`
+
+`C.proof_tests[3]` and `[T-PREPARED].test`, the two-crash proof. A
+complete but unsynced merge_prepared line; restart; recovery step (a1)
+syncs and proves the prefix before the pre-CAS recovery of T-FAST; the
+CAS moves the integration ref; a kill at `Written` of task_merged; then
+a simulated power loss discards every unsynced write. The log still
+contains merge_prepared, the ref is at proposed_sha, and the next resume
+appends task_merged — on a real repository, with the sync ledger as the
+durability oracle: in-process for the first crash, reported across the
+process boundary for the second.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let report_path = fixture.root.join("two-crash-report");`
+
+Restart, in a process of its own, killed at the task_merged write.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let reported = std::fs::read_to_string(&report_path).expect("the child reported");`
+
+(a1) before the CAS: the child's barrier synced the whole surviving
+prefix — the unsynced merge_prepared included — and only then was the
+swap entered, once.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `lose_unsynced_writes(&fixture, prefix_with_prepared);`
+
+The second power loss: every unsynced write is discarded. What the
+child proved durable is exactly what its barrier synced — the prefix
+through merge_prepared — and nothing after it.
+
+## `fn unsynced_merge_prepared_two_crash_barrier_before_cas_then_power_loss_keeps_log_and_ref_agreeing()` › `let third = harness();`
+
+The next resume records the merge it finds done, with no second swap.
+
+## `fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {` › `let fixture = Fixture::healthy("barrier-sync-fails");`
+
+`C.proof_tests[3]`, second sequence: the barrier's sync fails at
+(a1). No CAS is issued, the command ends resumably having done nothing,
+and after the loss of the unsynced line the before-append order holds:
+the candidate is still queued, and the next incarnation integrates it.
+
+## `fn barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss() {` › `lose_unsynced_writes(&fixture, durable);`
+
+The loss: the unsynced merge_prepared is gone, and the before-append
+order stands — the candidate queued, no transaction, the ref at the
+base — which the next incarnation carries through to publication.
+
+## `fn a_resume_of_a_prepared_transaction_whose_ref_moved_elsewhere_refuses_a_third_sha() {` › `let fixture = Fixture::healthy("finish-third-sha");`
+
+The barrier proved `merge_prepared` durable, but by the time recovery
+runs the integration ref names neither the expected head nor the proposal
+— a third writer moved it. Recovery refuses rather than clobbering it.
+
+## `fn a_resume_completes_a_prepared_transaction_whose_cas_already_ran_by_recording_the_merge() {` › `let fixture = Fixture::healthy("finish-cas-done");`
+
+The kill landed between the compare-and-swap and its `task_merged`: the
+ref is already at the proposal. Recovery issues no second swap and records
+the merge, so the log and the ref converge.
+
+## `fn a_resume_settles_an_interrupted_stale_verification_and_reclaims_its_residue() {` › `let driven = drive(&fixture, &DriveSeams::default(), 1);`
+
+And it does: the next incarnation's loop takes the requeued candidate
+through a fresh stale sequence — cherry-pick, pin, verification,
+publication — under sequence 2.
+
+## `fn a_resume_reclaims_an_interrupted_verifications_snapshots_after_settling_it() {` › `let fixture = Fixture::two_tasks("interrupted-snapshot");`
+
+T-VERIFY's resume action: "append merge_verification_interrupted; delete
+pin expected-old; reclaim snapshots". The gate snapshot a killed
+verification left is reclaimed with force — and only after the
+interrupted terminal is durable, the order the contract fixes.
+
+## `fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {` › `let fixture = Fixture::healthy("finish-orphan");`
+
+T-PROPOSAL (a', a, b) with no transaction open: a cherry-pick killed
+before anything was recorded left `merge/s0` and, killed between the pin
+and `merge_verification_started`, the exact orphan `prepared/<next_seq>`.
+Both are reclaimed; the proposal object is left to Git.
+
+## `fn a_resume_reclaims_the_orphan_pin_at_the_next_sequence_and_orphan_staging() {` › `let snapshot = plant_snapshot(&fixture, 0, orphan_commit.as_str());`
+
+A kill between a verification's terminal and its snapshot removal
+leaves a snapshot with no transaction to own it.
+
+## `fn a_resume_refuses_a_prepared_pin_outside_the_sequences_the_log_pinned() {` › `let fixture = Fixture::healthy("orphan-outside");`
+
+`expected_failures_refusals`: "orphan pin outside next sequence". With
+the next sequence at 0, `prepared/3` is a ref the log never accounts for:
+recovery refuses it, before any append, and leaves it exactly as found.
+
+## `fn a_resume_refuses_a_substituted_verification_pin_before_settling_it() {` › `let fixture = Fixture::two_tasks("substituted-pin");`
+
+T-VERIFY's refusal condition: "pin SHA differs from record". A writer
+moved `prepared/0` away from the proposal the verification recorded.
+Expected-old deletion at what the ref *now* names would prove only that
+nothing moved it since the read; authority comes from the record, and
+the record disagrees, so recovery refuses — before the interrupted
+terminal, and without touching the ref.
+
+## `fn stale_clean_prepared(`
+
+The `merge_prepared(stale_clean)` that authorizes the planted stale
+verification's publication.
+
+## `fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {` › `let fixture = Fixture::two_tasks("prepared-pin-kept");`
+
+T-PREPARED: `merge_prepared(stale_clean)` is durable and the ref has been
+moved to a third SHA. Publication refuses, the transaction stays open,
+and its pin — a resumably open resource the cleanup rule forbids
+touching — is still there for the resume that will complete it.
+
+## `fn a_resume_keeps_a_prepared_transactions_pin_when_publication_refuses() {` › `{`
+
+What the resume will read back is exactly what the live sequence
+authorized: a stale-clean publication with its pin and its staging.
+
+## `fn a_resume_prunes_a_resolved_sequences_pin_at_its_recorded_proposal_and_refuses_it_elsewhere() {` › `for substituted in [false, true] {`
+
+A kill between `task_merged` and the pin's deletion leaves a pin for a
+resolved sequence. It is pruned expected-old at the proposal the
+verification recorded, and at any other SHA it refuses and stays.
+
+## `fn a_resume_completes_an_already_present_publication_at_the_candidate_commit_and_reclaims_its_staging()` › `let fixture = Fixture::healthy("already-present-at-candidate");`
+
+The head was moved onto the candidate's own commit, so the stale path
+found an empty cherry-pick and authorized `already_present` with
+`expected_head == proposed_sha == candidate.commit_sha`. Inferring "fast"
+from those SHAs would leak the staging worktree; the fold retains the
+disposition, so recovery reclaims it after the no-op swap.
+
+## `struct DriveSeams {`
+
+---------------------------------------------------------------------------
+Driving the loop after a resume: the run's own `TopologyRun::step` over a
+resumed handle, with recording stand-ins for the seams a test varies.
+---------------------------------------------------------------------------
+
+The seams a driven step varies. Everything not named here is the run's
+production assembly: `FrozenPlans` over the fixture's recorded gates and
+review plan, the scaffold adapters, and a Runner that answers exit 0.
+
+
+## `struct DriveSeams {` › `gate_spawn_fails: bool,`
+
+The Runner returns an error for every process instead of an output.
+
+## `struct DriveSeams {` › `input_rejected: bool,`
+
+The review-input policy refuses the proposed tree.
+
+## `struct DriveSeams {` › `review_cost_usd: Option<f64>,`
+
+What each review pass reports as its cost.
+
+## `struct DriveSeams {` › `answer: Option<crate::ir::Answer>,`
+
+What the answer source answers every question with; `None` answers
+nothing.
+
+## `struct Driven {`
+
+What a driven run observed.
+
+## `struct Driven {` › `implementers: Vec<PassBinding>,`
+
+The implementer each verification plan was requested against.
+
+## `struct Driven {` › `reviewer_models: Vec<String>,`
+
+The model each review pass actually ran as.
+
+## `struct DrivenPlans<'a> {` › `implementers: std::cell::RefCell<Vec<PassBinding>>,`
+
+One driver owns this record; `RefCell` lets the read-only seam write it.
+
+## `struct Driven {` › `runs: Vec<DrivenRun>,`
+
+Every process the driven runner was asked to run — gates and reviewers
+alike — with its role, the workspace it was pointed at and that
+workspace's HEAD at spawn. The verifier oracle reads the reviewers' entries
+to prove each reviewer judged the recorded proposal in its own snapshot
+slot and never in staging (`PR8-R4-REVIEW-ORACLE`).
+
+## `impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews` › `fn run(`
+
+The driven review double runs a process through the Runner in the
+workspace it was handed before answering its scripted verdict, for the
+reason the scaffold's does (`scaffold.md`): a double that reads only the
+profile cannot see where the production judge pointed it, and the cover
+review of `8a5f59e8` moved that pointer into staging past every test.
+
+## `struct DrivenRun {`
+
+One process the driven runner ran: identity, role, workspace and the
+workspace's HEAD at spawn.
+
+## `fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {`
+
+
+Resume the fixture, then step the run's loop `steps` times under `seams`.
+
+## `fn an_integration_review_is_selected_against_the_candidates_recorded_implementer() {` › `let fixture = Fixture::build(`
+
+The candidate was produced at rung 0 (mid, claude-opus-5) of a two-rung
+ladder whose last rung is claude-fable-5, and the review plan's primary
+is claude-opus-5 with claude-fable-5 as the alternative. Selecting
+reviewers against the last rung would find primary != implementer and
+hand the candidate back to its own author; against the recorded binding
+the alternative reviews it.
+
+## `fn a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers() {` › `let fixture = Fixture::two_tasks("gate-spawn-outage");`
+
+`transaction_fault_matrix[T-VERIFY].resume_action`: an observed
+infrastructure failure terminates merge_verification_unavailable
+{Infrastructure, Deferred} inside the frozen allowance and Parked at it;
+`invariants[INV-23]`: a Runner that cannot run the process is a
+RunnerSpawnFailure outage. The fixture allows three deferrals.
+
+## `fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {` › `let fixture = Fixture::two_tasks("input-rejected");`
+
+R4: a review input that cannot be judged is HumanRequired, not a code
+rejection and not a publication. The review-input policy refuses the
+proposed tree before any reviewer runs.
+
+## `fn an_integration_reviews_cost_reaches_the_run_spend() {` › `let fixture = Fixture::two_tasks("integration-spend");`
+
+The ceiling is checked against `Spend`, so a review an integration ran
+must be charged there, live and on replay of the terminal's record.
+
+## `fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append()` › `let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);`
+
+R13: the loop ingests an answer to a verification-park question at the
+hard block — Answered returns the candidate to the queue, and the next
+step integrates it — and refuses an answer to a repair-admission
+question before any append, which is PR9's.
+
+## `const BETA: TaskKey = TaskKey(1);`
+
+---------------------------------------------------------------------------
+T-PROPOSAL (a'): the cherry-pick residue class, recovered through the
+resume — `C.proof_tests[2]` and `[T-PROPOSAL].test`.
+---------------------------------------------------------------------------
+
+## `fn plant_published_beta(fixture: &Fixture) -> CommitSha {`
+
+Publish BETA's candidate fast at sequence 0 — the candidate on the base,
+`merge_prepared(fast)`, the ref moved, `task_merged` — so the head has
+legitimately moved past the base. Needs a two-task fixture.
+
+## `fn plant_stale_queued_candidate(fixture: &Fixture) -> (PlantedTransaction, CommitSha) {`
+
+A queued candidate whose base the integration head has legitimately moved
+past — BETA published at sequence 0 — so ALPHA's integration takes the
+staging path under sequence 1: returns the planted candidate and the head.
+
+## `fn worktree_git_dir(worktree: &Path) -> PathBuf {`
+
+The per-worktree git dir of a linked worktree, where its administrative
+residue lives.
+
+## `fn assert_staging_residue_reclaimed(fixture: &Fixture, staging: &Path, handle: &RunHandle) {`
+
+After the residue is gone: the staging slot and every prepared pin, and
+the candidate still queued for the next incarnation.
+
+## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let fixture = Fixture::build(`
+
+The Internal residue class of Object.ProposalCherryPick, constructed by
+hand: objects the pick wrote that nothing references, and CHERRY_PICK_HEAD,
+MERGE_MSG, index.lock and sequencer state in the staging git dir. The
+resume reclaims the staging worktree with force — administrative
+residue and all — leaves the objects to Git, and the next incarnation
+integrates the candidate under the very sequence the residue held.
+
+## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let orphan_file = fixture.root.join("orphan-bytes");`
+
+Objects written and never published: a blob and a commit no ref names.
+
+## `fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_forced_reclaim_converges()` › `let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);`
+
+The workspace manager's classifier reads it as the site's Internal class
+and names what was planted.
+
+## `fn remove_git_ref_lock_residue(git_dir: &Path) -> Vec<PathBuf> {`
+
+Git's own ref-lock residue in the repository's common git dir:
+`packed-refs.lock` and any `*.lock` under `refs/`. Not the run's
+`upstroke-worktree.lock`, which is the coordinator's lock file (R25), and
+not a linked worktree's git dir, which recovery reclaims itself.
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `const SAMPLING_N: u32 = 8;`
+
+Object.ProposalCherryPick's frozen sampling N (effects/residue-classes.json).
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let two_tasks = || Damage {`
+
+How long the same pick takes when nothing kills it, measured in a probe
+fixture of its own; the kill ladder is fractions of it.
+
+## `const SAMPLING_N: u32 = 8;` › `let mut child = crate::workspace_manager::fixture::KillableGitChild::spawn(`
+
+The real child, killed at an uncontrolled point of the ladder.
+
+## `const SAMPLING_N: u32 = 8;` › `let _ = remove_git_ref_lock_residue(&fixture.git_dir);`
+
+A killed git child can also leave a lock file in the repository's
+common git dir — `packed-refs.lock`, observed on the macOS runner's
+git — which no residue class of the site names and no recovery step
+may remove (PR8-CRASH-002). It is removed here as the operator would,
+so the sampler measures the staging residue the site registers.
+
+## `const SAMPLING_N: u32 = 8;` › `let (_, handle) = resume_with_real_refs(&fixture, &harness())`
+
+Whatever the sample left, the resume reclaims it and the candidate
+integrates under a fresh pick.
+
+## `fn a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed() {` › `let fixture = Fixture::healthy("cas-lock");`
+
+PR8-CRASH-002 (deferred): a coordinator killed inside `git update-ref`
+leaves `<ref>.lock`, and the frozen effect inventory registers no
+residue class for any Ref site, so no recovery step may reclaim it.
+What holds today, pinned here: the authorized publication is retried,
+Git refuses on the lock, the refusal is resumable — the ref unchanged,
+merge_prepared durable, nothing appended — and once an operator removes
+the lock the next resume completes the publication.
+
+## `struct BlockNthSnapshotAdd {`
+
+The obstruction the final cover reviewer's witness used: the second reviewer's
+snapshot slot is occupied by a foreign non-empty directory just before its
+`git worktree add` runs, so that `add` fails with a genuine Git error after the
+first reviewer has already been paid for. `write_file` creates the parents, so
+one write leaves the slot occupied; it goes through the fixture funnel because
+`std::fs::write` and `std::fs::create_dir_all` are denied here (R18/R21).
+
+## `fn a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fails() {`
+
+Two reviewers on the integration judgement. The first returns, costing 2.50
+against a 2.20 run ceiling; creating the second's snapshot then fails with a Git
+error, which `verify` settles as an infrastructure deferral rather than ending
+the command. The completed pass is spent whatever the judgement does next, so
+the loop's next admission — in this same incarnation, with no restart — has to
+be made against a total that holds it. Charging only on a successful judgement
+return discarded the whole vector with `?` and let another sequence in.
+
+Distinct from `PR8-R2-SPEND-REPLAY`, which is a restart losing costs the frozen
+terminal cannot carry: this one involves no restart, and the cost is known and
+in memory when it is thrown away.
+
+## `fn a_reviewer_whose_process_never_started_is_a_runner_spawn_failure() {`
+
+A reviewer whose process never started settles as a `RunnerSpawnFailure`
+(`invariants[22]`, INV-23), and every other unavailable reviewer still settles
+as `ReviewUnavailable`.
+
+INV-23 requires it in those words — a container whose reported image id differs
+from the record "refuses during pre-flight or rebuild and is a
+RunnerSpawnFailure outage settlement mid-run" — and says the rule covers "every
+probe, worker, gate, review, and re-ask process of the run". The container
+runner detects a reviewer's image mismatch before start and answers
+`NeverStarted`; `run_review` contains that so the pass can defer instead of
+ending the command, and the contained result was `Unavailable{AgentError}`,
+which the generic mapping turns into `ReviewUnavailable` — a statement about
+the reviewer where the invariant names one about the runner. Deferral and
+containment were right, and the `Gone` arm is the control that says this repair
+changed only the attribution of the one fate the invariant names.
+
+## `fn checkout_of(workspace: &Path) -> BTreeMap<String, String> {`
+
+What the workspace held when the process was invoked: every tracked file and its
+content, read at the moment `DrivenRunner` stands in for the agent. The
+dependency regression asserts on this rather than on a recorded SHA, because a
+SHA assertion is the shape that would have passed for the whole life of
+`PR8-R7-DISPATCH-BASE` — the durable record and the worktree agreed with each
+other throughout, and both were wrong.
+
+## `fn a_dependent_task_is_dispatched_into_its_dependencys_merged_work() {`
+
+The regression for `PR8-R7-DISPATCH-BASE`, driven end to end: alpha queued and
+published, beta ready only then, and beta's agent handed a checkout that
+contains alpha's merged file. Nothing exotic is planted — no concurrent writer,
+no hostile filename, no crash, no injected failure — because the defect is the
+base case of a dependency chain. Mutating `dispatch_request` back to
+`run_started.base_sha` fails it at the checkout assertion with the worktree
+holding only `seed.txt`.
+
+## `fn a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded() {`
+
+The other direction, and the one a repair that is right going forward can still
+get wrong: a log in the shape the engine wrote before the rule changed — a task
+dispatched at the run's starting base while a publication had already moved the
+head — must replay to the decisions it recorded. The base is
+`task_dispatched.base_sha`, so `continue_open` rebuilds the worktree at it, the
+head that has since been published is not substituted, and no second
+`task_dispatched` appears. Mutating `continue_open` to re-derive its base
+through [`super::super::integrate::dispatch_head`] fails it at the worker's
+HEAD.

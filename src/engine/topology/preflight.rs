@@ -7,7 +7,7 @@ use crate::agent::{AdapterSource, Caps, ProcessOutput};
 use crate::error::UpstrokeError;
 use crate::gates::ShellKind;
 use crate::runner::container::resolve::RunnerPreflight;
-use crate::runner::{Runner, RunnerRequest};
+use crate::runner::{Runner, RunnerError, RunnerRequest};
 use crate::topology::events::RunnerPolicy;
 
 use super::identity::{InvocationLedger, PreflightIdentities, SlotAssertion, SlotPair, is_slotted};
@@ -171,22 +171,23 @@ pub(super) struct Registering<'a> {
 }
 
 impl Runner for Registering<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
+        let refused = |error: UpstrokeError| RunnerError::never_started(&request.invocation, error);
         {
             let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
-            ledger.register(&request.invocation)?;
+            ledger.register(&request.invocation).map_err(refused)?;
         }
         if is_slotted(&request.invocation) {
             let Some(slots) = self.slots else {
                 let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
                 let _ = ledger.cancel(&request.invocation);
-                return Err(UpstrokeError::Refused {
+                return Err(refused(UpstrokeError::Refused {
                     message: format!(
                         "`{}` is a slotted invocation and this boundary holds no slots; INV-23's \
                          non-slotted probe is the recorded shell alone",
                         request.invocation
                     ),
-                });
+                }));
             };
             let pair = SlotPair {
                 agent: match request.agent.as_ref() {
@@ -194,13 +195,13 @@ impl Runner for Registering<'_> {
                     None => {
                         let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
                         let _ = ledger.cancel(&request.invocation);
-                        return Err(UpstrokeError::Refused {
+                        return Err(refused(UpstrokeError::Refused {
                             message: format!(
                                 "`{}` is a slotted invocation with no agent binding; the pair it \
                                  would take is `{{agent, pool?}}` and there is no agent to name",
                                 request.invocation
                             ),
-                        });
+                        }));
                     }
                 },
                 pool: None,
@@ -210,20 +211,24 @@ impl Runner for Registering<'_> {
                 drop(slots);
                 let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
                 let _ = ledger.cancel(&request.invocation);
-                return Err(error);
+                return Err(refused(error));
             }
         }
 
         let outcome = self.inner.run(request);
 
+        let settled = |error: UpstrokeError| match &outcome {
+            Ok(_) => RunnerError::gone(&request.invocation, error),
+            Err(failure) => RunnerError::new(&request.invocation, failure.fate, error),
+        };
         if let (true, Some(slots)) = (is_slotted(&request.invocation), self.slots) {
             let mut slots = slots.lock().unwrap_or_else(PoisonError::into_inner);
-            slots.release(&request.invocation)?;
+            slots.release(&request.invocation).map_err(settled)?;
         }
         let mut ledger = self.ledger.lock().unwrap_or_else(PoisonError::into_inner);
         match &outcome {
-            Ok(_) => ledger.complete(&request.invocation)?,
-            Err(_) => ledger.cancel(&request.invocation)?,
+            Ok(_) => ledger.complete(&request.invocation).map_err(settled)?,
+            Err(_) => ledger.cancel(&request.invocation).map_err(settled)?,
         }
         outcome
     }

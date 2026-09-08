@@ -264,10 +264,19 @@ impl ContainerRuntime for WedgedRuntime {
         &self,
         _name: &str,
         _mode: crate::runner::container::runtime::StopMode,
-    ) -> Result<(), crate::runner::container::runtime::RuntimeError> {
-        Ok(())
+    ) -> Result<
+        crate::runner::container::runtime::Settled,
+        crate::runner::container::runtime::RuntimeError,
+    > {
+        Ok(crate::runner::container::runtime::Settled::ProcessGone)
     }
-    fn remove(&self, _name: &str) -> Result<(), crate::runner::container::runtime::RuntimeError> {
+    fn remove(
+        &self,
+        _name: &str,
+    ) -> Result<
+        crate::runner::container::runtime::Settled,
+        crate::runner::container::runtime::RuntimeError,
+    > {
         unreachable!("reclaim refuses before `rm` when termination cannot be observed")
     }
 }

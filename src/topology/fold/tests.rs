@@ -6064,6 +6064,82 @@ fn an_outage_that_needs_a_person_parks_with_a_question_that_can_be_answered() {
 }
 
 #[test]
+fn declined_parked_verification_fails_task_consumes_queue_position_releases_lease_and_halts_per_policy()
+ {
+    let head = sha("head");
+    let proposal = sha("proposal");
+    for halts in [false, true] {
+        let mut fold = two_queued();
+        apply(
+            &mut fold,
+            &verification_started(MID, 0, 0, &head, &proposal),
+        );
+        apply(
+            &mut fold,
+            &unavailable_event(
+                0,
+                UnavailableCause::HumanRequired {
+                    verdict: "  a licence finding  ".to_owned(),
+                },
+                UnavailableOutcome::Parked {
+                    question: question("q-park-Ünicode", MID),
+                },
+            ),
+        );
+        assert_eq!(fold.task_state(MID), Some(TaskState::AwaitingInput));
+        assert!(
+            fold.queue().expect("started").holds_task(MID),
+            "the candidate is still queued"
+        );
+        assert!(
+            fold.leases()
+                .expect("started")
+                .holds(LeaseOwner::Candidate {
+                    key: MID,
+                    generation: GenerationId(0)
+                }),
+            "the candidate lease is held while parked"
+        );
+
+        apply(
+            &mut fold,
+            &answered(
+                MID,
+                "q-park-Ünicode",
+                Answer4::Declined {
+                    decline_halts_run: halts,
+                },
+            ),
+        );
+
+        assert_eq!(
+            fold.task_state(MID),
+            Some(TaskState::Failed),
+            "a declined verification park fails the task"
+        );
+        assert!(
+            !fold.queue().expect("started").holds_task(MID),
+            "the queue position is consumed"
+        );
+        assert!(
+            !fold
+                .leases()
+                .expect("started")
+                .holds(LeaseOwner::Candidate {
+                    key: MID,
+                    generation: GenerationId(0)
+                }),
+            "the candidate lease is released"
+        );
+        assert_eq!(
+            fold.halted_at(),
+            halts.then_some(MID),
+            "the run halts exactly per decline_halts_run"
+        );
+    }
+}
+
+#[test]
 fn a_rejection_creates_or_widens_exactly_one_lineage_and_registers_its_repair() {
     let base = sha("base");
     let head = sha("head");
@@ -6242,6 +6318,305 @@ fn a_conflict_opens_and_closes_its_own_transaction() {
         .collect();
     held.sort_unstable();
     assert_eq!(held, vec!["build.rs", "src/Zebra", "src/mid"]);
+}
+
+#[test]
+fn a_lineage_past_its_repair_limit_registers_only_a_human_required_repair() {
+    let base = sha("base");
+    let head = sha("head");
+    let proposal = sha("proposal");
+
+    let verifying = |limit: u32| -> (TopologyFold, Vec<TopologyEvent>) {
+        let mut fold = TopologyFold::new(inputs());
+        let mut log = Vec::new();
+        let mut step = |fold: &mut TopologyFold, event: TopologyEvent| {
+            apply(fold, &event);
+            log.push(event);
+        };
+        step(
+            &mut fold,
+            ev(TopologyEventBody::RunStarted {
+                data: Box::new(RunStarted4 {
+                    limits: TopologyLimits {
+                        max_merge_repairs: limit,
+                        ..run_started().limits
+                    },
+                    ..run_started()
+                }),
+            }),
+        );
+        step(&mut fold, dispatch(ALPHA, 0, &base));
+        let start = attempt_started(&fold, ALPHA, 0, 1, 0);
+        step(&mut fold, start);
+        step(&mut fold, candidate_prepared(ALPHA, 0, &base));
+        step(&mut fold, candidate_created(ALPHA, 0));
+        step(&mut fold, fast_publication(ALPHA, 0, 0, &base, vec![ALPHA]));
+        step(&mut fold, merged(ALPHA, 0, 0, vec![ALPHA]));
+        step(&mut fold, dispatch(MID, 0, &base));
+        let start = attempt_started(&fold, MID, 0, 1, 0);
+        step(&mut fold, start);
+        step(&mut fold, candidate_prepared(MID, 0, &base));
+        step(&mut fold, candidate_created(MID, 0));
+        step(&mut fold, verification_started(MID, 0, 1, &head, &proposal));
+        (fold, log)
+    };
+
+    let rejection = |admission: SpawnAdmission| {
+        let mut repair = repair_spawn(TaskKey(3), MID, MID);
+        repair.entry.deps = vec![ALPHA];
+        repair.entry.display_deps = vec![TaskId::from("alpha")];
+        if let SpawnAdmission::HumanBinding { options, .. } = &admission {
+            clip_to_human_binding(&mut repair, options.clone());
+        } else {
+            repair.admission = admission;
+        }
+        ev(TopologyEventBody::MergeRejected {
+            data: Box::new(MergeRejected {
+                sequence: SequenceId(1),
+                candidate: candidate_of(MID, 0),
+                rejecting_head: head.clone(),
+                disposition: RejectionDisposition::CodeRejected {
+                    verification: verification_record(Verdict::Rejected),
+                },
+                repair,
+                lease_effect: RejectionLeaseEffect::CreatesLineage {
+                    root: MID,
+                    paths: region(MID),
+                },
+            }),
+        })
+    };
+    let human_required = |limit: u32| SpawnAdmission::HumanRequired {
+        limit,
+        question: question("q-limit-Ünicode", TaskKey(3)),
+    };
+    let human_binding = || SpawnAdmission::HumanBinding {
+        options: vec!["  Codex-CLI  ".to_owned()],
+        question: question("q-binding-Ünicode", TaskKey(3)),
+    };
+
+    let (under, log) = verifying(1);
+    accepts(&under, &rejection(SpawnAdmission::Runnable));
+    accepts(&under, &rejection(human_binding()));
+    let refused = refused_live_and_on_replay(&under, &log, &rejection(human_required(1)));
+    let FoldError::InconsistentRecord { detail, .. } = &refused else {
+        panic!("a premature human-required repair was refused as {refused}");
+    };
+    assert!(
+        detail.contains("consumed 0 of 1 automatic repair(s)"),
+        "the refusal counts the lineage against the frozen limit: {detail}"
+    );
+
+    let (at_limit, log) = verifying(0);
+    let refused = refused_live_and_on_replay(&at_limit, &log, &rejection(SpawnAdmission::Runnable));
+    let FoldError::InconsistentRecord { detail, .. } = &refused else {
+        panic!("an over-limit runnable repair was refused as {refused}");
+    };
+    assert!(
+        detail.contains("consumed its 0 automatic repair(s)"),
+        "the refusal names the exhausted limit: {detail}"
+    );
+    accepts(&at_limit, &rejection(human_binding()));
+
+    let mut parked = at_limit.clone();
+    apply(&mut parked, &rejection(human_required(0)));
+    assert_eq!(
+        parked.task_state(TaskKey(3)),
+        Some(TaskState::AwaitingInput)
+    );
+    assert_eq!(parked.task_state(MID), Some(TaskState::AwaitingRepair));
+    assert_eq!(
+        parked.open_questions().expect("started").len(),
+        1,
+        "the over-limit repair parks on the question the rejection embedded"
+    );
+    assert_eq!(parked.lineage_members(MID), Some(1));
+    assert_eq!(parked.next_sequence(), Some(SequenceId(2)));
+    assert_eq!(
+        parked.satisfies_closure(TaskKey(3)),
+        Some(vec![MID, TaskKey(3)])
+    );
+}
+
+#[test]
+fn a_lineage_that_has_consumed_its_allowance_registers_only_a_human_required_repair() {
+    let base = sha("base");
+    let head = sha("head");
+    let proposal = sha("proposal");
+    let repaired_proposal = sha("repaired-proposal");
+    let first_repair = TaskKey(3);
+    let second_repair = TaskKey(4);
+
+    let mut fold = TopologyFold::new(inputs());
+    let mut log = Vec::new();
+    let mut step = |fold: &mut TopologyFold, event: TopologyEvent| {
+        apply(fold, &event);
+        log.push(event);
+    };
+    step(
+        &mut fold,
+        ev(TopologyEventBody::RunStarted {
+            data: Box::new(RunStarted4 {
+                limits: TopologyLimits {
+                    max_merge_repairs: 1,
+                    ..run_started().limits
+                },
+                ..run_started()
+            }),
+        }),
+    );
+    step(&mut fold, dispatch(ALPHA, 0, &base));
+    let start = attempt_started(&fold, ALPHA, 0, 1, 0);
+    step(&mut fold, start);
+    step(&mut fold, candidate_prepared(ALPHA, 0, &base));
+    step(&mut fold, candidate_created(ALPHA, 0));
+    step(&mut fold, fast_publication(ALPHA, 0, 0, &base, vec![ALPHA]));
+    step(&mut fold, merged(ALPHA, 0, 0, vec![ALPHA]));
+    step(&mut fold, dispatch(MID, 0, &base));
+    let start = attempt_started(&fold, MID, 0, 1, 0);
+    step(&mut fold, start);
+    step(&mut fold, candidate_prepared(MID, 0, &base));
+    step(&mut fold, candidate_created(MID, 0));
+    step(&mut fold, verification_started(MID, 0, 1, &head, &proposal));
+
+    let mut first = repair_spawn(first_repair, MID, MID);
+    first.entry.deps = vec![ALPHA];
+    first.entry.display_deps = vec![TaskId::from("alpha")];
+    step(
+        &mut fold,
+        ev(TopologyEventBody::MergeRejected {
+            data: Box::new(MergeRejected {
+                sequence: SequenceId(1),
+                candidate: candidate_of(MID, 0),
+                rejecting_head: head.clone(),
+                disposition: RejectionDisposition::CodeRejected {
+                    verification: verification_record(Verdict::Rejected),
+                },
+                repair: first,
+                lease_effect: RejectionLeaseEffect::CreatesLineage {
+                    root: MID,
+                    paths: region(MID),
+                },
+            }),
+        }),
+    );
+    assert_eq!(fold.lineage_members(MID), Some(1));
+
+    let mut dispatched = dispatch(first_repair, 0, &base);
+    if let TopologyEventBody::TaskDispatched { data } = &mut dispatched.body {
+        data.lease = LeaseGrant::InheritedLineage { root: MID };
+        data.source_candidate = Some(candidate_of(MID, 0));
+    }
+    step(&mut fold, dispatched);
+    let mut start = attempt_started(&fold, first_repair, 0, 1, 0);
+    if let TopologyEventBody::AttemptStarted { data } = &mut start.body {
+        data.materialization_observed = Some(Materialization::Conflict);
+    }
+    step(&mut fold, start);
+    let mut prepared = candidate_prepared(first_repair, 0, &base);
+    if let TopologyEventBody::CandidatePrepared { data } = &mut prepared.body {
+        data.lease_effect = CandidateLeaseEffect::WidensLineage {
+            root: MID,
+            paths: region(first_repair),
+        };
+    }
+    step(&mut fold, prepared);
+    step(&mut fold, candidate_created(first_repair, 0));
+    step(
+        &mut fold,
+        verification_started(first_repair, 0, 2, &head, &repaired_proposal),
+    );
+
+    let rejection = |admission: SpawnAdmission| {
+        let mut repair = repair_spawn(second_repair, MID, first_repair);
+        repair.entry.display_id = TaskId::from(
+            crate::topology::registry::repair_display_id(1, &TaskId::from("alpha")).as_str(),
+        );
+        repair.entry.deps = vec![ALPHA];
+        repair.entry.display_deps = vec![TaskId::from("alpha")];
+        repair.entry.lineage = Some(crate::topology::registry::Lineage {
+            root: MID,
+            parent: first_repair,
+            index: 1,
+        });
+        if let SpawnAdmission::HumanBinding { options, .. } = &admission {
+            clip_to_human_binding(&mut repair, options.clone());
+        } else {
+            repair.admission = admission;
+        }
+        ev(TopologyEventBody::MergeRejected {
+            data: Box::new(MergeRejected {
+                sequence: SequenceId(2),
+                candidate: candidate_of(first_repair, 0),
+                rejecting_head: head.clone(),
+                disposition: RejectionDisposition::CodeRejected {
+                    verification: verification_record(Verdict::Rejected),
+                },
+                repair,
+                lease_effect: RejectionLeaseEffect::WidensLineage {
+                    root: MID,
+                    paths: region(first_repair),
+                },
+            }),
+        })
+    };
+
+    let refused = refused_live_and_on_replay(&fold, &log, &rejection(SpawnAdmission::Runnable));
+    let FoldError::InconsistentRecord { detail, .. } = &refused else {
+        panic!("a runnable repair past a consumed allowance was refused as {refused}");
+    };
+    assert!(
+        detail.contains("consumed its 1 automatic repair(s)") && detail.contains("#1 member"),
+        "the refusal names the consumed limit and the member: {detail}"
+    );
+    accepts(
+        &fold,
+        &rejection(SpawnAdmission::HumanBinding {
+            options: vec!["codex-cli".to_owned()],
+            question: question("q-binding-second", second_repair),
+        }),
+    );
+
+    let mut parked = fold.clone();
+    apply(
+        &mut parked,
+        &rejection(SpawnAdmission::HumanRequired {
+            limit: 1,
+            question: question("q-limit-second", second_repair),
+        }),
+    );
+    assert_eq!(
+        parked.task_state(second_repair),
+        Some(TaskState::AwaitingInput)
+    );
+    assert_eq!(
+        parked.task_state(first_repair),
+        Some(TaskState::AwaitingRepair)
+    );
+    assert_eq!(parked.lineage_members(MID), Some(2));
+    assert_eq!(parked.next_sequence(), Some(SequenceId(3)));
+}
+
+#[test]
+fn an_empty_intersection_ladder_records_no_tier_no_ceiling_and_the_raised_floor() {
+    let waiting = FrozenLadder {
+        tiers: Vec::new(),
+        attempts_per: 2,
+        rungs: Vec::new(),
+        floor: Some(Tier::Mid),
+        ceiling: None,
+        effort: effort_policy(),
+        admission: Admission::HumanBinding {
+            options: vec!["codex-cli".to_owned()],
+        },
+    };
+    assert_eq!(super::start::check_ladder(TaskKey(3), &waiting), Ok(()));
+    let mut with_ceiling = waiting.clone();
+    with_ceiling.ceiling = Some(Tier::Mid);
+    assert!(
+        super::start::check_ladder(TaskKey(3), &with_ceiling).is_err(),
+        "a ceiling over no tier is malformed"
+    );
 }
 
 fn answered(key: TaskKey, id: &str, answer: Answer4) -> TopologyEvent {
@@ -7468,8 +7843,11 @@ fn grid_state(
                     sequence: SequenceId(0),
                     candidate: candidate_of(MID, 0),
                     class: TransactionClass::Prepared {
+                        expected_head: sha("base"),
                         proposed_sha: sha("commit-2-0"),
                         satisfies: vec![MID],
+                        disposition: PreparedDisposition::Fast,
+                        prepared_ref: None,
                     },
                 });
             }

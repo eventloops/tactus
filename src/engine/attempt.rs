@@ -206,7 +206,7 @@ pub(super) fn run_attempt(
             )?;
             let cost_usd = review.cost_usd;
             let unavailable = matches!(review.result, review::ReviewResult::Unavailable { .. });
-            failure = review_failure(review.result);
+            failure = review_failure(review.result, review.never_started);
             reviews.push(
                 super::classify::ReviewPassFacts {
                     pass: reviewer.lens.name(),
@@ -263,7 +263,10 @@ impl super::topology::attempt::ReviewPasses for LegacyReviewPasses {
     }
 }
 
-pub(super) fn review_failure(result: review::ReviewResult) -> Option<AttemptFailure> {
+pub(super) fn review_failure(
+    result: review::ReviewResult,
+    never_started: bool,
+) -> Option<AttemptFailure> {
     let verdict = match result {
         review::ReviewResult::Unavailable { status, detail } => {
             let kind = match status {
@@ -271,13 +274,16 @@ pub(super) fn review_failure(result: review::ReviewResult) -> Option<AttemptFail
                 OutcomeStatus::Timeout => FailureKind::Timeout,
                 _ => FailureKind::ReviewUnavailable,
             };
-            return Some(
-                AttemptFailure::new(
-                    kind,
-                    format!("reviewer unavailable: {}", util::head(&detail, 400)),
-                )
-                .from_reviewer(),
-            );
+            let failure = AttemptFailure::new(
+                kind,
+                format!("reviewer unavailable: {}", util::head(&detail, 400)),
+            )
+            .from_reviewer();
+            return Some(if never_started {
+                failure.from_a_process_that_never_started()
+            } else {
+                failure
+            });
         }
         review::ReviewResult::Judged(verdict) => verdict,
     };

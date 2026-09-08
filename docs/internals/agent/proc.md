@@ -138,11 +138,26 @@ A direct child plus the platform primitive that owns its ordinary
 descendants. Keeping ownership beside `Child` prevents a successful wait
 from accidentally bypassing tree settlement.
 
+## `struct SpawnFailure {`
+
+A spawn that failed, with the [`ProcessFate`] the boundary established.
+On Unix a `Command::spawn` that fails created nothing (a pre-exec failure
+is reaped inside `spawn`), so it is `NeverStarted`. On Windows the spawn
+is four steps after `CreateProcess`, and a failure at any of them has a
+process behind it: the review of `79ddbffb` found those cleanups
+discarded behind an outer `NeverStarted` (`PR8-R3-HOST-GROUP-GONE`), so
+[`windows_job::spawn_suspended_in_job_with`] now says what its own
+cleanup established and the funnel stores it.
+
 ## `impl ProcessTree` › `fn finish_direct_exit(&mut self) -> Result<(), UpstrokeError> {`
 
 The direct child has already exited. Windows descendants remain job
 members, so terminate and observe the job empty before returning its
-status. Unix process-group settlement is owned by `termination`.
+status. Unix process-group settlement is owned by `termination`. The
+funnel stores `Gone` only after this returns `Ok`: `TerminateProcess` is
+asynchronous and dropping the job handle is not a wait, so a cleanup that
+failed or timed out leaves the fate `Unresolved` with the exit status
+unreturned.
 
 ## `pub fn run_with_timeout_at(`
 
@@ -163,6 +178,36 @@ Spawn failure, supervision failure -- among them a reader thread the OS
 refused, a stream whose read failed rather than ended, or a stdin write
 failure other than the child's broken-pipe refusal, or a fault the observer
 injected. Pipe worker panics are supervision failures too.
+
+The typed form is [`run_with_timeout_classified`]; this drops the fate for
+the legacy callers that have nothing to decide.
+
+## `pub struct ProcessFailure {`
+
+A funnel error with the [`ProcessFate`] the funnel established when it
+returned: `NeverStarted` until `spawn` returns (or, on Windows, when the
+spawn boundary's own cleanup established nothing was left), `Unresolved`
+from then until the **tree** is established gone, and `Gone` only from
+tree-level evidence — on Unix the Supervisor's `finish` establishing the
+process group has no non-zombie member, on Windows the job observed
+empty. The direct child's own kill and reap are never that evidence: a
+reaped leader says nothing about a same-group descendant, which is what
+the review of `79ddbffb` reproduced (`PR8-R3-HOST-GROUP-GONE`) — the
+leader killed and reaped, a `sleep` in its group alive, the fate `Gone`.
+The funnel keeps the fate in a cell beside the closure and every return
+path is classified by where it stands, so an injected fault at a
+containment point after the spawn — where the funnel itself kills nothing
+and observes nothing, whatever the Supervisor's `Drop` later does — is
+honestly `Unresolved`, a timeout or output-limit kill is `Gone` once the
+group is settled whatever the leader's reap then returns, and a
+[`settle_failed_supervision`] whose group was not established leaves
+`Unresolved` however cleanly the leader reaped.
+
+## `pub fn run_with_timeout_classified(`
+
+[`run_with_timeout_at`] with the fate attached: what the host Runner runs,
+because its caller settles an outage terminal only on a fate that says no
+process survives.
 
 ## `let mut termination = termination::Supervisor::begin(terminate_site)?;`
 
@@ -258,6 +303,36 @@ exactly as they were when they were private items of this file.
 Kill the whole process tree. Killing only the direct child is not enough
 when it is a `cmd.exe` shim: the real agent process would survive, keep
 running, and keep the pipes open.
+
+`Ok` is evidence, not a courtesy: on Windows the job was observed empty
+(`terminate_and_wait`), and on Unix the group signal was delivered
+(`kill(-pgid, SIGKILL)` returned 0, or `ESRCH` because no member was
+left) and the leader was reaped. The Unix answer is weaker than the
+reaper's — it does not wait for a member in uninterruptible sleep — but
+after a delivered `SIGKILL` no member can run user code or complete a
+`fork`, and this path is only the register-error fallback, unreachable
+for a pid the kernel issued. The review of `79ddbffb` found it answering
+an unconditional `Ok` with every result discarded.
+
+## `fn signal_group_kill(child: &ProcessTree) -> std::io::Result<()> {`
+
+The Unix half of [`kill_tree`]'s evidence: `SIGKILL` to the group the
+child leads, `Ok` when it was delivered or `ESRCH` said the group is
+already empty. Its own function so the non-Windows block of `kill_tree`
+carries one positively gated statement and no `not(unix)` body — the
+platform census (`effects::tests`) refuses a body no CI runner compiles.
+
+## `fn settle_failed_supervision(`
+
+Tidy the direct child after a supervision failure and store the fate.
+`group_established` is the Supervisor's `finish` result as a fact — the
+group has no non-zombie member — and it, alone, sets `Gone`; the kill and
+the reap of the leader are attempted whatever it says and their failures
+are reported through [`finish_failed_supervision_cleanup`], never read as
+evidence. The previous shape took a cleanup `Result` and set `Gone` on a
+successful `wait`, and its `Ok(true)` caller handed it `Ok(())` while
+reporting the reaper's failure as the primary error, so a lost reaper
+produced `Gone` from a reaped leader (`PR8-R3-HOST-GROUP-GONE`).
 
 ## `pub(crate) fn child_leads_its_own_group(pid: u32) -> bool {`
 
@@ -482,6 +557,15 @@ it — are unreachable in every real test, and R22's "created as an
 ambient-job member, so a coordinator death at any spawn sub-step incl.
 the create-suspended prefix terminates it" was asserted for the ambient
 job and not for the spawn path's own recovery.
+
+Every failure after `CreateProcess` answers a [`SpawnFailure`] carrying
+what its cleanup established, because the process exists. Before the
+thread was resumed (`settle_suspended`) the child has run no
+instruction and so has no descendant: the job observed empty, or the
+suspended child itself reaped, is `Gone`. Once `resume` has been called
+(`settle_resumed`) only the job observed empty is `Gone`, the leader's
+reap proving nothing about what it may have created. Anything less is
+`Unresolved`; a failure before `CreateProcess` is `NeverStarted`.
 
 `assign` is also what makes the `PrivateJobAssigned` coordinate
 checkable: it hands a test the private job's handle at the instant the
@@ -2093,7 +2177,11 @@ the tree; dropping successful workers releases them too.
 
 Leave the exited leader as a zombie until cleanup completes:
 its PID pins the PGID, so no unrelated group can reuse the
-numeric id between observation and the final signal.
+numeric id between observation and the final signal. A `finish` that
+fails here leaves the fate `Unresolved`: the leader has exited, but
+the group it led was never established empty, and the fail-closed
+`SIGTERM` the reaper arms is asynchronous, not a proof that the cleanup
+completed before the caller acts on the error.
 
 ## `run_with_timeout_and_limit` › `if let Some(feeder) = stdin_feeder {`
 
@@ -2140,3 +2228,54 @@ failure. A successful wait proves the direct child was reaped and makes a
 racing kill refusal irrelevant. If wait fails, both kill and wait errors are
 reported. Deferred worker reports append through `WithCleanup`, preserving
 the primary type and avoiding a second agent-error prefix around it.
+
+## `#[cfg(any(target_os = "macos", test))]` › `fn listed_pid_bytes(returned: i32, errno: i32, buffer_bytes: usize) -> Option<usize> {`
+
+How many bytes of pids `proc_listpids` listed, or `None` when its answer is not
+an enumeration at all.
+
+**Apple's wrapper returns zero on failure.** `proc_listpids` calls `__proc_info`
+and reports its `-1` as `0` with `errno` left set, and a type outside the range
+it accepts sets `EINVAL` and returns `0` as well
+(`libsyscall/wrappers/libproc/libproc.c`). So "no process is in that group" and
+"this call could not enumerate the group" are the same return value, and
+`errno` — cleared immediately before the call, so nothing older can be read as
+this call's failure — is the only thing that separates them. A buffer filled to
+its last byte may have been truncated and is not an enumeration either.
+
+The rule is a function rather than three lines inside the scanner because the
+scanner compiles only on macOS. This is compiled and exercised on every
+platform, so the reasoning about Apple's contract is checked on the box the
+reasoning is done on and not only on the one it runs on.
+
+The Linux scanner has no such ambiguity and needs no equivalent: `getdents64`
+answers a failure with a negative value, so its zero — the end of `/proc` — is
+unambiguous. That is why the two platforms' `Some(false)` are not the same
+claim, and why §7.3's row in `pr8-triage.md` now states each separately.
+
+## `#[cfg(target_os = "macos")]` › `fn group_has_non_zombie_members(pgid: i32) -> Option<bool> {`
+
+The macOS half of the scanner `cleanup_reaper_group` loops on and
+`verify_group_scanner` checks at launch. Its answer is evidence about the
+process group, so an enumeration that did not happen has to be `None` and not
+`Some(false)`: the loop treats `None` as "keep killing", exactly as the Linux
+`None` is treated, and the launch check refuses rather than reporting a group
+it could not see. Before this was fixed, a failed enumeration exited the loop at
+once, so the anchor was reaped, `CLEANUP` acknowledged and `Supervisor::finish`
+returned `Ok` beside a same-group descendant that had not terminated — which
+permits termination reporting, snapshot removal and release of the cleanup
+lease (INV-18, INV-15).
+
+## `mod tests {` › `fn a_pid_enumeration_that_failed_is_not_an_empty_process_group() {`
+
+Apple's `proc_listpids` answers 0 for a group with no members and 0 for a call
+that failed, so a scanner that reads 0 as an enumeration acknowledges a cleanup
+it never observed. The rule this asserts is the one the macOS scanner reads;
+the platform this test runs on cannot reach the syscall, which is why the rule
+is a function. The assertions are, in order: Apple's failure answers
+(`__proc_info` reporting `-1` with `errno` set, and the wrapper's own
+out-of-range refusal); a group that really has no members, which answers 0 with
+the `errno` this call left alone and is an enumeration of nothing; an ordinary
+listing, where a stale `errno` cannot make a non-zero return unknown because a
+non-zero return is the syscall's own success; and a buffer filled to its last
+byte or a negative return, neither of which is an enumeration.

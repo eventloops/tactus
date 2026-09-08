@@ -56,7 +56,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 probe_ordinal::VERSION,
                 PROBE_TIMEOUT,
             )?)
-            .map_err(|cause| bin::boundary_refused(CLI, INSTALL_HINT, &cause))?;
+            .map_err(|cause| {
+                bin::boundary_refused(CLI, INSTALL_HINT, &UpstrokeError::from(cause))
+            })?;
         if out.output_limited {
             return Err(UpstrokeError::Agent {
                 message: format!(
@@ -119,7 +121,9 @@ impl AgentAdapter for ClaudeCodeAdapter {
                 probe_ordinal::AUTH_STATUS,
                 PROBE_TIMEOUT,
             )?)
-            .map_err(|cause| bin::boundary_refused(CLI, INSTALL_HINT, &cause))?;
+            .map_err(|cause| {
+                bin::boundary_refused(CLI, INSTALL_HINT, &UpstrokeError::from(cause))
+            })?;
         let mut discovery = parse_auth_status(&out);
         discovery.notes.push(
             "this CLI offers no non-interactive model listing, so the roster for this agent is \

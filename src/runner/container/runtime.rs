@@ -215,6 +215,19 @@ impl Liveness {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    ProcessGone,
+    RemovalInProgress,
+}
+
+impl Settled {
+    #[must_use]
+    pub const fn process_gone(self) -> bool {
+        matches!(self, Self::ProcessGone)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopMode {
     Graceful,
     Kill,
@@ -260,9 +273,9 @@ pub trait ContainerRuntime: Send + Sync {
 
     fn start(&self, name: &str) -> Result<(), RuntimeError>;
 
-    fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError>;
+    fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError>;
 
-    fn remove(&self, name: &str) -> Result<(), RuntimeError>;
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError>;
 }
 
 pub trait OwnerLiveness: Send + Sync {

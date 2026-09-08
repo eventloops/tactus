@@ -8,12 +8,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
     DiscoveredContainer, ImageInspection, Liveness, OwnerLiveness, RuntimeError, RuntimeOp,
-    StopMode,
+    Settled, StopMode,
 };
 use super::{ContainerHooks, DockerCli};
 use crate::topology::effects::{EffectSiteId, HookPhase, Injection};
@@ -44,16 +44,16 @@ struct State {
     substitutions: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct FakeRuntime {
-    state: Mutex<State>,
+    state: Arc<Mutex<State>>,
     trace: ContainerTrace,
 }
 
 impl FakeRuntime {
     pub(crate) fn new(trace: ContainerTrace) -> Self {
         Self {
-            state: Mutex::new(State::default()),
+            state: Arc::new(Mutex::new(State::default())),
             trace,
         }
     }
@@ -339,18 +339,32 @@ impl ContainerRuntime for FakeRuntime {
         Ok(())
     }
 
-    fn stop(&self, name: &str, _mode: StopMode) -> Result<(), RuntimeError> {
-        self.enter(RuntimeOp::Stop, name)?;
-        if let Some(container) = self.state().containers.get_mut(name) {
-            container.state = Liveness::Exited;
+    fn stop(&self, name: &str, _mode: StopMode) -> Result<Settled, RuntimeError> {
+        let settled = super::settle_stop(
+            name,
+            self.enter(RuntimeOp::Stop, name)
+                .map(|()| format!("{name}\n")),
+            |target| self.observe(target),
+        )?;
+        if settled.process_gone() {
+            if let Some(container) = self.state().containers.get_mut(name) {
+                container.state = Liveness::Exited;
+            }
         }
-        Ok(())
+        Ok(settled)
     }
 
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
-        self.enter(RuntimeOp::Remove, name)?;
-        self.state().containers.remove(name);
-        Ok(())
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
+        let settled = super::settle_remove(
+            name,
+            self.enter(RuntimeOp::Remove, name)
+                .map(|()| format!("{name}\n")),
+            |target| self.observe(target),
+        )?;
+        if settled.process_gone() {
+            self.state().containers.remove(name);
+        }
+        Ok(settled)
     }
 }
 
@@ -441,6 +455,8 @@ pub(crate) const DOCKER_GATED_TESTS: &[&str] = &[
     "real_docker_prints_the_transcribed_removal_in_progress_diagnostic",
     "real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_none",
     "real_docker_a_container_contains_a_daemonised_descendant",
+    "real_docker_fails_locally_without_ever_saying_a_container_is_gone",
+    "real_docker_lists_the_state_the_settlement_observation_reads",
 ];
 
 pub(crate) fn absent_reason() -> String {

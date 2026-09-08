@@ -40,6 +40,16 @@ engine's own point in its own order, and only the *decision* about what
 their result means is shared — the same split `ShellGate::command` makes
 for a gate's command.
 
+## `pub(crate) fn unjudgeable_diff(diff: &str, has_reviewers: bool) -> Option<AttemptFailure> {`
+
+The first of [`diff_failure`]'s two observations on its own: a diff no
+reviewer can read. What the integration verification consults, because
+the second observation is a judgement of the candidate's content that was
+made when the candidate was produced — an integration diff is the
+candidate cherry-picked onto a moved head, and a test another candidate
+published first is absent from it without being absent from the tree
+(`pr8-triage.md` §5, adequacy 2).
+
 ## `pub(crate) fn diff_failure(`
 
 What the diff alone says is wrong with an attempt, before anything runs.
