@@ -915,7 +915,7 @@ fn park_question<J: Verification>(
         key,
         kind,
         context,
-        options: crate::engine::coordinator::question_options(kind),
+        options: crate::engine::coordinator::topology_question_options(kind),
     }
 }
 

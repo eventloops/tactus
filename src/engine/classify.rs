@@ -136,7 +136,7 @@ pub(crate) fn unresolved_conflict_failure(paths: &[String]) -> AttemptFailure {
     AttemptFailure::new(
         FailureKind::AgentError,
         format!(
-            "the worker left {} conflicted path(s) unresolved: {}",
+            "the worker left {} conflicted path(s) unresolved in the index: {}",
             paths.len(),
             paths
                 .iter()
@@ -146,10 +146,11 @@ pub(crate) fn unresolved_conflict_failure(paths: &[String]) -> AttemptFailure {
         ),
     )
     .with_feedback(format!(
-        "The repair worktree was materialized with the rejected candidate and these paths still \
-         carry conflict markers: {}. Resolve every conflict in the working tree — remove the \
-         `<<<<<<<`/`=======`/`>>>>>>>` markers and keep the behaviour already merged — and do \
-         not commit.",
+        "The repair worktree was materialized with the rejected candidate and these paths are \
+         still unmerged in the index: {}. Resolve every conflict in the working tree — remove \
+         the conflict markers and keep the behaviour already merged — then stage each resolved \
+         path with `git add <path>` (or `git rm <path>` to resolve it by deletion). A path left \
+         unmerged is refused before any gate runs. Do not commit.",
         paths.join(", ")
     ))
 }

@@ -1562,7 +1562,7 @@ impl TopologyRun {
                 kind,
                 failure,
             ),
-            options: crate::engine::coordinator::question_options(kind),
+            options: crate::engine::coordinator::topology_question_options(kind),
         })
     }
 

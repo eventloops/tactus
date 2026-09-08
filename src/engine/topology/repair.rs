@@ -139,7 +139,11 @@ fn repair_body(
         RejectionDisposition::Conflict { paths } => {
             body.push_str("\nThe cherry-pick onto that head conflicted in: ");
             body.push_str(&render_paths(paths));
-            body.push_str(".\n");
+            body.push_str(
+                ".\nEach conflicted path is left unmerged in the index for you to resolve: edit \
+                 it, then stage the resolution with `git add <path>` (or `git rm <path>`). A \
+                 result with an unmerged entry is refused before any gate runs.\n",
+            );
         }
         RejectionDisposition::CodeRejected { verification } => {
             body.push_str(&format!(
@@ -256,7 +260,7 @@ fn admission_for(
                     "this lineage has consumed its {limit} automatic repair(s); a person must \
                      approve another attempt with the latest evidence, or decline the lineage"
                 ),
-                crate::engine::coordinator::question_options(QuestionKind::Continue),
+                crate::engine::coordinator::topology_question_options(QuestionKind::Continue),
             ),
         };
     }

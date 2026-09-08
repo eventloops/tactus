@@ -845,10 +845,14 @@ publishing the index or cache-tree". The staged objects are behind the
 scrubbing the worktree rather than by anything cleverer.
 
 **A repair's unresolved conflicts are read first.** `unresolved_conflicts`
-is a read over the unmerged index entries and their working-tree files;
-when it names any, the capture returns the base's tree with those paths
-and stages nothing, so a worker that left markers behind cannot have them
-captured as its work.
+is a read of the index's unmerged entries — the paths the worker has not
+resolved with `git add` or `git rm`, whatever their working-tree files look
+like; when it names any, the capture returns the base's tree with those
+paths and stages nothing, so an unresolved conflict cannot be captured as
+the worker's work. It once read the files for `<<<<<<< ` markers instead;
+PR #249's conformance review materialized conflicts under
+`conflict-marker-size=8` and `-merge`, both of which the scan read as
+resolved and the capture staged.
 
 ### Errors
 

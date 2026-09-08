@@ -324,6 +324,15 @@ spread points, every residue classified and every worktree recovered to the
 control's tree. Its first run found the held `MERGE_MSG.lock` the verifier
 did not read.
 
+## `fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {`
+
+PR #249's crash review, finding 1: the coordinator dies after the pick
+completed and before `attempt_started`; (g) reuses the quiescent worktree
+and the continuation picks again, twice over. The index and the working
+tree must hold what one pick produces — the funnel restores the base's tree
+before each pick, because a pick onto the merged index applied its hunk a
+second time on every resume.
+
 ## `fn repair_materialization_objects_released_to_git_on_scrub() {`
 
 R9 → R27: a three-way merge's new blob is referenced by the repair index
@@ -335,5 +344,6 @@ candidate commit stays reachable through its ref.
 The two kill points after the pick's index write, pinned deterministically:
 the held `MERGE_MSG.lock` is read as the message's residue and recreated
 from; the merged index with no state file — also the completed after
-phase — is reused, and the re-run pick is a no-op reporting the same
-observation, for a clean source and for a conflicting one.
+phase — is reused, and the re-run pick starts from the restored base tree
+and reports the same observation, for a clean source and for a conflicting
+one.

@@ -2478,6 +2478,63 @@ fn steps_d_and_e_reach_every_generation_not_the_first() {
     }
 }
 
+/// `T-ATTEMPT.resume_action`: "the task worktree scrubbed with force". Step
+/// (d) closes the interrupted attempt's generation; the worktree that
+/// generation owned (R9) goes with the close.
+#[test]
+fn an_interrupted_attempts_worktree_and_intent_are_reclaimed_by_recovery() {
+    let fixture = Fixture::build(
+        "interrupted-worktree-reclaimed",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    assert!(
+        worktree.exists()
+            && fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&slot),
+        "the dead incarnation left the in-flight attempt's worktree and intent"
+    );
+
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let (result, _) = resume(&fixture, &harness, &given);
+    let recovered = result.expect("a run with an in-flight attempt resumes");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "(d) settles the attempt interrupted"
+    );
+    assert_eq!(
+        replayed(&fixture).task_state(ALPHA),
+        Some(TaskState::Pending),
+        "and the task returns to Pending for a fresh generation"
+    );
+    assert!(
+        !worktree.exists()
+            && !fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&slot),
+        "the closed generation's worktree and intent are reclaimed (worktree={}, intent={})",
+        worktree.exists(),
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+    );
+}
+
 #[test]
 fn retry_refused_after_resume() {
     let fixture = Fixture::build(
@@ -2504,6 +2561,9 @@ fn retry_refused_after_resume() {
         "before the resume the retained generation is retryable, or this test proves nothing"
     );
 
+    let retained_worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    let retained_slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+
     let harness = harness();
     let runtime = runtime_holding_the_record();
     let certifies = AlwaysCertifies;
@@ -2519,6 +2579,22 @@ fn retry_refused_after_resume() {
     assert!(
         !after.ready_retry(ALPHA),
         "the retained session is gone, so there is no same-session retry to take"
+    );
+    assert!(
+        !retained_worktree.exists()
+            && !fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&retained_slot),
+        "an ordinary generation (e) closes is reclaimed like a repair's: the class, not \
+         the instance the review walked (worktree={}, intent={})",
+        retained_worktree.exists(),
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&retained_slot)
     );
     let refused = after
         .plan_transition(&event(attempt_started(2)))
@@ -4296,8 +4372,8 @@ fn the_driver_parks_an_attempt_with_the_question_it_raised() {
     );
     assert_eq!(
         parked.options,
-        crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify),
-        "the options are not `question_options`'s"
+        crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify),
+        "the options are the schema-4 list, which promises nothing about typed text"
     );
 }
 
@@ -8861,7 +8937,8 @@ fn the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshot
 
 #[test]
 fn a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap() {
-    let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);
+    let options =
+        crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify);
     let fixture = Fixture::two_tasks("paid-park");
     plant_stale_verification(&fixture);
     let driven = drive(
@@ -8992,7 +9069,8 @@ fn an_integration_reviews_cost_reaches_the_run_spend() {
 
 #[test]
 fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {
-    let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);
+    let options =
+        crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify);
     let fixture = Fixture::two_tasks("park-answered");
     plant_stale_verification(&fixture);
     append_events(
@@ -10402,6 +10480,12 @@ fn retained_by_the_creator(session: &str) -> AttemptSettlement {
 /// The repair's worktree as the killed creator left it: registered at the
 /// slot the manager derives, at the recorded base, with nothing done in it.
 fn plant_repair_worktree(fixture: &Fixture, key: TaskKey, base: &str) -> PathBuf {
+    plant_task_worktree(fixture, key, base)
+}
+
+/// Any task's generation-0 worktree as a dead incarnation left it: intent
+/// written, worktree added at `base`, nothing done in it.
+fn plant_task_worktree(fixture: &Fixture, key: TaskKey, base: &str) -> PathBuf {
     let manager = fixture.manager();
     let slot = crate::engine::topology::dispatch::task_slot(key, GEN);
     manager
@@ -10622,6 +10706,9 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
         },
     );
     let (rejection, repair) = plant_rejected_repair(&fixture);
+    let retained_worktree =
+        plant_repair_worktree(&fixture, repair, rejection.rejecting_head.as_str());
+    let retained_slot = crate::engine::topology::dispatch::task_slot(repair, GEN);
     append_events(
         &fixture,
         &[
@@ -10639,6 +10726,16 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
         "the retained repair generation is retryable by its own incarnation, or the close \
          below closes nothing"
     );
+    assert!(
+        retained_worktree.exists()
+            && fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&retained_slot),
+        "the dead incarnation left the retained generation's worktree and intent, or the \
+         reclaim below reclaims nothing"
+    );
 
     let harness = harness();
     let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
@@ -10648,6 +10745,19 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
     assert_eq!(
         recovered.retained_closed, 1,
         "(e) closes the retained repair generation"
+    );
+    assert!(
+        !retained_worktree.exists(),
+        "PR #249's crash review, finding 2: a generation (e) closes owns nothing (R9), so \
+         its worktree is reclaimed with the close rather than kept for the life of the run"
+    );
+    assert!(
+        !fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&retained_slot),
+        "and its durable intent with it"
     );
     let closed = TopologyFold::parse_log(&fixture.log_bytes())
         .expect("parses")
@@ -10745,6 +10855,26 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
     assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
     assert!(driven.invocations_balance);
     assert_eq!(driven.entitlements_held, 0);
+    let (again, _handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("another complete resume after the replacement generation merged");
+    assert_eq!(
+        again.retained_closed, 0,
+        "the prior generation is already closed in the log"
+    );
+    assert!(
+        !retained_worktree.exists()
+            && !fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&retained_slot),
+        "the closed generation stays reclaimed across a later resume"
+    );
 }
 
 /// `R11` across a budget stop: the rejected candidate's ref is what keeps the
@@ -10937,6 +11067,124 @@ fn a_one_off_binding_answer_activates_a_repair_no_frozen_rung_can_run() {
     );
     let fold = replayed(&fixture);
     assert_eq!(fold.task_state(ALPHA), Some(TaskState::Merged));
+    assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
+    assert!(driven.invocations_balance);
+    assert_eq!(driven.entitlements_held, 0);
+}
+
+/// PR #249's conformance review, finding 1: with two agents offered, the
+/// person picks the second by number at the production parser. That is a
+/// one-off binding to the second agent — `option_index: 1`, the catalogue's
+/// lowest model for it at or above the floor — and not a decline of the
+/// lineage, which is what the parser's last-option rule made of it.
+#[test]
+fn picking_the_last_of_two_offered_agents_binds_the_repair_to_it_rather_than_declining() {
+    let fixture = Fixture::build(
+        "one-off-binding-second-agent",
+        Damage {
+            two_tasks: true,
+            small_only: true,
+            integration_second_opinion: true,
+            ..Damage::default()
+        },
+    );
+    let (_rejection, repair) = plant_rejected_repair(&fixture);
+    let fold = replayed(&fixture);
+    let open = fold
+        .open_questions()
+        .expect("started")
+        .values()
+        .find(|open| open.question.key == repair)
+        .expect("the repair's admission question is open")
+        .clone();
+    let second_agent = crate::engine::topology::scaffold::REVIEW_AGENT;
+    assert_eq!(
+        open.question.options,
+        vec![AGENT.to_owned(), second_agent.to_owned()],
+        "the options are the root's two allowed agents, or this test proves nothing"
+    );
+    let rendered = crate::ir::Question {
+        id: open.question.id.clone(),
+        kind: open.question.kind,
+        affected_tasks: Vec::new(),
+        context: open.question.context.clone(),
+        options: open.question.options.clone(),
+    };
+    let typed = crate::interaction::interpret(&rendered, "2\n");
+    assert_eq!(
+        typed,
+        crate::ir::Answer::Answered {
+            text: second_agent.to_owned()
+        },
+        "`2` at the prompt is the second agent, not a decline"
+    );
+
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(typed),
+            ..DriveSeams::default()
+        },
+        3,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "step 1 ingests a binding, not a decline: {:?}",
+        driven.progress
+    );
+    let answers = answers_of(&driven.log, repair);
+    assert_eq!(answers.len(), 1);
+    let crate::topology::events::Answer4::Answered {
+        option_index,
+        binding_override: Some(binding),
+    } = &answers[0].answer
+    else {
+        panic!("the answer is a one-off binding: {:?}", answers[0].answer);
+    };
+    assert_eq!(*option_index, 1, "the second option");
+    assert_eq!(binding.option_index, 1);
+    assert_eq!(binding.agent, second_agent);
+    assert_eq!(
+        binding.model,
+        crate::catalog::CATALOG
+            .iter()
+            .filter(|entry| entry.agent == second_agent && entry.tier >= Tier::Mid)
+            .min_by_key(|entry| entry.tier)
+            .map(|entry| entry.model.to_owned())
+            .expect("the catalogue has a model for the second agent at or above Mid"),
+        "the catalogue's lowest model for the chosen agent at or above the floor"
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "step 2 runs the repair under the second agent: {:?}",
+        driven.progress
+    );
+    let starts = attempt_starts_of(&driven.log, repair);
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].binding.agent, second_agent);
+    assert!(starts[0].binding.pinned);
+    assert_eq!(starts[0].binding.tier, Tier::Mid);
+    let fold = replayed(&fixture);
+    assert_eq!(
+        fold.task_state(ALPHA),
+        Some(TaskState::Merged),
+        "the lineage merges instead of failing: {:?}",
+        driven.progress
+    );
     assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
     assert!(driven.invocations_balance);
     assert_eq!(driven.entitlements_held, 0);

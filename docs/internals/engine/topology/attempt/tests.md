@@ -1003,16 +1003,30 @@ caller offered something it should not have. Witnessed by restoring that
 
 ## `fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_is_staged() {`
 
-`R9`: a conflicted path still carrying markers is read before staging, so
+`R9`: a path the index still holds unmerged is read before staging, so
 nothing is staged and the tree is the base's; the assessment fails
-`AgentError` naming the path, with feedback about the markers, and no gate
-or reviewer runs. Once the worker resolves the file, the capture stages
+`AgentError` naming the path, with feedback that says to resolve and stage
+it, and no gate or reviewer runs. Rewriting the file without its markers
+changes nothing until the worker stages it; once it has, the capture stages
 the resolution and the index holds no unmerged entry.
 
-## `fn deleting_a_conflicted_file_resolves_it() {`
+## `fn a_staged_deletion_resolves_a_conflict_and_an_unstaged_one_does_not() {`
 
-A conflicted path whose file is gone was resolved by deletion: nothing
-unresolved, and the captured tree records the deletion.
+A conflicted path whose file is gone is still an unmerged entry; `git rm`
+resolves it, and the captured tree then records the deletion.
+
+## `fn a_conflict_rendered_with_a_longer_marker_size_is_unresolved_at_capture() {`
+
+PR #249's conformance review, finding 2: the unmerged entry is what makes a
+path unresolved, not the seven-character marker a scan would look for. A
+`conflict-marker-size=8` conflict the worker left alone is refused before
+staging while its other edit stands, and a staged resolution captures.
+
+## `fn an_untouched_binary_conflict_is_unresolved_at_capture() {`
+
+The same finding's other format: a `-merge` path Git leaves as the current
+side with no marker at all. Untouched it is refused; replaced and staged it
+captures with the side the worker chose.
 
 ## `fn an_already_present_source_proceeds_as_an_ordinary_attempt_whose_empty_diff_fails_honestly() {`
 

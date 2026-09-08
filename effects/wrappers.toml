@@ -519,6 +519,7 @@ effect_free = [
     "id",
     "interactive",
     "interpret",
+    "is_decline_option",
     "is_open",
     "new",
     "new_question_id",

@@ -200,9 +200,43 @@ fail a task and block its dependents. Failing requires typing it.
 
 Resolve one rendered, 1-indexed option without losing the action encoded by
 engine-authored terminal choices. `Question.options` predates typed option
-records, so the final option on every non-clarification question is the
-frozen decline action; treating its label as ordinary guidance would retry
-the task the operator explicitly chose to give up on.
+records, so an option is a decline by what it says — one of
+[`DECLINE_OPTIONS`] — and never by where it sits; treating a decline's label
+as ordinary guidance would retry the task the operator explicitly chose to
+give up on.
+
+**It used to be positional.** Until PR #249's first repair round the last
+option of every non-clarification list with two or more options was read as
+the decline, which is where the legacy coordinator puts it. A schema-4
+`HumanBinding` admission offers *agents* — `["claude-code", "copilot"]` —
+and the conformance review picked `2` at the production parser: the second
+agent became a durable `Declined`, and replay showed the root and its
+repair `Failed` with the lineage lease released. An option list carries no
+typed action, so the text the engine authors is the only thing that can say
+which option declines.
+
+## `pub(crate) const DECLINE_SPEND_OPTION: &str =`
+
+The decline action of an `ApproveSpend` question, as the engine words it
+for the operator.
+
+## `pub(crate) const GIVE_UP_OPTION: &str =`
+
+The give-up action of every other question that offers one, as the engine
+words it for the operator, in both engines' lists.
+
+## `pub(crate) const DECLINE_OPTIONS: [&str; 2] = [DECLINE_SPEND_OPTION, GIVE_UP_OPTION];`
+
+Every option the engine authors as a decline. `coordinator::question_options`
+and `coordinator::topology_question_options` build their lists from these
+two constants, so the producer and [`is_decline_option`] cannot disagree
+about which option declines; an option list from anywhere else — an
+agent name, a legacy question file worded otherwise — declines nothing by
+number, and `skip` typed at the prompt still does.
+
+## `pub(crate) fn is_decline_option(option: &str) -> bool {`
+
+Whether an option's text is one of the engine's decline actions.
 
 ## `pub fn answers_for<'a>(`
 
@@ -235,6 +269,12 @@ Cap on the wait. Past this, waiting longer is worse than asking a human.
 
 Doubling backoff, capped. `round` counts consecutive waits where deferred
 tasks were the *only* runnable work.
+
+## `fn picking_the_last_agent_offered_by_number_names_that_agent_and_declines_nothing() {`
+
+PR #249's conformance review, finding 1, at the parser: a `HumanBinding`
+question's options are agents, and `2` on `["claude-code", "copilot"]` is
+`copilot`. Declining is `skip`, or an option that says so.
 
 ## `fn an_empty_line_parks_but_skip_declines()` › `assert_eq!(interpret(&question(), "\n"), Answer::Unanswered);`
 

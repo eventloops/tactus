@@ -146,7 +146,10 @@ mod tests {
             kind: QuestionKind::Unblock,
             affected_tasks: vec![TaskId::from("t1")],
             context: "every rung failed on the same assertion".to_owned(),
-            options: vec!["retry on frontier".to_owned(), "skip it".to_owned()],
+            options: vec![
+                "retry on frontier".to_owned(),
+                interaction::GIVE_UP_OPTION.to_owned(),
+            ],
         });
         interaction::write_question(&questions, &record).expect("write question");
     }

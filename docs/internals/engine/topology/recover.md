@@ -1681,11 +1681,15 @@ Where the protocol's reopen reports a torn-tail normalization.
 `recovery_order` (d), and `T-ATTEMPT`'s resume action: an attempt whose
 coordinator died is not retried in place, it is settled `interrupted` and
 its generation closed, so the next dispatch opens a fresh generation at the
-task's base.
+task's base — and "the task worktree scrubbed with force", which is the
+same resume action's next clause: the closed generation owns its worktree
+and intent (R9) and a Closed generation owns nothing, so both go with the
+close, after the append ([`reclaim_closed_generation`]).
 
 ### Errors
 
-Whatever [`emit`] refuses or fails at.
+Whatever [`emit`] refuses or fails at, or the scrub's containment refusals
+or Git error.
 
 ## `pub fn close_retained_idle(`
 
@@ -1697,9 +1701,29 @@ not that incarnation: `T-RESUME`'s authoritative state says "retained_session
 authority already invalid for the new incarnation", so the generation closes
 rather than being resumed into.
 
+**And its worktree and intent are reclaimed with the close.** PR #249's
+crash review planted a retained repair generation's real worktree, resumed,
+ran the replacement generation to a merge, resumed again, and found the
+closed generation's checkout and durable intent still there: nothing
+reclaimed a generation (e) had closed, so every retained generation a dead
+incarnation left accumulated for the life of the run. `cleanup` allows a
+task worktree to be scrubbed once "the generation is Closed", R9 owns it by
+generation, and the same omission sat in (d); both steps now hand the closed
+generation to [`reclaim_closed_generation`] after the append. The live
+retry close (`RetryOutcome::Close`, `WorktreeMissing`) is the arm not
+changed: the attempt-level test pins that a retry itself removes nothing,
+and a live run's closed worktree is run-end closure's to reclaim (PR10).
+
 ### Errors
 
-Whatever [`emit`] refuses or fails at.
+Whatever [`emit`] refuses or fails at, or the scrub's containment refusals
+or Git error.
+
+## `fn reclaim_closed_generation(`
+
+Scrub the worktree and intent a generation recovery has just closed. The
+scrub is `dispatch::scrub`, forced and idempotent, so a generation whose
+worktree the kill never created is reclaimed as cheaply as one it did.
 
 ## `pub fn run_resumed(`
 

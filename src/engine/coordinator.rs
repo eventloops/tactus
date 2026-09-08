@@ -1223,11 +1223,21 @@ pub(super) fn question_options(kind: QuestionKind) -> Vec<String> {
         }
         QuestionKind::ApproveSpend => vec![
             "approve: run the escalated attempt".to_owned(),
-            "decline (`skip`) — this task fails and its dependents are blocked".to_owned(),
+            interaction::DECLINE_SPEND_OPTION.to_owned(),
         ],
         _ => vec![
             "retry this task with guidance you type below".to_owned(),
-            "give up on this task (`skip`) — its dependents will be blocked".to_owned(),
+            interaction::GIVE_UP_OPTION.to_owned(),
+        ],
+    }
+}
+
+pub(super) fn topology_question_options(kind: QuestionKind) -> Vec<String> {
+    match kind {
+        QuestionKind::ApproveSpend => question_options(kind),
+        QuestionKind::Clarify | QuestionKind::Unblock | QuestionKind::Continue => vec![
+            "retry this task (typed text un-parks it and is not passed to the agent)".to_owned(),
+            interaction::GIVE_UP_OPTION.to_owned(),
         ],
     }
 }

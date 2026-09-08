@@ -1507,7 +1507,9 @@ The question a parked attempt raises.
 
 Every word of it comes from the legacy authorities:
 `coordinator::question_context` for the prose the human reads and
-`coordinator::question_options` for what they can answer. The driver
+`coordinator::topology_question_options` for what they can answer — the
+schema-4 list, which does not promise that typed text reaches the agent,
+because `question_answered` carries no field for it. The driver
 supplies only what the frozen registry knows — the display id, the
 title, the acceptance list — and what this branch knows about the
 attempt.

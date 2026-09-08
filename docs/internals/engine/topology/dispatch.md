@@ -569,14 +569,20 @@ failure.
 Run, or re-run, a repair's recorded materialization in a verified or fresh
 worktree, and say what it observed.
 
-`Object.RepairMaterialize` is `git cherry-pick --no-commit`, whose merge
-objects are referenced by the worktree index (R9), followed by the removal
-of the state files the pick leaves (`MERGE_MSG`, `AUTO_MERGE`) so the
-worktree is quiescent again. It is idempotent in a worktree at the recorded
-base: a fresh one reproduces the index, and one whose index already holds
-the pick gets a no-op merge reporting the same observation — which is why
-`T-DISPATCH` says "re-run the recorded materialization in a **verified or
-fresh** worktree" and why a caller reaches this through
+`Object.RepairMaterialize` restores the worktree's index and checkout to
+`HEAD`'s tree (`git read-tree --reset -u HEAD`), then runs
+`git cherry-pick --no-commit`, whose merge objects are referenced by the
+worktree index (R9), and removes the state files the pick leaves
+(`MERGE_MSG`, `AUTO_MERGE`) so the worktree is quiescent again. It is
+idempotent in a worktree at the recorded base **because of the restore**: a
+fresh worktree and one whose index already holds a completed pick both get
+one pick onto the base's tree. A pick onto the merged index is not a no-op
+— it is a three-way merge, and PR #249's crash review measured it applying
+its hunk again on every resume
+(`a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces`)
+— which is why `T-DISPATCH`'s "re-run the recorded materialization in a
+**verified or fresh** worktree" needs the funnel to start from the base
+whatever the verify found, and why a caller reaches this through
 [`resume_open_no_attempt`] rather than directly. The observation is the
 funnel's `Materialized`, mapped one-to-one onto the wire's
 `Materialization` by [`observed_kind`].
@@ -598,12 +604,12 @@ kill inside the pick leaves `index.lock`, or the merged index with
 `MERGE_MSG` or its held `MERGE_MSG.lock`, all of which `Worktree.Verify`
 reads and recreates from; a pick that completed left its index holding the
 merge and — the funnel having cleared the state files — nothing the verify
-reads, so the worktree is reused and the pick re-run onto that index is a
-no-op merge reporting the same observation
+reads, so the worktree is reused as it stands and the funnel restores the
+base's tree before it picks again, reporting the same observation
 (`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
-Either way the result is one materialization in a worktree at the recorded
-base, and [`Resumed`] carries both what the verify decided and what the
-materialization observed.
+Either way the result is one pick onto the base's tree in a worktree at the
+recorded base, and [`Resumed`] carries both what the verify decided and
+what the materialization observed.
 
 ### Errors
 

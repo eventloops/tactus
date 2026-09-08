@@ -2711,9 +2711,9 @@ impl WorkspaceManager {
     /// `RejectionDisposition::Conflict` is *expected* to conflict: leaving the
     /// conflict in the worktree is what gives the agent something to resolve,
     /// and [`Self::unresolved_conflicts`] is the rule that catches an agent
-    /// that does not. So a non-zero exit whose index carries unmerged entries is
-    /// [`Materialized::Conflict`], and only a non-zero exit *without* them is
-    /// the Git error it was before.
+    /// that does not stage a resolution. So a non-zero exit whose index
+    /// carries unmerged entries is [`Materialized::Conflict`], and only a
+    /// non-zero exit *without* them is the Git error it was before.
     ///
     /// # The three shapes, measured
     ///
@@ -2743,9 +2743,30 @@ impl WorkspaceManager {
     /// why the residue classifier reads the *index* for it. A kill before the
     /// removal leaves `MERGE_MSG` (or its held `MERGE_MSG.lock`), which the
     /// quiescence check reads and recreates from; a completed materialization
-    /// verifies at its base and the continuation's re-run pick onto the index
-    /// that already holds it is a no-op merge reporting the same observation
-    /// (`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
+    /// verifies at its base and is reused.
+    ///
+    /// # The pick starts from the base's tree, every time
+    ///
+    /// A worktree that verified at its base may still hold a pick: the
+    /// packet's quiescence rule reads `HEAD`, the index lock and the state
+    /// files, not the index against the base's tree, so a materialization
+    /// that completed before its process died passes `Worktree.Verify` with
+    /// its merged index in place. A cherry-pick onto that index is **not** a
+    /// no-op — it is a three-way merge, and PR #249's crash review measured it
+    /// applying its hunk a second time (`a a y c b c a` picked with
+    /// `c b -> c c b x` gave `a a y c c b x c a`, and a second pick onto that
+    /// `a a y c c c b x c a`; one more line per resume). So the funnel first
+    /// restores the index and working tree to `HEAD`'s tree with
+    /// `git read-tree --reset -u HEAD` — which also discards unmerged entries
+    /// and any edit, and touches no ref, no `ORIG_HEAD`, and no untracked file
+    /// — and only then picks. Every materialization is therefore one pick
+    /// onto the base's tree, whatever the worktree held, which is what makes
+    /// re-running it after a kill deterministic
+    /// (`a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces`,
+    /// `a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
+    /// A kill inside the restore leaves `index.lock` (this site's `IndexLock`
+    /// element) or an index at the base with a partly rewritten checkout, and
+    /// the next materialization restores again.
     ///
     /// # Errors
     ///
@@ -2763,6 +2784,15 @@ impl WorkspaceManager {
             EffectSiteId::Object(ObjectSite::RepairMaterialize),
             || {
                 self.revalidate_acted_through(Primitive::RepairMaterialize, Some(slot), None)?;
+                self.git_ok(
+                    &path,
+                    &[
+                        OsString::from("read-tree"),
+                        OsString::from("--reset"),
+                        OsString::from("-u"),
+                        OsString::from("HEAD"),
+                    ],
+                )?;
                 let output = self.git(
                     &path,
                     &[
@@ -2868,59 +2898,47 @@ impl WorkspaceManager {
     }
 
     /// The conflicted paths of a repair worktree the worker left unresolved:
-    /// every unmerged index entry whose working-tree file still carries a
-    /// conflict marker.
+    /// every path the index still holds unmerged.
     ///
     /// **A read, so it takes no hooks and names no effect site**, like
     /// [`Self::changed_paths`]: it stages nothing, writes no index and creates
     /// no object.
     ///
     /// `repairs.dispatch`: "unresolved index entries fail capture before gates";
-    /// DESIGN §26.4: "the engine refuses a result with unresolved index entries
-    /// and then runs the ordinary gates and reviews". Under *agents edit files;
-    /// the engine owns git* an agent cannot resolve an index entry — only the
-    /// capture's own `git add -A` does, and that stages every unmerged path
-    /// unconditionally, an untouched conflicted file with its markers inside.
-    /// So the rule is read over the working tree **before** the capture stages
-    /// anything: a path whose file still begins a line with `<<<<<<< ` or
-    /// `>>>>>>> ` is unresolved; a path whose file is gone was resolved by
-    /// deletion; a path that does not decode is unresolved because it cannot be
-    /// inspected. `=======` alone is deliberately not a marker (a setext heading
-    /// is one), and a binary conflict carries no marker at all.
+    /// DESIGN §26.4: the materialization leaves "the unmerged index for the
+    /// worker to resolve" and "the engine refuses a result with unresolved
+    /// index entries". The rule is read where it is stated, in the index: an
+    /// entry is resolved when the worker has staged its resolution (`git add
+    /// <path>`, or `git rm <path>` for a resolution by deletion), exactly as
+    /// Git's own hint after a conflicting pick says, and it is unresolved while
+    /// the stage entries remain — whatever the working-tree file looks like.
+    /// This deliberately does **not** read the file for conflict markers:
+    /// PR #249's conformance review materialized a conflict under a legitimate
+    /// `conflict-marker-size=8` attribute, and another under `-merge`, which
+    /// leaves the current side in place with no marker at all; a marker scan
+    /// read both as resolved, the capture staged them, and unresolved work
+    /// reached the gates. The index has no formats.
     ///
-    /// Measured (git 2.43): a conflicted file rewritten without markers is
-    /// resolved by the capture's `git add -A`, and `write-tree` then succeeds.
+    /// A path that does not decode is reported as one unresolved entry naming
+    /// the reason, because it cannot be inspected and a capture must not pass
+    /// on a list it could not read.
     ///
     /// # Errors
     ///
-    /// The containment refusals, a Git error from the unmerged read, or an I/O
-    /// error other than not-found reading a conflicted file (§7: only an actual
-    /// absence is an answer).
+    /// The containment refusals or a Git error from the unmerged read.
     pub fn unresolved_conflicts(&self, slot: &Slot) -> Result<Vec<String>, UpstrokeError> {
         self.revalidate()?;
         let path = self.slot_target(slot)?;
         let records = self.unmerged_records(&path)?;
-        let unmerged = match parsers::changed_path_records(&records) {
-            Ok(paths) => paths,
-            Err(error) => {
-                return Ok(vec![format!(
-                    "(an unmerged entry this process cannot inspect: {error})"
-                )]);
-            }
-        };
-        let mut unresolved = Vec::new();
-        for entry in unmerged {
-            let file = path.join(entry.as_str());
-            let bytes = match std::fs::read(&file) {
-                Ok(bytes) => bytes,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(source) => return Err(UpstrokeError::Io { path: file, source }),
-            };
-            if carries_conflict_marker(&bytes) {
-                unresolved.push(entry.as_str().to_owned());
-            }
+        match parsers::changed_path_records(&records) {
+            Ok(paths) => Ok(paths
+                .into_iter()
+                .map(|entry| entry.as_str().to_owned())
+                .collect()),
+            Err(error) => Ok(vec![format!(
+                "(an unmerged entry this process cannot inspect: {error})"
+            )]),
         }
-        Ok(unresolved)
     }
 
     /// Whether `object` is an object this repository has.
@@ -3931,18 +3949,6 @@ pub(crate) mod fixture;
 #[inline]
 fn note_removal_attempt(attempt: u32) {
     fixture::note_removal_attempt(attempt);
-}
-
-/// Whether `bytes` holds a line that begins with a conflict marker.
-///
-/// Git's markers are seven characters and a space at the start of a line;
-/// `<<<<<<< ` opens a conflict and `>>>>>>> ` closes one. Either alone is
-/// evidence — a file the worker half-resolved keeps one of them — and the
-/// middle `=======` is not read, because it is also ordinary content.
-fn carries_conflict_marker(bytes: &[u8]) -> bool {
-    bytes
-        .split(|byte| *byte == b'\n')
-        .any(|line| line.starts_with(b"<<<<<<< ") || line.starts_with(b">>>>>>> "))
 }
 
 #[cfg(test)]

@@ -1114,6 +1114,13 @@ directly, against the replayed fold.
 And the transition itself is refused: a forged retry into the closed
 generation does not plan.
 
+## `fn an_interrupted_attempts_worktree_and_intent_are_reclaimed_by_recovery() {`
+
+`T-ATTEMPT.resume_action`, the clause after the settlement: "the task
+worktree scrubbed with force". Step (d) closes the generation and its
+worktree and intent go with it — the sibling arm of (e)'s reclaim, found by
+asking whether the class had another member.
+
 ## `fn run_resumed_records_identical_runner_identity() {`
 
 `run_resumed(4).runner` equals `run_started(4).runner` field for field.
@@ -3451,7 +3458,17 @@ records is the continuation's.
 `ST-11` for a repair: (e) closes the retained generation
 `ResumeDiscardsRetainedSession` with `LineageHeld`, the repair opens its
 next generation from the same recorded source, and that generation is
-materialized again, once; the closed one never is.
+materialized again, once; the closed one never is. The closed generation's
+real worktree and intent, planted before the retained prefix, are gone
+after the resume and still gone after the replacement merges and another
+resume runs — PR #249's crash review, finding 2.
+
+## `fn picking_the_last_of_two_offered_agents_binds_the_repair_to_it_rather_than_declining() {`
+
+PR #249's conformance review, finding 1, end to end: two agents offered,
+`2` typed at the production parser, and the repair runs under the second
+agent with `option_index: 1` and the catalogue's lowest model for it —
+where the last-option rule had recorded a decline and failed the lineage.
 
 ## `fn a_rejected_candidates_ref_survives_a_budget_stop_and_the_repair_dispatches_after_the_resume() {`
 

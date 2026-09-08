@@ -1993,10 +1993,16 @@ fn a_malformed_captured_id_is_a_git_error_naming_where_the_value_came_from() {
 }
 
 fn repair_at(run: &mut Run, base: &str) -> (Dispatched, AttemptPlan) {
+    let side = run.fixture.side.clone();
+    repair_from(run, base, &side)
+}
+
+/// A repair dispatched at `base`, materialized from `source_commit` as its
+/// protected candidate.
+fn repair_from(run: &mut Run, base: &str, source_commit: &str) -> (Dispatched, AttemptPlan) {
     use crate::engine::topology::dispatch::{DispatchRequest, dispatch};
 
-    let side = run.fixture.side.clone();
-    let source = run.protect_candidate(&side);
+    let source = run.protect_candidate(source_commit);
     let repair = run.spawn_repair(ALPHA);
     let request = DispatchRequest {
         key: repair,
@@ -2096,11 +2102,10 @@ fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_i
         failure.reason
     );
     assert!(
-        failure
-            .feedback
-            .as_deref()
-            .is_some_and(|feedback| feedback.contains("conflict markers")),
-        "and the worker is told what to do next time: {:?}",
+        failure.feedback.as_deref().is_some_and(|feedback| {
+            feedback.contains("conflict markers") && feedback.contains("`git add <path>`")
+        }),
+        "and the worker is told what to do next time, staging included: {:?}",
         failure.feedback
     );
 
@@ -2139,8 +2144,24 @@ fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_i
     let mark = run.mark();
     let capture = context!(run, process)
         .capture(dispatched.site())
-        .expect("a resolved conflict captures");
-    assert!(capture.unresolved.is_empty(), "the markers are gone");
+        .expect("an edited but unstaged conflict still captures as unresolved");
+    assert_eq!(
+        capture.unresolved,
+        vec!["c.txt".to_owned()],
+        "a file rewritten without its markers is still an unmerged index entry until the \
+         worker stages it: the rule is the index's, not the file's"
+    );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::Before), 0);
+
+    git(&dispatched.worktree, &["add", "--", "c.txt"]);
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a staged resolution captures");
+    assert!(
+        capture.unresolved.is_empty(),
+        "the worker's `git add` resolved the entry"
+    );
     assert_eq!(
         run.count_after(mark, STAGE, HookPhase::After),
         1,
@@ -2164,7 +2185,7 @@ fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_i
 }
 
 #[test]
-fn deleting_a_conflicted_file_resolves_it() {
+fn a_staged_deletion_resolves_a_conflict_and_an_unstaged_one_does_not() {
     use crate::topology::events::Materialization;
 
     let mut run = Run::started("resolved-by-deletion");
@@ -2181,9 +2202,19 @@ fn deleting_a_conflicted_file_resolves_it() {
     let capture = context!(run, process)
         .capture(dispatched.site())
         .expect("capture");
+    assert_eq!(
+        capture.unresolved,
+        vec!["c.txt".to_owned()],
+        "a conflicted path whose file is gone is still unmerged: the index has not been told"
+    );
+
+    git(&dispatched.worktree, &["rm", "-q", "--", "c.txt"]);
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
     assert!(
         capture.unresolved.is_empty(),
-        "a conflicted path whose file is gone was resolved by deletion"
+        "a deletion the worker staged with `git rm` resolves the entry"
     );
     assert_eq!(git(&dispatched.worktree, &["ls-files", "--unmerged"]), "");
     assert!(
@@ -2195,6 +2226,151 @@ fn deleting_a_conflicted_file_resolves_it() {
         .any(|name| name == "c.txt"),
         "the captured tree records the deletion"
     );
+}
+
+/// PR #249's conformance review, finding 2: a conflict rendered with a
+/// legitimate `conflict-marker-size` is a conflict all the same. The worker
+/// edits another file and leaves the unmerged path alone, and the capture
+/// refuses it before staging anything, whatever the markers look like.
+#[test]
+fn a_conflict_rendered_with_a_longer_marker_size_is_unresolved_at_capture() {
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("unresolved-marker-size");
+    let head = run.fixture.head.clone();
+    let with_attributes = run.commit_with(
+        &head,
+        ".gitattributes",
+        "c.txt conflict-marker-size=8\n",
+        "attrs-marker-size",
+    );
+    let conflicting = run.commit_with(
+        &with_attributes,
+        "c.txt",
+        "not the side's content\n",
+        "c-other-marker-size",
+    );
+    let (dispatched, plan) = repair_at(&mut run, &conflicting);
+    assert_eq!(dispatched.materialized, Some(Materialization::Conflict));
+    let rendered =
+        std::fs::read_to_string(dispatched.worktree.join("c.txt")).expect("the conflicted file");
+    assert!(
+        rendered.lines().any(|line| line.starts_with("<<<<<<<< ")),
+        "the attribute rendered eight-character markers, or this test proves nothing:\n{rendered}"
+    );
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    agent_edits(&dispatched.worktree);
+
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the capture reads the conflict rather than failing");
+    assert_eq!(
+        capture.unresolved,
+        vec!["c.txt".to_owned()],
+        "the unmerged index entry is what makes the path unresolved, not the width of \
+         its markers"
+    );
+    assert_eq!(
+        run.count_after(mark, STAGE, HookPhase::Before),
+        0,
+        "nothing was staged: the worker's other edit does not carry an unresolved \
+         conflict into a candidate"
+    );
+    assert_eq!(
+        capture.tree,
+        tree_of(&run, &conflicting),
+        "an unresolved capture names the tree the worktree started from"
+    );
+
+    write_file(&dispatched.worktree.join("c.txt"), b"resolved\n");
+    git(&dispatched.worktree, &["add", "--", "c.txt"]);
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a staged resolution captures");
+    assert!(capture.unresolved.is_empty());
+    assert_eq!(
+        git(
+            &dispatched.worktree,
+            &["cat-file", "-p", &format!("{}:c.txt", capture.tree)]
+        ),
+        "resolved",
+        "the captured tree carries the resolution"
+    );
+    assert!(process.balances());
+}
+
+/// PR #249's conformance review, finding 2, the other format: a path whose
+/// `-merge` attribute makes Git leave the current side in place with no
+/// marker at all. Untouched, it is as unresolved as a text conflict, and an
+/// oracle that reads markers would pass it and publish the wrong side.
+#[test]
+fn an_untouched_binary_conflict_is_unresolved_at_capture() {
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("unresolved-binary");
+    let head = run.fixture.head.clone();
+    let with_attributes =
+        run.commit_with(&head, ".gitattributes", "c.bin -merge\n", "attrs-binary");
+    let base = run.commit_with(
+        &with_attributes,
+        "c.bin",
+        "\u{0}\u{1}the published side\n",
+        "bin-published",
+    );
+    let source_commit = run.commit_with(
+        &head,
+        "c.bin",
+        "\u{0}\u{1}the candidate side\n",
+        "bin-candidate",
+    );
+    let (dispatched, plan) = repair_from(&mut run, &base, &source_commit);
+    assert_eq!(dispatched.materialized, Some(Materialization::Conflict));
+    assert_eq!(
+        std::fs::read(dispatched.worktree.join("c.bin")).expect("the conflicted file"),
+        b"\0\x01the published side\n",
+        "Git leaves the current side in the working tree, with no marker to read"
+    );
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    agent_edits(&dispatched.worktree);
+
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the capture reads the conflict rather than failing");
+    assert_eq!(
+        capture.unresolved,
+        vec!["c.bin".to_owned()],
+        "an unmerged binary path is unresolved until the worker resolves it"
+    );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::Before), 0);
+    assert_eq!(capture.tree, tree_of(&run, &base));
+
+    write_file(
+        &dispatched.worktree.join("c.bin"),
+        b"\0\x01the candidate side\n",
+    );
+    git(&dispatched.worktree, &["add", "--", "c.bin"]);
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a staged resolution captures");
+    assert!(capture.unresolved.is_empty());
+    assert_eq!(
+        crate::workspace_manager::fixture::git_out(
+            &dispatched.worktree,
+            &["cat-file", "-p", &format!("{}:c.bin", capture.tree)]
+        )
+        .stdout,
+        b"\0\x01the candidate side\n",
+        "the captured tree carries the side the worker chose"
+    );
+    assert!(process.balances());
 }
 
 #[test]

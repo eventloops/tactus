@@ -1202,6 +1202,92 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
     );
 }
 
+/// PR #249's crash review, finding 1: a coordinator dies after the pick
+/// completed and its state files were cleared, before `attempt_started`.
+/// Recovery (g) reuses the worktree (HEAD at the base, quiescent) and the
+/// continuation materializes again. The second pick must land on the base's
+/// tree, not on the index the first pick already changed: a cherry-pick is a
+/// three-way merge, and onto an index that already holds its result it can
+/// apply its hunks a second time. Each token below is one line of the file;
+/// the reviewer's witness duplicated the `c` on every resume.
+#[test]
+fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("continuation-preserves-tree");
+    let seed = run.fixture.seed.clone();
+    let parent = run.commit_with(&seed, "a.txt", "a\na\nd\nd\nc\nb\nc\na\n", "witness-parent");
+    let source_commit = run.commit_with(
+        &parent,
+        "a.txt",
+        "a\na\nd\nd\nc\nc\nb\nx\nc\na\n",
+        "witness-source",
+    );
+    let base = run.commit_with(&parent, "a.txt", "a\na\ny\nc\nb\nc\na\n", "witness-base");
+    let source = run.protect_candidate(&source_commit);
+    let repair = run.spawn_repair(ALPHA);
+    let dispatched = dispatch_repair(&mut run, repair, 0, &base, &source);
+    assert_eq!(dispatched.materialized, Some(Materialization::Clean));
+    // The merge of the source's change onto the base, worked out by hand:
+    // the hunk `c b` -> `c c b x` applied at the base's `y c b c a`.
+    const ONE_PICK: &str = "a\na\ny\nc\nc\nb\nx\nc\na\n";
+    assert_eq!(
+        git(&dispatched.worktree, &["show", ":a.txt"]),
+        ONE_PICK.trim_end(),
+        "one pick produces the merged file in the index"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dispatched.worktree.join("a.txt")).expect("a.txt"),
+        ONE_PICK,
+        "and in the working tree the worker reads"
+    );
+
+    let open = dispatched.open_generation();
+    for resume in 1..=2 {
+        let recovered = verify_or_recreate(
+            &run.fixture.manager,
+            &mut run.hooks,
+            &open,
+            &open.quiescence(),
+        )
+        .expect("(g) verifies the completed pick's worktree at its base");
+        assert_eq!(
+            recovered,
+            Reuse::Verified,
+            "resume {resume}: a completed pick is quiescent at its base and is reused"
+        );
+        let continued = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+            .expect("the continuation materializes again");
+        assert_eq!(continued.reuse, Reuse::Verified, "resume {resume}");
+        assert_eq!(
+            continued.materialized,
+            Some(Materialization::Clean),
+            "resume {resume}"
+        );
+        assert_eq!(
+            git(&dispatched.worktree, &["show", ":a.txt"]),
+            ONE_PICK.trim_end(),
+            "resume {resume}: a crash after the pick, before attempt_started, must not change \
+             the repair's input — the index"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dispatched.worktree.join("a.txt")).expect("a.txt"),
+            ONE_PICK,
+            "resume {resume}: nor the working tree"
+        );
+        assert!(
+            crate::workspace_manager::fixture::git_out(
+                &dispatched.worktree,
+                &["diff-files", "--quiet"]
+            )
+            .status
+            .success(),
+            "resume {resume}: the working tree matches the index"
+        );
+    }
+    run.replay_twice_equal();
+}
+
 #[test]
 fn repair_materialization_objects_released_to_git_on_scrub() {
     use crate::workspace_manager::unreachable_objects;
@@ -1327,8 +1413,10 @@ fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_sta
     // funnel clears the state files itself, is also the completed after phase.
     // The packet's quiescence rule (HEAD at base, index unlocked, no
     // cherry-pick state) is satisfied, so the worktree is reused as it stands;
-    // the pick re-run on an index that already holds its change is a no-op
-    // merge that reports the same observation, and the tree is the same tree.
+    // the funnel restores the base's tree before it picks again, so the
+    // re-run is one pick onto the base, reporting the same observation and
+    // producing the same tree (a pick onto the merged index is not a no-op:
+    // `a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces`).
     let dir = git_dir(&worktree);
     remove_file(&dir.join("MERGE_MSG"));
     remove_file(&dir.join("AUTO_MERGE"));
@@ -1362,7 +1450,7 @@ fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_sta
     assert_eq!(
         resumed.materialized,
         Some(Materialization::Conflict),
-        "the re-run pick refuses an unmerged index and the observation is still the conflict"
+        "the restore clears the unmerged index and the re-run pick conflicts again"
     );
     assert_eq!(
         unmerged_entries(&conflicted.worktree),
