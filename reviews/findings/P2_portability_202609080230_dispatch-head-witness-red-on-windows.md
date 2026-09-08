@@ -8,7 +8,7 @@ reviewed_sha: 91fe35b008a0a612bb37ed43a9eb3b5b7487c8a3
 location: src/engine/topology/recover/tests.rs:9925
 provenance: pre_existing
 first_bad: bcc3a533 on master, the recover fixture's `git init` without a line-ending pin; red since 45b5d429, the first test to compare checkout bytes through it
-guard: `a_dependent_task_is_dispatched_into_its_dependencys_merged_work`, green on the Windows guest with the fixture's repository pinned and the contents assertion untouched; the tree without the pin is the reproduction. Fixed by the eighth repair round in `aaf289f1`. This file is kept and updated rather than deleted because the round's brief asked for the cause and the change to be recorded here; `reviews/findings/README.md` deletes a resolved finding, and whoever merges may delete this one with nothing lost — the body's row and `pr8-triage.md` §11 carry everything below.
+guard: `a_dependent_task_is_dispatched_into_its_dependencys_merged_work`, green on the Windows guest with the fixture's repository pinned and the contents assertion untouched; the tree without the pin is the reproduction. Fixed by the eighth repair round in `aaf289f1`. This file is kept and updated rather than deleted because the round's brief asked for the cause and the change to be recorded here; `reviews/findings/README.md` deletes a resolved finding, and whoever merges may delete this one with nothing lost.
 ---
 
 ## Failure sequence
@@ -75,8 +75,9 @@ contents assertion is untouched; a SHA comparison is the shape that passed throu
 original defect's life, and a comparison that normalised line endings would forgive exactly the
 transformation it was meant to see through. The module's notes carry the reason beside the pin.
 Verified on the guest with the repaired tree checked out at `aaf289f1`: the test alone `ok`, the
-recover module `101 passed; 0 failed; 2 ignored`, and the full suite as CI runs it, recorded in
-`pr8-triage.md` §11.3.
+recover module `101 passed; 0 failed; 2 ignored`, and the full suite as CI runs it —
+`2300 passed; 0 failed; 40 ignored` in the library harness, where the two red runs had
+`2299 passed; 1 failed; 40 ignored`.
 
 ## Why it is re-filed at P2 `portability`
 

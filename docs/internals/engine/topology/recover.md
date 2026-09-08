@@ -98,14 +98,13 @@ too) and requires the ref there. A ref elsewhere, or none, is DESIGN §26's
 "`task_merged` exists but the ref disagrees — refuse; the log and integration
 branch no longer describe the same run": nothing is moved and nothing is
 created. The three reviews of `3414dc58` found the base compared after a
-publication, which refused every resume of a run that had merged anything
-(`pr8-triage.md` C1).
+publication, which refused every resume of a run that had merged anything.
 
 It is skipped only when the proven prefix carries a `Prepared` transaction
 — [`finish_integration`] at step (f) owns the ref then, moving it by the
 authorized CAS — and runs under a `VerificationStarted` one, whose interrupted
-settlement moves no ref (`pr8-plan.md` R23). Otherwise its position is before
-step (d)'s first append, and every bound on it is a separate clause:
+settlement moves no ref. Otherwise its position is before step (d)'s first
+append, and every bound on it is a separate clause:
 
 * **After (a1).** It is a durable effect on a repository ref. O18 puts the
   stable-prefix barrier before the census's fold-derived reclaim, before any
@@ -129,8 +128,7 @@ step (d)'s first append, and every bound on it is a separate clause:
   settlement moves no ref, so a ref that is neither at the base nor at the
   last publication is foreign state (`[T-RESUME].refusal_condition`) whatever
   the verification recorded, and refusing it here is refusing before any
-  append. The reviews of `3414dc58` had it skipped under any transaction
-  (`pr8-triage.md` R23).
+  append. The reviews of `3414dc58` had it skipped under any transaction.
 * **Before (d).** The step can refuse: a ref at another SHA, a symbolic ref,
   a ref checked out in a worktree. A refusal after `attempt_interrupted`,
   `generation_closed` and `run_resumed` is a resume half-performed — the
@@ -1262,7 +1260,7 @@ keeps it — returning it for the namespace check's expected set. Anything
 else under `prepared/` is not accounted for by the log and is what the check
 refuses, untouched. The reviews of `3414dc58` found this step deleting every
 pin it did not recognise, the still-Prepared transaction's and a
-substituted one included (`pr8-triage.md` C2).
+substituted one included.
 
 ## `finish_integration(&mut certified, seams.manager, &mut context)?;`
 
@@ -1462,7 +1460,7 @@ Returns the open transaction's pin for the namespace check's expected set.
 Expected-old deletion at whatever a ref names proves only that nothing
 moved it since the read; it does not establish that the value read was
 authorized, which is why the old form of this step — delete everything but
-the verifying pin — was wrong (`pr8-triage.md` C2).
+the verifying pin — was wrong.
 
 ## `pub fn finish_promotions(`
 

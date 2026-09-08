@@ -281,8 +281,7 @@ created, which recovery resolves — an unresolved verification included:
 its reservation converted at `merge_verification_started`, the open
 transaction is what holds the pipeline entitlement from then on, and the
 `Err` arm's cancellation is not reached (the review of `79ddbffb`
-measured the reservation ledger at 0 there and read it as a release;
-`pr8-triage.md` §6 finding 5).
+measured the reservation ledger at 0 there and read it as a release).
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::DeferBackoff => Disposition::Performed,`
 
@@ -376,10 +375,9 @@ moves a task's rung only at an escalation settlement and a task at
 producing attempt's. The reviews of `3414dc58` found the ladder's *last*
 rung passed here, which a candidate produced lower down never ran under —
 so a primary reviewer equal to the real implementer was not swapped for
-the alternative, and a model could be handed its own work to review
-(`pr8-triage.md` C6). `DESIGN.md` §26 verdict item 4 reruns "all recorded
-gates and review passes", and the recorded passes were selected against this
-binding.
+the alternative, and a model could be handed its own work to review.
+`DESIGN.md` §26 verdict item 4 reruns "all recorded gates and review
+passes", and the recorded passes were selected against this binding.
 
 ## `impl IntegrationCx<'_, '_>` › `fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {`
 
@@ -393,12 +391,11 @@ answer for the proposed tree, read in the staging worktree. Either stands
 in for the gates and reviewers as the judge's prior failure, and the
 sequence parks the candidate `HumanRequired` (R4). Without it the real
 refusal escaped from `review::materialize_prompt` as an error, and a policy
-that refused the tree still published (`pr8-triage.md`, tests 2). The
-attempt path's `diff_failure` also checks a Test task's provenance; that
-is a judgement of the candidate when it was produced, and the reviews of
-`916852c9` reproduced it rejecting a Test candidate whose identical test
-another candidate had published first, so the integration diff is not
-asked it (`pr8-triage.md` §5, adequacy 2).
+that refused the tree still published. The attempt path's `diff_failure`
+also checks a Test task's provenance; that is a judgement of the candidate
+when it was produced, and the reviews of `916852c9` reproduced it rejecting
+a Test candidate whose identical test another candidate had published
+first, so the integration diff is not asked it.
 
 ## `impl Verification for IntegrationCx<'_, '_>` › `self.spend.record_reviews(key, &judgement.reviews);`
 
@@ -406,7 +403,7 @@ The ceiling's ledger, charged before the terminal is appended, exactly as
 an attempt's reviews are charged in `settle`; `Spend::replay` rebuilds it
 from the terminal's record. An unavailable terminal carries no review
 record, so a review that ended in a park or an outage is charged live and
-not on replay (`pr8-plan.md` R22).
+not on replay.
 
 ## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Runner(error)) => match error.fate {`
 
@@ -416,19 +413,19 @@ process. `NeverStarted` is `invariants[INV-23]`'s mid-run
 of its own (`transaction_fault_matrix[T-VERIFY].resume_action`); left to
 `?` at `3414dc58`, it escaped after `merge_verification_started`, the
 transaction stayed open, and every repeat bypassed the defer and park
-limit (`pr8-triage.md` C3). `Gone` — a gate process that started and the
-Runner has since established gone — is an outage too, `Other` because it
-is not a spawn failure. `Unresolved` is neither: the repair round settled
-it as a spawn failure, and the reviews of `916852c9` reproduced a gate
-still running in Docker beside a `Deferred` terminal that had released
-both entitlements and removed the snapshot the container had mounted, then
-a second sequence started beside it. A terminal authorizes cleanup and
-readmission, so an error that leaves the process's liveness unknown ends
-the command with the transaction open and nothing appended; the next
-resume's census reclaims the container before recovery step (f) settles
-the verification interrupted. A reviewer's Runner error reaches the
-judgement through `run_review`, which reports it unavailable on the same
-two fates and propagates the third.
+limit. `Gone` — a gate process that started and the Runner has since
+established gone — is an outage too, `Other` because it is not a spawn
+failure. `Unresolved` is neither: the repair round settled it as a spawn
+failure, and the reviews of `916852c9` reproduced a gate still running in
+Docker beside a `Deferred` terminal that had released both entitlements
+and removed the snapshot the container had mounted, then a second sequence
+started beside it. A terminal authorizes cleanup and readmission, so an
+error that leaves the process's liveness unknown ends the command with the
+transaction open and nothing appended; the next resume's census reclaims
+the container before recovery step (f) settles the verification
+interrupted. A reviewer's Runner error reaches the judgement through
+`run_review`, which reports it unavailable on the same two fates and
+propagates the third.
 
 ## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Other(UpstrokeError::Git { message })) => Ok(Verified::Unavailable {`
 
@@ -439,8 +436,7 @@ snapshot the checkout could not make — is among the failures
 merge_verification_unavailable with outcome Deferred or Parked". Every
 Git command the verification issues runs before or between its processes,
 never beside one, so the terminal is safe to settle. R24 at `916852c9`
-excluded these and the `?` propagated them as an interruption
-(`pr8-triage.md` §5, record F3).
+excluded these and the `?` propagated them as an interruption.
 
 ## `impl LoopBranch` › `pub fn owes(self, clause: &str) -> UpstrokeError {`
 
@@ -990,7 +986,7 @@ How many provisional reservations this run cancelled.
 Exposed so a test can tell a reservation that converted at its append
 from one the failure path cancelled: the review of `79ddbffb` read the
 empty ledger after an unresolved verification as a release, and the count
-is what says it was a conversion (`pr8-triage.md` §6 finding 5).
+is what says it was a conversion.
 
 ## `impl TopologyRun` › `pub fn defer_round(&self) -> u32 {`
 

@@ -47,8 +47,7 @@ reviewer can read. What the integration verification consults, because
 the second observation is a judgement of the candidate's content that was
 made when the candidate was produced — an integration diff is the
 candidate cherry-picked onto a moved head, and a test another candidate
-published first is absent from it without being absent from the tree
-(`pr8-triage.md` §5, adequacy 2).
+published first is absent from it without being absent from the tree.
 
 ## `pub(crate) fn diff_failure(`
 

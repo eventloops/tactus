@@ -359,7 +359,7 @@ A fast publication staged nothing; a stale-clean or already-present
 one ran in `merge/s<seq>` and the fold retains which it was, because
 the SHAs alone cannot say: an already-present publication at the
 candidate's own commit has `proposed_sha == candidate.commit_sha`
-and a staging worktree all the same (`pr8-triage.md`, crash 5).
+and a staging worktree all the same.
 The pin is the one the record names — `None` for fast and
 already-present, which pin nothing.
 
@@ -560,7 +560,7 @@ bounded to `crate::gates::FEEDBACK_TAIL_BYTES`; and the reviewer's
 Only the reason used to reach the record, so the frozen spec carried the summary
 and nothing that says what to change. PR9 dispatches from that spec and never
 sees this `AttemptFailure`, so evidence dropped here is evidence the repair
-never gets (`pr8-triage.md` §9, finding 2).
+never gets.
 
 The reason stays whole and leads, and the bound is applied to the feedback
 alone, because a bound applied to the pair would cut the summary off first.

@@ -197,12 +197,12 @@ makes this the reviewer's demand and not a restatement of why the pass failed.
 
 ## `fn a_failing_gates_own_output_reaches_the_frozen_repair_spec() {`
 
-The two witnesses of `pr8-triage.md` §9, finding 2, written here rather than
-against the conversion: they drive a failing gate and a rejecting reviewer
-through the production loop to a durable `merge_rejected`, and read both the
-`VerificationRecord` and the frozen repair spec's body. Each asserts the summary
-is still there beside the evidence, so a repair that replaced one with the other
-fails too, and each ends `replay_twice_equal`.
+The two witnesses that a rejection's evidence reaches the frozen spec, written
+here rather than against the conversion: they drive a failing gate and a
+rejecting reviewer through the production loop to a durable `merge_rejected`,
+and read both the `VerificationRecord` and the frozen repair spec's body. Each
+asserts the summary is still there beside the evidence, so a repair that
+replaced one with the other fails too, and each ends `replay_twice_equal`.
 
 ## `fn a_dispatch_takes_the_published_head_and_refuses_one_the_log_did_not_authorize() {`
 
