@@ -652,7 +652,8 @@ branch already carries — `PR172-…-TORN-WORKTREE-LIST-RECORD` is the workspac
 different sampler — so it is filed as `PR247-SAMPLER-REFUSED-A-LOCKED-INDEX-ON-WINDOWS` in
 `reviews/findings/` rather than counted against either. One red is not a rate, this token cannot
 re-run a job, and neither of the round's code changes reaches Git, a worktree or the residue
-classifier.
+classifier. The next head, one record commit later, is green on all eleven checks including that
+leg: one red in two runs, which the finding file records as its second observation.
 
 **One thing this round measured twice, and the second measurement is the one quoted.** The
 box's `upstroke-build` allocates from a shared pool of slot target directories, and this crate's

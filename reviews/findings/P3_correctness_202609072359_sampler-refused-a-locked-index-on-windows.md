@@ -26,6 +26,10 @@ failed to read C:/Users/Administrator/AppData/Local/Temp/upstroke-pr7e-3128-samp
 "the classifier refused 1 of 8 samples". `2296 passed; 1 failed; 40 ignored`, and every other leg
 of the same run — lint on three platforms, msrv on three, test on ubuntu and macOS — is green.
 
+**Second observation, `c8aebfbc`:** the next head on the same branch, one record commit later, is
+green on all eleven checks including this leg. One red in two runs. This session's token cannot
+re-run a job, so the second observation is the next push's own run and not a rerun of the first.
+
 ## Why it is filed rather than repaired here
 
 **It is a different fingerprint from the two already filed.** `PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`
