@@ -760,6 +760,16 @@ Three readings this round records, because each was a choice and not a deduction
   repair gets wrong.** `task_dispatched.base_sha` is durable and the fold reads it from the log, so
   nothing about replay changes; the test that proves it is the one that fails when `continue_open`
   is made to re-derive its base instead of reading the record.
+- **No `design/` change is owed and none is made.** §26's verdict 1 already says a dispatched task
+  gets a detached linked worktree "at the run's **integration HEAD at dispatch**", and its durable
+  protocol already says a fresh workspace is created "at the then-current integration head" and
+  that at actual dispatch the engine "records the then-current integration head as the … generation
+  base". The design was right and the code did not do what it said, which is the case §13's
+  same-pull-request rule does not reach: the rule is for behaviour the design does not already
+  carry. The refusal is the enforcement of that clause's premise — that the ref *is* the run's
+  integration head — and it is the posture
+  `decisions.coordinator_integration.integration_sequence` already states for the head read. This
+  branch has never changed `design/` in seven rounds, round four's foreign-head refusal included.
 
 ### 10.3 The mutations replayed this round
 
@@ -796,6 +806,13 @@ re-read against the tree here rather than against a findings list.
   make none of them wrong; no citation names a coordinate at the current head.
 - **The Validation section's counts re-taken**, on this round's own baseline rather than carried
   forward: the test count moves from 2373 to 2376, which is this round's three new tests.
+- **A claim about the baseline's own logs corrected.** The section said "every step's log names
+  `Compiling`/`Checking upstroke v0.1.0 (/srv/worktrees/pr8)`", which no run can satisfy: `fmt`
+  compiles nothing and the five shell gates compile nothing, and on a warm private target base
+  even `test` can print no `Compiling` line at all — the first baseline this round took did not.
+  The claim is now what the evidence supports and what the sixth round's incident actually needs:
+  the baseline is re-taken after a touch inside the gate lock, its three compiling steps each log
+  this worktree, and no other worktree path appears in any of the nine logs.
 - **Room made before writing.** The body was 64470 characters against GitHub's 65536 limit. The
   round-by-round review narrative for rounds four and five moves to §§7–8 of this file, where those
   rounds are already recorded in full, leaving its claim, its identifiers and a pointer in the

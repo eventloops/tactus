@@ -179,9 +179,10 @@ three are in `reviews/findings/`. No fingerprint appeared in the fifth, sixth or
 local runs, and every local run that measured this worktree passed clean at the first attempt. The
 sightings in full are `pr8-plan.md` §5.
 
-The run above is on a target directory private to this worktree and every step's log names
-`Compiling`/`Checking upstroke v0.1.0 (/srv/worktrees/pr8)`; nothing here is quoted from a run
-that does not name this worktree, which `pr8-triage.md` §9 explains and measures.
+The run above is on a target directory private to this worktree, taken after a touch inside the
+gate lock so nothing came from cache: each of its three compiling steps — clippy, test, msrv —
+logs `Compiling`/`Checking upstroke v0.1.0 (/srv/worktrees/pr8)`, and no other worktree path
+appears in any of the nine logs (`pr8-triage.md` §9 is why that is checked).
 
 The sixth round's two Docker-gated tests **ran** here rather than skipping, against a live daemon
 (docker 29.7.2). Where no daemon answers they skip, as every `real_docker_*` test does, and the
@@ -202,8 +203,8 @@ the body reaches GitHub's 65,536-character limit for a pull-request description 
 below, which the policy gate greps from the published body, cannot move: the sampler's sightings
 in full (`pr8-plan.md` §5) and the round-by-round review narrative for rounds one to five
 (`pr8-triage.md` §§2–8), each leaving its claim, its identifiers and a pointer here. The published
-body is 65177 characters, and a round with something to add moves something of its own out
-first, as the fifth, sixth and seventh did.
+body is 65270 characters, and a round with something to add moves something of its own
+out first, as the fifth, sixth and seventh did.
 
 ## Review evidence
 
