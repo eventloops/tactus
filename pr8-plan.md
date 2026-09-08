@@ -626,6 +626,8 @@ survived every one of them:
 | `test(engine): the dispatch head's guard, and the notes for both witnesses` | the refusal arm's four readings against a real repository, and §13's move of the round's prose to the modules' notes |
 | `test(engine): the driver tests resume through the real ref funnel` | the row this round raised (`PR8-R7-DRIVER-REF-FUNNEL`) |
 | `docs(pr8): the plan and findings of the seventh repair round` | this file, `pr8-triage.md` §10, and `pr8-body.md` |
+| `docs(pr8): the baseline claim says what its logs can show` | the Validation sentence about the baseline's own logs, and §10.2's reading that no `design/` change is owed |
+| `docs(pr8): the round's commit table names every commit in it` | this table's own last two rows, and the count of the tests the round's second row moved — thirteen, through twelve resume sites |
 
 Nothing in the round is Class A, B or C: `src/topology/**` is untouched, the frozen event
 vocabulary is untouched, and the two new `Refusal` variants are in an engine module outside the
