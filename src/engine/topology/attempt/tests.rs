@@ -1991,3 +1991,259 @@ fn a_malformed_captured_id_is_a_git_error_naming_where_the_value_came_from() {
         "and a well-formed id passes through unchanged"
     );
 }
+
+fn repair_at(run: &mut Run, base: &str) -> (Dispatched, AttemptPlan) {
+    use crate::engine::topology::dispatch::{DispatchRequest, dispatch};
+
+    let side = run.fixture.side.clone();
+    let source = run.protect_candidate(&side);
+    let repair = run.spawn_repair(ALPHA);
+    let request = DispatchRequest {
+        key: repair,
+        generation: GENERATION,
+        base: crate::topology::events::CommitSha(base.to_owned()),
+        kind: DispatchKind::Repair {
+            root: ALPHA,
+            source,
+        },
+    };
+    let dispatched = dispatch(
+        &run.fixture.manager,
+        &mut run.hooks,
+        &mut run.emitter,
+        &request,
+    )
+    .expect("the repair dispatches");
+    let mut plan = run.attempt_plan(repair, 1);
+    plan.materialization_observed = dispatched.materialized;
+    (dispatched, plan)
+}
+
+fn tree_of(run: &Run, commit: &str) -> String {
+    git(
+        &run.fixture.base,
+        &["rev-parse", &format!("{commit}^{{tree}}")],
+    )
+}
+
+#[test]
+fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_resolved_one_is_staged() {
+    use crate::ladder::{FailureKind, FailureOrigin};
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("unresolved-conflict");
+    let head = run.fixture.head.clone();
+    let conflicting = run.commit_with(&head, "c.txt", "not the side's content\n", "c-other");
+    let (dispatched, plan) = repair_at(&mut run, &conflicting);
+    assert_eq!(dispatched.materialized, Some(Materialization::Conflict));
+    let mut process = Process::new();
+    let started = context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the capture reads the conflict rather than failing");
+    assert_eq!(
+        capture.unresolved,
+        vec!["c.txt".to_owned()],
+        "the worker touched nothing, so the conflicted path still carries its markers"
+    );
+    assert_eq!(
+        run.count_after(mark, STAGE, HookPhase::Before),
+        0,
+        "nothing was staged: `git add -A` would have recorded the markers as the resolution"
+    );
+    assert_eq!(run.count_after(mark, WRITE_TREE, HookPhase::Before), 0);
+    assert_eq!(
+        capture.tree,
+        tree_of(&run, &conflicting),
+        "an unresolved capture names the tree the worktree started from"
+    );
+    assert!(
+        git(&dispatched.worktree, &["ls-files", "--unmerged"])
+            .lines()
+            .count()
+            >= 2,
+        "and leaves the index unmerged"
+    );
+
+    let diff = run
+        .fixture
+        .manager
+        .candidate_diff(&dispatched.slot, &capture.parent, &capture.tree)
+        .expect("diff");
+    let assessed = context!(run, process)
+        .assess(
+            dispatched.site(),
+            &plan,
+            &started,
+            &capture,
+            &diff,
+            crate::ir::TaskKind::Fix,
+        )
+        .expect("assessed");
+    let failure = assessed
+        .failure
+        .clone()
+        .expect("an unresolved conflict fails the attempt before any gate");
+    assert_eq!(failure.kind, FailureKind::AgentError);
+    assert_eq!(failure.origin, FailureOrigin::Worker);
+    assert!(
+        failure.reason.contains("c.txt") && failure.reason.contains("unresolved"),
+        "the failure names the paths: {}",
+        failure.reason
+    );
+    assert!(
+        failure
+            .feedback
+            .as_deref()
+            .is_some_and(|feedback| feedback.contains("conflict markers")),
+        "and the worker is told what to do next time: {:?}",
+        failure.feedback
+    );
+
+    let review_inputs = run.review_inputs();
+    let judgement = context!(run, process)
+        .judge(
+            dispatched.site(),
+            &plan,
+            Judging {
+                run: &started,
+                capture: &capture,
+                assessed: &assessed,
+            },
+            &review_inputs,
+            &|pass| crate::review::ReviewInvocations {
+                pass: started.identities.review_pass(pass, 0),
+                reask: started.identities.review_reask(pass, 0),
+            },
+        )
+        .expect("judged");
+    assert!(
+        judgement.gates.is_empty() && judgement.reviews.is_empty(),
+        "no gate and no reviewer ran on an unresolved capture"
+    );
+    assert_eq!(
+        run.runner.ran().len(),
+        1,
+        "the worker was the only process: {:?}",
+        run.runner.ran()
+    );
+
+    write_file(
+        &dispatched.worktree.join("c.txt"),
+        b"resolved by the worker\n",
+    );
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a resolved conflict captures");
+    assert!(capture.unresolved.is_empty(), "the markers are gone");
+    assert_eq!(
+        run.count_after(mark, STAGE, HookPhase::After),
+        1,
+        "the engine's own staging records the worker's resolution"
+    );
+    assert_eq!(
+        git(&dispatched.worktree, &["ls-files", "--unmerged"]),
+        "",
+        "and the index holds no unmerged entry any more"
+    );
+    assert_eq!(
+        git(
+            &dispatched.worktree,
+            &["cat-file", "-p", &format!("{}:c.txt", capture.tree)]
+        ),
+        "resolved by the worker",
+        "the captured tree carries the resolution"
+    );
+    assert!(process.balances());
+    run.replay_twice_equal();
+}
+
+#[test]
+fn deleting_a_conflicted_file_resolves_it() {
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("resolved-by-deletion");
+    let head = run.fixture.head.clone();
+    let conflicting = run.commit_with(&head, "c.txt", "not the side's content\n", "c-other");
+    let (dispatched, plan) = repair_at(&mut run, &conflicting);
+    assert_eq!(dispatched.materialized, Some(Materialization::Conflict));
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+
+    remove_file(&dispatched.worktree.join("c.txt"));
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert!(
+        capture.unresolved.is_empty(),
+        "a conflicted path whose file is gone was resolved by deletion"
+    );
+    assert_eq!(git(&dispatched.worktree, &["ls-files", "--unmerged"]), "");
+    assert!(
+        !git(
+            &dispatched.worktree,
+            &["ls-tree", "--name-only", &capture.tree]
+        )
+        .lines()
+        .any(|name| name == "c.txt"),
+        "the captured tree records the deletion"
+    );
+}
+
+#[test]
+fn an_already_present_source_proceeds_as_an_ordinary_attempt_whose_empty_diff_fails_honestly() {
+    use crate::ladder::FailureKind;
+    use crate::topology::events::Materialization;
+
+    let mut run = Run::started("already-present-source");
+    let side = run.fixture.side.clone();
+    let (dispatched, plan) = repair_at(&mut run, &side);
+    assert_eq!(
+        dispatched.materialized,
+        Some(Materialization::Empty),
+        "the candidate's change is already present on this base"
+    );
+    let mut process = Process::new();
+    let started = context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("`repairs.empty_source`: an Empty observation proceeds as an ordinary attempt");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert!(capture.unresolved.is_empty());
+    assert_eq!(
+        capture.tree,
+        tree_of(&run, &side),
+        "the worker changed nothing, so the captured tree is the base's"
+    );
+    let diff = run
+        .fixture
+        .manager
+        .candidate_diff(&dispatched.slot, &capture.parent, &capture.tree)
+        .expect("diff");
+    assert!(diff.trim().is_empty(), "there is nothing to judge: {diff}");
+    let assessed = context!(run, process)
+        .assess(
+            dispatched.site(),
+            &plan,
+            &started,
+            &capture,
+            &diff,
+            crate::ir::TaskKind::Fix,
+        )
+        .expect("assessed");
+    assert_eq!(
+        assessed.failure.as_ref().map(|failure| failure.kind),
+        Some(FailureKind::EmptyDiff),
+        "an empty diff fails under the existing rule; no special no-candidate settlement exists \
+         (it is a deferred decision)"
+    );
+    assert!(process.balances());
+}

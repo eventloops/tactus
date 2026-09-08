@@ -2732,12 +2732,17 @@ impl WorkspaceManager {
     /// protects it for as long as the run can resume.
     ///
     /// **`--no-commit` does not leave `CHERRY_PICK_HEAD` behind** in any of the
-    /// three cases on git 2.43; it leaves `MERGE_MSG`, `AUTO_MERGE` and
-    /// `ORIG_HEAD`, and `MERGE_MSG` is one of the names `Worktree.Verify` reads
-    /// as administrative residue. So a completed materialization fails the
-    /// quiescence check at its base exactly as an interrupted one does, and
-    /// both are recreated with force before the pick is re-run — which is why
-    /// the residue classifier reads the *index* for this site's after phase.
+    /// three cases on git 2.43; it leaves `MERGE_MSG` and `AUTO_MERGE`, and
+    /// `MERGE_MSG` is one of the names `Worktree.Verify` reads as
+    /// administrative residue, in its committed form and in the held
+    /// `MERGE_MSG.lock` form a kill inside its write leaves. So a completed
+    /// materialization fails the quiescence check at its base exactly as an
+    /// interrupted one does, and both are recreated with force before the pick
+    /// is re-run — which is why the residue classifier reads the *index* for
+    /// this site's after phase. The one interrupted state the check passes is
+    /// the index written and its lock released with `MERGE_MSG` not yet begun;
+    /// re-running the pick on that index is a no-op merge that reports the
+    /// same observation (`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
     ///
     /// # Errors
     ///

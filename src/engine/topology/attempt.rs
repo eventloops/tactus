@@ -376,12 +376,19 @@ impl AttemptContext<'_> {
         let mut outcome = adapter.parse(&run.worker)?;
         outcome.diff = diff.to_owned();
 
-        let mut failure = crate::engine::attempt::evaluate_outcome(&outcome, &run.worker);
-        if failure.is_none() && !capture.unresolved.is_empty() {
-            failure = Some(crate::engine::classify::unresolved_conflict_failure(
+        // The worker's own end (an error exit, a timeout, a question it asked) is
+        // reported as what it is; a completed worker that left conflicted paths is
+        // reported as that, before the diff is looked at, since an unresolved capture
+        // carries the base's tree and the diff-shaped verdicts would misdescribe it.
+        let mut failure = if outcome.status == crate::ir::OutcomeStatus::Completed
+            && !capture.unresolved.is_empty()
+        {
+            Some(crate::engine::classify::unresolved_conflict_failure(
                 &capture.unresolved,
-            ));
-        }
+            ))
+        } else {
+            crate::engine::attempt::evaluate_outcome(&outcome, &run.worker)
+        };
         if failure.is_none() {
             failure = crate::engine::classify::diff_failure(
                 &outcome.diff,

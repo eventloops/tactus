@@ -6156,6 +6156,14 @@ fn worktree_verify_answers_every_non_quiescence_by_name() {
         ("CHERRY_PICK_HEAD", ResidueElement::CherryPickHead),
         ("MERGE_HEAD", ResidueElement::MergeHead),
         ("MERGE_MSG", ResidueElement::MergeMsg),
+        // The held form of each state file: a writer killed between creating
+        // its lock and renaming it into place. It is the same command's state,
+        // and the form that makes the next writer of that name fail outright.
+        ("CHERRY_PICK_HEAD.lock", ResidueElement::CherryPickHead),
+        ("MERGE_HEAD.lock", ResidueElement::MergeHead),
+        ("MERGE_MSG.lock", ResidueElement::MergeMsg),
+        ("REVERT_HEAD", ResidueElement::SequencerState),
+        ("REVERT_HEAD.lock", ResidueElement::SequencerState),
     ] {
         fs::write(git_dir.join(name), "x\n").expect("plant residue");
         assert_eq!(
