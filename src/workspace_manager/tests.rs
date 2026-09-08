@@ -8107,16 +8107,17 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
             // never leaves. It is still constructed synthetically, because
             // `ObjectSite::RepairMaterialize.residue_elements()` registers
             // it and PR3 froze that; it will simply never appear in a
-            // sampled histogram.
+            // sampled histogram. The funnel removes the `MERGE_MSG` (and
+            // `AUTO_MERGE`) the pick did write, so the after phase is the
+            // index and nothing `Worktree.Verify` reads as merge state.
             assert!(
                 !git_dir.join("CHERRY_PICK_HEAD").exists(),
                 "a successful `cherry-pick --no-commit` sets no CHERRY_PICK_HEAD"
             );
             assert!(
-                git_dir.join("MERGE_MSG").exists(),
-                "what it does leave is MERGE_MSG, which this site's element list does not \
-                     register and which `Worktree.Verify` reads as merge state — so the tabled \
-                     recovery is entered either way"
+                !git_dir.join("MERGE_MSG").exists() && !git_dir.join("AUTO_MERGE").exists(),
+                "the funnel clears the pick's state files: a completed materialization is \
+                     quiescent at its base and a retained repair generation can verify"
             );
             let after = classify(site, &ResidueTarget::new(&base).at(&path));
             [none, internal, after]

@@ -2732,17 +2732,20 @@ impl WorkspaceManager {
     /// protects it for as long as the run can resume.
     ///
     /// **`--no-commit` does not leave `CHERRY_PICK_HEAD` behind** in any of the
-    /// three cases on git 2.43; it leaves `MERGE_MSG` and `AUTO_MERGE`, and
-    /// `MERGE_MSG` is one of the names `Worktree.Verify` reads as
-    /// administrative residue, in its committed form and in the held
-    /// `MERGE_MSG.lock` form a kill inside its write leaves. So a completed
-    /// materialization fails the quiescence check at its base exactly as an
-    /// interrupted one does, and both are recreated with force before the pick
-    /// is re-run — which is why the residue classifier reads the *index* for
-    /// this site's after phase. The one interrupted state the check passes is
-    /// the index written and its lock released with `MERGE_MSG` not yet begun;
-    /// re-running the pick on that index is a no-op merge that reports the
-    /// same observation (`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
+    /// three cases on git 2.43; it leaves `MERGE_MSG` and `AUTO_MERGE`. This
+    /// funnel removes both once the pick has ended, whatever it ended as: the
+    /// engine never commits in the worktree, so neither file serves anything,
+    /// and `MERGE_MSG` is one of the names `Worktree.Verify` reads as
+    /// administrative residue — left in place it would make every same-session
+    /// retry of a repair generation fail its `HoldsTree` verification and close
+    /// the generation, which `ST-15` (repair) forbids. The after phase of this
+    /// site is therefore the index holding the pick and no state file, which is
+    /// why the residue classifier reads the *index* for it. A kill before the
+    /// removal leaves `MERGE_MSG` (or its held `MERGE_MSG.lock`), which the
+    /// quiescence check reads and recreates from; a completed materialization
+    /// verifies at its base and the continuation's re-run pick onto the index
+    /// that already holds it is a no-op merge reporting the same observation
+    /// (`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
     ///
     /// # Errors
     ///
@@ -2769,13 +2772,16 @@ impl WorkspaceManager {
                     ],
                 )?;
                 if output.status.success() {
-                    return Ok(if self.staged_against_head(&path)? {
+                    let observed = if self.staged_against_head(&path)? {
                         Materialized::Clean
                     } else {
                         Materialized::Empty
-                    });
+                    };
+                    self.clear_pick_state(&path)?;
+                    return Ok(observed);
                 }
                 if !self.unmerged_records(&path)?.is_empty() {
+                    self.clear_pick_state(&path)?;
                     return Ok(Materialized::Conflict);
                 }
                 Err(UpstrokeError::Git {
@@ -2788,6 +2794,31 @@ impl WorkspaceManager {
                 })
             },
         )
+    }
+
+    /// The state files `cherry-pick --no-commit` leaves in the worktree's git
+    /// dir once it has ended, removed so the worktree is quiescent again
+    /// ([`Self::repair_materialize`] says why). Absence is the ordinary case
+    /// for a pick that never got as far as writing them.
+    fn clear_pick_state(&self, path: &Path) -> Result<(), UpstrokeError> {
+        let Some(git_dir) = self.worktree_git_dir(path)? else {
+            return Ok(());
+        };
+        for name in ["MERGE_MSG", "AUTO_MERGE"] {
+            let file = git_dir.join(name);
+            match fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(UpstrokeError::Filesystem {
+                        operation: "remove",
+                        path: file,
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Whether the worktree's index differs from its `HEAD`.

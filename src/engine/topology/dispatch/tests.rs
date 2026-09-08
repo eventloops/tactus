@@ -973,18 +973,17 @@ fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {
     );
     let mut planted_objects = Vec::new();
     for element in elements {
-        let reset = verify_or_recreate(
-            &run.fixture.manager,
-            &mut run.hooks,
-            &open,
-            &open.quiescence(),
-        )
-        .expect("a clean worktree at base to plant into");
-        assert!(
-            matches!(reset, Reuse::Recreated { .. }),
-            "{element:?}: a materialized worktree is never reused — its `MERGE_MSG` fails \
-             `Worktree.Verify` at the base"
-        );
+        // A fresh worktree at the base to plant into: the forced removal and
+        // the add, which is what the tabled recovery does after a failed
+        // verification (the intent the dispatch wrote is still there).
+        run.fixture
+            .manager
+            .remove_worktree(run.hooks.effects(), &open.slot)
+            .expect("forced removal");
+        run.fixture
+            .manager
+            .add_worktree(run.hooks.effects(), &open.slot, &open.base.0)
+            .expect("a fresh worktree at the base");
 
         let dir = git_dir(&worktree);
         match element {
@@ -1302,14 +1301,12 @@ fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_sta
     let dir = git_dir(&worktree);
     let expected_tree = git(&worktree, &["write-tree"]);
     assert!(
-        dir.join("MERGE_MSG").exists(),
-        "the completed pick left MERGE_MSG"
+        !dir.join("MERGE_MSG").exists() && !dir.join("AUTO_MERGE").exists(),
+        "the funnel cleared the pick's state files once the pick had ended"
     );
 
     // K3: the message's lock held, the message itself not yet in place.
-    let message = std::fs::read(dir.join("MERGE_MSG")).expect("the message");
-    write_file(&dir.join("MERGE_MSG.lock"), &message);
-    remove_file(&dir.join("MERGE_MSG"));
+    write_file(&dir.join("MERGE_MSG.lock"), b"side\n");
     let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
         .expect("a held MERGE_MSG.lock is recovered from");
     assert_eq!(
@@ -1326,11 +1323,12 @@ fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_sta
         "a recreated worktree has a fresh git dir"
     );
 
-    // K2: the index written and released, no state file yet. The packet's
-    // quiescence rule (HEAD at base, index unlocked, no cherry-pick state) is
-    // satisfied, so the worktree is reused as it stands; the pick re-run on an
-    // index that already holds its change is a no-op merge that reports the
-    // same observation, and the tree is the same tree.
+    // K2: the index written and released, no state file — which, since the
+    // funnel clears the state files itself, is also the completed after phase.
+    // The packet's quiescence rule (HEAD at base, index unlocked, no
+    // cherry-pick state) is satisfied, so the worktree is reused as it stands;
+    // the pick re-run on an index that already holds its change is a no-op
+    // merge that reports the same observation, and the tree is the same tree.
     let dir = git_dir(&worktree);
     remove_file(&dir.join("MERGE_MSG"));
     remove_file(&dir.join("AUTO_MERGE"));
@@ -1354,8 +1352,10 @@ fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_sta
     let dir = git_dir(&conflicted.worktree);
     let unmerged_before = unmerged_entries(&conflicted.worktree);
     assert!(unmerged_before > 0, "the conflict left unmerged entries");
-    remove_file(&dir.join("MERGE_MSG"));
-    remove_file(&dir.join("AUTO_MERGE"));
+    assert!(
+        !dir.join("MERGE_MSG").exists(),
+        "a conflicting pick's state files are cleared too"
+    );
     let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &conflicted_open)
         .expect("an unmerged index with no state file is recovered from");
     assert_eq!(resumed.reuse, Reuse::Verified);

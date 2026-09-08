@@ -6218,6 +6218,71 @@ fn declined_parked_verification_fails_task_consumes_queue_position_releases_leas
     }
 }
 
+/// A rejection is folded once. Replayed a second time — the same sequence, or
+/// the same candidate at the next sequence — it finds no open transaction and
+/// no queued candidate to reject, and is refused with the fold unchanged.
+#[test]
+fn a_rejection_already_folded_is_refused_when_it_arrives_again() {
+    let base = sha("base");
+    let head = sha("head");
+    let proposal = sha("proposal");
+    let mut ready = started();
+    merge_task(&mut ready, ALPHA, 0, 0);
+    apply(&mut ready, &dispatch(MID, 0, &base));
+    let start = attempt_started(&ready, MID, 0, 1, 0);
+    apply(&mut ready, &start);
+    apply(&mut ready, &candidate_prepared(MID, 0, &base));
+    apply(&mut ready, &candidate_created(MID, 0));
+    apply(
+        &mut ready,
+        &verification_started(MID, 0, 1, &head, &proposal),
+    );
+    let rejection = |sequence: u32| {
+        let mut rejected = MergeRejected {
+            sequence: SequenceId(sequence),
+            candidate: candidate_of(MID, 0),
+            rejecting_head: head.clone(),
+            disposition: RejectionDisposition::CodeRejected {
+                verification: verification_record(Verdict::Rejected),
+            },
+            repair: repair_spawn(TaskKey(3), MID, MID),
+            lease_effect: RejectionLeaseEffect::CreatesLineage {
+                root: MID,
+                paths: region(MID),
+            },
+        };
+        rejected.repair.entry.deps = vec![ALPHA];
+        rejected.repair.entry.display_deps = vec![TaskId::from("alpha")];
+        ev(TopologyEventBody::MergeRejected {
+            data: Box::new(rejected),
+        })
+    };
+    accepts(&ready, &rejection(1));
+    apply(&mut ready, &rejection(1));
+    let registered = ready.registry().expect("started").len();
+    assert_eq!(ready.task_state(TaskKey(3)), Some(TaskState::Pending));
+
+    for sequence in [1, 2] {
+        let refusal = refuse(&ready, &rejection(sequence));
+        assert!(
+            refusal.to_string().contains("merge_rejected"),
+            "sequence {sequence}: the refusal names the event: {refusal}"
+        );
+    }
+    assert_eq!(
+        ready.registry().expect("started").len(),
+        registered,
+        "a refused rejection registers nothing"
+    );
+    assert_eq!(ready.task_state(TaskKey(3)), Some(TaskState::Pending));
+    assert_eq!(ready.task_state(MID), Some(TaskState::AwaitingRepair));
+    assert_eq!(
+        ready.lineage_members(MID),
+        Some(1),
+        "and the lineage still has exactly the one member the first rejection registered"
+    );
+}
+
 #[test]
 fn a_rejection_creates_or_widens_exactly_one_lineage_and_registers_its_repair() {
     let base = sha("base");
