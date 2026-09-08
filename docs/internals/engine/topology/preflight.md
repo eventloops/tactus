@@ -196,6 +196,13 @@ nothing to fix.
 
 The run's Runner with R3 and R4 wrapped around every request.
 
+Its own refusals — a registration the ledger refuses, a slotted request
+with no slots or no agent, a pair the assertion refuses — are `RunnerError`s
+with the fate `NeverStarted`, because they precede the inner Runner; a
+release or settlement failure after the inner run carries the inner
+outcome's fate (`Gone` for an output, the inner error's for an error), so
+the boundary never claims more about the process than the Runner it wraps.
+
 One place, so that "each a registered invocation" is true of a process an
 adapter built as much as of one this module built.
 

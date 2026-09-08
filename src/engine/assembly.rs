@@ -152,6 +152,48 @@ impl FrozenPlans<'_> {
             .find(|(name, _)| name == agent)
             .map(|(_, caps)| caps.version.clone())
     }
+
+    /// Every recorded gate, as the plan a snapshot runs it from.
+    fn gate_plans(&self) -> Vec<GatePlan> {
+        self.gates
+            .iter()
+            .map(|gate| {
+                let (command, timeout) = gate.command();
+                GatePlan {
+                    name: gate.name.clone(),
+                    command,
+                    timeout,
+                }
+            })
+            .collect()
+    }
+
+    /// The review passes `entry` obliges against `implementer`, each at the
+    /// run's frozen review effort and in its own pool.
+    fn reviewer_plans(
+        &self,
+        entry: &crate::topology::registry::TaskEntry,
+        implementer: &crate::review::PassBinding,
+    ) -> Vec<ReviewerPlan> {
+        let pass_timeout = Duration::from_secs(entry.reviews.pass_timeout_secs);
+        let Some(bindings) = entry.reviews.bindings() else {
+            return Vec::new();
+        };
+        crate::review::passes_for(bindings, implementer)
+            .into_iter()
+            .map(|pass| ReviewerPlan {
+                agent: AgentId::new(&pass.binding.agent),
+                preflight_cli_version: self.cli_version(&pass.binding.agent),
+                profile: {
+                    let mut profile = pass.profile(entry.ladder.effort.review);
+                    profile.pool = self.pool_for(&pass.binding.agent).unwrap_or_default();
+                    profile
+                },
+                lens: pass.lens,
+                timeout: pass_timeout,
+            })
+            .collect()
+    }
 }
 
 impl AttemptPlans for FrozenPlans<'_> {
@@ -172,6 +214,16 @@ impl AttemptPlans for FrozenPlans<'_> {
             ),
             decisions: self.decisions.to_vec(),
             stem: crate::util::filename_component(entry.display_id.as_str()),
+        })
+    }
+
+    fn verification(
+        &self,
+        request: &super::topology::attempt::VerificationRequest<'_>,
+    ) -> Result<super::topology::attempt::VerificationPlan, UpstrokeError> {
+        Ok(super::topology::attempt::VerificationPlan {
+            gates: self.gate_plans(),
+            reviewers: self.reviewer_plans(request.entry, &request.implementer),
         })
     }
 
@@ -208,40 +260,11 @@ impl AttemptPlans for FrozenPlans<'_> {
         }
         .command()?;
 
-        let gates = self
-            .gates
-            .iter()
-            .map(|gate| {
-                let (command, timeout) = gate.command();
-                GatePlan {
-                    name: gate.name.clone(),
-                    command,
-                    timeout,
-                }
-            })
-            .collect();
+        let gates = self.gate_plans();
 
         let implementer =
             crate::review::PassBinding::new(&request.binding.agent, &request.binding.model);
-        let pass_timeout = Duration::from_secs(entry.reviews.pass_timeout_secs);
-        let reviewers = if let Some(bindings) = entry.reviews.bindings() {
-            crate::review::passes_for(bindings, &implementer)
-                .into_iter()
-                .map(|pass| ReviewerPlan {
-                    agent: AgentId::new(&pass.binding.agent),
-                    preflight_cli_version: self.cli_version(&pass.binding.agent),
-                    profile: {
-                        let mut profile = pass.profile(entry.ladder.effort.review);
-                        profile.pool = self.pool_for(&pass.binding.agent).unwrap_or_default();
-                        profile
-                    },
-                    lens: pass.lens,
-                    timeout: pass_timeout,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let reviewers = self.reviewer_plans(entry, &implementer);
 
         Ok(AttemptPlan {
             attempt: request.attempt,

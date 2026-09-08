@@ -171,6 +171,15 @@ trace on both sides.
 An `Err` from the `After` phase is returned *after* the primitive ran, which
 is the whole point of the error-return mode.
 
+## `fn funnel_reporting_attempt<T>(`
+
+The same funnel, saying on failure whether the primitive was reached. An
+`Err` from the `Before` phase is returned *before* the primitive ran, and
+for one site that difference is process evidence: a `docker start` that was
+never issued left a created container holding no process, while one whose
+answer was lost may have started it. `funnel` is this with the flag
+dropped, so there is one funnel body and not two.
+
 ## `enum Operation {`
 
 ---------------------------------------------------------------------------
@@ -499,9 +508,22 @@ Refuse a create whose named volumes are not already there.
 
 See [`create_container`] for why this is here and not only at resolution.
 
+## `pub struct StartFailure {`
+
+How a start failed, and whether `docker start` was attempted before it
+did. The cover review of `8a5f59e8` injected an error at `Container.Start`'s
+`Before` phase, verified `RuntimeOp::Start` absent from the runtime's calls,
+and watched the launch record `ContainerReached::Started` all the same, so
+with the cancel unable to reach the runtime the fate was `Unresolved` where
+`NeverStarted` was the truth and the integration left its transaction open
+instead of consuming the outage deferral (`PR8-R4-START-NOT-ATTEMPTED`).
+The flag comes from [`funnel_reporting_attempt`], which is the only thing
+that knows on which side of the primitive the failure happened.
+
 ## `pub fn start_container(`
 
-`Container.Start` (R26).
+`Container.Start` (R26). Its failure says whether the start was attempted
+([`StartFailure`]), because the launch's fate turns on exactly that.
 
 **The container to start is named by the proof and by nothing else.**
 `expected_failures_refusals[6]` is "container start without an intent is
@@ -512,8 +534,10 @@ is no argument to pass that is not evidence.
 
 ### Errors
 
-[`UpstrokeError::Refused`] when `site` does not name this operation or the
-runtime refuses.
+[`StartFailure`] carrying [`UpstrokeError::Refused`] when `site` does not
+name this operation or the runtime refuses, with `attempted` false when
+`docker start` was never issued.
+
 
 ## `fn expect_intent_for(intent: &IntentWritten, name: &str, verb: &str) -> Result<(), UpstrokeError> {`
 
@@ -689,11 +713,74 @@ The answer is a list of descriptions rather than a `Result`, because the
 caller must return the refusal it already has: this function's failure is
 never the thing to report *instead of* an integrity violation.
 
-## `fn cancel_reached(`
+## `pub enum ContainerToRelease {`
+
+What the caller already knows about the container a cancel or a release is
+handed. `Absent`: no `docker create` was attempted, so the stop and the
+removal are skipped. `MayBeRunning`: a container may exist and may be
+running its process, so the stop and the removal are what establish its
+fate. `ObservedExited`: the caller's supervisor observed the container
+terminated, so nothing runs in it whatever the stop and the removal then
+say — an observed exit is process-fate evidence in its own right, and the
+review of `79ddbffb` found it thrown away the moment a later step failed
+(`PR8-R3-CONTAINER-EVIDENCE`).
+
+## `pub struct CancelResidue {`
+
+What a cancel or a release could not do, and one fact beside the messages:
+whether the runtime established that no process of the container survives.
+The messages are for the operator; the fact is for `ContainerRunner::run`
+and `cancelled`, which classify the process by it — a container the runtime
+never confirmed stopped or removed may still be running its process, and
+that is the one thing an outage terminal must not be settled over.
+
+`container_gone` is **process-fate evidence, kept distinct from whether
+every cleanup step completed** (the review of `79ddbffb`, whose three
+container findings were that one conflation). It is true when no container
+was reached, when the caller observed the container exited, when a stop
+succeeded, or when a forced removal succeeded (`docker rm --force` kills
+before it removes); a failed stop followed by a successful removal is gone,
+and so is a failed removal after a stop that established the exit. It is
+false only when a container may exist and the runtime confirmed neither.
+The view and the intent surviving is no part of it: they are residue for
+the census.
+
+**A stop or a removal the daemon answered with another reclaimer's removal
+already in progress confirms neither** ([`Settled::RemovalInProgress`]).
+The daemon sets that flag in `containerRm` *before* `cleanupContainer`
+kills, and resets it if the kill fails, so the loser's answer says only
+that somebody else holds the flag. The third repair round read the
+normalized `Ok(())` of that answer as a completed removal, and the cover
+review of `8a5f59e8` measured the result through the production runner:
+fate `Gone`, survivor `Running`, view and intent pruned
+(`PR8-R4-REMOVAL-IN-PROGRESS`). The runtime now says which of the two it
+established, and only `ProcessGone` counts.
+
+## `pub fn cancel_reached(`
 
 The one exhaustive cleanup in this tree: stop, remove, unmount, remove the
 intent — **attempting every step even after one fails**, and never removing
 the R26 record while it is the only thing that can find the R19 residue.
+Answers a [`CancelResidue`]. A stop or a removal counts as evidence only
+when the runtime answered [`Settled::ProcessGone`]; a
+[`Settled::RemovalInProgress`] answer is named in the residue as
+establishing nothing, and a failure is named as a failure.
+
+#### Why the view and the intent outlive an unconfirmed container (`PR8-R3-CONTAINER-RETAIN`)
+
+When the stop and the removal both fail and the caller did not observe
+the exit, the container may still be running with the R19 view
+bind-mounted: pruning the view then deletes the Git metadata out from
+under a live gate, and removing the intent deletes the only record that
+names either. The review of `79ddbffb` measured exactly that — survivor
+`Running`, error `Unresolved`, `view=false, intent=false` — after the
+previous round had learned to retain the outer worktree snapshot, which
+protects nothing the container has mounted. So the view and the intent
+are retained **together** whenever `container_gone` is false, the residue
+says so and names the row it protects, and the next census reclaims the
+container, the view and the intent through the intent ([`reclaim`]: kill,
+observe terminated, remove, unmount, remove intent). Removing them would
+be the fail-open direction.
 
 `ContainerRunner::cancel` and `ContainerRunner::release` delegate here, and
 so does [`cancel_created`]. One definition, deliberately: the view-path
@@ -754,6 +841,19 @@ can find it through.
 
 [`UpstrokeError::Refused`] naming every step that failed.
 
+## `pub struct ReleaseFailure {`
+
+[`release`]'s error with `container_gone` beside it: the runner's `run`
+reads it to say whether the failed release left a process that may still
+be running or only a view or an intent for the census.
+
+## `pub fn release_classified(`
+
+[`release`] keeping that fact, and told what the caller observed
+([`ContainerToRelease`]) so a container seen to exit is not held to be
+running because its stop then failed; `release` is the same call, assuming
+`MayBeRunning`, for a caller that has nothing to classify.
+
 ## `pub const TERMINATION_OBSERVATIONS: usize = 8;`
 
 How many times reclaim asks whether a container has terminated.
@@ -766,7 +866,11 @@ all of them "cannot be observed terminated", which
 
 ## `pub fn reclaim(`
 
-One container reclaimed, in the packet's own order.
+One container reclaimed, in the packet's own order. The evidence that the
+process is gone is [`observe_terminated`] between the kill and the
+removal; what the kill and the removal answered is what lets a racing
+reclaimer continue, and is not read as evidence here.
+
 
 > reclaim = docker kill -> wait until observed exited/removed -> docker rm
 > -> remove Git view -> remove intent, every step idempotent and tolerant of
@@ -1242,6 +1346,16 @@ named function with its own tests rather than a `matches!` at the call site:
 every fake in this slice injects [`RuntimeError::Unreachable`] *directly*,
 so nothing but a test of this function tests the thing that decides it.
 
+A message the daemon spoke is proof the daemon was reached, whatever the rest
+of it quotes, so [`speaks_for_the_daemon`] refuses before the table is
+consulted. Without that the table is a phrase search over text the environment
+shapes, in the direction that matters: an answered failure read as unreachable
+makes `census::proceeds_without` true, and a write command then proceeds with
+no container evidence over a runtime that answered and would not list a dead
+owner's containers. The daemon's phrases are its own; the label values and
+mount paths it quotes back are engine-supplied. Round six, the sweep of
+finding 1's class.
+
 ## `pub fn classify_docker_failure(operation: RuntimeOp, detail: String) -> RuntimeError {`
 
 One failed `docker` invocation, as the seam's error.
@@ -1252,9 +1366,16 @@ classification is reachable — and testable — **without a daemon**, and the
 census tests can hand a fake runtime the error a verbatim diagnostic really
 produces instead of asserting on an `Unreachable` they minted themselves.
 
-## `fn is_absent(detail: &str) -> bool {`
+## `fn is_absent(target: &str, detail: &str) -> bool {`
 
-Whether a `docker` failure means "the object is not there".
+Whether a `docker` failure means "the object `target` is not there".
+
+The phrases are unchanged and they are no longer read from the whole of
+stderr: [`daemon_answer_about`] is what decides which text they may be looked
+for in. `DockerCli::inspect` is the only caller that still turns this into an
+answer on its own, and on every path it reaches — an image, a volume, and the
+container reads inside `collect` and `create`'s read-back — an absent object
+is a refusal or an error and never a settled process (round six, §7.3).
 
 ## `pub const REMOVAL_IN_PROGRESS: &str = "is already in progress";`
 
@@ -1275,16 +1396,25 @@ third state a racing reclaimer sees, and `T-CONTAINER.resume_action`'s
 losing reclaimer would return an error before `rm`, the view prune and the
 intent removal, and the write command driving it would refuse rather than
 converge. `PR6-CONV-002` is the entry; every fake race converged because
-`FakeRuntime::remove` cannot produce this answer at all.
+`FakeRuntime::remove` could not produce this answer at all — it can now,
+through `set_docker_stderr`, and routes it through this very normalizer.
 
-## `fn remove_already_settled(detail: &str) -> bool {`
+It is also **not evidence that the process is gone**. `containerRm` sets
+the flag before `cleanupContainer` kills, so the loser learns only that the
+winner holds it; it normalizes to [`Settled::RemovalInProgress`], which
+lets a reclaimer continue and lets nothing conclude a fate
+(`PR8-R4-REMOVAL-IN-PROGRESS`).
 
-Whether a `docker rm` failure means the container is gone, or is going away
-under somebody else.
+## `fn removal_answer(target: &str, detail: &str) -> Option<Settled> {`
 
-## `fn settle_remove(outcome: Result<String, RuntimeError>) -> Result<(), RuntimeError> {`
+What a `docker rm` failure established: an absent container is a gone
+process, another reclaimer's removal in progress is nothing, and any other
+failure is a failure.
 
-`docker rm`'s raw answer, as the seam's.
+## `fn settle_remove(`
+
+`docker rm`'s raw answer, as the seam's: success is a gone process, because
+`docker rm --force` kills and waits before it answers.
 
 A free function for the reason [`settle_stop`] is one: the branch that
 matters is one a real daemon produces **only** in a race, so a gated test is
@@ -1326,7 +1456,7 @@ The id the runtime says it used, read back from the created
 container. Never `spec.image_id`: the whole point of the check the
 caller then performs is that these two can differ.
 
-## `fn remove(&self, name: &str) -> Result<(), RuntimeError>` › `settle_remove(self.exec(`
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>` › `settle_remove(`
 
 `--volumes` (`PR6A-ANONYMOUS-VOLUMES-LEAK`). An image declaring
 `VOLUME` gets an **anonymous** volume per container, and `docker rm`
@@ -1341,10 +1471,11 @@ balances. `--volumes` removes only anonymous volumes attached to this
 container and **never a named one**, which is what makes reclaiming it
 here a discharge of R26 rather than a violation of R20.
 
-## `fn stop_already_settled(detail: &str) -> bool {`
+## `fn stop_answer(target: &str, detail: &str) -> Option<Settled> {`
 
-Whether a `docker stop` / `docker kill` failure means the container has
-already reached the state the caller asked for.
+What a `docker stop` / `docker kill` failure established: a container the
+daemon says is not running or does not exist is a gone process; another
+reclaimer's removal in progress is nothing.
 
 The adjacent source comment retains the daemon's concurrent-reclaimer
 protocol under standards §10 and §13. A stopped or removing container lets a
@@ -1371,21 +1502,149 @@ historical head because the fixtures serialized the reclaimers. That is not
 a claim about the current suite, which directly checks the stop-settlement
 predicate, including the daemon's removal-in-progress response.
 
-## `fn stop_already_settled(detail: &str) -> bool` › `remove_already_settled(detail) || detail.contains("is not running")`
+## `fn stop_answer(target: &str, detail: &str) -> Option<Settled>` › `removal_answer(target, detail)`
 
-`remove_already_settled` and not `is_absent`: a `docker kill` issued
-against a container another reclaimer is already removing answers with
-`REMOVAL_IN_PROGRESS` too, and that container is on its way out either
-way.
+`removal_answer` and not `is_absent`: a `docker kill` issued against a
+container another reclaimer is already removing answers with
+`REMOVAL_IN_PROGRESS` too. The reclaimer continues past it, and it says
+nothing about the process: the winner set the flag before it killed.
 
-## `fn settle_stop(outcome: Result<String, RuntimeError>) -> Result<(), RuntimeError> {`
+## `fn settle_stop(`
 
-`docker stop` / `docker kill`'s raw answer, as the seam's.
+`docker stop` / `docker kill`'s raw answer, as the seam's: success is a
+gone process, because both return after the daemon has seen the exit.
 
 A free function taking the raw outcome rather than a `match` inside
 [`DockerCli::stop`], so the tolerance is reachable **without a daemon**: the
 branch that matters is one a real runtime only produces in a race, and a
-gated test is the wrong and only place it could otherwise be observed.
+gated test is the wrong and only place it could otherwise be observed. Since
+round six it is a thin naming of [`settle`] over [`stop_answer`]: what it
+means to settle, and what a settlement has to be established against, is one
+function shared with `settle_remove`.
+
+## `const DAEMON_ANSWER: &str = "error response from daemon:";`
+
+The Docker CLI opens a line with this, and with nothing to its left, when it
+is relaying what the daemon said. A command that failed before it reached the
+daemon — an endpoint it cannot resolve, TLS material that is not there, a flag
+it does not know — never produces such a line.
+
+Measured on `docker` 29.7.2 (`r6-evidence/docker-transcription.md` in the
+artifacts): every typed subcommand this file issues relays the daemon's answer
+with this marker, and the typed `image inspect` uses it too — only the generic
+`docker inspect`, which this file never runs, wraps a 404 as
+`Error: No such object:` instead. A local failure prints
+`Failed to initialize: unable to resolve docker endpoint: …` and no such line.
+
+## `fn daemon_answer_about(target: &str, detail: &str) -> Option<String> {`
+
+The daemon's own words about `target` inside a diagnostic, lowercased, or
+`None` when the CLI failed locally or answered about something else.
+
+Absence and termination used to be read out of the whole of stderr, and stderr
+is text the environment shapes. With TLS material missing under a directory
+named `no such container`, the CLI fails **before contacting the daemon** and
+quotes that path back; every phrase table in this file matched the quoted path,
+so a local failure settled `Gone` and `ProcessGone` beside a container that was
+still running — the sequence and its reproduction are `pr8-triage.md` §9,
+finding 1.
+
+Two things have to hold before a phrase means anything at all. The message has
+to be one the daemon spoke, which the CLI marks by opening the line with
+[`DAEMON_ANSWER`] and putting the daemon's message after it: a quoted path
+lands mid-line, never at a line's start. And it has to be about the container
+we asked about, which is what naming the target establishes. Each half refuses
+a shape the other admits, and `tests::a_diagnostic_that_is_not_the_daemon_answering_about_this_container_settles_nothing`
+carries one case for each — a local failure quoting the phrase, a local failure
+quoting the phrase *and* the container's name, and the daemon answering about
+another container.
+
+Neither is proof on its own, and the pair is not proof either, because text is
+evidence about a message and never about a process. What a surviving answer
+earns is the right to **propose** a settlement, which [`settle`] then
+establishes against the runtime before returning it.
+
+An empty target answers `None` rather than matching every line: `contains("")`
+is true of anything, and a normalizer whose gate is vacuous for one argument is
+a normalizer with an ungated path.
+
+## `fn speaks_for_the_daemon(detail: &str) -> bool {`
+
+Whether the CLI relayed anything the daemon said, whoever it was about. Used
+by [`is_unreachable_diagnostic`] in the direction the census depends on.
+
+## `fn establishes(proposed: Settled, observed: Liveness) -> bool {`
+
+Whether an observation establishes a settlement a diagnostic proposed.
+
+`ProcessGone` is a claim about the process, so the runtime has to agree the
+container is not running. `RemovalInProgress` claims nothing about the process
+— the reclaimer continues and the residue names it — so there is nothing for an
+observation to establish, and [`settle`] returns it without making one.
+
+## `fn settle(`
+
+The settlement a stop's or a removal's outcome establishes.
+
+A success is the daemon's own answer: `docker stop`, `docker kill` and
+`docker rm --force` return after the daemon has seen the exit, so nothing is
+observed for one. A failure is read by `propose` for what its text claims, and
+a claim about the process is then put to `observe`, which answers from the
+runtime rather than from the failed command's stderr; a proposal the
+observation contradicts is returned as the failure it was, leaving the intent
+retained for a later reclaimer.
+
+The observation is a parameter and not a call, so `FakeRuntime` settles through
+this same function against its own state, and the tests that are about a
+diagnostic rather than about an observation say which observation they mean.
+`tests::never_observed` is the observer for the outcomes that must settle, or
+refuse to, without asking the runtime anything.
+
+## `fn listed_state<'a>(listing: &'a str, name: &str) -> Option<&'a str> {`
+
+The state a `docker ps` listing holds for exactly `name`, or `None` when the
+listing does not hold it.
+
+`--filter name=` is a regular expression and matches every longer name that
+contains this one — measured live, with `upstroke-probe-r6-longer` returned for
+the filter `name=upstroke-probe-r6` — so the filter narrows the listing and
+this comparison decides. `real_docker_lists_the_state_the_settlement_observation_reads`
+creates the colliding name deliberately and fails if the filter stops matching
+it, so the comparison is never left untested by a filter that got stricter.
+
+## `fn liveness_of(listed: Option<&str>) -> Liveness {`
+
+What a listing says about a container's liveness; `None` is the daemon not
+holding the container at all.
+
+The vocabulary and the fallthrough are PR6's, unchanged: a container being
+removed counts as running until its record is gone, and a status this does not
+enumerate lands on the terminated side. `pr8-triage.md` §7.3 records why that
+arm is the class's remaining weak one and why refusing an unenumerated state,
+though the conforming shape, is a behaviour change to PR6 code with no
+reproduction behind it.
+
+## `const CONTAINER_STATE_FORMAT: &str = "{{.Names}}\u{1f}{{.State}}";`
+
+The two fields the settlement observation reads. `{{.State}}` prints the same
+lowercase vocabulary as `container inspect`'s `{{.State.Status}}` — measured
+`created`, `running` and `exited` on the same container — which is what lets
+[`liveness_of`] keep PR6's mapping while the query changes.
+
+## `impl DockerCli` › `fn listing(&self, op: RuntimeOp, name: &str) -> Result<String, RuntimeError> {`
+
+What the daemon holds for one container, from a command that had to reach it to
+answer at all: the CLI fails when it cannot reach the daemon, so a listing that
+succeeded is the daemon speaking, and the container's presence is a value in
+that listing rather than a phrase in a diagnostic. An absent container is an
+exit of **0** with no output, which no local failure can produce.
+
+## `fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {`
+
+Absence is read out of a listing that had to succeed, never out of a failed
+`container inspect`'s stderr: the phrase a diagnostic carries is text the
+environment shapes, and this is the observation every other settlement in the
+runtime is established against (round six, finding 1).
 
 ## `fn mount_argument(mount: &runtime::Mount) -> String {`
 

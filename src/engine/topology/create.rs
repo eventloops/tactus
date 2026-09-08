@@ -123,7 +123,7 @@ use crate::rundir::{
     remove_marker, remove_private_husk, remove_public_husk, stage_commit_record, stage_marker,
     stage_owner_record, write_plan,
 };
-use crate::runner::{InvocationId, Runner, RunnerRequest};
+use crate::runner::{InvocationId, Runner, RunnerError, RunnerRequest};
 use crate::topology::effects::EventSite;
 use crate::topology::events::{RunStarted4, TopologyEvent, TopologyEventBody};
 use crate::topology::fold::{FrozenInputs, TopologyDelta, TopologyFold};
@@ -286,7 +286,7 @@ pub struct ShellProbe<'a> {
 }
 
 impl Runner for ShellProbe<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         self.through.run(request)
     }
 }
@@ -302,15 +302,18 @@ pub struct AgentProbe<'a> {
 }
 
 impl Runner for AgentProbe<'_> {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError> {
         if !super::identity::is_slotted(&request.invocation) {
-            return Err(UpstrokeError::Refused {
-                message: format!(
-                    "`{}` takes no slot and this is an agent probe's boundary; INV-23's \
-                     non-slotted probe is the recorded shell, which runs on its own path",
-                    request.invocation
-                ),
-            });
+            return Err(RunnerError::never_started(
+                &request.invocation,
+                UpstrokeError::Refused {
+                    message: format!(
+                        "`{}` takes no slot and this is an agent probe's boundary; INV-23's \
+                         non-slotted probe is the recorded shell, which runs on its own path",
+                        request.invocation
+                    ),
+                },
+            ));
         }
         self.through.run(request)
     }
@@ -804,6 +807,14 @@ mod steps {
         /// it is about to probe under.
         pub(super) fn owner(&self) -> &OwnerRecord {
             &self.owner
+        }
+
+        /// The run lock's cleanup scope, entered for the stretch of P4 that
+        /// spawns the probes: a Unix reaper takes its cleanup-lease paths from
+        /// the thread-local scope at spawn, and a probe's reaper that outlives
+        /// this coordinator must hold R28 like any other.
+        pub(super) fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
+            self.lock.enter_cleanup_scope()
         }
 
         pub(super) fn abort(self, reached: Prefix, error: UpstrokeError) -> Box<Aborted> {
@@ -1749,7 +1760,9 @@ fn p4_run_preflight(
     hooks: &mut dyn TopologyHooks,
 ) -> Result<ProbesCertified, Box<Aborted>> {
     let _ = hooks;
+    let _cleanup_scope = p3b.cleanup_scope();
     let expected = p3b.facts().checked().runner_policy_sha256().to_owned();
+
     if request.probes.policy_digest() != expected {
         let recorded = crate::runner::policy::runner_policy_sha256(&p3b.owner().runner);
         return Err(p3b.abort(

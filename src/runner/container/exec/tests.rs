@@ -14,7 +14,7 @@ use crate::rundir::RunPaths;
 use crate::runner::container::intent::LABEL_PRIVATE_ROOT;
 use crate::runner::container::runtime::{
     ContainerExecution, ContainerTrace, CreatedContainer, DiscoveredContainer, ImageInspection,
-    Liveness, RuntimeOp, StopMode,
+    Liveness, RuntimeOp, Settled, StopMode,
 };
 use crate::runner::container::view::fixtures as repo;
 use crate::runner::container::{
@@ -82,6 +82,9 @@ const VOLUMES: &[(&str, &str)] = &[
     ("codex", "upstroke-creds-codex"),
 ];
 const EVENT_LOG_MARKER: &str = "COORDINATOR-EVENT-LOG-a5f2";
+fn removal_in_progress_diagnostic(name: &str) -> String {
+    format!("Error response from daemon: removal of container {name} is already in progress")
+}
 
 const IMAGE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
@@ -203,10 +206,10 @@ impl ContainerRuntime for Runtime {
         }
         Ok(())
     }
-    fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {
+    fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         self.0.fake.stop(name, mode)
     }
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
         self.0.fake.remove(name)
     }
 }
@@ -311,6 +314,423 @@ impl Fixture {
             (Withheld::AuthoritativeGit, self.repo.join(".git")),
         ]
     }
+}
+
+#[test]
+fn the_runner_reports_what_it_established_about_the_process_when_it_fails() {
+    use crate::error::ProcessFate;
+    use crate::runner::container::runtime::RuntimeOp;
+    use crate::topology::effects::{EffectSiteId, HookPhase};
+
+    struct Cell {
+        case: &'static str,
+        unreachable: &'static [RuntimeOp],
+        failing: &'static [RuntimeOp],
+        removal_in_progress: bool,
+        hook: Option<(ContainerSite, HookPhase)>,
+        mismatch: bool,
+        exit_on_start: bool,
+        timeout: Duration,
+        expected: ProcessFate,
+        start_attempted: bool,
+        survivor: Option<Liveness>,
+        view_and_intent_retained: bool,
+    }
+
+    let ten = Duration::from_secs(10);
+    let cells = [
+        Cell {
+            case: "the runtime is down before create",
+            unreachable: &[RuntimeOp::Create, RuntimeOp::Stop, RuntimeOp::Remove],
+            failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::NeverStarted,
+            start_attempted: false,
+            survivor: None,
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the runtime refuses to create",
+            unreachable: &[],
+            failing: &[RuntimeOp::Create],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::NeverStarted,
+            start_attempted: false,
+            survivor: None,
+            view_and_intent_retained: false,
+        },
+        Cell {
+            case: "the created container reports another image",
+            unreachable: &[],
+            failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: true,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::NeverStarted,
+            start_attempted: false,
+            survivor: None,
+            view_and_intent_retained: false,
+        },
+        Cell {
+            case: "the runtime refuses to start and the cancel completes",
+            unreachable: &[],
+            failing: &[RuntimeOp::Start],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::Gone,
+            start_attempted: true,
+            survivor: None,
+            view_and_intent_retained: false,
+        },
+        Cell {
+            case: "the start is committed and the launch fails after it",
+            unreachable: &[],
+            failing: &[],
+            removal_in_progress: false,
+            hook: Some((ContainerSite::Start, HookPhase::After)),
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::Gone,
+            start_attempted: true,
+            survivor: None,
+            view_and_intent_retained: false,
+        },
+        Cell {
+            case: "the runtime is lost at start and the cancel establishes nothing",
+            unreachable: &[RuntimeOp::Start, RuntimeOp::Stop, RuntimeOp::Remove],
+            failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::Unresolved,
+            start_attempted: true,
+            survivor: Some(Liveness::Exited),
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the observation is lost and the release completes",
+            unreachable: &[RuntimeOp::Observe],
+            failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::Gone,
+            start_attempted: true,
+            survivor: None,
+            view_and_intent_retained: false,
+        },
+        Cell {
+            case: "the observation and the stop are lost and the forced removal completes",
+            unreachable: &[RuntimeOp::Observe, RuntimeOp::Stop],
+            failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::Gone,
+            start_attempted: true,
+            survivor: None,
+            view_and_intent_retained: false,
+        },
+        Cell {
+            case: "the observation, the stop and the removal are all lost",
+            unreachable: &[RuntimeOp::Observe, RuntimeOp::Stop, RuntimeOp::Remove],
+            failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::Unresolved,
+            start_attempted: true,
+            survivor: Some(Liveness::Running),
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the exit is observed and then the collection, the stop and the removal are lost",
+            unreachable: &[RuntimeOp::Collect, RuntimeOp::Stop, RuntimeOp::Remove],
+            failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: true,
+            timeout: ten,
+            expected: ProcessFate::Gone,
+            start_attempted: true,
+            survivor: Some(Liveness::Exited),
+            view_and_intent_retained: false,
+        },
+        Cell {
+            case: "the gate times out and only the view discard fails",
+            unreachable: &[],
+            failing: &[],
+            removal_in_progress: false,
+            hook: Some((ContainerSite::UnmountGitView, HookPhase::Before)),
+            mismatch: false,
+            exit_on_start: false,
+            timeout: Duration::ZERO,
+            expected: ProcessFate::Gone,
+            start_attempted: true,
+            survivor: None,
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the gate times out, the stop fails and the forced removal completes",
+            unreachable: &[],
+            failing: &[RuntimeOp::Stop],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: Duration::ZERO,
+            expected: ProcessFate::Gone,
+            start_attempted: true,
+            survivor: None,
+            view_and_intent_retained: false,
+        },
+        Cell {
+            case: "the gate times out and neither the stop nor the removal completes",
+            unreachable: &[RuntimeOp::Stop, RuntimeOp::Remove],
+            failing: &[],
+            removal_in_progress: false,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: Duration::ZERO,
+            expected: ProcessFate::Unresolved,
+            start_attempted: true,
+            survivor: Some(Liveness::Running),
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the observation and the stop are lost and another reclaimer's removal is in \
+                   progress",
+            unreachable: &[RuntimeOp::Observe, RuntimeOp::Stop],
+            failing: &[],
+            removal_in_progress: true,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::Unresolved,
+            start_attempted: true,
+            survivor: Some(Liveness::Running),
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the gate times out, the stop is lost and another reclaimer's removal is in \
+                   progress",
+            unreachable: &[RuntimeOp::Stop],
+            failing: &[],
+            removal_in_progress: true,
+            hook: None,
+            mismatch: false,
+            exit_on_start: false,
+            timeout: Duration::ZERO,
+            expected: ProcessFate::Unresolved,
+            start_attempted: true,
+            survivor: Some(Liveness::Running),
+            view_and_intent_retained: true,
+        },
+        Cell {
+            case: "the funnel refuses before `docker start` is attempted and the cancel cannot \
+                   reach the runtime",
+            unreachable: &[RuntimeOp::Stop, RuntimeOp::Remove],
+            failing: &[],
+            removal_in_progress: false,
+            hook: Some((ContainerSite::Start, HookPhase::Before)),
+            mismatch: false,
+            exit_on_start: false,
+            timeout: ten,
+            expected: ProcessFate::NeverStarted,
+            start_attempted: false,
+            survivor: Some(Liveness::Exited),
+            view_and_intent_retained: true,
+        },
+    ];
+
+    let mut seen = 0_usize;
+    for (index, cell) in cells.iter().enumerate() {
+        let case = cell.case;
+        let fixture = Fixture::new(&format!("fate-{index}"), cell.exit_on_start);
+        for op in cell.unreachable {
+            fixture.runtime.fake().set_unreachable(*op);
+        }
+        for op in cell.failing {
+            fixture.runtime.fake().set_failing(*op);
+        }
+        let request = gate_request(
+            ShellKind::Sh.spec(if cell.timeout.is_zero() {
+                "sleep 600"
+            } else {
+                "exit 0"
+            }),
+            fixture.task_a.clone(),
+            cell.timeout,
+            gate_id(0),
+        );
+        let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
+            .expect("a container name");
+        if cell.removal_in_progress {
+            fixture.runtime.fake().set_docker_stderr(
+                RuntimeOp::Remove,
+                &removal_in_progress_diagnostic(name.as_str()),
+            );
+        }
+        if cell.mismatch {
+            fixture
+                .runtime
+                .fake()
+                .substitute_reported_image_id(name.as_str(), OTHER_IMAGE_ID);
+        }
+        let mut runner = fixture.runner();
+        if let Some((site, phase)) = cell.hook {
+            let mut hooks = RecordingHooks::new(fixture.trace.clone());
+            hooks.fail_at(EffectSiteId::Container(site), phase);
+            runner = runner.with_hooks(Box::new(hooks));
+        }
+
+        let error = runner.run(&request).expect_err(case);
+        assert_eq!(error.fate, cell.expected, "{case}: {error}");
+        assert!(
+            error.to_string().contains(cell.expected.describe()),
+            "{case}: the error says what was established: {error}"
+        );
+        assert_eq!(
+            fixture.trace.ops().contains(&RuntimeOp::Start),
+            cell.start_attempted,
+            "{case}: whether `docker start` was attempted decides whether a spawn failure can \
+             be claimed; ops were {:?}",
+            fixture.trace.ops()
+        );
+        let names = fixture.runtime.fake().container_names();
+        let survivor = names
+            .first()
+            .and_then(|name| fixture.runtime.fake().container(name))
+            .map(|container| container.state);
+        assert_eq!(
+            survivor, cell.survivor,
+            "{case}: the container left behind and its state; names were {names:?}"
+        );
+        let view_retained = view_dir(&fixture.private_root, &name).exists();
+        let intent_retained = name.intent_path(&fixture.private_root).exists();
+        assert_eq!(
+            (view_retained, intent_retained),
+            (cell.view_and_intent_retained, cell.view_and_intent_retained),
+            "{case}: the R19 view and the R26 intent are retained together exactly when the \
+             runtime did not establish the container gone (or the view could not be pruned)"
+        );
+        if cell.view_and_intent_retained {
+            assert!(
+                error.to_string().contains("deliberately retained"),
+                "{case}: the error says the residue was kept on purpose: {error}"
+            );
+        }
+        seen += 1;
+    }
+    assert_eq!(seen, 16, "every cell of the container fate matrix ran");
+}
+
+#[test]
+fn a_container_the_runtime_cannot_confirm_stopped_keeps_its_mounted_git_view_and_intent() {
+    use crate::error::ProcessFate;
+
+    let fixture = Fixture::new("unresolved-mounted-view", false);
+    for op in [RuntimeOp::Observe, RuntimeOp::Stop, RuntimeOp::Remove] {
+        fixture.runtime.fake().set_unreachable(op);
+    }
+    let request = gate_request(
+        ShellKind::Sh.spec("exit 0"),
+        fixture.task_a.clone(),
+        Duration::from_secs(10),
+        gate_id(0),
+    );
+    let name = ContainerName::new(repo_key(), RUN_ID, INCARNATION_1, &request.invocation)
+        .expect("a container name");
+
+    let error = fixture
+        .runner()
+        .run(&request)
+        .expect_err("the runtime lost the gate");
+    assert_eq!(error.fate, ProcessFate::Unresolved, "{error}");
+    assert_eq!(
+        fixture
+            .runtime
+            .fake()
+            .container(name.as_str())
+            .map(|container| container.state),
+        Some(Liveness::Running),
+        "the runtime never confirmed the gate stopped"
+    );
+    let view = view_dir(&fixture.private_root, &name);
+    let intent = name.intent_path(&fixture.private_root);
+    assert!(
+        view.exists() && intent.exists(),
+        "a live container's mounted Git view and its intent record must outlive an \
+         unresolved release: view={}, intent={}",
+        view.exists(),
+        intent.exists()
+    );
+    let sites: Vec<String> = fixture
+        .trace
+        .rendered()
+        .into_iter()
+        .filter(|entry| entry.starts_with("site:"))
+        .collect();
+    assert!(
+        !sites
+            .iter()
+            .any(|site| site.starts_with("site:UnmountGitView:"))
+            && !sites
+                .iter()
+                .any(|site| site.starts_with("site:RemoveIntent:")),
+        "neither the view nor the intent was touched while the container may run: {sites:#?}"
+    );
+    let message = error.to_string();
+    assert!(
+        message.contains("deliberately retained") && message.contains("R26"),
+        "the error names the retained anchor: {message}"
+    );
+
+    for op in [RuntimeOp::Observe, RuntimeOp::Stop, RuntimeOp::Remove] {
+        fixture.runtime.fake().set_reachable(op);
+    }
+    let found = list_intents(&fixture.private_root).expect("scan");
+    assert_eq!(
+        found.len(),
+        1,
+        "the retained intent is what a later census discovers the survivor through"
+    );
+    crate::runner::container::reclaim(
+        &mut RecordingHooks::new(fixture.trace.clone()),
+        &fixture.runtime,
+        &crate::runner::container::DisposableDirView::new(fixture.trace.clone()),
+        &fixture.private_root,
+        &name,
+        Some(&view),
+    )
+    .expect("with the runtime back, the census reclaim converges on the retained record");
+    assert!(fixture.runtime.fake().container_names().is_empty());
+    assert!(!view.exists() && !intent.exists());
 }
 
 fn worker_id(ordinal: u32) -> InvocationId {
@@ -886,16 +1306,24 @@ fn a_substituted_reported_image_id_refuses_before_start_in_both_phases() {
         );
         match expected {
             ImageIdMismatch::RefusedBeforeStart => assert!(
-                matches!(refusal, UpstrokeError::Refused { .. }),
+                matches!(*refusal.source, UpstrokeError::Refused { .. }),
                 "{phase}: a pre-flight mismatch must be a refusal before any spend: \
                  {refusal:?}"
             ),
             ImageIdMismatch::SpawnFailureOutage => assert!(
-                matches!(refusal, UpstrokeError::Agent { .. }),
+                matches!(*refusal.source, UpstrokeError::Agent { .. }),
                 "{phase}: a mid-run mismatch reached the caller as the same generic refusal a \
                  pre-flight one does, so the RunnerSpawnFailure outage settlement the \
                  contract requires is unreachable: {refusal:?}"
             ),
+        }
+        assert_eq!(
+            refusal.fate,
+            crate::error::ProcessFate::NeverStarted,
+            "{phase}: a created container that never started and was removed is no process"
+        );
+        match expected {
+            ImageIdMismatch::RefusedBeforeStart | ImageIdMismatch::SpawnFailureOutage => {}
         }
 
         assert!(

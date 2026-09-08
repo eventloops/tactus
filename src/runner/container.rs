@@ -32,8 +32,8 @@ use crate::runner::InvocationId;
 use intent::{ContainerIntent, ContainerName, INTENT_STAGED_SUFFIX, IntentWritten, containers_dir};
 use runtime::{
     ContainerExecution, ContainerRuntime, ContainerTrace, CreateSpec, CreatedContainer,
-    DiscoveredContainer, DurableStep, Liveness, RuntimeError, RuntimeOp, StopMode, TracePhase,
-    ViewAction,
+    DiscoveredContainer, DurableStep, Liveness, RuntimeError, RuntimeOp, Settled, StopMode,
+    TracePhase, ViewAction,
 };
 
 pub trait ContainerHooks {
@@ -108,12 +108,24 @@ fn funnel<T>(
     site: ContainerSite,
     primitive: impl FnOnce() -> Result<T, UpstrokeError>,
 ) -> Result<T, UpstrokeError> {
+    funnel_reporting_attempt(hooks, site, primitive).map_err(|(_, error)| error)
+}
+
+fn funnel_reporting_attempt<T>(
+    hooks: &mut dyn ContainerHooks,
+    site: ContainerSite,
+    primitive: impl FnOnce() -> Result<T, UpstrokeError>,
+) -> Result<T, (bool, UpstrokeError)> {
     let id = EffectSiteId::Container(site);
     let trace = hooks.trace();
     trace.site(site, TracePhase::Before);
-    apply(hooks.phase(id, HookPhase::Before), id, HookPhase::Before)?;
-    let produced = primitive()?;
-    apply(hooks.phase(id, HookPhase::After), id, HookPhase::After)?;
+    if let Err(error) = apply(hooks.phase(id, HookPhase::Before), id, HookPhase::Before) {
+        return Err((false, error));
+    }
+    let produced = primitive().map_err(|error| (true, error))?;
+    if let Err(error) = apply(hooks.phase(id, HookPhase::After), id, HookPhase::After) {
+        return Err((true, error));
+    }
     trace.site(site, TracePhase::After);
     Ok(produced)
 }
@@ -320,15 +332,25 @@ fn expect_mounted_volumes_present(
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct StartFailure {
+    pub attempted: bool,
+    pub error: UpstrokeError,
+}
+
 pub fn start_container(
     hooks: &mut dyn ContainerHooks,
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
     intent: &IntentWritten,
-) -> Result<(), UpstrokeError> {
-    expect_site(site, Operation::Start)?;
+) -> Result<(), StartFailure> {
+    expect_site(site, Operation::Start).map_err(|error| StartFailure {
+        attempted: false,
+        error,
+    })?;
     let name = intent.name().as_str().to_owned();
-    funnel(hooks, site, || runtime.start(&name).map_err(refused))
+    funnel_reporting_attempt(hooks, site, || runtime.start(&name).map_err(refused))
+        .map_err(|(attempted, error)| StartFailure { attempted, error })
 }
 
 fn expect_intent_for(intent: &IntentWritten, name: &str, verb: &str) -> Result<(), UpstrokeError> {
@@ -363,7 +385,7 @@ pub fn stop_container(
     runtime: &dyn ContainerRuntime,
     name: &ContainerName,
     mode: StopMode,
-) -> Result<(), UpstrokeError> {
+) -> Result<Settled, UpstrokeError> {
     expect_site(site, Operation::Stop)?;
     funnel(hooks, site, || {
         runtime.stop(name.as_str(), mode).map_err(refused)
@@ -375,7 +397,7 @@ pub fn remove_container(
     site: ContainerSite,
     runtime: &dyn ContainerRuntime,
     name: &ContainerName,
-) -> Result<(), UpstrokeError> {
+) -> Result<Settled, UpstrokeError> {
     expect_site(site, Operation::Remove)?;
     funnel(hooks, site, || {
         runtime.remove(name.as_str()).map_err(refused)
@@ -463,7 +485,8 @@ pub fn launch(
             ),
         });
     }
-    start_container(hooks, ContainerSite::Start, runtime, &written)?;
+    start_container(hooks, ContainerSite::Start, runtime, &written)
+        .map_err(|failure| failure.error)?;
     Ok(Launched {
         name: plan.name.clone(),
         intent_path,
@@ -480,32 +503,82 @@ fn cancel_created(
     name: &ContainerName,
     view_path: Option<&Path>,
 ) -> Vec<String> {
-    cancel_reached(hooks, runtime, view, private_root, name, true, view_path)
+    cancel_reached(
+        hooks,
+        runtime,
+        view,
+        private_root,
+        name,
+        ContainerToRelease::MayBeRunning,
+        view_path,
+    )
+    .messages
 }
 
-fn cancel_reached(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerToRelease {
+    Absent,
+    MayBeRunning,
+    ObservedExited,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelResidue {
+    pub messages: Vec<String>,
+    pub container_gone: bool,
+}
+
+impl CancelResidue {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+}
+
+pub fn cancel_reached(
     hooks: &mut dyn ContainerHooks,
     runtime: &dyn ContainerRuntime,
     view: &dyn GitView,
     private_root: &Path,
     name: &ContainerName,
-    container_exists: bool,
+    container: ContainerToRelease,
     view_path: Option<&Path>,
-) -> Vec<String> {
+) -> CancelResidue {
     let mut residue = Vec::new();
-    if container_exists {
-        if let Err(error) = stop_container(
+    let mut container_gone = container != ContainerToRelease::MayBeRunning;
+    if container != ContainerToRelease::Absent {
+        match stop_container(
             hooks,
             ContainerSite::Stop,
             runtime,
             name,
             StopMode::Graceful,
         ) {
-            residue.push(format!("the container could not be stopped: {error}"));
+            Ok(Settled::ProcessGone) => container_gone = true,
+            Ok(Settled::RemovalInProgress) => {
+                residue.push(removal_in_progress_establishes_nothing("the stop", name))
+            }
+            Err(error) => residue.push(format!("the container could not be stopped: {error}")),
         }
-        if let Err(error) = remove_container(hooks, ContainerSite::Remove, runtime, name) {
-            residue.push(format!("the container could not be removed: {error}"));
+        match remove_container(hooks, ContainerSite::Remove, runtime, name) {
+            Ok(Settled::ProcessGone) => container_gone = true,
+            Ok(Settled::RemovalInProgress) => {
+                residue.push(removal_in_progress_establishes_nothing("the removal", name))
+            }
+            Err(error) => residue.push(format!("the container could not be removed: {error}")),
         }
+    }
+    if !container_gone {
+        residue.push(format!(
+            "the R19 Git view and the R26 intent record of `{name}` are deliberately retained: \
+             the runtime confirmed neither the stop nor the removal, so the container may still \
+             be running with the view mounted, and the intent is what the next census reclaims \
+             both through (decisions.resource_accounting.rows[R19].at_run_end.NoRunFinished)"
+        ));
+        return CancelResidue {
+            messages: residue,
+            container_gone,
+        };
     }
     let mut view_survives = false;
     if let Some(path) = view_path {
@@ -520,14 +593,27 @@ fn cancel_reached(
              thing a later census can discover that unpruned R19 view through \
              (decisions.resource_accounting.rows[R19].at_run_end.NoRunFinished)"
         ));
-        return residue;
+        return CancelResidue {
+            messages: residue,
+            container_gone,
+        };
     }
     if let Err(error) = remove_intent(hooks, ContainerSite::RemoveIntent, private_root, name) {
         residue.push(format!(
             "the R26 intent record could not be removed: {error}"
         ));
     }
-    residue
+    CancelResidue {
+        messages: residue,
+        container_gone,
+    }
+}
+
+fn removal_in_progress_establishes_nothing(step: &str, name: &ContainerName) -> String {
+    format!(
+        "{step} of `{name}` was answered with another reclaimer's removal already in progress; the \
+         daemon sets that flag before it kills, so this establishes nothing about the process"
+    )
 }
 
 fn render_residue(residue: &[String]) -> String {
@@ -549,25 +635,53 @@ pub fn release(
     private_root: &Path,
     launched: &Launched,
 ) -> Result<(), UpstrokeError> {
+    release_classified(
+        hooks,
+        runtime,
+        view,
+        private_root,
+        launched,
+        ContainerToRelease::MayBeRunning,
+    )
+    .map_err(|failure| failure.error)
+}
+
+#[derive(Debug)]
+pub struct ReleaseFailure {
+    pub container_gone: bool,
+    pub error: UpstrokeError,
+}
+
+pub fn release_classified(
+    hooks: &mut dyn ContainerHooks,
+    runtime: &dyn ContainerRuntime,
+    view: &dyn GitView,
+    private_root: &Path,
+    launched: &Launched,
+    container: ContainerToRelease,
+) -> Result<(), ReleaseFailure> {
     let residue = cancel_reached(
         hooks,
         runtime,
         view,
         private_root,
         &launched.name,
-        true,
+        container,
         Some(&launched.view_path),
     );
     if residue.is_empty() {
         return Ok(());
     }
-    Err(UpstrokeError::Refused {
-        message: format!(
-            "the release of `{}` could not complete every step, so this run's R19/R26 ledgers \
-             do not balance and a census will find the residue: {}",
-            launched.name,
-            residue.join("; ")
-        ),
+    Err(ReleaseFailure {
+        container_gone: residue.container_gone,
+        error: UpstrokeError::Refused {
+            message: format!(
+                "the release of `{}` could not complete every step, so this run's R19/R26 \
+                 ledgers do not balance and a census will find the residue: {}",
+                launched.name,
+                residue.messages.join("; ")
+            ),
+        },
     })
 }
 
@@ -902,9 +1016,25 @@ impl DockerCli {
     ) -> Result<Option<String>, RuntimeError> {
         match self.exec(op, target, args) {
             Ok(text) => Ok(Some(text)),
-            Err(RuntimeError::Failed { detail, .. }) if is_absent(&detail) => Ok(None),
+            Err(RuntimeError::Failed { detail, .. }) if is_absent(target, &detail) => Ok(None),
             Err(error) => Err(error),
         }
+    }
+
+    fn listing(&self, op: RuntimeOp, name: &str) -> Result<String, RuntimeError> {
+        let filter = format!("name={name}");
+        self.exec(
+            op,
+            name,
+            &[
+                "ps",
+                "--all",
+                "--filter",
+                &filter,
+                "--format",
+                CONTAINER_STATE_FORMAT,
+            ],
+        )
     }
 
     fn image(
@@ -978,6 +1108,24 @@ fn split_list(raw: &str) -> Vec<String> {
 
 const PS_FIELD_SEPARATOR: char = '\u{1f}';
 
+const CONTAINER_STATE_FORMAT: &str = "{{.Names}}\u{1f}{{.State}}";
+
+fn listed_state<'a>(listing: &'a str, name: &str) -> Option<&'a str> {
+    listing
+        .lines()
+        .filter_map(|line| line.split_once(PS_FIELD_SEPARATOR))
+        .find(|(listed, _)| listed.trim() == name)
+        .map(|(_, state)| state.trim())
+}
+
+fn liveness_of(listed: Option<&str>) -> Liveness {
+    match listed {
+        None => Liveness::Gone,
+        Some("running" | "restarting" | "paused" | "removing") => Liveness::Running,
+        Some(_) => Liveness::Exited,
+    }
+}
+
 const PS_FORMAT: &str = "{{.Names}}\u{1f}{{.Label \"upstroke.private_root\"}}\
      \u{1f}{{.Label \"upstroke.run\"}}\u{1f}{{.Label \"upstroke.run_dir\"}}\
      \u{1f}{{.Label \"upstroke.incarnation\"}}\u{1f}{{.Label \"upstroke.invocation\"}}";
@@ -1035,6 +1183,9 @@ const UNREACHABLE_DIAGNOSTICS: &[&str] = &[
 
 #[must_use]
 pub fn is_unreachable_diagnostic(detail: &str) -> bool {
+    if speaks_for_the_daemon(detail) {
+        return false;
+    }
     let lower = detail.to_ascii_lowercase();
     UNREACHABLE_DIAGNOSTICS
         .iter()
@@ -1049,26 +1200,80 @@ pub fn classify_docker_failure(operation: RuntimeOp, detail: String) -> RuntimeE
     RuntimeError::Failed { operation, detail }
 }
 
-fn is_absent(detail: &str) -> bool {
-    let lower = detail.to_ascii_lowercase();
-    lower.contains("no such object")
-        || lower.contains("no such container")
-        || lower.contains("no such image")
-        || lower.contains("no such volume")
+const DAEMON_ANSWER: &str = "error response from daemon:";
+
+fn daemon_answer_about(target: &str, detail: &str) -> Option<String> {
+    let target = target.trim().to_ascii_lowercase();
+    if target.is_empty() {
+        return None;
+    }
+    daemon_lines(detail).find(|line| line.contains(&target))
+}
+
+fn speaks_for_the_daemon(detail: &str) -> bool {
+    daemon_lines(detail).next().is_some()
+}
+
+fn daemon_lines(detail: &str) -> impl Iterator<Item = String> + '_ {
+    detail
+        .lines()
+        .map(|line| line.trim().to_ascii_lowercase())
+        .filter(|line| line.starts_with(DAEMON_ANSWER))
+}
+
+fn is_absent(target: &str, detail: &str) -> bool {
+    daemon_answer_about(target, detail).is_some_and(|answer| {
+        answer.contains("no such object")
+            || answer.contains("no such container")
+            || answer.contains("no such image")
+            || answer.contains("no such volume")
+    })
 }
 
 pub const REMOVAL_IN_PROGRESS: &str = "is already in progress";
 
-fn remove_already_settled(detail: &str) -> bool {
-    is_absent(detail) || detail.to_ascii_lowercase().contains(REMOVAL_IN_PROGRESS)
+fn removal_answer(target: &str, detail: &str) -> Option<Settled> {
+    if is_absent(target, detail) {
+        return Some(Settled::ProcessGone);
+    }
+    daemon_answer_about(target, detail)
+        .is_some_and(|answer| answer.contains(REMOVAL_IN_PROGRESS))
+        .then_some(Settled::RemovalInProgress)
 }
 
-fn settle_remove(outcome: Result<String, RuntimeError>) -> Result<(), RuntimeError> {
+fn establishes(proposed: Settled, observed: Liveness) -> bool {
+    !proposed.process_gone() || observed.is_terminated()
+}
+
+fn settle(
+    target: &str,
+    outcome: Result<String, RuntimeError>,
+    propose: fn(&str, &str) -> Option<Settled>,
+    observe: impl FnOnce(&str) -> Result<Liveness, RuntimeError>,
+) -> Result<Settled, RuntimeError> {
     match outcome {
-        Ok(_) => Ok(()),
-        Err(RuntimeError::Failed { detail, .. }) if remove_already_settled(&detail) => Ok(()),
+        Ok(_) => Ok(Settled::ProcessGone),
+        Err(RuntimeError::Failed { operation, detail }) => match propose(target, &detail) {
+            Some(proposed) if !proposed.process_gone() => Ok(proposed),
+            Some(proposed) => {
+                if establishes(proposed, observe(target)?) {
+                    Ok(proposed)
+                } else {
+                    Err(RuntimeError::Failed { operation, detail })
+                }
+            }
+            None => Err(RuntimeError::Failed { operation, detail }),
+        },
         Err(error) => Err(error),
     }
+}
+
+fn settle_remove(
+    target: &str,
+    outcome: Result<String, RuntimeError>,
+    observe: impl FnOnce(&str) -> Result<Liveness, RuntimeError>,
+) -> Result<Settled, RuntimeError> {
+    settle(target, outcome, removal_answer, observe)
 }
 
 impl ContainerRuntime for DockerCli {
@@ -1125,24 +1330,8 @@ impl ContainerRuntime for DockerCli {
     }
 
     fn observe(&self, name: &str) -> Result<Liveness, RuntimeError> {
-        let Some(text) = self.inspect(
-            RuntimeOp::Observe,
-            name,
-            &[
-                "container",
-                "inspect",
-                name,
-                "--format",
-                "{{.State.Status}}",
-            ],
-        )?
-        else {
-            return Ok(Liveness::Gone);
-        };
-        match text.trim() {
-            "running" | "restarting" | "paused" | "removing" => Ok(Liveness::Running),
-            _ => Ok(Liveness::Exited),
-        }
+        let listing = self.listing(RuntimeOp::Observe, name)?;
+        Ok(liveness_of(listed_state(&listing, name)))
     }
 
     fn collect(&self, name: &str) -> Result<ContainerExecution, RuntimeError> {
@@ -1218,20 +1407,28 @@ impl ContainerRuntime for DockerCli {
             .map(|_| ())
     }
 
-    fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError> {
+    fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError> {
         let verb = match mode {
             StopMode::Graceful => "stop",
             StopMode::Kill => "kill",
         };
-        settle_stop(self.exec(RuntimeOp::Stop, name, &[verb, name]))
+        settle_stop(
+            name,
+            self.exec(RuntimeOp::Stop, name, &[verb, name]),
+            |target| self.observe(target),
+        )
     }
 
-    fn remove(&self, name: &str) -> Result<(), RuntimeError> {
-        settle_remove(self.exec(
-            RuntimeOp::Remove,
+    fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {
+        settle_remove(
             name,
-            &["rm", "--force", "--volumes", name],
-        ))
+            self.exec(
+                RuntimeOp::Remove,
+                name,
+                &["rm", "--force", "--volumes", name],
+            ),
+            |target| self.observe(target),
+        )
     }
 }
 
@@ -1240,16 +1437,19 @@ impl ContainerRuntime for DockerCli {
 // seeing stopped, removing or absent continues observe/remove/view/intent cleanup.
 // Other failures remain errors so failed or cancelled reclamation can be retried
 // from the retained intent. "Removing" is settled for stop, not proof of absence.
-fn stop_already_settled(detail: &str) -> bool {
-    remove_already_settled(detail) || detail.contains("is not running")
+fn stop_answer(target: &str, detail: &str) -> Option<Settled> {
+    if daemon_answer_about(target, detail).is_some_and(|answer| answer.contains("is not running")) {
+        return Some(Settled::ProcessGone);
+    }
+    removal_answer(target, detail)
 }
 
-fn settle_stop(outcome: Result<String, RuntimeError>) -> Result<(), RuntimeError> {
-    match outcome {
-        Ok(_) => Ok(()),
-        Err(RuntimeError::Failed { detail, .. }) if stop_already_settled(&detail) => Ok(()),
-        Err(error) => Err(error),
-    }
+fn settle_stop(
+    target: &str,
+    outcome: Result<String, RuntimeError>,
+    observe: impl FnOnce(&str) -> Result<Liveness, RuntimeError>,
+) -> Result<Settled, RuntimeError> {
+    settle(target, outcome, stop_answer, observe)
 }
 
 fn mount_argument(mount: &runtime::Mount) -> String {

@@ -2,6 +2,8 @@
 
 Extended notes for [`src/runner/container/fake.rs`](../../../../src/runner/container/fake.rs).
 
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/runner/container/fake.rs).
+
 The code is the authority for what it does; this file is the whole of its prose, moved out of
 the source verbatim. Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
@@ -117,6 +119,13 @@ one arming that goes through `super::classify_docker_failure`.
 (3) Substitution injection: what `create` will report for this name.
 
 ## `pub(crate) struct FakeRuntime {`
+
+`Clone`, with its state behind an `Arc<Mutex<_>>` since the repair round of
+`916852c9`: a Runner owns its runtime as a `Box<dyn ContainerRuntime>`, and
+the test that hands the production `ContainerRunner` a fake must still be
+able to arm the fake mid-test and inspect what survived afterwards. The
+shared ownership is the test's handle beside the runner's, nothing more;
+the trace was already shared the same way.
 
 The fake container runtime.
 
@@ -247,11 +256,25 @@ nothing injected the healthy runtime reports what it was asked for;
 with an injection it reports something else, and that is the only
 reason `substituted_image_id_refused_before_start` is constructible.
 
-## `fn stop(&self, name: &str, _mode: StopMode) -> Result<(), R…` › `if let Some(container) = self.state().containers.get_mut(name) {`
+## `fn stop(&self, name: &str, _mode: StopMode) -> Result<Settled, RuntimeError> {`
 
-Idempotent and tolerant of already-gone: a container the fake does
-not hold is a stop that succeeded, because two concurrent reclaimers
+The armed answer goes through the production normalizer
+(`super::settle_stop`), so a diagnostic set with `set_docker_stderr` is
+classified by the same function that classifies the daemon's: an
+already-stopped or absent answer is `ProcessGone` and moves the fake's
+container to `Exited`; a removal-in-progress answer is
+`RemovalInProgress` and moves nothing, as the daemon's flag moves nothing.
+A fake that minted the typed answer itself would test its own table.
+Idempotent and tolerant of already-gone as before: a container the fake
+does not hold is a stop that succeeded, because two concurrent reclaimers
 must converge.
+
+## `fn remove(&self, name: &str) -> Result<Settled, RuntimeError> {`
+
+The same through `super::settle_remove`: the container leaves the fake only
+on `ProcessGone`, so a test that arms another reclaimer's removal sees the
+container survive exactly as the daemon's would.
+
 
 ## `pub(crate) struct FakeOwnerLiveness {`
 

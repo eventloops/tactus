@@ -2,14 +2,14 @@
 
 Extended notes for [`src/ladder.rs`](../../src/ladder.rs).
 
-[Source on GitHub](https://github.com/eventloops/upstroke/blob/master/src/ladder.rs).
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/ladder.rs).
 
 The code defines current behavior. These notes preserve contracts and implementation
 history. Search each backticked heading fragment separately in the source.
 
 References below to `decisions.*` use retired v0.2 planning identifiers.
 They record implementation history and do not add current requirements.
-[DESIGN.md](https://github.com/eventloops/upstroke/blob/master/DESIGN.md#retired-records)
+[DESIGN.md](https://github.com/sourcemaps/upstroke/blob/master/DESIGN.md#retired-records)
 is the living design authority.
 
 ## Module
@@ -440,3 +440,23 @@ Same kind, opposite handling — this is why origin exists.
 
 Not on the last attempt, not on the last rung: the ladder never
 gets consulted, because nothing judged the code.
+
+## `pub struct AttemptFailure {` › `pub never_started: bool,`
+
+Whether the process this failure reports **never started**.
+
+Not a `FailureKind`: the kinds are a frozen serialized vocabulary and this is
+not a new kind of failure but a fact about the one that happened, which the
+schema-4 integration needs in order to attribute an outage the way
+`invariants[22]` (INV-23) names — a mid-run image mismatch is a
+`RunnerSpawnFailure`, "and includes reviewers and re-asks". It is in memory
+only; nothing serializes it, and the legacy ladder does not read it, so the
+v0.1 path is unchanged by its presence.
+
+## `impl AttemptFailure {` › `pub fn from_a_process_that_never_started(mut self) -> Self {`
+
+Record that the process this failure reports never started. A builder rather
+than a constructor argument, so the one production site that classifies a
+review result keeps its single `AttemptFailure::new` call and the census over
+those calls (`runner::tests::an_observation_about_an_attempt_is_classified_in_one_production_place`)
+still counts one rule per observation.

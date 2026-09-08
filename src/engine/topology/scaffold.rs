@@ -38,6 +38,7 @@ use crate::workspace_manager::{
 
 use super::attempt::{AttemptPlan, GatePlan, ReviewerPlan};
 use super::dispatch::{DispatchKind, DispatchRequest, Dispatched, EventEmitter, dispatch};
+use super::seams::TopologyHooks;
 
 pub(super) const ALPHA: TaskKey = TaskKey(0);
 pub(super) const BETA: TaskKey = TaskKey(1);
@@ -65,7 +66,7 @@ fn task_of(id: &str) -> Task {
     }
 }
 
-fn plan() -> Plan {
+pub(super) fn plan() -> Plan {
     Plan {
         source: PlanSource {
             adapter: "markdown".to_owned(),
@@ -99,7 +100,7 @@ fn chain(task: &str) -> ChainSummary {
     }
 }
 
-const NORMALIZED_DIGEST: &str =
+pub(super) const NORMALIZED_DIGEST: &str =
     "sha256:1010101010101010101010101010101010101010101010101010101010101010";
 
 fn run_started(fixture: &Fixture) -> RunStarted4 {
@@ -131,7 +132,7 @@ fn run_started(fixture: &Fixture) -> RunStarted4 {
         normalized_plan_digest: NORMALIZED_DIGEST.to_owned(),
         registry_digest: String::new(),
         path_policy: PathPolicy {
-            version: PathPolicyVersion::V1,
+            version: PathPolicyVersion::V2,
             case_fold: true,
             grammar: PathGrammar::Globset,
         },
@@ -387,6 +388,7 @@ pub(super) struct Ran {
     pub(super) agent: Option<AgentId>,
     pub(super) command: CommandSpec,
     pub(super) durable_at_spawn: Vec<String>,
+    pub(super) head_at_spawn: Option<String>,
 }
 
 pub(super) const GATE_DIAGNOSTIC: &str = "scaffold gate rejected the diff";
@@ -456,8 +458,18 @@ impl RecordingRunner {
 }
 
 impl Runner for RecordingRunner {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError> {
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, crate::runner::RunnerError> {
         let durable_at_spawn = self.durable_now();
+        let head_at_spawn = {
+            let output = crate::workspace_manager::fixture::git_out(
+                &request.workspace,
+                &["rev-parse", "--verify", "--quiet", "HEAD"],
+            );
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        };
         self.ran
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -468,6 +480,7 @@ impl Runner for RecordingRunner {
                 agent: request.agent.clone(),
                 command: request.command.clone(),
                 durable_at_spawn,
+                head_at_spawn,
             });
         let mut codes = self
             .codes
@@ -629,10 +642,206 @@ pub(super) struct Run {
     pub(super) emitter: FoldedEmitter,
     pub(super) runner: RecordingRunner,
     pub(super) invocations: crate::engine::topology::identity::InvocationLedger,
+    pub(super) reservations: crate::engine::topology::identity::Reservations,
+    pub(super) slots: crate::engine::topology::identity::SlotAssertion,
+    pub(super) verify_gates: Vec<super::attempt::GatePlan>,
+    pub(super) verify_reviewers: Vec<super::attempt::ReviewerPlan>,
+    pub(super) verify_review: VerifyReview,
+    pub(super) ids_source: super::seams::RealIds,
+}
+
+impl super::integrate::IntegrationJournal for Run {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        self.emitter
+            .emit(body, &mut self.hooks)
+            .map_err(|failure| failure.discharging(&mut self.invocations))
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.emitter.fold()
+    }
+
+    fn hooks(&mut self) -> &mut dyn super::seams::TopologyHooks {
+        &mut self.hooks
+    }
+
+    fn converted(&mut self, key: TaskKey) -> Result<(), UpstrokeError> {
+        self.reservations.convert(
+            key,
+            crate::engine::topology::identity::ReservationKind::Integration,
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum VerifyReview {
+    Passed,
+    NeedsChanges,
+    NeedsHuman,
+    Unavailable(crate::ir::OutcomeStatus),
+}
+
+struct ScaffoldReviews {
+    outcome: VerifyReview,
+}
+
+impl super::attempt::ReviewPasses for ScaffoldReviews {
+    fn run(
+        &self,
+        cx: &crate::review::ReviewCx<'_>,
+        runner: &dyn Runner,
+        invocations: &crate::review::ReviewInvocations,
+    ) -> Result<crate::review::ReviewOutcome, UpstrokeError> {
+        let request = crate::runner::review_request(
+            CommandSpec::new(cx.adapter.id()).arg("--review"),
+            cx.workspace.to_path_buf(),
+            AgentId::new(cx.adapter.id()),
+            cx.timeout,
+            invocations.pass.clone(),
+        );
+        if let Err(error) = runner.run(&request) {
+            if error.fate.is_unresolved() {
+                return Err(error.into());
+            }
+            let never_started = matches!(error.fate, crate::error::ProcessFate::NeverStarted);
+            return Ok(crate::review::ReviewOutcome {
+                result: crate::review::ReviewResult::Unavailable {
+                    status: crate::ir::OutcomeStatus::AgentError,
+                    detail: format!("review process failed: {error}"),
+                },
+                cost_usd: None,
+                invocations: 0,
+                transcript: PathBuf::new(),
+                never_started,
+            });
+        }
+        let result = match &self.outcome {
+            VerifyReview::Passed => crate::review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: true,
+                reasons: Vec::new(),
+                required_changes: Vec::new(),
+                needs_human: false,
+            }),
+            VerifyReview::NeedsChanges => crate::review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: false,
+                reasons: vec!["the proposed tree regresses merged behaviour".to_owned()],
+                required_changes: vec!["restore it".to_owned()],
+                needs_human: false,
+            }),
+            VerifyReview::NeedsHuman => crate::review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: false,
+                reasons: vec!["a person must decide this integration".to_owned()],
+                required_changes: Vec::new(),
+                needs_human: true,
+            }),
+            VerifyReview::Unavailable(status) => crate::review::ReviewResult::Unavailable {
+                status: *status,
+                detail: "the integration reviewer was unavailable".to_owned(),
+            },
+        };
+        Ok(crate::review::ReviewOutcome {
+            result,
+            cost_usd: Some(0.2),
+            invocations: 1,
+            transcript: PathBuf::new(),
+            never_started: false,
+        })
+    }
+}
+
+impl super::integrate::Verification for Run {
+    fn verify(
+        &mut self,
+        request: &super::integrate::VerifyRequest<'_>,
+    ) -> Result<super::integrate::Verified, UpstrokeError> {
+        use super::attempt::{
+            Judge, JudgeIdentities, JudgeNames, SnapshotDisposal, SnapshotOf, Subject,
+        };
+        let manager = self.fixture.manager.clone();
+        let parent = if request.already_present {
+            self.base().0
+        } else {
+            request.head.0.clone()
+        };
+        let tree = if request.already_present {
+            request.candidate.commit_sha.0.clone()
+        } else {
+            request.proposed.0.clone()
+        };
+        let diff = manager.candidate_diff(request.staging, &parent, &tree)?;
+        let inputs = super::attempt::ReviewInputs {
+            title: "integration".to_owned(),
+            body: String::new(),
+            acceptance: vec!["it integrates".to_owned()],
+            diff,
+            artifacts: Vec::new(),
+            decisions: Vec::new(),
+            stem: format!("s{}", request.sequence.0),
+        };
+        let gates = self.verify_gates.clone();
+        let reviewers = self.verify_reviewers.clone();
+        let reviews = ScaffoldReviews {
+            outcome: self.verify_review.clone(),
+        };
+        let adapters = ScaffoldAdapters::new();
+        let proposed = crate::workspace_manager::ObjectId::new(request.proposed.0.clone())
+            .expect("the proposed commit is an object id");
+        let identities = super::identity::SequenceIdentities::new(request.sequence);
+        let mut judge = Judge {
+            manager: &manager,
+            hooks: &mut self.hooks,
+            runner: &self.runner,
+            slots: &mut self.slots,
+            ledger: &mut self.invocations,
+            adapters: &adapters,
+            paths: &self.paths,
+            reviews: &reviews,
+        };
+        match judge.judge(
+            &Subject {
+                snapshot: SnapshotOf::Commit(proposed),
+                disposal: SnapshotDisposal::AfterTheTerminal,
+                names: JudgeNames::Integration {
+                    sequence: u64::from(request.sequence.0),
+                },
+                identities: JudgeIdentities::Sequence(identities),
+                stem: format!("integration-s{}", request.sequence.0),
+                gates: &gates,
+                reviewers: &reviewers,
+                inputs: &inputs,
+                prior_failure: None,
+                invocations: &move |pass| crate::review::ReviewInvocations {
+                    pass: identities.review_pass(pass, 0),
+                    reask: identities.review_reask(pass, 0),
+                },
+            },
+            &mut super::attempt::NoReviewAccount,
+        ) {
+            Ok(judgement) => Ok(super::integrate::Verified::Judged(judgement)),
+            Err(super::attempt::JudgeError::Runner(error)) => {
+                Ok(super::integrate::Verified::Unavailable {
+                    kind: crate::topology::events::InfrastructureKind::RunnerSpawnFailure,
+                    detail: error.to_string(),
+                })
+            }
+            Err(super::attempt::JudgeError::Other(error)) => Err(error),
+        }
+    }
+
+    fn ids(&self) -> &dyn super::seams::IdSource {
+        &self.ids_source
+    }
 }
 
 impl Run {
     pub(super) fn started(tag: &str) -> Self {
+        let mut run = Self::bare(tag);
+        let started = run_started(&run.fixture);
+        Self::begin(&mut run, started);
+        run
+    }
+
+    fn bare(tag: &str) -> Self {
         let fixture = Fixture::created(tag);
         let harness = Arc::new(Mutex::new(HookHarness::new()));
         let timeline = Timeline::default();
@@ -642,7 +851,7 @@ impl Run {
             &mut Vec::new(),
         )
         .expect("open the schema-4 log");
-        let mut run = Self {
+        Self {
             emitter: FoldedEmitter {
                 log,
                 fold: TopologyFold::new(FrozenInputs {
@@ -657,7 +866,13 @@ impl Run {
             },
             hooks: Hooks::new(&harness, &timeline),
             invocations: crate::engine::topology::identity::InvocationLedger::new(),
+            reservations: crate::engine::topology::identity::Reservations::new(),
             runner: RecordingRunner::new(),
+            slots: crate::engine::topology::identity::SlotAssertion::new(),
+            verify_gates: Vec::new(),
+            verify_reviewers: Vec::new(),
+            verify_review: VerifyReview::Passed,
+            ids_source: super::seams::RealIds,
             timeline,
             harness,
             paths: {
@@ -667,8 +882,11 @@ impl Run {
                 paths
             },
             fixture,
-        };
-        let started = run_started(&run.fixture);
+        }
+    }
+
+    fn begin(run: &mut Self, started: RunStarted4) {
+        let integration_ref = started.integration_ref.clone();
         run.emitter
             .emit(
                 TopologyEventBody::RunStarted {
@@ -677,8 +895,38 @@ impl Run {
                 &mut run.hooks,
             )
             .expect("run_started");
+        run.fixture
+            .manager
+            .create_ref_zero_old(
+                run.hooks.effects(),
+                crate::topology::effects::RefSite::CreateIntegration,
+                integration_ref.as_str(),
+                &run.fixture.head,
+            )
+            .expect("the integration ref");
         run.runner.watching(run.emitter.log.path());
+    }
+
+    pub(super) fn started_with_max_defers(tag: &str, max_defers: u32) -> Self {
+        let mut run = Self::bare(tag);
+        let mut started = run_started(&run.fixture);
+        started.limits.max_defers = max_defers;
+        Self::begin(&mut run, started);
         run
+    }
+
+    pub(super) fn wake_deferred(&mut self) {
+        self.emitter
+            .emit(
+                TopologyEventBody::DeferWaitElapsed {
+                    data: crate::topology::events::DeferWaitElapsed4 {
+                        waited_ms: 1,
+                        round: 1,
+                    },
+                },
+                &mut self.hooks,
+            )
+            .expect("defer_wait_elapsed");
     }
 
     pub(super) fn manager(&self) -> &WorkspaceManager {
@@ -787,6 +1035,12 @@ impl Run {
             hooks: Hooks::new(&harness, &timeline),
             runner: RecordingRunner::new(),
             invocations: crate::engine::topology::identity::InvocationLedger::new(),
+            reservations: crate::engine::topology::identity::Reservations::new(),
+            slots: crate::engine::topology::identity::SlotAssertion::new(),
+            verify_gates: Vec::new(),
+            verify_reviewers: Vec::new(),
+            verify_review: VerifyReview::Passed,
+            ids_source: super::seams::RealIds,
             timeline,
             harness,
             paths: {
@@ -869,6 +1123,181 @@ impl Run {
             )
             .expect("task_spawned");
         key
+    }
+}
+
+impl super::candidate::CandidateJournal for Run {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        self.emitter
+            .emit(body, &mut self.hooks)
+            .map_err(|failure| failure.discharging(&mut self.invocations))
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        self.emitter.fold()
+    }
+}
+
+impl Run {
+    pub(super) fn queue_candidate(
+        &mut self,
+        key: TaskKey,
+    ) -> crate::topology::events::CandidateRef {
+        let path = format!("{key}-work.txt");
+        let content = format!("work of task {key}\n");
+        self.queue_candidate_editing(key, &path, &content)
+    }
+
+    pub(super) fn queue_candidate_editing(
+        &mut self,
+        key: TaskKey,
+        path: &str,
+        content: &str,
+    ) -> crate::topology::events::CandidateRef {
+        use super::candidate::{
+            JudgedTree, append_candidate_created, append_candidate_prepared, create_candidates_ref,
+            pin_candidate, reclaim_after_creation, write_candidate_commit,
+        };
+
+        let generation =
+            u32::try_from(self.emitter.task(key).generations.len()).expect("a small fixture");
+        let dispatched = self.dispatch(key, generation);
+        let binding = self.binding(key, 0);
+        self.emitter
+            .emit(
+                TopologyEventBody::AttemptStarted {
+                    data: crate::topology::events::AttemptStarted4 {
+                        key,
+                        generation: dispatched.generation,
+                        attempt: AttemptNumber(1),
+                        rung: 0,
+                        binding,
+                        pool: Some("scaffold-pool".to_owned()),
+                        resume_session: None,
+                        materialization_observed: None,
+                    },
+                },
+                &mut self.hooks,
+            )
+            .expect("attempt_started");
+        write_file(&dispatched.worktree.join(path), content.as_bytes());
+        let manager = self.fixture.manager.clone();
+        manager
+            .candidate_stage(self.hooks.effects(), &dispatched.slot)
+            .expect("stage");
+        let tree = manager
+            .candidate_write_tree(self.hooks.effects(), &dispatched.slot)
+            .expect("write-tree");
+        let actual_paths = manager
+            .changed_paths(&dispatched.slot, dispatched.base.as_str())
+            .expect("changed paths");
+        let judged = JudgedTree {
+            key,
+            generation: dispatched.generation,
+            attempt: Box::new(AttemptRecord {
+                attempt: 1,
+                tier: "mid".to_owned(),
+                model: format!("{}-mid-model", self.display_id(key)),
+                pool: Some("scaffold-pool".to_owned()),
+                resumed: false,
+                duration: Duration::from_millis(5),
+                cost_usd: Some(0.5),
+                reviews: self
+                    .emitter
+                    .fold()
+                    .registry()
+                    .expect("a registry")
+                    .get(key)
+                    .expect("the task is registered")
+                    .reviews
+                    .obliged_lenses()
+                    .into_iter()
+                    .map(|lens| crate::events::ReviewRecord {
+                        pass: lens.name().to_owned(),
+                        agent: REVIEW_AGENT.to_owned(),
+                        model: "scaffold-review-model".to_owned(),
+                        adapter: None,
+                        preflight_cli_version: None,
+                        effort: None,
+                        pool: None,
+                        cost_usd: Some(0.1),
+                        outcome: crate::events::ReviewPassOutcome::Passed,
+                    })
+                    .collect(),
+                session_id: None,
+                usage: None,
+                failure: None,
+            }),
+            base_sha: dispatched.base.clone(),
+            tree_sha: CommitSha(tree),
+            message: format!("upstroke: {} attempt 1", self.display_id(key)),
+            actual_paths: actual_paths.clone(),
+            lease_effect: crate::topology::events::CandidateLeaseEffect::ReplacesPredicted {
+                paths: actual_paths,
+            },
+        };
+        let run_id = self
+            .emitter
+            .fold()
+            .started()
+            .expect("started")
+            .run_id
+            .clone();
+        let unpinned =
+            write_candidate_commit(&manager, &mut self.hooks, &run_id, judged).expect("commit");
+        let pinned = pin_candidate(&manager, &mut self.hooks, unpinned).expect("pin");
+        let promoting = append_candidate_prepared(self, pinned).expect("candidate_prepared");
+        let candidate = promoting.candidate().clone();
+        let referenced =
+            create_candidates_ref(&manager, &mut self.hooks, promoting).expect("candidates ref");
+        let created = append_candidate_created(self, referenced).expect("task_candidate_created");
+        reclaim_after_creation(&manager, &mut self.hooks, &dispatched.slot, created)
+            .expect("scrub");
+        candidate
+    }
+
+    pub(super) fn display_id(&self, key: TaskKey) -> String {
+        self.emitter
+            .fold()
+            .registry()
+            .expect("a registry")
+            .get(key)
+            .expect("the task is registered")
+            .display_id
+            .as_str()
+            .to_owned()
+    }
+
+    pub(super) fn integration_ref(&self) -> GitRef {
+        self.emitter
+            .fold()
+            .started()
+            .expect("started")
+            .integration_ref
+            .clone()
+    }
+
+    pub(super) fn head(&self) -> Option<String> {
+        self.fixture
+            .manager
+            .direct_ref_target(self.integration_ref().as_str())
+            .expect("read the integration ref")
+    }
+
+    pub(super) fn replay_twice_equal(&self) {
+        let events = self.emitter.durable_events();
+        let inputs = FrozenInputs {
+            plan: plan(),
+            normalized_plan_digest: NORMALIZED_DIGEST.to_owned(),
+        };
+        let first = TopologyFold::replay(inputs.clone(), &events).expect("the log replays");
+        let second = TopologyFold::replay(inputs, &events).expect("the log replays again");
+        assert_eq!(first.state(), second.state(), "two replays disagree");
+        assert_eq!(
+            self.emitter.fold().state(),
+            first.state(),
+            "the live fold and a replay of its own log disagree"
+        );
     }
 }
 

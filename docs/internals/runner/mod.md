@@ -235,15 +235,31 @@ DESIGN.md:227.
 Object-safe, and `Send + Sync` so PR11 can turn `run` into a boxed `Send`
 future behind the same `&dyn Runner` its callers already hold.
 
-## `pub trait Runner: Send + Sync` › `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError>;`
+## `pub struct RunnerError {`
+
+A Runner's error together with the [`ProcessFate`] it established for the
+invocation. The trait returns this rather than `UpstrokeError` so that no
+Runner can fail without saying what it knows about the process: a caller
+that settles an outage terminal on a Runner error is authorizing cleanup
+and readmission, and it may do so only for `NeverStarted` and `Gone`
+(`engine::topology::run`, the reviews of `916852c9`). `From<RunnerError>
+for UpstrokeError` is [`UpstrokeError::Runner`], so `?` still works at every
+caller that has nothing to decide.
+
+The constructors name the fate — `never_started`, `gone`, `unresolved` —
+and `new` takes it as a value for a runner that computes it.
+
+## `pub trait Runner: Send + Sync` › `fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError>;`
 
 Execute `request` and return what the process did.
 
 ### Errors
 
 A pre-flight refusal (a reserved environment key in the overlay, a
-failing shell probe) or a spawn/supervision failure. A non-zero exit is
-not an error: it is a [`ProcessOutput`].
+failing shell probe), a spawn failure, or a supervision or release failure,
+each with the fate the Runner established. A non-zero exit is not an
+error: it is a [`ProcessOutput`], and so is a timeout the Runner enforced
+(`timed_out`, the process stopped and reaped).
 
 ## `pub const SPAWN_SITE: EffectSiteId = EffectSiteId::Process(ProcessSite::Spawn);`
 

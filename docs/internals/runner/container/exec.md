@@ -2,6 +2,8 @@
 
 Extended notes for [`src/runner/container/exec.rs`](../../../../src/runner/container/exec.rs).
 
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/runner/container/exec.rs).
+
 The code is the authority for what it does; this file is the whole of its prose, moved out of
 the source verbatim. Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
@@ -363,9 +365,22 @@ field with one value.
 
 The R19 view directory, when it was materialised.
 
-## `struct Reached` › `container: bool,`
+## `struct Reached` › `container: ContainerReached,`
 
-Whether `docker create` returned a container.
+How far the container itself got.
+
+## `enum ContainerReached {`
+
+`NotCreated`: `docker create` was not attempted, so no container can
+exist. `Created`: it was attempted — the daemon may have created one
+before the answer was lost — and `docker start` was not, so whatever
+exists holds no process. `Started`: `docker start` was attempted, so the
+container may be running. The three are what [`ContainerRunner::cancelled`]
+classifies the process by: the review of `79ddbffb` found a boolean "may
+have been created" conflated with "may be running", so Docker down before
+`docker create` was `Unresolved` (an outage no defer ever counted) and a
+committed `docker start` with a clean cancel was `NeverStarted`
+(`PR8-R3-CONTAINER-START`).
 
 ## `impl Reached` › `const INTENT_ONLY: Self = Self {`
 
@@ -681,8 +696,10 @@ reported image id back, and that read can fail on a container
 that exists. `stop` and `remove` are both tolerant of
 already-gone (`settle_stop`, `settle_remove`), so this is a
 pair of no-ops when nothing was created. Measured: with
-`container: false` here, arming `Create`'s `After` phase left
-the container behind.
+`NotCreated` here, arming `Create`'s `After` phase left
+the container behind. `Created` and not `Started`: whatever
+exists was never started, so the fate is `NeverStarted`
+whatever the cancel then manages.
 
 ## `impl ContainerRunner` › `let refusal = ImageIdMismatch::of(&plan.invocation).error(`
 
@@ -697,7 +714,28 @@ distinguishable error is the `cause` R1's `cancelled` carries.
 ## `impl ContainerRunner` › `fn cancelled(`
 
 Release what a failed launch reached and answer `cause` with whatever
-could not be released appended.
+could not be released appended, as a `RunnerError` whose fate is decided
+by how far the launch got and by what the cancel established — two facts
+kept apart. Before `docker start` was attempted (`NotCreated`, `Created`)
+the fate is `NeverStarted` whatever the cancel achieved: a created but
+never started container holds no process, and a `docker create` whose
+answer was lost cannot have started one either. Whether the start was
+attempted is the funnel's to say ([`super::StartFailure`]): a refusal at
+`Container.Start`'s `Before` phase never issued `docker start`, so the
+launch stays at `Created` — the cover review of `8a5f59e8` found every
+start failure recorded as `Started` (`PR8-R4-START-NOT-ATTEMPTED`).
+ Once `docker start` was
+attempted (`Started`) the cancel's evidence decides — `Gone` when the
+runtime confirmed a stop or a forced removal, `Unresolved` when it
+confirmed neither, and an answer that another reclaimer's removal is in
+progress confirms neither (`Settled::RemovalInProgress`, the daemon sets
+that flag before it kills) — because at this seam a start the daemon
+refused cannot be told from a start whose acknowledgement was lost.
+ A refused start whose
+cancel completes therefore settles as an `Infrastructure{Other}` outage
+with the refusal in its detail rather than as `RunnerSpawnFailure`; both
+defer identically. The review of `79ddbffb` measured both directions of
+the previous rule wrong (`PR8-R3-CONTAINER-START`).
 
 The answer is never the cleanup's own failure: an operator holding "the
 container could not be stopped" instead of "the runtime executed a
@@ -723,7 +761,11 @@ were each self-consistent and nothing crossed them.
 
 ## `impl ContainerRunner` › `fn release(`
 
-"stop/rm, view removal, intent removal **after completion**".
+"stop/rm, view removal, intent removal **after completion**", answered as
+[`super::release_classified`] answers it: a failure says whether the
+runtime established the container's process gone, which is what `run`
+needs to classify the process, and `run` tells it whether the exit was
+observed so a container seen to terminate keeps nothing back.
 
 [`super::release`], which is the one place those four sites are
 performed in that order. It was a second copy until repair round R3b,
@@ -735,7 +777,8 @@ never reached `Runner::run`.
 
 ### Errors
 
-[`UpstrokeError::Refused`] naming every step that could not be completed.
+A `ReleaseFailure` whose error is [`UpstrokeError::Refused`] naming every
+step that could not be completed.
 
 ## `impl ContainerRunner` › `fn supervise(&self, name: &ContainerName, deadline: Instant) -> Result<bool, UpstrokeError> {`
 
@@ -853,20 +896,41 @@ against a second one being written.
 WriteIntent -> MountGitView -> Create (+ verify the reported image
 id) -> Start, in that order and in one place.
 
-## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOut…` › `let released = self.release(&mut **hooks, &self.identity.private_root, &launched);`
+## `fn run(&self, request: &RunnerRequest) -> Result<ProcessOut…` › `let released = self.release(`
 
 Release whatever the invocation reached, whether or not it succeeded:
 R26 is "released on complete (stop/rm, view removed, intent removed),
 **cancel**, or shutdown", and R19's "pruned on complete or cancel".
-So the release runs on both paths and its own failure is reported
-only when there is no earlier one to report — a release that could
-not finish leaves residue the census reclaims, and hiding the reason
-the invocation failed behind it would trade a diagnosis for a
-symptom.
+So the release runs on both paths. The fate the error carries is decided
+by process evidence alone, and by nothing about which cleanup steps
+completed: `Gone` when the supervisor observed the container terminated,
+or the release confirmed a stop, or the release confirmed a forced
+removal; `Unresolved` only when none of those holds — the supervisor never
+saw it exit (the observation failed, or the output was a timeout) and the
+runtime confirmed neither a stop nor a removal. Which error is carried is
+the other question: the output's when the outcome failed, the release's
+when only the release did, both when both did, with the release failure
+attached as cleanup. The review of `79ddbffb` found the previous rule
+reading a failed stop as "may still run" past a successful forced
+removal, a timed-out output as `Unresolved` on any release failure — a
+view that could not be discarded included — and an observed exit as
+nothing (`PR8-R3-CONTAINER-EVIDENCE`); the release is told when the exit
+was observed so it does not retain the view and intent for a container
+it knows holds no process.
 
-## `impl ContainerRunner` › `fn finish(`
+The reviews of `916852c9` reproduced the case this decides: Docker lost
+after `start`, so observe, stop and remove all failed, and the one error
+the caller saw was settled as a spawn failure — an outage terminal that
+released the transaction and reclaimed the snapshot beside a gate still
+running. A release that could not finish leaves residue the census
+reclaims on the next resume, and that census runs before any recovery
+event, so ending the command with the fate unresolved is what lets the
+container be reclaimed before the verification is settled.
 
-Supervise, then collect. Split out so `run` can release on either path.
+## `impl ContainerRunner` › `fn collect(`
+
+Collect after the supervision, which `run` performs itself so it knows
+whether the exit was observed before it releases.
 
 ## `impl ContainerRunner` › `let execution = self`
 

@@ -2,6 +2,8 @@
 
 Extended notes for [`src/runner/container/exec/tests.rs`](../../../../../src/runner/container/exec/tests.rs).
 
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/runner/container/exec/tests.rs).
+
 The code is the authority for what it does; this file is the whole of its prose, moved out of
 the source verbatim. Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
@@ -1884,3 +1886,11 @@ Repair round R1.
 ## `fn every_gated_test_of_this_lane_is_counted()` › `"real_docker_withholds_an_image_credential_variable_from_a_role_that_takes_none",`
 
 Repair round R3b.
+
+## `fn removal_in_progress_diagnostic(name: &str) -> String {`
+
+The daemon's answer names the container it is about, and since round six nothing
+reads an answer about another container as this one's settlement, so the fixture
+is armed after the container's name is known rather than from a literal. A
+constant naming `upstroke-c` beside a generated container name is a diagnostic
+the repaired normalizer correctly refuses.

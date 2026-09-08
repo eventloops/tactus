@@ -1967,11 +1967,15 @@ impl ContainerRuntime for UnreachableRuntime {
         Err(unreachable_for(RuntimeOp::Start))
     }
 
-    fn stop(&self, _: &str, _: StopMode) -> Result<(), RuntimeError> {
+    fn stop(
+        &self,
+        _: &str,
+        _: StopMode,
+    ) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Stop))
     }
 
-    fn remove(&self, _: &str) -> Result<(), RuntimeError> {
+    fn remove(&self, _: &str) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Remove))
     }
 }
@@ -2027,11 +2031,15 @@ impl ContainerRuntime for RefusingRuntime {
         Err(unreachable_for(RuntimeOp::Start))
     }
 
-    fn stop(&self, _: &str, _: StopMode) -> Result<(), RuntimeError> {
+    fn stop(
+        &self,
+        _: &str,
+        _: StopMode,
+    ) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Stop))
     }
 
-    fn remove(&self, _: &str) -> Result<(), RuntimeError> {
+    fn remove(&self, _: &str) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
         Err(unreachable_for(RuntimeOp::Remove))
     }
 }

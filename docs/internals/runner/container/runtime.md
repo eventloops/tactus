@@ -2,6 +2,8 @@
 
 Extended notes for [`src/runner/container/runtime.rs`](../../../../src/runner/container/runtime.rs).
 
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/runner/container/runtime.rs).
+
 The code is the authority for what it does; this file is the whole of its prose, moved out of
 the source verbatim. Each section is headed by the line of code the comment sat above, spelled
 as it is in the source, so the heading is the grep string that finds the code.
@@ -357,6 +359,20 @@ is the opposite of "two concurrent reclaimers converge".
 
 Whether this answer proves the container is no longer running.
 
+## `pub enum Settled {`
+
+What a stop or a removal established about the container's process.
+`ProcessGone`: the daemon completed the operation, or answered that the
+container is absent or not running — `docker stop`, `docker kill` and
+`docker rm --force` all return after the exit has been seen. `RemovalInProgress`:
+the daemon answered that another reclaimer's removal is already in
+progress; it sets that flag before it kills, so nothing about the process
+is established, and a reclaimer may continue past the answer but nothing
+may conclude a fate from it. The cover review of `8a5f59e8` found the
+second normalized to a bare `Ok(())` and read as a completed removal
+(`PR8-R4-REMOVAL-IN-PROGRESS`); the answer is typed so that no caller can
+read it that way again.
+
 ## `pub enum StopMode {`
 
 How a container is stopped.
@@ -491,19 +507,25 @@ Start it.
 
 [`RuntimeError`] when the runtime cannot be reached or the start fails.
 
-## `pub trait ContainerRuntime: Send + Sync` › `fn stop(&self, name: &str, mode: StopMode) -> Result<(), RuntimeError>;`
+## `pub trait ContainerRuntime: Send + Sync` › `fn stop(&self, name: &str, mode: StopMode) -> Result<Settled, RuntimeError>;`
 
-Stop or kill it. **Idempotent and tolerant of already-gone.**
+Stop or kill it, and say what that established (`Settled`)
+. **Idempotent
+and tolerant of already-gone.**
 
 ### Errors
 
 [`RuntimeError`] when the runtime cannot be reached, or the stop fails
 for a reason other than the container being absent.
 
-## `pub trait ContainerRuntime: Send + Sync` › `fn remove(&self, name: &str) -> Result<(), RuntimeError>;`
+## `pub trait ContainerRuntime: Send + Sync` › `fn remove(&self, name: &str) -> Result<Settled, RuntimeError>;`
 
-Remove it. **Idempotent and tolerant of already-gone**, because "two
-concurrent reclaimers converge".
+Remove it, and say what that established (`Settled`)
+. **Idempotent and
+tolerant of already-gone**, because "two concurrent reclaimers converge" —
+and the loser of a removal race is told so rather than told the process is
+gone.
+
 
 ### Errors
 
@@ -706,3 +728,28 @@ The index of the first entry whose rendering starts with `prefix`.
 ## `impl ContainerTrace` › `pub fn clear(&self) {`
 
 Forget everything recorded so far, keeping the handle.
+
+<!--
+PR163-ASTRA-RUSTDOC-LINKS: the rustdoc shortcut syntax above (`` [`Name`] ``)
+has no Markdown reference definition, so a CommonMark renderer emits plain
+text instead of a link. These definitions give each shortcut a real target
+so the references above resolve.
+-->
+[`ContainerRuntime::probe`]: ../../../../src/runner/container/runtime.rs
+[`ContainerRuntime`]: ../../../../src/runner/container/runtime.rs
+[`CreateSpec::read_only_root`]: ../../../../src/runner/container/runtime.rs
+[`CreateSpec`]: ../../../../src/runner/container/runtime.rs
+[`CreatedContainer::reported_image_id`]: ../../../../src/runner/container/runtime.rs
+[`Mount::Tmpfs`]: ../../../../src/runner/container/runtime.rs
+[`RuntimeError::Failed`]: ../../../../src/runner/container/runtime.rs
+[`RuntimeError::Unreachable`]: ../../../../src/runner/container/runtime.rs
+[`RuntimeError`]: ../../../../src/runner/container/runtime.rs
+[`RuntimeOp`]: ../../../../src/runner/container/runtime.rs
+[`Self::reported_image_id`]: ../../../../src/runner/container/runtime.rs
+[`StopMode`]: ../../../../src/runner/container/runtime.rs
+[`crate::agent::ProcessOutput`]: ../../../../src/agent/proc.rs
+[`crate::runner::Runner`]: ../../../../src/runner/mod.rs
+[`crate::topology::events::ImageIdentity`]: ../../../../src/topology/events.rs
+[`crate::util::DurabilityLedger`]: ../../../../src/util.rs
+[`crate::util::DurableStep`]: ../../../../src/util.rs
+[`super::exec::ContainerRunner::plan`]: ../../../../src/runner/container/exec.rs

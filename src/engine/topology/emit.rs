@@ -21,6 +21,7 @@ pub struct RunIdentity {
 pub struct EmitState<'a> {
     pub fold: &'a mut TopologyFold,
     pub log: &'a mut EventLog,
+    pub events: &'a mut Vec<TopologyEvent>,
     pub reservations: &'a mut Reservations,
     pub warnings: &'a mut Vec<String>,
 }
@@ -246,8 +247,10 @@ pub fn emit(
     {
         Ok(()) => {
             state.fold.apply_delta(delta);
+            state.events.push(checked.clone());
             Ok(checked)
         }
+
         Err(cause) if poisoned_before || state.log.poisoned_at().is_none() => {
             Err(EmitError::NotEntered(cause))
         }

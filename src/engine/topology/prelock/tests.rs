@@ -136,12 +136,19 @@ impl ContainerRuntime for Inventory {
         Ok(())
     }
 
-    fn stop(&self, _name: &str, _mode: StopMode) -> Result<(), RuntimeError> {
-        Ok(())
+    fn stop(
+        &self,
+        _name: &str,
+        _mode: StopMode,
+    ) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
+        Ok(crate::runner::container::runtime::Settled::ProcessGone)
     }
 
-    fn remove(&self, _name: &str) -> Result<(), RuntimeError> {
-        Ok(())
+    fn remove(
+        &self,
+        _name: &str,
+    ) -> Result<crate::runner::container::runtime::Settled, RuntimeError> {
+        Ok(crate::runner::container::runtime::Settled::ProcessGone)
     }
 }
 

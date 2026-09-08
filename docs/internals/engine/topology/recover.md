@@ -1,7 +1,7 @@
 # `src/engine/topology/recover.rs`
 
 Repository source for these notes: [`src/engine/topology/recover.rs`](../../../../src/engine/topology/recover.rs).
-[Source on GitHub](https://github.com/eventloops/upstroke/blob/master/src/engine/topology/recover.rs).
+[Source on GitHub](https://github.com/sourcemaps/upstroke/blob/master/src/engine/topology/recover.rs).
 The relative link works in a checkout or on GitHub; the GitHub link also works from the published site.
 
 The code is the authority for what it does. The explanatory prose is preserved below.
@@ -79,17 +79,32 @@ step this order would otherwise not have:
 > **P7/P8: create the ref zero-old at the recorded base if absent; if
 > present == base continue (no spend repeats)**
 
-[`ensure_recorded_integration_ref`] is that step. Its body is
-[`super::create::ensure_integration_ref`] — **P8's own body, called, not
-copied**: two implementations of "if present == base continue" would be two
-places for a run killed between P6 and P8 to be treated differently from one
-that was not, which is the duplication that function exists to prevent.
-What this module adds is the two arguments, and it takes them from the
-record `RootDerived` resolved and `RecordsVerified` authenticated —
-`run_started(4).integration_ref` and `run_started(4).base_sha` — never from
-today's configuration.
+[`ensure_recorded_integration_ref`] is that step. For a run that has not yet
+published, its body is [`super::create::ensure_integration_ref`] — **P8's
+own body, called, not copied**: two implementations of "if present == base
+continue" would be two places for a run killed between P6 and P8 to be
+treated differently from one that was not, which is the duplication that
+function exists to prevent. What this module adds is the two arguments, and
+it takes them from the record `RootDerived` resolved and `RecordsVerified`
+authenticated — `run_started(4).integration_ref` and `run_started(4).base_sha`
+— never from today's configuration.
 
-Its position is between step (f)'s [`refuse_unimplemented_terminals`] and
+For a run that *has* published, the base is no longer where the ref belongs:
+`transaction_fault_matrix[T-RESUME].durable_state` counts "CAS completions"
+among what a resume continues from, so the step reads the latest
+`task_merged.merged_sha` in the proven prefix
+([`super::integrate::authorized_head`], the rule the live `decide` reads
+too) and requires the ref there. A ref elsewhere, or none, is DESIGN §26's
+"`task_merged` exists but the ref disagrees — refuse; the log and integration
+branch no longer describe the same run": nothing is moved and nothing is
+created. The three reviews of `3414dc58` found the base compared after a
+publication, which refused every resume of a run that had merged anything
+(`pr8-triage.md` C1).
+
+It is skipped only when the proven prefix carries a `Prepared` transaction
+— [`finish_integration`] at step (f) owns the ref then, moving it by the
+authorized CAS — and runs under a `VerificationStarted` one, whose interrupted
+settlement moves no ref (`pr8-plan.md` R23). Otherwise its position is before
 step (d)'s first append, and every bound on it is a separate clause:
 
 * **After (a1).** It is a durable effect on a repository ref. O18 puts the
@@ -102,33 +117,35 @@ step (d)'s first append, and every bound on it is a separate clause:
 * **After (c).** The repository is touched only once the recorded Runner has
   been rebuilt by inspection and its probes have answered, so a resume that
   cannot run at all leaves the object store exactly as it found it.
-* **After (f).** This is the bound that is not merely tidy.
-  [`refuse_unimplemented_terminals`] refuses a proven prefix that leaves an
-  integration transaction unresolved, and an unresolved integration
-  transaction is precisely the state in which the integration ref may be
-  mid-move. The ref of such a run can still be *at* the recorded base — the
-  CAS has not run yet — and "present == base continue" would then silently
-  adopt a ref under a transaction this build cannot resolve. That case is
-  the one the step's own refusals do not catch, so the checkpoint refusal
-  runs first.
+* **Skipped under a prepared publication.** This is the bound that is not
+  merely tidy. A run whose transaction has reached `merge_prepared` owns its
+  ref: `finish_integration` at step (f) compares it against the authorization
+  and swaps it, and the ref of such a run can still be *at* the recorded base
+  — the CAS has not run yet — so "present == base continue" would adopt,
+  expected-old, a ref that `finish_integration` is about to compare against
+  and swap. The recovery therefore skips the step exactly when the open
+  transaction is `Prepared`, and `finish_integration` is the single writer of
+  the ref. Under a *verifying* transaction the step runs: an interrupted
+  settlement moves no ref, so a ref that is neither at the base nor at the
+  last publication is foreign state (`[T-RESUME].refusal_condition`) whatever
+  the verification recorded, and refusing it here is refusing before any
+  append. The reviews of `3414dc58` had it skipped under any transaction
+  (`pr8-triage.md` R23).
 * **Before (d).** The step can refuse: a ref at another SHA, a symbolic ref,
   a ref checked out in a worktree. A refusal after `attempt_interrupted`,
   `generation_closed` and `run_resumed` is a resume half-performed — the
   epoch incremented and the generations closed for a command that then
   failed — and the next resume would append the same set again before
-  refusing again. [`refuse_unimplemented_terminals`] gives the identical
-  reason for its own position: a refusal after two appends is not "before
-  any append".
+  refusing again: a refusal after two appends is not "before any append".
 
 O15 is "run_started before integration ref", and on a resume it is satisfied
 by construction rather than by placement: `run_started(4)` is the committed
 first line (a0) read before this order began. Nothing here can put the ref
 first.
 
-It is **not** a recovery event. It appends nothing, so
-[`refuse_unimplemented_terminals`] does not gate it as an operation whose
-terminal is missing, and it needs no terminal of its own — the effect either
-happened or did not, and the next resume decides which by looking at the ref.
+It is **not** a recovery event. It appends nothing and needs no terminal of
+its own — the effect either happened or did not, and the next resume decides
+which by looking at the ref.
 
 ### Nothing here is a production path
 
@@ -367,6 +384,20 @@ Take the worktree lease, then this run's run lock.
 process, or while a surviving reaper's shared cleanup hold (R28)
 is observed. The value is consumed either way, because a
 refusal here ends the command.
+
+## `impl LocksHeld` › `pub fn cleanup_scope(&self) -> crate::rundir::CleanupScope {`
+
+The run lock's cleanup scope, for the thread that drives the recovery
+order. A Unix reaper takes its cleanup-lease paths from the thread-local
+scope at spawn (`proc::spawn_reaper`), and only through a scope does it
+hold the shared `cleanup.lock` that R28 says the next coordinator observes
+and refuses on. The v0.1 coordinator and resume enter the scope right
+after acquiring the lock; the topology path acquired it here and entered
+nothing, so every reaper of the probes at (c) and of the loop's gates and
+reviewers held no lease — the cover review of `8a5f59e8` measured a real
+reaper at `ReaperStarted` with the run's hold absent
+(`PR8-R4-CLEANUP-LEASE`). [`run_recovery_order`] enters it for its own
+duration, and `TopologyRun::step` enters one per step.
 
 ## `impl LocksHeld` › `pub fn root(&self) -> &RootDerived {`
 
@@ -1180,6 +1211,12 @@ needs. Reordering the body does not compile.
 Step (i), admission, is the loop's and is not here: `checkpoint_refusals`
 gives the loop's refusals to `select.rs`, and this file owns step (b)'s.
 
+The lock's cleanup scope is entered as soon as the locks are held and
+lives to the end of the function ([`LocksHeld::cleanup_scope`]), so the
+reapers of (c)'s host probes hold the run's R28 lease; the loop enters its
+own per step, because the scope is thread-local and the handle may be
+driven elsewhere.
+
 ### Errors
 
 The first refusal of the order: a lock held elsewhere or a surviving reaper
@@ -1211,12 +1248,32 @@ the fold is poisoned and the next resume repeats from (a0).
 
 (c) the recorded Runner by inspection, then its probes.
 
-## `refuse_unimplemented_terminals(&certified)?;`
+## `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
 
-(f) the terminals this build does not implement, refused before any
-append — which is why it precedes (d) and (e) rather than sitting in its
-own numbered position: a refusal after two appends is not "before any
-append".
+`T-PROPOSAL`'s residue reclaim and the accounting of every `prepared/<seq>`
+the log pinned, before the namespace check. A cherry-pick killed before or
+after it wrote its objects leaves a `merge/s<seq>` staging worktree and can
+leave the provisional orphan `prepared/<next_seq>`; a kill between
+`task_merged` and the pin's deletion leaves a resolved sequence's pin. This
+removes the staging with force, prunes a resolved pin expected-old at the
+proposal its record names, reclaims exactly the orphan at the next
+sequence, and *checks* the open transaction's pin against its record and
+keeps it — returning it for the namespace check's expected set. Anything
+else under `prepared/` is not accounted for by the log and is what the check
+refuses, untouched. The reviews of `3414dc58` found this step deleting every
+pin it did not recognise, the still-Prepared transaction's and a
+substituted one included (`pr8-triage.md` C2).
+
+## `finish_integration(&mut certified, seams.manager, &mut context)?;`
+
+(f) the integration half: resolve the one transaction the proven prefix
+leaves open. A `Prepared` transaction is completed through the same
+`integrate::publish` the live path uses — the compare-and-swap issued only
+now the barrier of (a1) has proven the `merge_prepared` line durable; a
+`VerificationStarted` one is settled `merge_verification_interrupted`, its
+pin pruned and its staging reclaimed, and the candidate re-verifies under a
+new sequence. It runs at (F) beside [`finish_promotions`]: both complete what
+the run authorized, after (d) and (e).
 
 ## `{`
 
@@ -1239,11 +1296,12 @@ row.
 
 ## `ensure_recorded_integration_ref(&certified, seams.refs, hooks)?;`
 
-T-RUNSTART's P7/P8 repair, after (f) and before the first append. The
-module comment argues each bound; the one that is not merely tidy is (f),
-because a prefix with an unresolved integration transaction can have its
-ref still sitting at the recorded base, and "present == base continue"
-would adopt it under a transaction this build cannot resolve.
+T-RUNSTART's P7/P8 repair for a run that has not published, the
+published-run check for one that has, before the first append. The module
+comment argues each bound; the one that is not merely tidy is the prepared
+publication, whose ref is still at the recorded base until `finish_integration`
+swaps it — "present == base continue" would adopt it under that transaction,
+so the step is skipped for a `Prepared` transaction and for no other.
 
 ## `let mut reservations = Reservations::new();`
 
@@ -1329,57 +1387,82 @@ Parked and BudgetExceeded are resumable outcomes: the fold's own
 guard lets `run_resumed` through for exactly these two, which is what
 makes "raise the ceiling and resume" the response to a budget stop.
 
-## `pub fn refuse_unimplemented_terminals(certified: &PreflightCertified) -> Result<(), UpstrokeError> {`
+## `pub fn finish_integration(`
 
-Step (f)'s checkpoint refusal.
+Step (f)'s integration half: resolve the one integration transaction the
+proven prefix leaves open. It replaced `refuse_unimplemented_terminals`, the
+PR7 checkpoint that refused this state — PR8 implements the terminals, so it
+completes rather than refuses.
 
-`checkpoint_refusals`: "an intermediate build refuses, **before any
-append**, any operation whose terminals it does not implement (PR7:
-integration and run end beyond refusal)".
+`transaction_fault_matrix` rows `T-FAST`, `T-PREPARED` and `T-VERIFY`, and
+INV-09's "an authorized publication is always completed (recovery or run-end
+closure), never abandoned".
 
-**The refusal here is the *integration* transaction's, and only that.** This
-sentence read "completing it means `task_candidate_created` or a CAS, and
-PR7 implements neither terminal", which was true when the step was written
-and false by the time the driver existed: `finish_promotions` calls
-`candidate::append_candidate_created`, so PR7 implements that terminal and
-step (f) hands unresolved promotions to it rather than refusing them. What
-this refuses is the integration half — completing one means a
-compare-and-swap on the integration ref, which is PR8's. The 2026-08-26
-re-review of `c2c0294` found the stale half, finding C.
+* A **`Prepared`** transaction is completed through
+  [`super::integrate::publish`] on the [`super::integrate::Authorized`] the
+  fold reads back — the *same* publish the live path runs, so a resume and a
+  live completion converge by construction. The compare-and-swap it issues is
+  safe only because the stable-prefix barrier of step (a1) has already proven
+  the `merge_prepared` line durable: a CAS is never issued on a merely
+  replay-visible authorization. A ref already at the proposal records the
+  `task_merged` without a second swap; a third SHA refuses rather than
+  clobbering.
+* A **`VerificationStarted`** transaction is settled
+  `merge_verification_interrupted`, its `prepared/<seq>` pin deleted
+  expected-old at the proposal the record names and its staging worktree
+  reclaimed, and the candidate re-verifies under a new sequence.
+  `Authorized::from_fold` returns `None` for it — this build no longer
+  refuses that `None`, it interrupts. The pin was checked against its record
+  by [`reclaim_stale_residue`] before any append; a substituted pin refused
+  there, so nothing here deletes a ref the log did not authorize.
 
-Takes `&PreflightCertified` because it is a step-(f) emitter's predicate and
-every recovery emitter takes one — the refusal has to be reachable from the
-same place the append would have been, or it is refusing somewhere else.
+Takes `&mut PreflightCertified` and the run's `WorkspaceManager`, because it
+is a step-(f) emitter and a writer of the integration ref, reachable from the
+same place the live append would have been.
 
 ### Errors
 
-[`UpstrokeError::Refused`] naming the unresolved integration transaction.
+A refusal (a third SHA on the CAS, a symbolic or checked-out ref, a pin at
+another SHA), the append-error protocol's report, or a Git error.
 
-**It named a second thing until 2026-08-27**: a task whose generation was
-`Promoting` with its candidate pin gone. That refusal guarded erratum E6's
-convergence, which rebuilt a candidate identity from the pin; with
-`candidate_prepared` as the sole successful settlement there is no such
-reconstruction and no such window, so one refusal is left and this takes no
-`WorkspaceManager` — it is now a predicate over the fold alone.
+## `fn pinned_sequences(`
 
-## `pub fn refuse_unimplemented_terminals(certified: &PreflightCertified) -> Result<(), UpstrokeError> {` › `Ok(())`
+The pins the log accounts for: every stale-clean
+`merge_verification_started` in the proven prefix, with the pin it named and
+the proposal it was created at. A fast or already-present sequence pins
+nothing. This is the record every pin decision below is made against —
+authority comes from the record, never from what a ref happens to name when
+it is read.
 
-**A `Promoting` generation whose pin is gone used to be refused here**,
-because E6's convergence rebuilt the candidate identity *from* that pin
-and had nothing to rebuild from without it.
+## `fn reclaim_stale_residue(`
 
-Both are gone. Since the 2026-08-27 CONFORM ruling `candidate_prepared`
-is the sole successful settlement and the only thing that sets
-`Promoting`, in the same block that records the candidate — so a
-promoting generation carries its own identity and needs no pin to
-reconstruct one. A pin already pruned is `T-CAND-REF`'s ordinary
-late-crash prefix, which `finish_promotions` completes; a pin with no
-candidate record is orphan residue, which `candidate::recovery_for`
-prunes while settling the attempt interrupted.
+Reclaim what the log does not need and check what it does, before the
+namespace check: T-PROPOSAL (a', a, b) residue, and every `prepared/<seq>`
+the log accounts for.
 
-What still refuses before any append is the integration transaction
-above, which is PR8's terminal and one of the two `checkpoint_refusals`
-authorises.
+* Every `merge/<seq>` staging worktree no live transaction owns is removed
+  with force, the proposal objects then left to Git (R27).
+* A resolved sequence's pin is pruned expected-old at the proposal its
+  `merge_verification_started` recorded; a pin at any other SHA refuses
+  (INV-17: substituted refs refuse) and is left as it is.
+* The open transaction's pin — a verification's or a prepared publication's
+  — is required to name its recorded proposal and is kept: T-VERIFY's
+  "pin SHA differs from record" refuses before any settlement, and
+  `invariants[INV-15]`'s cleanup never touches a resumably open resource.
+* With no transaction open, exactly `prepared/<next_seq>` is the
+  provisional orphan T-PROPOSAL (b) names, reclaimed expected-old at what
+  it names.
+
+Anything else under `prepared/` is not accounted for by the log and is
+refused by the namespace check that follows, untouched
+(`expected_failures_refusals`: "orphan pin outside next sequence").
+
+Returns the open transaction's pin for the namespace check's expected set.
+
+Expected-old deletion at whatever a ref names proves only that nothing
+moved it since the read; it does not establish that the value read was
+authorized, which is why the old form of this step — delete everything but
+the verifying pin — was wrong (`pr8-triage.md` C2).
 
 ## `pub fn finish_promotions(`
 
@@ -1412,9 +1495,10 @@ which a resumed run never reaches, and `select` has no branch that advances a
 `task.open().is_none()`. `Promoting` holds a pipeline entitlement, so at
 `max_parallel = 1` the stall took every other task with it.
 
-It was also a **regression against a refusal**: before E6,
-[`refuse_unimplemented_terminals`] refused any `Promoting` generation before
-any append. Narrowing that refusal without implementing the continuation
+It was also a **regression against a refusal**: before E6, the step-(f)
+checkpoint (then `refuse_unimplemented_terminals`, since replaced by
+[`finish_integration`]) refused any `Promoting` generation before any append.
+Narrowing that refusal without implementing the continuation
 traded a clean pre-append refusal for a silent permanent stall, which is the
 worse of the two by the project's own ordering — a refusal is a resumable
 end, and this was not an end at all.
@@ -1497,12 +1581,21 @@ A run killed between P6 and P8 is committed — `run_started(4)` is durable and
 else in this build creates one, so without this step such a run resumes into
 a namespace its own record describes and the repository does not have.
 
-**The body is P8's, called rather than copied.**
+**Before any publication, the body is P8's, called rather than copied.**
 [`super::create::ensure_integration_ref`] answers all three dispositions —
 absent, present at the base, present at anything else — and its doc states
 why there may be only one of it. This function contributes the two
-arguments and nothing else; if it ever grows a comparison of its own,
-that is the duplication the shared body exists to prevent.
+arguments and nothing else on that path; a second "present == base" would be
+the duplication the shared body exists to prevent.
+
+**After a publication, the ref belongs to the last `task_merged`.** The
+proven prefix's latest `merged_sha` ([`super::integrate::authorized_head`],
+one rule with two callers since the cover review of `8a5f59e8` found the
+live decision without it, `PR8-R4-LIVE-HEAD`) is the one head the ref may
+name: a ref there continues, a ref elsewhere refuses as the run
+whose log and branch no longer agree (DESIGN §26), and an absent ref refuses
+rather than being recreated — P7/P8's create-at-base is for a run killed at
+run start, and a published run was not.
 
 **Both arguments come from the record.** `run_started(4).integration_ref` and
 `run_started(4).base_sha`, reached through the witness chain from the
@@ -1512,9 +1605,9 @@ not from a `Workspace`, and not from the fold's current view of the run: a
 resume that recomputed either would be able to publish a ref the run was
 never started against.
 
-Takes `&PreflightCertified` for the same reason
-[`refuse_unimplemented_terminals`] does — it is what makes "after (c)"
-unstateable as anything else — and returns `()` rather than a witness because
+Takes `&PreflightCertified` for the same reason every step-(f) emitter does
+— it is what makes "after (c)" unstateable as anything else — and returns
+`()` rather than a witness because
 nothing downstream may depend on it having run: it is a repair of a prefix,
 not a link in the order.
 
@@ -1650,7 +1743,10 @@ one the loop's own appends must be able to check themselves against.
 ## `pub struct RunHandle {`
 
 The run's own state, handed from a completed start to the loop that drives
-it.
+it. `cleanup_scope` hands the driving thread the lock's cleanup scope for
+the stretch it spawns processes in (`TopologyRun::step`), since the lock
+itself stays inside the handle and cannot be borrowed across `&mut self`.
+
 
 **Every field of this was being dropped at the end of the recovery order**,
 and that is the mechanical reason `TopologyRun` could not exist. Not a
@@ -1942,3 +2038,76 @@ Every `(key, generation)` settled holding a session.
 ## `fn outcome_name(outcome: &RunOutcome) -> &'static str {`
 
 The outcome as `run_finished` writes it.
+
+## `pub fn run_recovery_order(` › `let publication_pending = matches!(`
+
+A `Prepared` transaction owns the ref: `finish_integration` compares it
+against the authorization and swaps it, so the startup check would only
+adopt what that step is about to move. Under any other prefix — no
+transaction, or a verification whose interrupted settlement moves no
+ref — the check runs: `[T-RESUME].refusal_condition`, "foreign
+integration state".
+
+## `pub fn run_recovery_order(` › `let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;`
+
+T-PROPOSAL residue and the pins the log accounts for: staging worktrees
+no live transaction owns are reclaimed with force, a resolved sequence's
+pin is pruned at the proposal it recorded, the open transaction's pin is
+checked against its record and kept, and exactly the provisional orphan
+`prepared/<next_seq>` is reclaimed. Before the namespace check, so that
+check refuses whatever the log does not account for — untouched.
+
+## `pub fn run_recovery_order(` › `expected.push(fold.started().map_or_else(String::new, |started| {`
+
+The run's own integration ref sits under this namespace and is never
+unexpected; `expected_refs` leaves it out because it enumerates
+candidate refs, so the recovery names it here.
+
+## `pub fn run_recovery_order(` › `if let Some(pin) = &live_pin {`
+
+The open transaction's pin is expected: it keeps the proposal
+reachable while the transaction resolves, verifying or prepared.
+
+## `pub fn run_recovery_order(` › `if !publication_pending {`
+
+The P7/P8 integration-ref repair is for a run killed at run-start, and
+the published-run check for every later one. A run with a prepared
+publication is past both: the ref is the transaction's to move, so the
+step is skipped and `finish_integration` owns the ref.
+
+## `fn reclaim_snapshot_residue(`
+
+Reclaim every verification snapshot, with force, once every terminal a
+snapshot could belong to is durable: the attempts settled at (d), and the
+integration transaction resolved just above.
+
+`C.cancellation`: "snapshots reclaimed"; `[T-VERIFY].resume_action`. The
+live path removes snapshots only after its terminal, so a kill between the
+terminal and the removal — or during the judgement itself, whose terminal
+this step has now appended — leaves exactly this residue, and nothing
+still running can own a snapshot when a fresh process reaches here.
+
+## `struct PinnedSequence {`
+
+A stale-clean verification the log started: its sequence, the pin the
+record names, and the proposal that pin was created at.
+
+## `fn pinned_sequences(events: &[TopologyEvent]) -> Vec<PinnedSequence> {`
+
+Every `prepared/<seq>` the log accounts for, from the proven prefix's
+`merge_verification_started` records with a stale-clean basis. A fast or
+already-present sequence pins nothing and is not here.
+
+## `fn converted(&mut self, _key: TaskKey) -> Result<(), UpstrokeError> {` › `Ok(())`
+
+A fresh process holds no provisional reservation; a recovery
+publication converts nothing.
+
+## `pub(in crate::engine::topology::recover) fn writer(`
+
+The append handle, the fold and the event list together, because the one
+`emit` funnel keeps all three in step: what recovery appends is read back
+by the loop it hands the `RunHandle` to (the authorized head after a
+publication recovery completed, for one), so the list a resume was
+derived from is extended by every append the resume itself makes.
+

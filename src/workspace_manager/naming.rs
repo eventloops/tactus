@@ -115,10 +115,16 @@ impl SnapshotName {
         Self(format!("g{generation}-a{attempt}-review{reviewer}"))
     }
 
-    /// The snapshot an integration transaction judges its proposal on.
+    /// The snapshot an integration transaction's gate set runs on.
     #[must_use]
     pub fn integration(sequence: u64) -> Self {
         Self(format!("s{sequence}-integration"))
+    }
+
+    /// One fresh snapshot per integration reviewer.
+    #[must_use]
+    pub fn integration_review(sequence: u64, reviewer: u32) -> Self {
+        Self(format!("s{sequence}-review{reviewer}"))
     }
 
     /// The name as a directory component.

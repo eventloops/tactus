@@ -328,6 +328,11 @@ impl Reservations {
     }
 
     #[must_use]
+    pub const fn cancelled(&self) -> u32 {
+        self.cancelled
+    }
+
+    #[must_use]
     pub const fn balances(&self) -> bool {
         self.taken == self.converted + self.cancelled && self.held.is_none()
     }

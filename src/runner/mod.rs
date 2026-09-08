@@ -192,8 +192,55 @@ pub fn gate_request(
     }
 }
 
+pub use crate::error::ProcessFate;
+
+#[derive(Debug, thiserror::Error)]
+#[error("the Runner could not complete `{invocation}` ({}): {source}", .fate.describe())]
+pub struct RunnerError {
+    pub invocation: InvocationId,
+    pub fate: ProcessFate,
+    #[source]
+    pub source: Box<UpstrokeError>,
+}
+
+impl RunnerError {
+    #[must_use]
+    pub fn new(invocation: &InvocationId, fate: ProcessFate, source: UpstrokeError) -> Self {
+        Self {
+            invocation: invocation.clone(),
+            fate,
+            source: Box::new(source),
+        }
+    }
+
+    #[must_use]
+    pub fn never_started(invocation: &InvocationId, source: UpstrokeError) -> Self {
+        Self::new(invocation, ProcessFate::NeverStarted, source)
+    }
+
+    #[must_use]
+    pub fn gone(invocation: &InvocationId, source: UpstrokeError) -> Self {
+        Self::new(invocation, ProcessFate::Gone, source)
+    }
+
+    #[must_use]
+    pub fn unresolved(invocation: &InvocationId, source: UpstrokeError) -> Self {
+        Self::new(invocation, ProcessFate::Unresolved, source)
+    }
+}
+
+impl From<RunnerError> for UpstrokeError {
+    fn from(error: RunnerError) -> Self {
+        Self::Runner {
+            invocation: error.invocation.render(),
+            fate: error.fate,
+            source: error.source,
+        }
+    }
+}
+
 pub trait Runner: Send + Sync {
-    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, UpstrokeError>;
+    fn run(&self, request: &RunnerRequest) -> Result<ProcessOutput, RunnerError>;
 }
 
 pub const SPAWN_SITE: EffectSiteId = EffectSiteId::Process(ProcessSite::Spawn);
@@ -1116,12 +1163,16 @@ mod tests {
                 "src/agent/proc.rs",
                 1,
                 2,
-                3,
+                5,
                 "the process funnel itself: two `command.spawn()` (Unix and \
-                 Windows), and three `run_with_timeout*` mentions in \
-                 production CODE: `run_with_timeout_at`, its delegation \
-                 to `run_with_timeout_and_limit`, and that private entry's \
-                 declaration. The former plain `run_with_timeout` entry and \
+                 Windows), and five `run_with_timeout*` mentions in \
+                 production CODE: `run_with_timeout_at`, its delegation to \
+                 `run_with_timeout_classified`, that entry's declaration, its \
+                 delegation to `run_with_timeout_and_limit`, and that private \
+                 entry's declaration — the classified entry is the same \
+                 funnel keeping the process fate it established, added for \
+                 the host Runner's typed error (the reviews of `916852c9`, \
+                 regression 1). The former plain `run_with_timeout` entry and \
                  its delegation are now inside a `#[cfg(test)]` support \
                  module; production callers must provide both Process sites \
                  explicitly, so counting those two test-only mentions as \

@@ -34,6 +34,7 @@ pub struct AttemptFailure {
     pub origin: FailureOrigin,
     pub reason: String,
     pub feedback: Option<String>,
+    pub never_started: bool,
 }
 
 impl AttemptFailure {
@@ -43,7 +44,14 @@ impl AttemptFailure {
             origin: FailureOrigin::Worker,
             reason: reason.into(),
             feedback: None,
+            never_started: false,
         }
+    }
+
+    #[must_use]
+    pub fn from_a_process_that_never_started(mut self) -> Self {
+        self.never_started = true;
+        self
     }
 
     pub fn with_feedback(mut self, feedback: String) -> Self {

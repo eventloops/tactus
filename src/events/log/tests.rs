@@ -165,7 +165,7 @@ fn run_started_event() -> TopologyEvent {
                     "sha256:1111111111111111111111111111111111111111111111111111111111111111"
                         .to_owned(),
                 path_policy: PathPolicy {
-                    version: PathPolicyVersion::V1,
+                    version: PathPolicyVersion::V2,
                     case_fold: false,
                     grammar: PathGrammar::Globset,
                 },
@@ -2662,7 +2662,9 @@ fn the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold() {
         "src/engine/topology/candidate.rs",
         "src/engine/topology/create.rs",
         "src/engine/topology/emit.rs",
+        "src/engine/topology/integrate.rs",
         "src/engine/topology/recover.rs",
+        "src/engine/topology/repair.rs",
         "src/engine/topology/run.rs",
         "src/engine/topology/select.rs",
         "src/engine/topology/settle.rs",

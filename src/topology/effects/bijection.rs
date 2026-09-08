@@ -76,7 +76,7 @@ pub enum BijectionFailure {
     },
 
     #[error(
-        "`{site}`'s `{phase}` entry lists the `{element:?}` residue element and does not record \
+        "`{site}`'s `{phase}` entry lists the `{element}` residue element and does not record \
          constructing it"
     )]
     ResidueElementNotConstructed {
@@ -88,7 +88,7 @@ pub enum BijectionFailure {
         element: ResidueElement,
     },
 
-    #[error("`{site}`'s `{phase}` entry's `{element:?}` residue element did not recover")]
+    #[error("`{site}`'s `{phase}` entry's `{element}` residue element did not recover")]
     ResidueElementNotRecovered {
         /// The site.
         site: EffectSiteId,
@@ -99,7 +99,7 @@ pub enum BijectionFailure {
     },
 
     #[error(
-        "`{site}`'s `{phase}` entry classified its `{element:?}` residue element as \
+        "`{site}`'s `{phase}` entry classified its `{element}` residue element as \
          {classified:?}, and `{phase}` is the class of {expected:?}"
     )]
     ResidueElementMisclassified {

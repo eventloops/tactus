@@ -1342,7 +1342,15 @@ impl RunLock {
     /// The lock itself remains `Send`; callers enter the scope only while
     /// synchronously driving the run, so a future executor can move ownership
     /// first and establish the context on its actual worker thread.
-    pub(crate) fn enter_cleanup_scope(&self) -> cleanup::CleanupScope<'_> {
+    ///
+    /// The scope is owned rather than borrowed from the lock: the topology run
+    /// carries its lock inside the handle it drives, and a scope borrowing that
+    /// lock could not coexist with the `&mut self` every step needs. Each site
+    /// that spawns host processes under the lock enters a scope for exactly
+    /// that stretch and drops it before it returns, so no scope outlives the
+    /// hold it names. The cover review of `8a5f59e8` found the integration
+    /// path's reapers holding no lease at all (`PR8-R4-CLEANUP-LEASE`).
+    pub(crate) fn enter_cleanup_scope(&self) -> cleanup::CleanupScope {
         cleanup::enter(&self._cleanup)
     }
 }
@@ -1542,12 +1550,12 @@ mod cleanup {
     }
 
     #[derive(Debug)]
-    pub(crate) struct CleanupScope<'a> {
+    pub(crate) struct CleanupScope {
         path: PathBuf,
-        _lifetime_and_thread: PhantomData<(&'a CleanupLease, Rc<()>)>,
+        _thread: PhantomData<Rc<()>>,
     }
 
-    impl Drop for CleanupScope<'_> {
+    impl Drop for CleanupScope {
         fn drop(&mut self) {
             ACTIVE.with(|active| {
                 let mut active = active.borrow_mut();
@@ -1564,14 +1572,14 @@ mod cleanup {
         }
     }
 
-    pub(super) fn enter(lease: &CleanupLease) -> CleanupScope<'_> {
+    pub(super) fn enter(lease: &CleanupLease) -> CleanupScope {
         ACTIVE.with(|active| {
             let mut active = active.borrow_mut();
             *active.entry(lease.path.clone()).or_default() += 1;
         });
         CleanupScope {
             path: lease.path.clone(),
-            _lifetime_and_thread: PhantomData,
+            _thread: PhantomData,
         }
     }
 
@@ -1646,11 +1654,11 @@ mod cleanup {
     pub(super) struct CleanupLease;
 
     #[derive(Debug)]
-    pub(crate) struct CleanupScope<'a> {
-        _lifetime_and_thread: PhantomData<(&'a CleanupLease, Rc<()>)>,
+    pub(crate) struct CleanupScope {
+        _thread: PhantomData<Rc<()>>,
     }
 
-    impl Drop for CleanupScope<'_> {
+    impl Drop for CleanupScope {
         fn drop(&mut self) {}
     }
 
@@ -1662,12 +1670,14 @@ mod cleanup {
         false
     }
 
-    pub(super) fn enter(_lease: &CleanupLease) -> CleanupScope<'_> {
+    pub(super) fn enter(_lease: &CleanupLease) -> CleanupScope {
         CleanupScope {
-            _lifetime_and_thread: PhantomData,
+            _thread: PhantomData,
         }
     }
 }
+
+pub(crate) use cleanup::CleanupScope;
 
 #[cfg(unix)]
 pub(crate) fn active_cleanup_lease_paths() -> Vec<PathBuf> {

@@ -93,7 +93,9 @@ impl AgentAdapter for CodexAdapter {
                 probe_ordinal::VERSION,
                 PROBE_TIMEOUT,
             )?)
-            .map_err(|cause| bin::boundary_refused(CLI, INSTALL_HINT, &cause))?;
+            .map_err(|cause| {
+                bin::boundary_refused(CLI, INSTALL_HINT, &UpstrokeError::from(cause))
+            })?;
         if out.output_limited {
             return Err(UpstrokeError::Agent {
                 message: format!(
@@ -177,7 +179,9 @@ impl AgentAdapter for CodexAdapter {
                 probe_ordinal::LOGIN_STATUS,
                 PROBE_TIMEOUT,
             )?)
-            .map_err(|cause| bin::boundary_refused(CLI, INSTALL_HINT, &cause))?;
+            .map_err(|cause| {
+                bin::boundary_refused(CLI, INSTALL_HINT, &UpstrokeError::from(cause))
+            })?;
         let mut discovery = parse_login_status(&out);
         let models = runner.run(&probe_request(
             ADAPTER_ID,
@@ -380,12 +384,12 @@ fn run_config_parser_probe(
     schema_path: &std::path::Path,
     ordinal: u32,
 ) -> Result<ProcessOutput, UpstrokeError> {
-    runner.run(&probe_request(
+    Ok(runner.run(&probe_request(
         ADAPTER_ID,
         invocation.spec(&config_probe_args(surface, assignment, schema_path))?,
         ordinal,
         PROBE_TIMEOUT,
-    )?)
+    )?)?)
 }
 
 fn config_probe_args(
@@ -1351,7 +1355,7 @@ mod tests {
         fn run(
             &self,
             request: &crate::runner::RunnerRequest,
-        ) -> Result<ProcessOutput, UpstrokeError> {
+        ) -> Result<ProcessOutput, crate::runner::RunnerError> {
             self.seen
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

@@ -10,8 +10,9 @@ use crate::runner::container::GitView;
 use crate::runner::container::resolve::RunnerPreflight;
 use crate::runner::container::runtime::{ContainerRuntime, OwnerLiveness};
 use crate::topology::events::{
-    AttemptInterrupted4, AttemptNumber, GenerationCloseReason, GenerationClosed, GenerationId,
-    IncarnationId, LeaseDisposition, RunResumed4, RunStarted4, TopologyEvent, TopologyEventBody,
+    AttemptInterrupted4, AttemptNumber, CommitSha, GenerationCloseReason, GenerationClosed,
+    GenerationId, GitRef, IncarnationId, LeaseDisposition, RunResumed4, RunStarted4, SequenceId,
+    TopologyEvent, TopologyEventBody,
 };
 use crate::topology::fold::{FrozenInputs, GenerationClass, TopologyFold};
 use crate::topology::leases::GenerationLease;
@@ -281,6 +282,11 @@ pub mod chain {
             }
 
             #[must_use]
+            pub fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
+                self._run.enter_cleanup_scope()
+            }
+
+            #[must_use]
             pub fn into_guards(self) -> (RunLock, WorktreeLock, RootDerived) {
                 // Transfer live guards without unlocking. The recipient keeps both for
                 // the command and must release the run lock before the worktree lease.
@@ -527,8 +533,12 @@ pub mod chain {
 
             pub(in crate::engine::topology::recover) fn writer(
                 &mut self,
-            ) -> (&mut crate::events::log::EventLog, &mut TopologyFold) {
-                (&mut self.log, &mut self.fold)
+            ) -> (
+                &mut crate::events::log::EventLog,
+                &mut TopologyFold,
+                &mut Vec<crate::topology::events::TopologyEvent>,
+            ) {
+                (&mut self.log, &mut self.fold, &mut self.events)
             }
         }
     }
@@ -910,6 +920,7 @@ pub fn run_recovery_order(
         seams.worktree_git_dir,
         hooks.rundir(),
     )?;
+    let _cleanup_scope = locks.cleanup_scope();
     let records = RecordsVerified::verify(locks, seams.repo_key)?;
     let mut steps = vec![RecoveryStep::A];
 
@@ -947,25 +958,12 @@ pub fn run_recovery_order(
     let mut certified = PreflightCertified::certify(rebuilt, seams.preflight)?;
     steps.push(RecoveryStep::C);
 
-    refuse_unimplemented_terminals(&certified)?;
-
-    {
-        let fold = fold_of(&certified);
-        let run_id = fold
-            .started()
-            .ok_or_else(|| UpstrokeError::Refused {
-                message: "the proven prefix has no run".to_owned(),
-            })?
-            .run_id
-            .clone();
-        let namespace = crate::engine::topology::candidate::run_namespace(&run_id);
-        let expected = crate::engine::topology::candidate::expected_refs(&run_id, fold);
-        seams
-            .manager
-            .refuse_unexpected_refs(&namespace, &expected)?;
-    }
-
-    ensure_recorded_integration_ref(&certified, seams.refs, hooks)?;
+    let publication_pending = matches!(
+        fold_of(&certified)
+            .transaction()
+            .map(|transaction| &transaction.class),
+        Some(crate::topology::fold::TransactionClass::Prepared { .. })
+    );
 
     let mut reservations = Reservations::new();
     let mut invocations = InvocationLedger::new();
@@ -977,11 +975,41 @@ pub fn run_recovery_order(
         invocations: &mut invocations,
         warnings,
     };
+
+    let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;
+
+    {
+        let fold = fold_of(&certified);
+        let run_id = fold
+            .started()
+            .ok_or_else(|| UpstrokeError::Refused {
+                message: "the proven prefix has no run".to_owned(),
+            })?
+            .run_id
+            .clone();
+        let namespace = crate::engine::topology::candidate::run_namespace(&run_id);
+        let mut expected = crate::engine::topology::candidate::expected_refs(&run_id, fold);
+        expected.push(fold.started().map_or_else(String::new, |started| {
+            started.integration_ref.as_str().to_owned()
+        }));
+        if let Some(pin) = &live_pin {
+            expected.push(pin.0.clone());
+        }
+        seams
+            .manager
+            .refuse_unexpected_refs(&namespace, &expected)?;
+    }
+
+    if !publication_pending {
+        ensure_recorded_integration_ref(&certified, seams.refs, context.hooks)?;
+    }
+
     let interrupted = settle_interrupted(&mut certified, &mut context)?;
     steps.push(RecoveryStep::D);
     let retained_closed = close_retained_idle(&mut certified, &mut context)?;
     steps.push(RecoveryStep::E);
 
+    finish_integration(&mut certified, seams.manager, &mut context)?;
     let finished = finish_promotions(&mut certified, seams.manager, &mut context)?;
 
     steps.push(RecoveryStep::F);
@@ -1023,19 +1051,173 @@ pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError
     }
 }
 
-pub fn refuse_unimplemented_terminals(certified: &PreflightCertified) -> Result<(), UpstrokeError> {
+pub fn finish_integration(
+    certified: &mut PreflightCertified,
+    manager: &WorkspaceManager,
+    context: &mut EmitContext<'_>,
+) -> Result<(), UpstrokeError> {
+    use crate::topology::fold::TransactionClass;
+    let Some(transaction) = fold_of(certified).transaction() else {
+        return reclaim_snapshot_residue(manager, context);
+    };
+    let sequence = transaction.sequence;
+    match &transaction.class {
+        TransactionClass::Prepared { .. } => {
+            let authorized =
+                crate::engine::topology::integrate::Authorized::from_fold(fold_of(certified))?
+                    .ok_or_else(|| UpstrokeError::Refused {
+                        message: "the proven prefix records a Prepared transaction the recovery \
+                                  could not read as an authorization"
+                            .to_owned(),
+                    })?;
+            let mut journal = RecoveryJournal { certified, context };
+            crate::engine::topology::integrate::publish(&mut journal, manager, authorized)?;
+        }
+        TransactionClass::VerificationStarted {
+            basis,
+            proposed_sha,
+            ..
+        } => {
+            let pin = match basis {
+                crate::topology::events::VerificationBasis::StaleClean { prepared_ref } => {
+                    Some((prepared_ref.clone(), proposed_sha.clone()))
+                }
+                crate::topology::events::VerificationBasis::AlreadyPresent => None,
+            };
+            emit(
+                certified,
+                context,
+                TopologyEventBody::MergeVerificationInterrupted {
+                    data: crate::topology::events::MergeVerificationInterrupted {
+                        sequence,
+                        detail: "the coordinator that started this verification did not survive \
+                                 it; recovery step (f) settles it interrupted and the candidate \
+                                 re-verifies under a new sequence"
+                            .to_owned(),
+                    },
+                },
+            )?;
+            let staging = crate::engine::topology::integrate::staging_slot(sequence);
+            if let Some((pin, proposed)) = &pin {
+                crate::engine::topology::integrate::prune_pin(
+                    context.hooks,
+                    manager,
+                    pin,
+                    proposed,
+                )?;
+            }
+            manager.remove_worktree(context.hooks.effects(), &staging)?;
+            manager.remove_intent(context.hooks.effects(), &staging)?;
+        }
+    }
+    reclaim_snapshot_residue(manager, context)
+}
+
+fn reclaim_snapshot_residue(
+    manager: &WorkspaceManager,
+    context: &mut EmitContext<'_>,
+) -> Result<(), UpstrokeError> {
+    for slot in manager.intents()? {
+        if matches!(slot, crate::workspace_manager::Slot::Snapshot { .. }) {
+            manager.remove_worktree(context.hooks.effects(), &slot)?;
+            manager.remove_intent(context.hooks.effects(), &slot)?;
+        }
+    }
+    Ok(())
+}
+
+struct PinnedSequence {
+    sequence: SequenceId,
+    pin: GitRef,
+    proposed: CommitSha,
+}
+
+fn pinned_sequences(events: &[TopologyEvent]) -> Vec<PinnedSequence> {
+    events
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::MergeVerificationStarted { data } => match &data.basis {
+                crate::topology::events::VerificationBasis::StaleClean { prepared_ref } => {
+                    Some(PinnedSequence {
+                        sequence: data.sequence,
+                        pin: prepared_ref.clone(),
+                        proposed: data.proposed_sha.clone(),
+                    })
+                }
+                crate::topology::events::VerificationBasis::AlreadyPresent => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn reclaim_stale_residue(
+    certified: &PreflightCertified,
+    manager: &WorkspaceManager,
+    context: &mut EmitContext<'_>,
+) -> Result<Option<GitRef>, UpstrokeError> {
     let fold = fold_of(certified);
-    if fold.transaction().is_some() {
-        return Err(UpstrokeError::Refused {
-            message: "the proven prefix leaves an integration transaction unresolved. Recovery \
-                      step (f) completes authorized publications, and this build implements no \
-                      integration terminal, so it refuses before any append rather than \
-                      resolving a transaction it cannot finish."
-                .to_owned(),
-        });
+    let run_id = fold
+        .started()
+        .ok_or_else(|| UpstrokeError::Refused {
+            message: "the proven prefix has no run".to_owned(),
+        })?
+        .run_id
+        .clone();
+    let open = fold.transaction().map(|transaction| transaction.sequence);
+    let live_staging = open.map(crate::engine::topology::integrate::staging_slot);
+
+    for slot in manager.intents()? {
+        if matches!(slot, crate::workspace_manager::Slot::Staging { .. })
+            && Some(&slot) != live_staging.as_ref()
+        {
+            manager.remove_worktree(context.hooks.effects(), &slot)?;
+            manager.remove_intent(context.hooks.effects(), &slot)?;
+        }
     }
 
-    Ok(())
+    let mut live_pin = None;
+    for pinned in pinned_sequences(events_of(certified)) {
+        if Some(pinned.sequence) == open {
+            if let Some(found) = manager.direct_ref_target(pinned.pin.as_str())? {
+                if found != pinned.proposed.0 {
+                    return Err(
+                        crate::engine::topology::integrate::Refusal::PinSubstituted {
+                            sequence: pinned.sequence.0,
+                            refname: pinned.pin.0,
+                            found,
+                            expected: pinned.proposed.0,
+                        }
+                        .into(),
+                    );
+                }
+            }
+            live_pin = Some(pinned.pin);
+        } else {
+            crate::engine::topology::integrate::prune_pin(
+                context.hooks,
+                manager,
+                &pinned.pin,
+                &pinned.proposed,
+            )?;
+        }
+    }
+
+    if open.is_none() {
+        let next = fold.next_sequence().ok_or_else(|| UpstrokeError::Refused {
+            message: "the proven prefix has no run".to_owned(),
+        })?;
+        let orphan = crate::engine::topology::integrate::prepared_pin_ref(&run_id, next);
+        if let Some(found) = manager.direct_ref_target(orphan.as_str())? {
+            manager.delete_ref_expected_old(
+                context.hooks.effects(),
+                crate::topology::effects::RefSite::DeletePreparedPin,
+                orphan.as_str(),
+                &found,
+            )?;
+        }
+    }
+    Ok(live_pin)
 }
 
 pub fn finish_promotions(
@@ -1112,18 +1294,57 @@ impl crate::engine::topology::candidate::CandidateJournal for RecoveryJournal<'_
     }
 }
 
+impl crate::engine::topology::integrate::IntegrationJournal for RecoveryJournal<'_, '_, '_> {
+    fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
+        emit(self.certified, self.context, body)
+    }
+
+    fn fold(&self) -> &TopologyFold {
+        fold_of(self.certified)
+    }
+
+    fn hooks(&mut self) -> &mut dyn TopologyHooks {
+        self.context.hooks
+    }
+
+    fn converted(&mut self, _key: TaskKey) -> Result<(), UpstrokeError> {
+        Ok(())
+    }
+}
+
 pub fn ensure_recorded_integration_ref(
     certified: &PreflightCertified,
     refs: &dyn IntegrationRefs,
     hooks: &mut dyn TopologyHooks,
 ) -> Result<(), UpstrokeError> {
     let started = started_of(certified);
-    ensure_integration_ref(
-        refs,
-        hooks.effects(),
-        started.integration_ref.as_str(),
-        started.base_sha.as_str(),
-    )
+    let refname = started.integration_ref.as_str();
+    let authorized =
+        crate::engine::topology::integrate::authorized_head(started, events_of(certified));
+    let Some(sequence) = authorized.published_by else {
+        return ensure_integration_ref(refs, hooks.effects(), refname, started.base_sha.as_str());
+    };
+    let published = authorized.head;
+    refs.assert_publishable(refname)?;
+    match refs.direct_target(refname)? {
+        Some(at) if at == published.0 => Ok(()),
+        Some(at) => Err(UpstrokeError::Refused {
+            message: format!(
+                "the integration ref `{refname}` is at {at} and the log's latest publication, \
+                 sequence {}, put it at {published}; the log and the integration ref no longer \
+                 describe the same run, so nothing is moved and the run does not continue",
+                sequence.0
+            ),
+        }),
+        None => Err(UpstrokeError::Refused {
+            message: format!(
+                "the integration ref `{refname}` names nothing and the log's latest publication, \
+                 sequence {}, put it at {published}; a published run's ref is never recreated \
+                 from its base, so nothing is created and the run does not continue",
+                sequence.0
+            ),
+        }),
+    }
 }
 
 pub struct EmitContext<'a> {
@@ -1238,6 +1459,11 @@ pub struct RunHandle {
 
 impl RunHandle {
     #[must_use]
+    pub(crate) fn cleanup_scope(&self) -> crate::rundir::CleanupScope {
+        self._run.enter_cleanup_scope()
+    }
+
+    #[must_use]
     pub fn created(
         started: RunStarted4,
         committed_first_line_sha256: String,
@@ -1285,7 +1511,7 @@ fn emit(
         committed_first_line_sha256: Some(records.commit().run_started_sha256.clone()),
     };
 
-    let (log, fold) = certified
+    let (log, fold, events) = certified
         .rebuilt_mut()
         .censused_mut()
         .barrier_mut()
@@ -1293,12 +1519,17 @@ fn emit(
     let mut state = EmitState {
         fold,
         log,
+        events,
         reservations: context.reservations,
         warnings: context.warnings,
     };
     super::emit::emit(&identity, &mut state, context.clock, body, context.hooks)
         .map(|_| ())
         .map_err(|error| super::emit::EmitFailure::from(error).discharging(context.invocations))
+}
+
+fn events_of(certified: &PreflightCertified) -> &[TopologyEvent] {
+    certified.rebuilt().censused().barrier().events()
 }
 
 fn fold_of(certified: &PreflightCertified) -> &TopologyFold {
