@@ -5885,6 +5885,12 @@ fn the_lock_protocol_sits_beside_the_type_and_states_both_intervals() {
         "`unwrap_or_else(PoisonError::into_inner)`",
         // Release.
         "Every guard releases at scope exit",
+        // The order claim is about these two acquisitions and nothing wider:
+        // a callback re-entering the runner deadlocks on `hooks`, which the
+        // previous "a runner cannot deadlock against itself" denied.
+        "Callbacks must not re-enter the runner they observe",
+        // And recovery is recovery, not repair.
+        "Nothing here repairs that value or restores an invariant the panic broke",
     ] {
         assert!(
             protocol.contains(required),
@@ -5973,6 +5979,210 @@ fn run_takes_the_hooks_guard_after_it_has_resolved_the_program() {
     assert!(
         message.contains("upstroke-no-such-program"),
         "the refusal did not come from program resolution: {message}"
+    );
+}
+
+/// A request for a program that resolves on every platform, so a refusal in the
+/// two tests below comes from the observer rather than from program resolution.
+fn shell_request(workspace: &Path) -> RunnerRequest {
+    let template = native().command("exit 0");
+    RunnerRequest {
+        command: CommandSpec {
+            program: template.get_program().to_string_lossy().into_owned(),
+            args: template
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect(),
+            env: Vec::new(),
+            stdin: Vec::new(),
+        },
+        workspace: workspace.to_path_buf(),
+        role: ExecutionRole::Gate,
+        timeout: Duration::from_secs(30),
+        agent: None,
+        invocation: gate_invocation(),
+    }
+}
+
+/// Asks, from inside a containment callback, whether the runner that is calling
+/// it is holding `hooks` at that moment. `try_lock` rather than `lock`, because
+/// the answer this exists to obtain is "you would block here": a callback that
+/// actually re-entered the runner would park a thread on the guard for the rest
+/// of the suite, and the request timeout supervises a child, not a thread
+/// waiting on a mutex. `Ok` is unreachable while `run` holds the guard, and is
+/// the correct answer if `run` ever stops holding it — which is the regression
+/// this reports.
+#[derive(Clone, Default)]
+struct GuardProbe {
+    /// Filled in once the runner is inside its `Arc`: the observer lives in the
+    /// runner it observes, so the back-reference has to be `Weak`.
+    runner: Arc<Mutex<std::sync::Weak<HostRunner>>>,
+    holds_the_guard: Arc<Mutex<Vec<bool>>>,
+}
+
+impl GuardProbe {
+    fn observe(&self) {
+        let runner = self
+            .runner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .upgrade();
+        let Some(runner) = runner else {
+            return;
+        };
+        let held = matches!(
+            runner.hooks.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        );
+        self.holds_the_guard
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(held);
+    }
+}
+
+impl SpawnHooks for GuardProbe {
+    fn point(&mut self, _point: SubEffectPoint) -> Injection {
+        self.observe();
+        Injection::Proceed
+    }
+
+    fn child_created(&mut self, _pid: u32) {
+        self.observe();
+    }
+}
+
+/// The interval that makes re-entry a deadlock, measured rather than asserted.
+/// `run` hands `&mut dyn SpawnHooks` to the process funnel *while holding*
+/// `hooks`, and the funnel calls the caller-supplied observer back at every
+/// containment point inside that call — on Unix from `point(ReaperStarted)`
+/// onward, on Windows from `child_created` onward. So a callback that called
+/// `run`, `start_write_command`, or anything else that takes `hooks` on the same
+/// runner would block on a guard its own call already holds; `std::sync::Mutex`
+/// is not reentrant. The comment beside `HostRunner` states that prohibition,
+/// and this is the fact underneath it. The acquisition order it also states —
+/// `resolved` before `hooks`, never both — is a different and narrower claim,
+/// which is why the comment no longer says a runner cannot deadlock against
+/// itself.
+#[test]
+fn a_spawn_callback_runs_while_this_runner_holds_the_hooks_guard() {
+    let root = FixtureRoot(scratch("hooks-callback-interval"));
+    let probe = GuardProbe::default();
+    let runner = Arc::new(HostRunner::new().with_hooks(Box::new(probe.clone())));
+    *probe.runner.lock().unwrap_or_else(PoisonError::into_inner) = Arc::downgrade(&runner);
+
+    let output = runner
+        .run(&shell_request(&root.0))
+        .expect("the probe proceeds at every containment point");
+    assert_eq!(output.code, Some(0), "{output:?}");
+
+    let observations = probe
+        .holds_the_guard
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone();
+    assert!(
+        !observations.is_empty(),
+        "the funnel never called the observer back, so this measures nothing"
+    );
+    assert!(
+        observations.iter().all(|held| *held),
+        "a containment callback ran with `hooks` free: re-entering the runner \
+         from one would not deadlock there, and the prohibition beside \
+         `HostRunner` would be overstating: {observations:?}"
+    );
+}
+
+/// An observer with state of its own that it needs in order to answer. `point`
+/// takes it; with `panic_under_the_guard` set it panics instead of putting it
+/// back, which is the shape the recovery clause beside `HostRunner` is about,
+/// and without it the same observer restores what it took and proceeds — the
+/// control.
+struct RequiresItsOwnState {
+    required: Option<&'static str>,
+    panic_under_the_guard: bool,
+}
+
+impl RequiresItsOwnState {
+    fn healthy() -> Self {
+        Self {
+            required: Some("the observer's own state"),
+            panic_under_the_guard: false,
+        }
+    }
+
+    fn panics() -> Self {
+        Self {
+            panic_under_the_guard: true,
+            ..Self::healthy()
+        }
+    }
+}
+
+impl SpawnHooks for RequiresItsOwnState {
+    fn point(&mut self, _point: SubEffectPoint) -> Injection {
+        match self.required.take() {
+            None => Injection::Error,
+            Some(state) => {
+                assert!(
+                    !self.panic_under_the_guard,
+                    "the observer panics with its own state taken"
+                );
+                self.required = Some(state);
+                Injection::Proceed
+            }
+        }
+    }
+}
+
+/// What `unwrap_or_else(PoisonError::into_inner)` does and what it does not.
+/// It bypasses the poison flag, so one panic under the guard does not turn
+/// every later acquisition into a refusal — but the value it hands back is the
+/// one the panicking guard left, and nothing here repairs it. An observer that
+/// panicked with its own state taken is handed back still missing it and
+/// refuses every `run` that follows, which is the sequence this runs.
+///
+/// The panic is raised through the lock rather than through a spawn. The funnel
+/// reaches this observer under the same guard either way, and unwinding out of
+/// a half-started spawn would leave a suspended child behind on Windows for a
+/// fact that needs no child to establish.
+#[test]
+fn a_poisoned_hooks_guard_hands_back_the_damaged_observer_unrepaired() {
+    let root = FixtureRoot(scratch("hooks-poison-recovery"));
+    let point = *per_spawn_points()
+        .first()
+        .expect("this platform has a per-spawn containment point");
+
+    // The control: the same observer, never driven through a panic, runs the
+    // same request to completion. The refusal below is the damage, not the
+    // fixture.
+    let control = HostRunner::new().with_hooks(Box::new(RequiresItsOwnState::healthy()));
+    let output = control
+        .run(&shell_request(&root.0))
+        .expect("an undamaged observer of this shape proceeds");
+    assert_eq!(output.code, Some(0), "{output:?}");
+
+    let runner = HostRunner::new().with_hooks(Box::new(RequiresItsOwnState::panics()));
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut hooks = runner.hooks.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = (**hooks).point(point);
+    }));
+    unwound.expect_err("the observer panics with its own state taken");
+    assert!(
+        runner.hooks.is_poisoned(),
+        "the unwind under the guard left no poison, so there is no recovery to measure"
+    );
+
+    // Recovery, and its limit: `run` gets past the poisoned lock rather than
+    // being refused by it, and what it gets is the same damaged observer.
+    let refused = runner
+        .run(&shell_request(&root.0))
+        .expect_err("the observer the acquisition recovers is the damaged one");
+    let message = refused.to_string();
+    assert!(
+        message.contains("containment step") && message.contains(&point.to_string()),
+        "the refusal did not come from the recovered observer refusing at {point}, \
+         so this measured something other than the state the panic left: {message}"
     );
 }
 

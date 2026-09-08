@@ -79,14 +79,28 @@ const fn supplies_credentials(role: &ExecutionRole) -> bool {
 // — subprocess supervision, not the whole of `run`. That interval is the one
 // in which a shared runner supervises one child at a time.
 //
-// The two are never held at once and are taken in that order, so a runner
-// cannot deadlock against itself. Every guard releases at scope exit: a
-// return, a `?`, or an unwind. All three acquisitions — `resolved` in
-// `program_for`, `hooks` in `start_write_command` and in `run` — recover the
-// inner state with `unwrap_or_else(PoisonError::into_inner)`, so a panic under
-// one guard leaves the memo and the observer usable instead of refusing every
-// later caller. Child cleanup after a failure or a cancellation belongs to the
-// process funnel's RAII owners, not to these guards.
+// The two are never held at once and are taken in that order, so neither of
+// these acquisitions can wait on the other. That is the whole of the deadlock
+// claim, and it is a claim about this module's own acquisitions. Both fields
+// are `std::sync::Mutex`, which is not reentrant, and `run` holds `hooks`
+// across `proc::run_with_timeout_at` — which calls the caller-supplied
+// observer back at every containment point. A callback that re-enters the
+// runner it observes — `Runner::run`, `start_write_command`, or any other
+// path that takes `hooks` — blocks on the guard its own call already holds,
+// and no request timeout covers a thread parked there. Callbacks must not
+// re-enter the runner they observe.
+//
+// Every guard releases at scope exit: a return, a `?`, or an unwind. All three
+// acquisitions — `resolved` in `program_for`, `hooks` in `start_write_command`
+// and in `run` — recover the inner state with
+// `unwrap_or_else(PoisonError::into_inner)`: the acquisition bypasses the
+// poison flag and hands back the value the panicking guard left, so one panic
+// does not turn every later acquisition into a refusal. Recovery ends there.
+// Nothing here repairs that value or restores an invariant the panic broke:
+// the memo keeps exactly the entries it had, and an observer that panicked
+// with its own state taken is handed back still missing it, free to refuse
+// every spawn that follows. Child cleanup after a failure or a cancellation
+// belongs to the process funnel's RAII owners, not to these guards.
 pub struct HostRunner {
     policy: RunnerPolicy,
     digest: String,

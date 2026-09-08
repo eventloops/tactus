@@ -78,7 +78,10 @@ subprocess supervision — a request refused by `compose` or by `program_for` ne
 takes it. That interval, and not the whole of `run`, is why a shared runner
 supervises one process at a time even when its callers are concurrent. Guards
 release at scope exit; every acquisition recovers the inner state of a poisoned
-lock, and the process funnel's RAII owners handle child cleanup.
+lock — recovers it, and does not repair it — and the process funnel's RAII
+owners handle child cleanup. Neither statement is a promise about a callback
+that re-enters the runner it observes; see
+[`HostRunner::hooks`](#hostrunnerhooks).
 
 ### `ProgramQuestion`
 
@@ -171,6 +174,24 @@ process at a time —
 this sentence. That is not a limitation today — `Runner::run` is synchronous until PR11 and the
 substrate is sequential — but PR11's concurrent scheduler will need an observer per invocation
 rather than per runner, and this is where that shows up.
+
+**The observer is called back under this guard, so it must not re-enter this runner.** `run` hands
+`&mut dyn SpawnHooks` to `proc::run_with_timeout_at` while holding `hooks`, and the funnel reaches
+the observer at every containment point inside that call. A callback that re-enters the runner it
+observes — `Runner::run`, `start_write_command`, or any other path that takes `hooks` — blocks on
+the guard its own call already holds, because `std::sync::Mutex` is not reentrant; the request
+timeout supervises a child and does not cover a thread parked on a guard. The acquisition order
+beside `HostRunner` says only that `resolved` and `hooks` never wait on each other, which is a
+different proposition. `a_spawn_callback_runs_while_this_runner_holds_the_hooks_guard` measures the
+interval that makes re-entry a deadlock rather than leaving it to this paragraph.
+
+**Poisoning is recovered, not repaired.** Every acquisition takes the inner value through
+`PoisonError::into_inner`, so a panic under the guard does not turn later acquisitions into
+refusals. What comes back is the observer that panic left behind — with whatever state it took and
+never restored — and nothing here restores it. An observer whose invariant the panic broke can
+refuse every spawn that follows, and that is the observer's own contract to keep, not this runner's
+to mend. `a_poisoned_hooks_guard_hands_back_the_damaged_observer_unrepaired` runs exactly that
+sequence.
 
 ## `HostRunner::with_environment`
 
