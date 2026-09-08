@@ -138,6 +138,8 @@ impl Fixture {
             ["config", "user.email", "tests@upstroke.local"],
             ["config", "user.name", "upstroke tests"],
             ["config", "core.logAllRefUpdates", "true"],
+            ["config", "core.autocrlf", "false"],
+            ["config", "core.eol", "lf"],
         ] {
             crate::workspace_manager::fixture::git(&repo_root, &setting);
         }

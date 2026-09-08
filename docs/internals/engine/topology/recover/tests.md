@@ -168,6 +168,30 @@ cut at. Step (g) recreates `OpenNoAttempt` worktrees "at their bases",
 and a base that names no object makes the step's own funnel fail for
 a reason that has nothing to do with what is being tested.
 
+## `fn build(tag: &str, damage: Damage) -> Self` › `["config", "core.autocrlf", "false"],`
+
+Line endings are pinned in the repository's own config, for the reason
+`workspace_manager::fixture` pins them (§12, and
+`PR126-REVIEW2-NULL-TESTS-INHERIT-THE-HASH-FORMAT`): an ambient Git setting
+that silently changes what a test observes. Git for Windows installs
+`core.autocrlf=true` in its system config, and under it a blob written as
+`A\n` is checked out as `A\r\n` — by `git worktree add` as much as by
+`git checkout`, because a linked worktree reads this repository's config —
+so a test that compares a checkout's bytes against what it committed fails
+on that platform alone while the commit is the one it asked for. That is
+what happened to
+`a_dependent_task_is_dispatched_into_its_dependencys_merged_work` on CI's
+winguest leg (`PR247-DISPATCH-HEAD-WITNESS-RED-ON-WINDOWS`): alpha's
+`candidate.txt` was in beta's worktree with the right content and Windows
+line endings, and the dispatch it witnesses was correct.
+
+The pin is in the repository rather than in the environment of the
+fixture's `git` helper because the checkout that matters is production's:
+`WorkspaceManager` runs `git worktree add` with the process's own
+environment, and the repository config is the one layer both read. A test
+that compares checkout bytes through any other fixture inherits the same
+obligation.
+
 ## `fn build(tag: &str, damage: Damage) -> Self` › `let marker = CreatingMarker {`
 
 P1: the `.creating` marker the creator published and never removed,
