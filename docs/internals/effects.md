@@ -220,7 +220,7 @@ Whether it carries a `reason = "…"`.
 `source` with every comment **removed** and every string literal **kept**
 verbatim. A comment's newlines survive, so line numbers do; the rest of its
 bytes do not, so nothing after the first comment sits at the offset it had in
-`source`. Length preservation is [`blank_comments_and_strings`]'s contract,
+`source`. Length preservation is `blank_comments_and_strings`'s contract,
 not this one's.
 
 ```text
@@ -378,7 +378,7 @@ every byte offset — and therefore every line number — exact.
 
 A needle that lives *inside* a literal cannot be looked for in this output:
 the quotes are blanked with it, so `"docker` is a byte sequence the haystack
-can no longer contain. [`blank_comments`] is the half that keeps it, and
+can no longer contain. `blank_comments` is the half that keeps it, and
 `the_notes_give_each_blanker_its_own_contract` runs both worked examples
 above against the functions themselves.
 

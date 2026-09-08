@@ -834,7 +834,7 @@ The two blankers have two different contracts, and
 [`docs/internals/effects.md`](../../effects.md) states each one under the
 function it belongs to.
 
-`PR161-ASTRA-BLANKER-CONTRACT`. The notes opened [`blank_comments`] with its
+`PR161-ASTRA-BLANKER-CONTRACT`. The notes opened `blank_comments` with its
 sibling's contract — "every comment and string literal replaced by spaces of
 the same length" — while the function deletes a comment's bytes and keeps a
 literal's. A census written from that sentence can look for a needle inside a
