@@ -740,7 +740,7 @@ impl TopologyRun {
         seams: &RunSeams<'_>,
         hooks: &mut dyn TopologyHooks,
     ) -> Result<Dispatched, UpstrokeError> {
-        let request = self.dispatch_request(key, generation)?;
+        let request = self.dispatch_request(key, generation, seams)?;
 
         self.reservations.take(key, ReservationKind::Dispatch)?;
 
@@ -1499,6 +1499,7 @@ impl TopologyRun {
         &self,
         key: TaskKey,
         generation: GenerationId,
+        seams: &RunSeams<'_>,
     ) -> Result<DispatchRequest, UpstrokeError> {
         let paths = self.handle.fold.predicted_region(key).ok_or_else(|| {
             UpstrokeError::Refused {
@@ -1509,10 +1510,16 @@ impl TopologyRun {
                 ),
             }
         })?;
+        let base = integrate::dispatch_head(
+            seams.manager,
+            &self.handle.started,
+            &self.handle.events,
+            key,
+        )?;
         Ok(DispatchRequest {
             key,
             generation,
-            base: self.handle.started.base_sha.clone(),
+            base,
             kind: DispatchKind::Ordinary { paths },
         })
     }

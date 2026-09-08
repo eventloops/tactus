@@ -190,7 +190,7 @@ sequence put it there.
 
 ## `pub fn authorized_head(started: &RunStarted4, events: &[TopologyEvent]) -> AuthorizedHead {`
 
-**The one head rule, with two callers.** The resume's startup check
+**The one head rule, with three callers.** The resume's startup check
 ([`super::recover::ensure_recorded_integration_ref`]) learned in the first
 repair round to compare the ref with the log's latest `task_merged` rather
 than with `run_started.base_sha` (`PR8-C1`); the live [`decide`] never
@@ -208,6 +208,11 @@ The live engine reads it off the event list `RunHandle` carries, which the
 one `emit` funnel keeps current for every writer
 ([`super::emit::EmitState`]), so a publication recovery completed a moment
 ago and one the loop performed itself are read the same way.
+
+The third caller is [`dispatch_head`], added in the seventh repair round.
+Nothing about the rule changed for it: a dispatch asks the same question
+the two integration callers ask, and asking it a third way is what the
+fourth round's repair was for.
 
 
 ## `fn prepared_base(`
@@ -267,6 +272,54 @@ and the sequence that put it there.
 A symbolic or checked-out integration ref (`assert_publishable`),
 [`Refusal::IntegrationRefAbsent`], [`Refusal::ForeignHead`], or a Git error
 reading the ref.
+
+
+## `pub fn dispatch_head(`
+
+The head a freshly dispatched task's worktree is created at.
+
+`design/26_design_merge_queue_protocol.md` verdict 1 gives a dispatched
+task "a detached linked worktree at the run's **integration HEAD at
+dispatch**", and which head that is, is the log's to say. This is
+[`authorized_head`]'s third caller, not a third rule.
+
+**Why the line it replaced was right until this slice.** The run loop
+built every `DispatchRequest` with `run_started.base_sha`. Before
+publication existed, that *was* the run's integration head for the whole
+run, at every dispatch, and the two readings agreed everywhere. This slice
+is what makes a publication move the ref, and so what turns the agreement
+into a disagreement: with beta depending on alpha, alpha's publication
+moves the head, and beta's first dispatch — an ordinary dependency chain,
+no concurrent writer, hostile filename, crash or injected failure in it —
+put beta's worktree at a base without alpha's merged file in it. The
+review of `eb4e2997` reproduced it against unchanged production sources
+(`PR8-R7-DISPATCH-BASE`). Nothing was erased and no publication was
+falsely recorded; dependent work simply ran without its prerequisite, and
+because a fresh generation selected the same starting base again, a retry
+did not correct it.
+
+**Why the ref is confirmed and not just read from the log.** A dispatch
+spends an agent. Confirming the ref is where the log says, before the
+caller appends anything, means a run whose integration ref has moved under
+it refuses rather than paying for work on a foreign head — the posture
+[`decide`] and [`super::recover::ensure_recorded_integration_ref`] already
+take, down to `assert_publishable` preceding the read. The ref is neither
+moved nor recreated here.
+
+**What a replay sees.** Nothing: the base a task was dispatched at is
+`task_dispatched.base_sha`, which is durable, and the fold reads it from
+the log. `TopologyRun::continue_open` resumes an open generation at the
+base its own record names, and `verify_or_recreate` checks quiescence
+against that same base, so a resume derives the base it dispatched at and
+a log written before this change replays to exactly the decisions it
+replayed to before.
+
+### Errors
+
+[`UpstrokeError::Refused`] when the ref names nothing
+([`Refusal::DispatchHeadAbsent`]) or names a head the log did not
+authorize ([`Refusal::DispatchHeadForeign`]), and for a symbolic or
+checked-out ref (`assert_publishable`); a Git error reading it.
 
 
 ## `pub struct Authorized {`

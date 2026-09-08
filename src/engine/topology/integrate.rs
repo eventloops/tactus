@@ -19,6 +19,7 @@ use crate::workspace_manager::{ProposalState, Slot, WorkspaceManager};
 
 use super::attempt::Judgement;
 use super::candidate::RUN_REF_ROOT;
+use super::create::IntegrationRefs;
 use super::seams::{IdSource, TopologyHooks};
 
 #[must_use]
@@ -93,6 +94,34 @@ pub enum Refusal {
         sequence: u32,
         refname: String,
         found: String,
+        authorized: String,
+        authority: String,
+    },
+
+    #[error(
+        "refusing to dispatch task {key}: the integration ref `{refname}` is at {found}, and the \
+         log authorizes {authorized} ({authority}); a dispatch takes the run's integration head \
+         at dispatch, and a head the log did not put there is foreign integration state, so no \
+         worktree is created and nothing is appended against it \
+         (DESIGN §26 verdict 1; decisions.coordinator_integration.integration_sequence)"
+    )]
+    DispatchHeadForeign {
+        key: u32,
+        refname: String,
+        found: String,
+        authorized: String,
+        authority: String,
+    },
+
+    #[error(
+        "refusing to dispatch task {key}: the integration ref `{refname}` names nothing, and the \
+         log authorizes {authorized} ({authority}); a dispatch takes the run's integration head \
+         at dispatch and never recreates the ref to find one, so no worktree is created and \
+         nothing is appended (DESIGN §26 verdict 1)"
+    )]
+    DispatchHeadAbsent {
+        key: u32,
+        refname: String,
         authorized: String,
         authority: String,
     },
@@ -218,6 +247,36 @@ pub fn authorized_head(started: &RunStarted4, events: &[TopologyEvent]) -> Autho
             head: started.base_sha.clone(),
             published_by: None,
         })
+}
+
+pub fn dispatch_head(
+    refs: &dyn IntegrationRefs,
+    started: &RunStarted4,
+    events: &[TopologyEvent],
+    key: TaskKey,
+) -> Result<CommitSha, UpstrokeError> {
+    let authorized = authorized_head(started, events);
+    let authority = authorized.describe();
+    let refname = started.integration_ref.as_str();
+    refs.assert_publishable(refname)?;
+    match refs.direct_target(refname)? {
+        Some(found) if found == authorized.head.0 => Ok(authorized.head),
+        Some(found) => Err(Refusal::DispatchHeadForeign {
+            key: key.0,
+            refname: refname.to_owned(),
+            found,
+            authorized: authorized.head.0,
+            authority,
+        }
+        .into()),
+        None => Err(Refusal::DispatchHeadAbsent {
+            key: key.0,
+            refname: refname.to_owned(),
+            authorized: authorized.head.0,
+            authority,
+        }
+        .into()),
+    }
 }
 
 fn prepared_base(

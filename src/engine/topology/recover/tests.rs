@@ -1,5 +1,6 @@
 //! Extended notes: `docs/internals/engine/topology/recover/tests.md`
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -112,6 +113,7 @@ struct Damage {
     no_automatic_repairs: bool,
     alpha_kind: Option<TaskKind>,
     host_gate: Option<&'static str>,
+    beta_depends_on_alpha: bool,
 }
 
 impl Fixture {
@@ -157,6 +159,11 @@ impl Fixture {
         }
 
         let mut plan = plan_with(damage.two_tasks);
+        if damage.beta_depends_on_alpha {
+            if let Some(beta) = plan.tasks.get_mut(1) {
+                beta.depends_on = vec![TaskId::from("alpha")];
+            }
+        }
         if let Some(kind) = damage.alpha_kind {
             if let Some(alpha) = plan.tasks.first_mut() {
                 alpha.kind = kind;
@@ -7399,6 +7406,22 @@ struct DrivenRun {
     role: crate::runner::ExecutionRole,
     workspace: PathBuf,
     head: Option<String>,
+    checkout: BTreeMap<String, String>,
+}
+
+fn checkout_of(workspace: &Path) -> BTreeMap<String, String> {
+    let listed = crate::workspace_manager::fixture::git_out(workspace, &["ls-files"]);
+    if !listed.status.success() {
+        return BTreeMap::new();
+    }
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter_map(|name| {
+            std::fs::read_to_string(workspace.join(name))
+                .ok()
+                .map(|content| (name.to_owned(), content))
+        })
+        .collect()
 }
 
 struct DrivenRunner {
@@ -7438,6 +7461,7 @@ impl Runner for DrivenRunner {
                 role: request.role.clone(),
                 workspace: request.workspace.clone(),
                 head,
+                checkout: checkout_of(&request.workspace),
             });
         let fate = self.fails.or_else(|| {
             (request.role == crate::runner::ExecutionRole::Review)
@@ -9889,4 +9913,166 @@ fn a_reviewer_whose_process_never_started_is_a_runner_spawn_failure() {
         "and a reviewer whose process started and is now gone is still an unavailable review: \
          INV-23 names the never-started fate and no other"
     );
+}
+
+#[test]
+fn a_dependent_task_is_dispatched_into_its_dependencys_merged_work() {
+    let fixture = Fixture::build(
+        "dependent-dispatch",
+        Damage {
+            two_tasks: true,
+            beta_depends_on_alpha: true,
+            ..Damage::default()
+        },
+    );
+    let planted = plant_queued_candidate(&fixture);
+    let planned = TopologyFold::replay(
+        fixture.inputs(),
+        &TopologyFold::parse_log(&fixture.log_bytes()).expect("the planted log parses"),
+    )
+    .expect("the planted log replays");
+    assert!(
+        !planned.ready(BETA),
+        "beta waits on alpha, so its dispatch is the one that follows a publication"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 2);
+
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Integrated { key: ALPHA, .. }))
+        ),
+        "the first step publishes alpha: {:?}",
+        driven.progress
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str()),
+        "and the integration ref carries that publication"
+    );
+
+    let worker = driven
+        .runs
+        .iter()
+        .find(|run| {
+            matches!(
+                run.invocation,
+                crate::runner::InvocationId::Attempt {
+                    key: BETA,
+                    role: crate::runner::invocation::AttemptRole::Worker,
+                    ..
+                }
+            )
+        })
+        .expect("the second step starts beta's worker");
+    assert_eq!(
+        worker.checkout.get("candidate.txt").map(String::as_str),
+        Some("the candidate edit\n"),
+        "beta's agent reads what alpha merged, in the worktree it was handed: DESIGN §26 \
+         verdict 1 dispatches at the run's integration head at dispatch, and beta is the first \
+         task this run dispatches after a publication moved that head. The checkout held {:?}",
+        worker.checkout.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        worker.head.as_deref(),
+        Some(planted.commit.as_str()),
+        "which is the head the log authorizes and not the base the run started at ({})",
+        fixture.base_sha.as_str()
+    );
+
+    let dispatched = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::TaskDispatched { data } if data.key == BETA => Some(data),
+            _ => None,
+        })
+        .expect("beta's dispatch is durable");
+    assert_eq!(
+        dispatched.base_sha, planted.commit,
+        "and the durable record names the base the worktree was actually created at, which is \
+         what a resume rebuilds it from"
+    );
+
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("the result log parses");
+    let once = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
+}
+
+#[test]
+fn a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded() {
+    let fixture = Fixture::two_tasks("old-log-dispatch-base");
+    let published = plant_published_beta(&fixture);
+    append_events(&fixture, &[dispatched_at(&fixture.base_sha)]);
+    assert_ne!(
+        published, fixture.base_sha,
+        "the publication moved the head away from the run's starting base"
+    );
+
+    let old_log = TopologyFold::parse_log(&fixture.log_bytes()).expect("the old log parses");
+    let replayed = TopologyFold::replay(fixture.inputs(), &old_log).expect("the old log replays");
+    assert_eq!(
+        replayed
+            .task(ALPHA)
+            .and_then(|task| task.generations.first())
+            .map(|generation| generation.base_sha.clone()),
+        Some(fixture.base_sha.clone()),
+        "the fold takes the open generation's base from `task_dispatched`, which is where a log \
+         written before the dispatch rule changed put the run's starting base"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(published.as_str()),
+        "the integration head is elsewhere throughout"
+    );
+    let worker = driven
+        .runs
+        .iter()
+        .find(|run| {
+            matches!(
+                run.invocation,
+                crate::runner::InvocationId::Attempt {
+                    key: ALPHA,
+                    role: crate::runner::invocation::AttemptRole::Worker,
+                    ..
+                }
+            )
+        })
+        .expect("the step continues alpha's open generation");
+    assert_eq!(
+        worker.head.as_deref(),
+        Some(fixture.base_sha.as_str()),
+        "a resume rebuilds the worktree at the base the dispatch recorded, not at the head that \
+         has since been published: the durable record decides, so an old log replays to the \
+         decisions it recorded"
+    );
+    assert!(
+        !worker.checkout.contains_key("other.txt"),
+        "and nothing merged after that dispatch appears in it: {:?}",
+        worker.checkout.keys().collect::<Vec<_>>()
+    );
+
+    let dispatches: Vec<&CommitSha> = driven
+        .log
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::TaskDispatched { data } if data.key == ALPHA => Some(&data.base_sha),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        dispatches,
+        vec![&fixture.base_sha],
+        "a continuation appends no second `task_dispatched` and rewrites no base"
+    );
+
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("the result log parses");
+    let once = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
+    let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
+    assert_eq!(once.state(), twice.state(), "replay twice equal");
 }

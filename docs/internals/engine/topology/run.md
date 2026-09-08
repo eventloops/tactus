@@ -1589,13 +1589,26 @@ deferral ceiling. None of it is re-derived.
 
 What a first ordinary dispatch of `key` asks for.
 
-Every field is read from the run's own record or the frozen registry,
-never invented: the base is `run_started(4).base_sha`, and the predicted
-region is the task's `path_hints`. **An empty hint list is `RepoWide`,
-not an empty prefix set** — `PathSet::RepoWide` is documented as the
-classification for an absent answer, and a task with no hints has given
-one. An empty `Prefixes` would be a region that overlaps no bounded
-region, which would let every task run against every other.
+Every field is read from the run's own record, its log or the frozen
+registry, never invented: the base is the run's current authorized
+integration head and the predicted region is the task's `path_hints`.
+**An empty hint list is `RepoWide`, not an empty prefix set** —
+`PathSet::RepoWide` is documented as the classification for an absent
+answer, and a task with no hints has given one. An empty `Prefixes` would
+be a region that overlaps no bounded region, which would let every task
+run against every other.
+
+**The base is the head at dispatch, not the head the run started at.**
+This read `run_started(4).base_sha` until the seventh repair round, which
+was the same commit as the integration head at every dispatch of a run
+that could not publish, and stopped being it the moment this slice made
+publication real: a task dispatched after its dependency merged got a
+worktree without the dependency's merged work in it
+(`PR8-R7-DISPATCH-BASE`). [`super::integrate::dispatch_head`] answers with
+the head the log's latest publication put there, having first confirmed
+the integration ref is at it, so a foreign head refuses here — before the
+reservation is taken, before `task_dispatched` is appended and before any
+worktree exists.
 
 ## `impl TopologyRun` › `let paths = self.handle.fold.predicted_region(key).ok_or_else(|| {`
 
