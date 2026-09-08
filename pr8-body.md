@@ -152,9 +152,9 @@ already settled are marked as such):
 ## Validation
 
 All ten gates green locally, from the repository root, on the last code commit of this branch,
-`4052c0a324fc8980751cb6c7019456014f54b618`; the commits that follow it change the three record
-files and the modules' notes and no code, and the ten gates were rerun on the pushed head before
-the push:
+`4052c0a324fc8980751cb6c7019456014f54b618`; every commit that follows it changes the record — the
+three record files, the modules' notes, one finding file — and no code, and the ten gates were
+rerun on the pushed head before the push:
 
 ```
 cargo fmt --check
@@ -211,7 +211,7 @@ a pull-request description and the ledger below, which the policy gate greps fro
 body, cannot move. The sixth round moved two more passages the same way and for the same reason —
 the residue sampler's sightings in full, to `pr8-plan.md` §5, and the round-by-round review
 narrative for the first three rounds, to `pr8-triage.md` §§2–6 — each leaving its claim, its
-identifiers and a pointer here. The published body is 64437 characters. A seventh round has little room and should move
+identifiers and a pointer here. The published body is 64470 characters. A seventh round has little room and should move
 something of its own out before it writes, the way the fifth and sixth did. Nothing was dropped: the twenty-two obligations are real-repository CAS, orphan
 and third-SHA publication; fast with no staging; the three fast mismatches live and on replay; the
 stale path; the two-crash proof; completed publications resuming; the terminal-shape coverage
