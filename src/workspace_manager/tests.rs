@@ -6956,7 +6956,10 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
 /// while `add -A`, `write-tree` and the unfiltered reads all succeeded. The
 /// index is built with `update-index --index-info` over stdin — fixture
 /// setup, not a staging privilege the worker has — and the read is the
-/// production one.
+/// production one. The files are not checked out: the read consults the
+/// index, 13,000 paths of that length are what Linux's argument limit
+/// needs, and a name of that length exceeds Windows' path limit on disk
+/// (measured on the guest: `checkout-index` failed "Filename too long").
 #[test]
 fn the_resolved_conflict_read_passes_no_recorded_path_as_an_argument() {
     use std::io::Write as _;
@@ -7017,15 +7020,10 @@ fn the_resolved_conflict_read_passes_no_recorded_path_as_an_argument() {
         records.extend_from_slice(format!("100644 {resolved_blob} 0\t{name}\0").as_bytes());
     }
     with_input(&["update-index", "-z", "--index-info"], &records);
-    git(&path, &["checkout-index", "-a"]);
-    fixture
-        .manager
-        .candidate_stage(&mut NoHooks, &slot, &[], ManifestDisposal::Kept)
-        .expect("`add -A` handles this index");
     fixture
         .manager
         .candidate_write_tree(&mut NoHooks, &slot)
-        .expect("`write-tree` handles it");
+        .expect("`write-tree` handles this index");
     assert!(
         fixture
             .manager
