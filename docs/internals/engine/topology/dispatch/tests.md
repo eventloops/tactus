@@ -367,6 +367,22 @@ rest `None`; `Internal` is what they were in nine runs, `After` without
 `MERGE_MSG` in the tenth, and two kills in all found a pick that had
 finished.
 
+**The kill has to reach git.** CI at `56ea88c9` failed this floor on the
+winguest lane with 30 kills in 32 spawns, ten `None` and twenty `After` with
+`MERGE_MSG` in place, none between: on Windows `git` on the `PATH` is Git for
+Windows' `cmd\git.exe`, a 46 KB launcher that starts the real
+`mingw64\bin\git.exe` as its own child and waits, so `Child::kill` ended
+the launcher and the pick either never began or ran to completion — no
+sampled kill had ever interrupted git on that lane. `KillableGitChild::spawn`
+now runs the real binary, resolved once through `git --exec-path`
+(`fixture::sampled_git`); PR5's four-command census sampler spawns `git` by
+name still and is recorded, not changed
+(`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`). The same run failed the kill-count
+floor on macOS with 6 kills in 32 spawns and 26 picks complete before their
+kill — four of the six mid-write — because the budget was one cold probe pick
+spread over a schedule most warm picks beat; the budget is now the shorter of
+two probe picks and `MAX_SPAWNS` is `8 × SAMPLING_N`.
+
 ## `fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {`
 
 PR #249's crash review, finding 1: the coordinator dies after the pick

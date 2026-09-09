@@ -1163,10 +1163,21 @@ fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {
 /// kill, collected over as many spawns as that takes (bounded), and at
 /// least one of them must have died before the pick published its index —
 /// a kill that landed after the publish is an interruption of nothing the
-/// site registers. `Internal` — objects written, index not yet published —
-/// is a narrow window that three runs on the build box hit in two; it is
-/// reported in the histogram and constructed deterministically by the
-/// synthetic half, not required here.
+/// site registers. And at least one kill must have landed **while the pick
+/// was writing** ([`KilledSample::while_writing`]): PR #249's adequacy
+/// review killed every child at spawn and the floor above accepted eight
+/// `None`s. The loop keeps sampling, within `MAX_SPAWNS`, until it has seen
+/// one. That needs a kill that reaches git: on Windows `git` on the `PATH`
+/// is Git for Windows' `cmd\git.exe`, a launcher that starts the real git as
+/// its own child and waits, and the winguest lane at `56ea88c9` recorded 30
+/// kills of it in 32 spawns — ten `None`, twenty `After` with `MERGE_MSG` in
+/// place, none between — so `KillableGitChild::spawn` runs the real binary
+/// (`fixture::sampled_git`; `PR249-KILL-SAMPLER-WINDOWS-WRAPPER`).
+///
+/// The budget is the shorter of two probe picks, not the first: the first
+/// pick in a fresh worktree is a cold one, and a schedule spread over it
+/// lands most kills after a warm pick has finished — macOS at `56ea88c9`
+/// collected 6 kills in 32 spawns with 26 picks complete before their kill.
 #[test]
 fn sampled_repair_materialization_child_kills_every_residue_classified_and_recovered() {
     use crate::workspace_manager::fixture::{KillableGitChild, died_by_kill};
@@ -1176,7 +1187,7 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
     const SAMPLING_N: u32 = 8;
     /// Spawns allowed to collect them: a pick faster than every kill point
     /// fails here, loudly, rather than counting its completions.
-    const MAX_SPAWNS: u32 = 4 * SAMPLING_N;
+    const MAX_SPAWNS: u32 = 8 * SAMPLING_N;
 
     let mut run = Run::started("sampled-materialization");
     let source = protected_candidate(&mut run);
@@ -1197,8 +1208,10 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
         .manager
         .add_worktree(run.hooks.effects(), &probe_slot, &head)
         .expect("probe worktree");
-    let budget = crate::workspace_manager::fixture::time_git(&probe, &argv)
-        .max(std::time::Duration::from_micros(200));
+    let cold = crate::workspace_manager::fixture::time_git(&probe, &argv);
+    git(&probe, &["read-tree", "--reset", "-u", "HEAD"]);
+    let warm = crate::workspace_manager::fixture::time_git(&probe, &argv);
+    let budget = cold.min(warm).max(std::time::Duration::from_micros(200));
     let expected_tree = git(&probe, &["write-tree"]);
     let expected_files = expected_checkout(&run, &head, &source.commit_sha.0, &["c.txt"]);
     assert_checkout_is(&probe, &expected_files, "probe");
