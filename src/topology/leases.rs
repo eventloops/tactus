@@ -88,6 +88,7 @@ pub struct LineageLease {
 pub struct LeaseTable {
     held: BTreeMap<LeaseOwner, PathSet>,
     lineages: Vec<LineageLease>,
+    next_age: u32,
 }
 
 impl LeaseTable {
@@ -97,10 +98,13 @@ impl LeaseTable {
 
     pub fn grant(&mut self, owner: LeaseOwner, paths: PathSet) {
         if let LeaseOwner::Lineage { root } = owner {
-            let age = u32::try_from(self.lineages.len()).unwrap_or(u32::MAX);
             match self.lineages.iter_mut().find(|lease| lease.root == root) {
                 Some(existing) => existing.paths = paths,
-                None => self.lineages.push(LineageLease { root, paths, age }),
+                None => {
+                    let age = self.next_age;
+                    self.next_age = self.next_age.saturating_add(1);
+                    self.lineages.push(LineageLease { root, paths, age });
+                }
             }
             return;
         }

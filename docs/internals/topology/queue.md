@@ -102,7 +102,11 @@ Why this entry is not integrable, or `None` when it is.
 ## `impl CandidateQueue` › `let own_age = leases.lineage(mine).map_or(u32::MAX, |lease| lease.age);`
 
 Its own lineage overlaps by construction — that is what the
-lease is for. Only a lineage created earlier holds it back.
+lease is for. Only a lineage created earlier holds it back. Ages are
+creation ordinals that are never reused, sparse once any lineage has
+released, and `<` reads only their order; a member whose own lineage is
+no longer held reads as younger than everything, so every overlapping
+lineage holds it back.
 
 ## `impl CandidateQueue` › `pub fn first_eligible<F>(`
 

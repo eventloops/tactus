@@ -100,15 +100,41 @@ each other.
 
 ## `pub struct LineageLease` › `pub age: u32,`
 
-Run-local creation ordinal, dense from 0.
+Run-local creation ordinal, taken from [`LeaseTable`]'s counter when the
+lineage is created and kept for the lineage's life. Never reused: a
+release neither renumbers the survivors nor hands the released age to the
+next lineage, so after a release the live ages are sparse, and a reader
+compares them with `<` and reads nothing into the gaps.
+
+Until 2026-09-09 the age was the table's lineage count at the moment of
+the grant. A release shrank the count, so the next lineage created after
+one repeated a live lineage's age, and the queue's `lease.age < own_age`
+no longer saw the survivor as older: a lineage created after a release
+could widen onto an older live lineage's region and publish ahead of it.
+G4's independent verification found it (P1, `G4-LINEAGE-AGE-REUSED-AFTER-RELEASE`);
+the executed sequence, the freeze class and the fix are
+`reviews/2026-09-09-g4-fix-lineage-age-record.md`.
 
 ## `pub struct LeaseTable {`
 
 Every region this run currently holds.
 
+## `pub struct LeaseTable` › `next_age: u32,`
+
+The age the next lineage created will take. Rises by one at each creation
+and never falls; a release leaves it alone, and a holding replaced in place
+does not consume one. Fold-derived like the rest of the table: it is a
+function of the order in which lineages were created, which is the order
+of the `merge_rejected` events that created them, so a replay of the log
+rebuilds it exactly and the live table and the replayed one compare equal.
+Nothing serialises it. It saturates at `u32::MAX` like the fold's other
+counters, the residual `SWEEP-FOLD-APPLY-SATURATING-COUNTERS` records.
+
 ## `impl LeaseTable` › `pub fn grant(&mut self, owner: LeaseOwner, paths: PathSet) {`
 
-Take a holding for `owner`, replacing any it already had.
+Take a holding for `owner`, replacing any it already had. A lineage not
+yet held is created with the next age and consumes it; one already held
+keeps its age and only its region changes.
 
 ## `impl LeaseTable` › `pub fn widen_lineage(&mut self, root: TaskKey, paths: &PathSet) {`
 
