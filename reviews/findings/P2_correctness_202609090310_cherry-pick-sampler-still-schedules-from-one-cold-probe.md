@@ -46,14 +46,22 @@ completes produces the identical signature of eight clean exits. Distinguishing 
 evidence this failure does not carry. What the source does establish is susceptibility: one
 measurement, no seed, no recalibration, no retry.
 
-**This is the third sampler in the tree with the same shape, and the only one that never got the
-repair.** `PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE` diagnosed exactly this and was fixed in PR7 by
-discarding a warm-up probe and taking the median of the next three. PR9's
-`sampled_repair_materialization_child_kills_every_residue_classified_and_recovered` was given a warm
-pick for the same reason. `git log -S"median" -- src/engine/topology/recover/tests.rs` returns **no
-commits**, so the calibration was never added to this file and later lost: it was never applied here
-at all. A grep of the current source alone cannot tell those apart, and the first draft of this
-finding wrongly rested on one.
+**This test is not covered by an existing finding, but the family around it is large and already
+has an owner-level item.** Nine findings under `reviews/findings/` name a sampler, and
+`PR80-MACOS-WORKSPACE-SAMPLER-COLD-PROBE-RECURRENCE` records this exact cold-probe shape recurring
+in the `workspace_manager` sampler, deferred to "the project owner — post-promotion sampler
+hardening", with `PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE` as its `first_bad`.
+
+So this is a fresh instance of a known class rather than a new discovery, and it should be taken up
+with that class rather than alone. What is new is only the location: none of the nine names
+`sampled_cherry_pick_child_kills_every_residue_classified_and_recovered` or
+`src/engine/topology/recover/tests.rs`, and
+`git log -S"median" -- src/engine/topology/recover/tests.rs` returns **no commits**, so PR7's
+calibration was never applied to this file — never added, rather than added and later lost.
+
+An earlier draft called this "the third sampler in the tree with the same shape, and the only one
+that never got the repair". That overstated the landscape twice over: there are more than three,
+and the repair's absence here is one instance of a deferral the owner already holds.
 
 ## Why this is P2 rather than P3
 
