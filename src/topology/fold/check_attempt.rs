@@ -422,16 +422,29 @@ impl RunState {
             detail,
         };
         if let Some(binding) = self.overrides.get(&started.key) {
-            if !started.binding.matches_override(binding) {
+            let floor = entry.ladder.floor.ok_or_else(|| {
+                mismatch(
+                    "a human named a one-off binding for this task and its ladder records no \
+                     floor, so there is no tier the binding runs at"
+                        .to_owned(),
+                )
+            })?;
+            let authorized = RungBinding::from_override(binding, floor);
+            if started.binding != authorized {
                 return Err(mismatch(format!(
-                    "a human named `{}`/`{}` at effort `{}` for this task and it ran `{}`/`{}` at \
-                     effort `{}`",
-                    binding.agent,
-                    binding.model,
-                    binding.effort,
+                    "a human named `{}`/`{}` at effort `{}`, which authorizes tier `{}` pinned \
+                     `{}` on this ladder's floor, and it ran `{}`/`{}` at effort `{}`, tier `{}` \
+                     pinned `{}`",
+                    authorized.agent,
+                    authorized.model,
+                    authorized.effort,
+                    authorized.tier,
+                    authorized.pinned,
                     started.binding.agent,
                     started.binding.model,
-                    started.binding.effort
+                    started.binding.effort,
+                    started.binding.tier,
+                    started.binding.pinned
                 )));
             }
         } else {

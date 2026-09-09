@@ -165,6 +165,9 @@ impl RunState {
                 SettlementTransition::Failed { halts_run, .. } => {
                     self.close_generation(finished.key);
                     self.set_state(finished.key, TaskState::Failed);
+                    if self.is_lineage_member(finished.key) {
+                        self.fail_lineage(finished.key);
+                    }
                     if *halts_run {
                         self.record_halt(finished.key);
                     }
@@ -414,6 +417,12 @@ impl RunState {
         if let Some(state) = derived_state(facts) {
             self.set_state(key, state);
         }
+    }
+
+    fn is_lineage_member(&self, key: TaskKey) -> bool {
+        self.registry
+            .get(key)
+            .is_some_and(|entry| entry.lineage.is_some())
     }
 
     fn fail_lineage(&mut self, key: TaskKey) {

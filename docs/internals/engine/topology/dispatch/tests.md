@@ -221,8 +221,26 @@ verified or fresh worktree".
 Both sides of the materialization, because they leave different worktrees
 and the recovery has to converge from each: killed *before* it, the worktree
 is at the base with a clean index; killed *after* it, the worktree carries
-the merge objects **and** `CHERRY_PICK_HEAD`, which `Worktree.Verify` reads
-as administrative residue and refuses.
+the merged index and no state file — this test's after-phase kill fires once
+the funnel's primitive has returned, and `repair_materialize` clears
+`MERGE_MSG` and `AUTO_MERGE` inside the primitive (`clear_pick_state`, on
+each outcome the materialization reports), so nothing is left for the after
+phase to see — which `Worktree.Verify` reads as a completed materialization
+(`Reuse::Verified`), and the re-run materialization converges from it by
+restoring the base's tree before it picks. Not `CHERRY_PICK_HEAD`:
+`cherry-pick --no-commit` never writes it (measured on git 2.43, clean and
+conflicting picks alike; the record's R5). A kill between the index's
+publish and `MERGE_MSG.lock` leaves the same state — the merged index with
+no state file — and converges the same way
+(`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
+This paragraph said until PR #249's fifth repair round that the after-kill
+worktree carries `CHERRY_PICK_HEAD` and is refused, and from the fifth round
+until the sixth that it carries `MERGE_MSG` and `AUTO_MERGE` "not yet
+cleared" and is recreated from; the fifth round's record review found the
+first copy, and the sixth round's the replacement, by adding presence
+assertions to this test's after-phase case in an isolated copy, production
+code unchanged: `MERGE_MSG`, `AUTO_MERGE` and `CHERRY_PICK_HEAD` all absent,
+the reuse `Verified`.
 
 The oracle is the recorded source, not a path list: after recovery the
 worktree's index must hold exactly what an uninterrupted materialization
@@ -301,3 +319,108 @@ The intent is durable before the add, and the add refuses without it.
 dispatch-side statement of what it protects: a worktree created without a
 durable intent is one `reclaim_intents` can never find. Driven by removing
 the intent and re-adding, because the funnel cannot be made to skip it.
+
+## `fn a_repair_dispatch_records_what_its_materialization_observed() {`
+
+The three observations a materialization can make — `Clean`, `Conflict`,
+`Empty` — each recorded on the `Dispatched` value, each generation closed
+at run end with `LineageHeld`, and the log replaying equal.
+
+## `fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {`
+
+`command_internal_sub_effects`, synthetic half, for `Object.RepairMaterialize`:
+each of the four declared elements planted into a fresh worktree at the
+base, classified `Internal`, and recovered by `resume_open_no_attempt` —
+reused or recreated exactly as `element_breaks_quiescence` says, the
+materialization reproduced once, the tree the control's, the planted
+objects untouched.
+
+## `fn checkout_bytes(worktree: &Path) -> BTreeMap<String, Vec<u8>> {`
+
+The checkout the worker is handed, read from disk: every path the index
+names, with the bytes its file holds. Never `write-tree`, which reads the
+index and not the files — PR #249's refusals review kept the index right and
+overwrote the files (mutation M6), and every SHA oracle in this module
+passed.
+
+## `fn expected_checkout(`
+
+What one pick of `source` onto `base` must leave on disk, derived from the
+two commits and nothing the materialization wrote: `base`'s files, with the
+paths `source` adds or changes read from `source`. The independent expected
+value the byte oracles compare against.
+
+## `fn assert_checkout_is(worktree: &Path, expected: &BTreeMap<String, Vec<u8>>, label: &str) {`
+
+The worktree's files are exactly `expected`, and the index agrees with them
+(`diff-files --quiet`): the two reads that together pin what the worker
+sees. Every materialization test in this module ends in it.
+
+## `fn sampled_repair_materialization_child_kills_every_residue_classified_and_recovered() {`
+
+The kill-sampling half: `SAMPLING_N` real `cherry-pick --no-commit`
+children that died by the kill, at spread points, every residue classified
+and every worktree recovered to the control's tree and bytes. Its first run
+found the held `MERGE_MSG.lock` the verifier did not read.
+
+**A completed pick is a control, not a sample.** PR #249's refusals review
+killed one child at spawn and let seven picks finish (M3); the floor of
+"eight classified samples and one kill" accepted `killed=1/8,
+observed=[None, After ×7]`. The populations are kept apart: kills are
+collected over a bounded number of spawns until `SAMPLING_N` of them have
+been observed, and a completed pick is verified to converge and counted as
+nothing.
+
+**A kill of a child that had not begun is a sample of nothing.** The
+adequacy review then removed the sampler's delay so that every child was
+killed the instant it was spawned, and "at least one kill before the index
+was published" accepted `killed=[None ×8]`. So each kill records whether it
+landed while the pick was writing (`KilledSample::while_writing`): after its
+first write — `index.lock`, so `Internal` — and before its last, `MERGE_MSG`,
+which a completed `--no-commit` pick always leaves; the loop keeps sampling,
+within `MAX_SPAWNS`, until it has seen one, and the test fails when none of
+its kills did. Measured on the build box, ten runs after the change: every
+run saw one or two such kills among its eight, in ten or eleven spawns, the
+rest `None`; `Internal` is what they were in nine runs, `After` without
+`MERGE_MSG` in the tenth, and two kills in all found a pick that had
+finished.
+
+**The kill has to reach git.** CI at `56ea88c9` failed this floor on the
+winguest lane with 30 kills in 32 spawns, ten `None` and twenty `After` with
+`MERGE_MSG` in place, none between: on Windows `git` on the `PATH` is Git for
+Windows' `cmd\git.exe`, a 46 KB launcher that starts the real
+`mingw64\bin\git.exe` as its own child and waits, so `Child::kill` ended
+the launcher and the pick either never began or ran to completion — no
+sampled kill had ever interrupted git on that lane. `KillableGitChild::spawn`
+now runs the real binary, resolved once through `git --exec-path`
+(`fixture::sampled_git`); PR5's four-command census sampler spawns `git` by
+name still and is recorded, not changed
+(`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`). The same run failed the kill-count
+floor on macOS with 6 kills in 32 spawns and 26 picks complete before their
+kill — four of the six mid-write — because the budget was one cold probe pick
+spread over a schedule most warm picks beat; the budget is now the shorter of
+two probe picks and `MAX_SPAWNS` is `8 × SAMPLING_N`.
+
+## `fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {`
+
+PR #249's crash review, finding 1: the coordinator dies after the pick
+completed and before `attempt_started`; (g) reuses the quiescent worktree
+and the continuation picks again, twice over. The index and the working
+tree must hold what one pick produces — the funnel restores the base's tree
+before each pick, because a pick onto the merged index applied its hunk a
+second time on every resume.
+
+## `fn repair_materialization_objects_released_to_git_on_scrub() {`
+
+R9 → R27: a three-way merge's new blob is referenced by the repair index
+and becomes unreachable, still present, when the worktree is scrubbed; the
+candidate commit stays reachable through its ref.
+
+## `fn a_materialization_killed_after_its_index_write_converges_from_both_of_its_states() {`
+
+The two kill points after the pick's index write, pinned deterministically:
+the held `MERGE_MSG.lock` is read as the message's residue and recreated
+from; the merged index with no state file — also the completed after
+phase — is reused, and the re-run pick starts from the restored base tree
+and reports the same observation, for a clean source and for a conflicting
+one.

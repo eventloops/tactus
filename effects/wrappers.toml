@@ -63,6 +63,7 @@ effect_free = [
     "acted_through",
     "acted_through_paths",
     "add_snapshot",
+    "argv",
     "assert_publishable",
     "base",
     "candidate_diff",
@@ -77,8 +78,11 @@ effect_free = [
     "from",
     "intent_path",
     "intents",
+    "names",
+    "names_in_another_case",
     "object_directory",
     "object_exists",
+    "parse",
     "private_root",
     "proposal_state",
     "quiescence",
@@ -90,11 +94,14 @@ effect_free = [
     "remove_worktree",
     "repo_key",
     "repo_key_v1",
+    "resolution_manifest",
+    "resolved_conflicts",
     "revalidate",
     "row",
     "slot_path",
     "temporary_object_files",
     "unreachable_objects",
+    "unresolved_conflicts",
     "worktree_records",
     "write_intent",
 ]
@@ -314,8 +321,11 @@ effectful_unnameable = []
 effect_free = [
     "changed_path_records",
     "decode_changed_paths",
+    "decode_index_path",
     "parse_worktree_records",
+    "plain_record_paths",
     "registration_checkout",
+    "stage_record_paths",
 ]
 
 # The read-only residue classifier. `residue_classified_sites` keeps the `funnel` class the parent's row gave it -- it derives its answer from the frozen site enums and is reached as part of that surface -- and every other name here observes: no object is written, no ref moved, no index touched. The Git inspections it reads through are the parent's helpers, and so is every process start.
@@ -506,6 +516,7 @@ effectful = [
 ]
 effectful_unnameable = [
     "ask",
+    "poll",
     "resolve",
 ]
 effect_free = [
@@ -517,6 +528,7 @@ effect_free = [
     "id",
     "interactive",
     "interpret",
+    "is_decline_option",
     "is_open",
     "new",
     "new_question_id",

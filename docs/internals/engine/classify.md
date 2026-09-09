@@ -65,6 +65,20 @@ with reviews disabled there is no reader to defeat, and refusing it would
 fail an attempt for a rule the run has switched off. An **opaque** diff
 fails either way, because the engine's own capture could not read it.
 
+## `pub(crate) fn unresolved_conflict_failure(entries: &[String]) -> AttemptFailure {`
+
+A worker whose repair worktree still held unmerged index entries at
+capture, undeclared in its resolution manifest — or whose manifest did not
+parse: `AgentError`, worker origin, naming the entries, with feedback
+telling the next attempt to resolve every conflict with its file tools,
+record each resolved path in `workspace_manager::RESOLUTION_MANIFEST` as
+`resolved <path>` or `deleted <path>`, and run no git command; the manifest
+is read at capture and removed once acted on, so a later attempt writes it
+again only for a resolution it changes. It once said to `git add`/`git rm`
+the path, which no edit profile can (PR #249's second repair round). The one
+production place this observation is classified, counted by the
+`classify.rs` row of the runner's site census.
+
 ## `pub(crate) fn gate_failure(failure: &GateFailure) -> AttemptFailure {`
 
 What a failed gate says about an attempt.

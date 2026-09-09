@@ -650,6 +650,7 @@ fn open_continuation_controls_before_and_after_a_lineage_answer() {
         Step::RepairDispatch {
             key: TaskKey(3),
             generation: GenerationId(0),
+            continuing: true,
         }
     ));
     trace.record(park_sibling());
@@ -662,6 +663,7 @@ fn open_continuation_controls_before_and_after_a_lineage_answer() {
         Step::RepairDispatch {
             key: TaskKey(3),
             generation: GenerationId(0),
+            continuing: true,
         }
     ));
     trace.record(continuation);

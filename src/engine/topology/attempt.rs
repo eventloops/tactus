@@ -21,7 +21,8 @@ use crate::topology::events::{
     TopologyEventBody,
 };
 use crate::workspace_manager::{
-    ObjectId, Slot, Snapshot, SnapshotInput, SnapshotName, WorkspaceManager,
+    DeclaredResolution, ObjectId, ResolutionKind, ResolutionManifest, Slot, Snapshot,
+    SnapshotInput, SnapshotName, WorkspaceManager,
 };
 
 use super::dispatch::{self, Dispatched, EventEmitter};
@@ -151,6 +152,134 @@ pub struct AttemptRun {
 pub struct Capture {
     pub tree: String,
     pub parent: String,
+    pub unresolved: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ResolutionPlan {
+    staged: Vec<DeclaredResolution>,
+    refused: Vec<String>,
+}
+
+/// The worker's manifest reconciled with the paths it governs: `unmerged`,
+/// the index's conflicted entries, every one of which must be declared, and
+/// `resolved`, the entries a previous capture of this generation resolved and
+/// the index still holds, which a declaration may revise and silence leaves to
+/// the ordinary `add -A`, which stages the path's edits or deletion like any
+/// other's. A declaration naming a path in neither list does nothing.
+///
+/// Per governed path: declared one way as the index spells it, staged that
+/// way; declared both ways, refused; declared one way exactly and the other
+/// way in another case (`Declaration::names_in_another_case`, a spelling that
+/// governs nothing itself), refused as a contradiction, since a
+/// case-insensitive filesystem reads the two as one file; declared only in
+/// another case, refused naming the index's spelling; undeclared, refused if
+/// unmerged and left to the `add -A` if already resolved. A malformed manifest refuses
+/// every governed path and quotes the line. The refusal list is what the
+/// worker is told (`classify::unresolved_conflict_failure`).
+fn plan_resolutions(
+    unmerged: &[String],
+    resolved: &[String],
+    manifest: &ResolutionManifest,
+) -> ResolutionPlan {
+    use crate::workspace_manager::{DELETED_KEYWORD, RESOLVED_KEYWORD};
+
+    let governed: Vec<(&String, bool)> = unmerged
+        .iter()
+        .map(|path| (path, true))
+        .chain(
+            resolved
+                .iter()
+                .filter(|path| !unmerged.contains(path))
+                .map(|path| (path, false)),
+        )
+        .collect();
+    let declarations = match manifest {
+        ResolutionManifest::Absent => &[][..],
+        ResolutionManifest::Declared(declarations) => declarations.as_slice(),
+        ResolutionManifest::Malformed { detail } => {
+            let mut refused: Vec<String> =
+                governed.iter().map(|(path, _)| (*path).clone()).collect();
+            refused.push(format!("({detail})"));
+            return ResolutionPlan {
+                staged: Vec::new(),
+                refused,
+            };
+        }
+    };
+    let keyword = |kind: ResolutionKind| match kind {
+        ResolutionKind::Resolved => RESOLVED_KEYWORD,
+        ResolutionKind::Deleted => DELETED_KEYWORD,
+    };
+    let mut plan = ResolutionPlan::default();
+    for &(path, unmerged_now) in &governed {
+        let exact = |kind: ResolutionKind| {
+            declarations
+                .iter()
+                .any(|declaration| declaration.kind == kind && declaration.names(path))
+        };
+        // A declaration in another case whose own spelling governs no path is
+        // an alias of this one on a case-insensitive filesystem, and nothing on
+        // a case-sensitive one; either way it is refused, never matched.
+        let alias = |kind: ResolutionKind| {
+            declarations
+                .iter()
+                .find(|declaration| {
+                    declaration.kind == kind
+                        && declaration.names_in_another_case(path)
+                        && !governed.iter().any(|(other, _)| declaration.names(other))
+                })
+                .map(|declaration| declaration.path.clone())
+        };
+        let resolved_exactly = exact(ResolutionKind::Resolved);
+        let deleted_exactly = exact(ResolutionKind::Deleted);
+        let contradiction = match (resolved_exactly, deleted_exactly) {
+            (true, true) => Some(format!(
+                "{path} (declared both `{RESOLVED_KEYWORD}` and `{DELETED_KEYWORD}`)"
+            )),
+            (true, false) => alias(ResolutionKind::Deleted).map(|spelling| {
+                format!(
+                    "{path} (declared `{RESOLVED_KEYWORD}`, and `{DELETED_KEYWORD}` as \
+                     `{spelling}`, a spelling that differs only by case)"
+                )
+            }),
+            (false, true) => alias(ResolutionKind::Resolved).map(|spelling| {
+                format!(
+                    "{path} (declared `{DELETED_KEYWORD}`, and `{RESOLVED_KEYWORD}` as \
+                     `{spelling}`, a spelling that differs only by case)"
+                )
+            }),
+            (false, false) => None,
+        };
+        if let Some(refusal) = contradiction {
+            plan.refused.push(refusal);
+            continue;
+        }
+        if resolved_exactly || deleted_exactly {
+            plan.staged.push(DeclaredResolution {
+                path: path.clone(),
+                kind: if resolved_exactly {
+                    ResolutionKind::Resolved
+                } else {
+                    ResolutionKind::Deleted
+                },
+            });
+            continue;
+        }
+        let only_in_another_case = [ResolutionKind::Resolved, ResolutionKind::Deleted]
+            .into_iter()
+            .find_map(|kind| alias(kind).map(|spelling| (kind, spelling)));
+        if let Some((kind, spelling)) = only_in_another_case {
+            plan.refused.push(format!(
+                "{path} (declared `{}` only as `{spelling}`, which differs from the index's \
+                 spelling by case alone; spell the path as the index does)",
+                keyword(kind)
+            ));
+        } else if unmerged_now {
+            plan.refused.push(path.clone());
+        }
+    }
+    plan
 }
 
 fn captured_object_id(source: &str, value: String) -> Result<ObjectId, UpstrokeError> {
@@ -324,14 +453,67 @@ impl AttemptContext<'_> {
     }
 
     pub fn capture(&mut self, site: AttemptSite<'_>) -> Result<Capture, UpstrokeError> {
+        // What the manifest governs: the index's unmerged entries, and the
+        // entries a previous capture of this generation resolved (a retained
+        // retry revising one). When the index holds neither, the manifest is
+        // not read, and whatever the file says has no effect on this capture
+        // — nor on a later one: the staging removes the worker's manifest
+        // whether or not it was read (`candidate_stage`), so that a
+        // declaration is applied once, by the capture of the attempt that
+        // wrote it. A refused manifest outlives its capture (a refusal stages
+        // nothing), as does one whose capture fails before that removal; a
+        // further capture of this worktree would read either again, and the
+        // driver makes none — a refusal is not resumable and a capture error
+        // interrupts the attempt, and either closes the generation
+        // (`RESOLUTION_MANIFEST`'s doc, `design/26` §26.4).
+        let unmerged = self.manager.unresolved_conflicts(site.slot)?;
+        let resolved = self.manager.resolved_conflicts(site.slot)?;
+        let resolutions = if unmerged.is_empty() && resolved.is_empty() {
+            Vec::new()
+        } else {
+            let manifest = self.manager.resolution_manifest(site.slot)?;
+            let plan = plan_resolutions(&unmerged, &resolved, &manifest);
+            if !plan.refused.is_empty() {
+                let tree = self
+                    .manager
+                    .commit_tree_sha(site.base.as_str())?
+                    .ok_or_else(|| UpstrokeError::Git {
+                        message: format!(
+                            "the recorded base {} has no tree; an unresolved capture cannot \
+                             name the tree the worktree started from",
+                            site.base
+                        ),
+                    })?;
+                return Ok(Capture {
+                    tree,
+                    parent: site.base.0.clone(),
+                    unresolved: plan.refused,
+                });
+            }
+            plan.staged
+        };
         self.manager
-            .candidate_stage(self.hooks.effects(), site.slot)?;
+            .candidate_stage(self.hooks.effects(), site.slot, &resolutions)?;
+        if !resolutions.is_empty() {
+            let left = self.manager.unresolved_conflicts(site.slot)?;
+            if !left.is_empty() {
+                return Err(UpstrokeError::Git {
+                    message: format!(
+                        "the capture staged every declared resolution and the index of {} \
+                         still holds unmerged entries: {}",
+                        site.worktree.display(),
+                        left.join(", ")
+                    ),
+                });
+            }
+        }
         let tree = self
             .manager
             .candidate_write_tree(self.hooks.effects(), site.slot)?;
         Ok(Capture {
             tree,
             parent: site.base.0.clone(),
+            unresolved: Vec::new(),
         })
     }
 
@@ -356,7 +538,19 @@ impl AttemptContext<'_> {
         let mut outcome = adapter.parse(&run.worker)?;
         outcome.diff = diff.to_owned();
 
-        let mut failure = crate::engine::attempt::evaluate_outcome(&outcome, &run.worker);
+        // The worker's own end (an error exit, a timeout, a question it asked) is
+        // reported as what it is; a completed worker that left conflicted paths is
+        // reported as that, before the diff is looked at, since an unresolved capture
+        // carries the base's tree and the diff-shaped verdicts would misdescribe it.
+        let mut failure = if outcome.status == crate::ir::OutcomeStatus::Completed
+            && !capture.unresolved.is_empty()
+        {
+            Some(crate::engine::classify::unresolved_conflict_failure(
+                &capture.unresolved,
+            ))
+        } else {
+            crate::engine::attempt::evaluate_outcome(&outcome, &run.worker)
+        };
         if failure.is_none() {
             failure = crate::engine::classify::diff_failure(
                 &outcome.diff,

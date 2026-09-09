@@ -34,10 +34,9 @@ fn every_branch_states_what_this_build_does_with_it() {
     assert_eq!(
         refused,
         vec!["run-end closure"],
-        "`checkpoint_refusals` has PR8 refuse repair execution and repair-admission \
-         answers — neither a branch of its own — and run end stays refused until PR10. \
-         A second branch here is a build refusing something the packet did not let it \
-         refuse"
+        "run end stays refused until PR10; repair execution and repair-admission answers, \
+         which PR8 refused, are performed by this build. A second branch here is a build \
+         refusing something the packet did not let it refuse"
     );
 
     let owed: Vec<&str> = LoopBranch::ALL
@@ -59,10 +58,12 @@ fn every_branch_states_what_this_build_does_with_it() {
         .filter(|branch| matches!(branch.disposition(), Disposition::NotThisSlice { .. }))
         .map(|branch| branch.label())
         .collect();
-    assert_eq!(
-        elsewhere,
-        vec!["ingest answers"],
-        "a branch left this build's scope without saying which slice took it"
+    assert!(
+        elsewhere.is_empty(),
+        "every branch of the loop is this build's: `ingest answers` was PR9's by \
+         `pr_sequence[10]` (`T-ANSWER`, `AwaitingInput -> Pending via validated answer`) and \
+         PR9 performs it before every selection. A branch here left this build's scope \
+         without saying which slice took it: {elsewhere:?}"
     );
 
     assert_eq!(
@@ -90,6 +91,14 @@ fn every_step_belongs_to_one_branch_or_to_none_for_a_reason() {
                 key: TaskKey(0),
                 generation: GenerationId(0),
                 continuing: false,
+            },
+            Some(LoopBranch::ReadyDispatch),
+        ),
+        (
+            Step::RepairDispatch {
+                key: TaskKey(2),
+                generation: GenerationId(0),
+                continuing: true,
             },
             Some(LoopBranch::ReadyDispatch),
         ),

@@ -305,8 +305,12 @@ fn after_reference_present(
             Ok(target.base.is_some_and(|base| head != base))
         }
         // `cherry-pick --no-commit` publishes its merge objects through the
-        // repair worktree's index. CHERRY_PICK_HEAD survives a *successful*
-        // `--no-commit`, so it is never the discriminator here.
+        // repair worktree's index. `--no-commit` never writes CHERRY_PICK_HEAD
+        // — not on a clean pick, not on a conflicting one (measured on git
+        // 2.43; `repair_materialize`'s doc) — so the file cannot be the
+        // discriminator here, and the index against `HEAD` is. (This comment
+        // said until PR #249's fifth repair round that CHERRY_PICK_HEAD
+        // "survives a successful `--no-commit`"; the record review found it.)
         EffectSiteId::Object(ObjectSite::RepairMaterialize) => {
             if index_lock_present(worktree)? {
                 return Ok(false);
@@ -355,6 +359,11 @@ pub fn observed_residue_elements(
         Some(dir) => name_present(dir, name),
         None => Ok(false),
     };
+    // A state file, committed or still held under its lock.
+    let state_in_git_dir = |name: &str| match git_dir.as_deref() {
+        Some(dir) => state_file_present(dir, name),
+        None => Ok(false),
+    };
     for element in site.residue_elements() {
         let seen = match element {
             ResidueElement::UnreferencedObject => {
@@ -366,10 +375,10 @@ pub fn observed_residue_elements(
             }
             ResidueElement::TemporaryObjectFile => temporary_object_files(repository)?,
             ResidueElement::IndexLock => in_git_dir("index.lock")?,
-            ResidueElement::CherryPickHead => in_git_dir("CHERRY_PICK_HEAD")?,
-            ResidueElement::MergeHead => in_git_dir("MERGE_HEAD")?,
-            ResidueElement::MergeMsg => in_git_dir("MERGE_MSG")?,
-            ResidueElement::OrigHead => in_git_dir("ORIG_HEAD")?,
+            ResidueElement::CherryPickHead => state_in_git_dir("CHERRY_PICK_HEAD")?,
+            ResidueElement::MergeHead => state_in_git_dir("MERGE_HEAD")?,
+            ResidueElement::MergeMsg => state_in_git_dir("MERGE_MSG")?,
+            ResidueElement::OrigHead => state_in_git_dir("ORIG_HEAD")?,
             ResidueElement::SequencerState => in_git_dir("sequencer")?,
             ResidueElement::RegisteredUnpopulatedWorktree => {
                 add_state(repository, worktree)? == AddState::Unpopulated
@@ -424,6 +433,18 @@ pub const fn element_breaks_quiescence(element: ResidueElement) -> bool {
 /// as evidence of an interrupted command would close generations that are
 /// perfectly reusable. Recorded rather than silently dropped.
 ///
+/// Each state *file* is read in both the forms Git's lockfile API gives it:
+/// committed under its own name, or still held as `<name>.lock` by a writer
+/// that was killed between creating the lock and renaming it into place. The
+/// held form is the same interrupted command's state, and it is the form that
+/// blocks the next writer of that name outright (`could not lock 'MERGE_MSG':
+/// File exists`), so a verifier that read only the committed form would pass a
+/// worktree on which the very command that is about to be re-run cannot
+/// complete. Measured by PR9's repair-materialization kill sampler: a
+/// `cherry-pick --no-commit` killed inside `write_message` leaves exactly
+/// `MERGE_MSG.lock`, a merged index and no `MERGE_MSG` (`index.lock` is
+/// already released by then). The directories have no held form.
+///
 /// # Errors
 ///
 /// An I/O error naming a name in the git dir this process could not inspect.
@@ -431,21 +452,33 @@ pub(super) fn administrative_residue_at(
     git_dir: &Path,
 ) -> Result<Vec<ResidueElement>, UpstrokeError> {
     let mut present = Vec::new();
+    if name_present(git_dir, "index.lock")? {
+        present.push(ResidueElement::IndexLock);
+    }
     for (name, element) in [
-        ("index.lock", ResidueElement::IndexLock),
         ("CHERRY_PICK_HEAD", ResidueElement::CherryPickHead),
         ("MERGE_HEAD", ResidueElement::MergeHead),
         ("MERGE_MSG", ResidueElement::MergeMsg),
-        ("sequencer", ResidueElement::SequencerState),
-        ("rebase-merge", ResidueElement::SequencerState),
-        ("rebase-apply", ResidueElement::SequencerState),
-        ("REVERT_HEAD", ResidueElement::SequencerState),
     ] {
-        if name_present(git_dir, name)? {
+        if state_file_present(git_dir, name)? {
             present.push(element);
         }
     }
+    for name in ["sequencer", "rebase-merge", "rebase-apply"] {
+        if name_present(git_dir, name)? {
+            present.push(ResidueElement::SequencerState);
+        }
+    }
+    if state_file_present(git_dir, "REVERT_HEAD")? {
+        present.push(ResidueElement::SequencerState);
+    }
     Ok(present)
+}
+
+/// Whether a Git state file is present in either of its two forms: committed
+/// as `name`, or still held as `name.lock` by an interrupted writer.
+fn state_file_present(git_dir: &Path, name: &str) -> Result<bool, UpstrokeError> {
+    Ok(name_present(git_dir, name)? || name_present(git_dir, &format!("{name}.lock"))?)
 }
 
 /// What one of the three adds left behind: their three residue classes.

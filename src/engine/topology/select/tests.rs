@@ -639,7 +639,7 @@ fn the_checkpoint_admits_every_branch_this_build_implements() {
 }
 
 #[test]
-fn every_step_variant_is_admitted_or_refused_and_the_split_is_six_three() {
+fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {
     let every: Vec<Step> = vec![
         Step::Poisoned,
         budget_exceeded(
@@ -667,6 +667,7 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_six_three() {
         Step::RepairDispatch {
             key: TaskKey(3),
             generation: GenerationId(0),
+            continuing: false,
         },
         Step::Backoff,
         Step::HardBlock {
@@ -706,15 +707,16 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_six_three() {
 
     assert_eq!(
         crossed.len(),
-        6,
+        7,
         "the admitted count moved: {:?}",
         crossed.iter().map(|(_, n)| *n).collect::<Vec<_>>()
     );
     assert_eq!(
         refused,
-        vec!["Poisoned", "RepairDispatch", "Closure"],
-        "the set that does not cross the checkpoint changed: `checkpoint_refusals` has PR8 \
-         refuse repair dispatch and run-end closure, and `Poisoned` is the absence of a branch"
+        vec!["Poisoned", "Closure"],
+        "the set that does not cross the checkpoint changed: `checkpoint_refusals` has this \
+         build refuse run-end closure until PR10, `Poisoned` is the absence of a branch, and a \
+         repair dispatch — PR8's refusal — is performed"
     );
 }
 
@@ -1321,7 +1323,7 @@ fn register_runnable_repair(fold: &mut TopologyFold) {
 }
 
 #[test]
-fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_append() {
+fn a_repair_origin_task_crosses_the_checkpoint_and_the_ceiling_binds_it_like_any_dispatch() {
     let mut fold = started();
     register_runnable_repair(&mut fold);
     let repair = TaskKey(3);
@@ -1338,8 +1340,18 @@ fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_
         Step::RepairDispatch {
             key: repair,
             generation: GenerationId(0),
+            continuing: false,
         },
         "the selector names the repair dispatch as its own step rather than an ordinary one"
+    );
+    assert_eq!(
+        checkpoint(step).expect("this build dispatches a repair"),
+        Admitted::RepairDispatch {
+            key: repair,
+            generation: GenerationId(0),
+            continuing: false,
+        },
+        "and the checkpoint admits it: `T-REPAIR-DISPATCH` is this build's row"
     );
 
     let mut spend = Spend::new();
@@ -1348,24 +1360,49 @@ fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_
         run_usd: Some(1.0),
         task_usd: None,
     };
+    let Step::BudgetExceeded(exceeded) = select(&fold, &breached, &spend) else {
+        panic!(
+            "`loop`: a ready task's branch is `ceiling check, provisional dispatch reservation, \
+             dispatch`, and a repair is a ready task — a breached ceiling appends \
+             `budget_exceeded` before any effect instead of dispatching"
+        );
+    };
     assert_eq!(
-        select(&fold, &breached, &spend),
+        exceeded.key,
+        Some(repair),
+        "the breach names the repair the ceiling refused to spend on"
+    );
+    assert_eq!(exceeded.budget, BudgetKind::Run);
+
+    let dispatched = dispatch_repair(&fold, repair);
+    apply(&mut fold, &dispatched);
+    assert_eq!(
+        select(&fold, &Ceiling::unlimited(), &no_spend()),
         Step::RepairDispatch {
             key: repair,
             generation: GenerationId(0),
+            continuing: true,
         },
-        "a breached ceiling would append `budget_exceeded` for a dispatch that is refused \
-         before any append"
+        "a repair generation opened and not yet attempted is continued, not re-dispatched"
     );
+}
 
-    let error = checkpoint(step).expect_err("this build does not dispatch a repair");
-    let message = format!("{error}");
-    assert!(
-        message.contains("Repair-origin") && message.contains("PR9"),
-        "the refusal names the operation and the slice that owns it: {message}"
-    );
-    assert!(
-        message.contains("Nothing was appended"),
-        "the refusal says the run is untouched: {message}"
-    );
+fn dispatch_repair(fold: &TopologyFold, key: TaskKey) -> crate::topology::events::TopologyEvent {
+    use crate::topology::events::{LeaseGrant, TaskDispatched};
+    let root = fold
+        .registry()
+        .and_then(|registry| registry.get(key))
+        .and_then(|entry| entry.lineage)
+        .map(|lineage| lineage.root)
+        .expect("the repair descends from a lineage");
+    ev(TopologyEventBody::TaskDispatched {
+        data: TaskDispatched {
+            key,
+            generation: GenerationId(0),
+            base_sha: sha("moved-head"),
+            worktree_path: format!("/private/workspaces/tasks/k{}-g0", key.0),
+            lease: LeaseGrant::InheritedLineage { root },
+            source_candidate: Some(candidate_of(root, 0)),
+        },
+    })
 }

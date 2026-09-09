@@ -1126,6 +1126,116 @@ impl Run {
     }
 }
 
+impl Run {
+    pub(super) fn commit_with(
+        &self,
+        parent: &str,
+        file: &str,
+        content: &str,
+        message: &str,
+    ) -> String {
+        let repo = &self.fixture.base;
+        let scratch = self.fixture.root.join(format!("scratch-{message}"));
+        write_file(&scratch, content.as_bytes());
+        let blob = crate::workspace_manager::fixture::git(
+            repo,
+            &[
+                "hash-object",
+                "-w",
+                scratch.to_str().expect("a utf-8 scratch path"),
+            ],
+        );
+        crate::workspace_manager::fixture::git(repo, &["read-tree", parent]);
+        crate::workspace_manager::fixture::git(
+            repo,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{blob},{file}"),
+            ],
+        );
+        let tree = crate::workspace_manager::fixture::git(repo, &["write-tree"]);
+        let commit = crate::workspace_manager::fixture::git(
+            repo,
+            &["commit-tree", &tree, "-p", parent, "-m", message],
+        );
+        crate::workspace_manager::fixture::git(repo, &["read-tree", "HEAD"]);
+        commit
+    }
+
+    /// One commit on `parent` changing several paths at once: `Some(content)`
+    /// writes the path, `None` removes it. A cherry-pick applies one commit's
+    /// change against that commit's parent, so a candidate that has to
+    /// conflict in several files must carry every one of those changes
+    /// itself; a chain of one-file commits would pick only its tip.
+    pub(super) fn commit_changing(
+        &self,
+        parent: &str,
+        changes: &[(&str, Option<&str>)],
+        message: &str,
+    ) -> String {
+        use crate::workspace_manager::fixture::git;
+
+        let repo = &self.fixture.base;
+        git(repo, &["read-tree", parent]);
+        for (index, (file, content)) in changes.iter().enumerate() {
+            match content {
+                Some(content) => {
+                    let scratch = self.fixture.root.join(format!("scratch-{message}-{index}"));
+                    write_file(&scratch, content.as_bytes());
+                    let blob = git(
+                        repo,
+                        &[
+                            "hash-object",
+                            "-w",
+                            scratch.to_str().expect("a utf-8 scratch path"),
+                        ],
+                    );
+                    git(
+                        repo,
+                        &[
+                            "update-index",
+                            "--add",
+                            "--cacheinfo",
+                            &format!("100644,{blob},{file}"),
+                        ],
+                    );
+                }
+                None => {
+                    git(repo, &["update-index", "--force-remove", "--", file]);
+                }
+            }
+        }
+        let tree = git(repo, &["write-tree"]);
+        let commit = git(repo, &["commit-tree", &tree, "-p", parent, "-m", message]);
+        git(repo, &["read-tree", "HEAD"]);
+        commit
+    }
+
+    pub(super) fn protect_candidate(
+        &mut self,
+        commit: &str,
+    ) -> crate::topology::events::CandidateRef {
+        let refname = "refs/upstroke/runs/run-1/candidates/k0/0".to_owned();
+        self.fixture
+            .manager
+            .create_ref_zero_old(
+                self.hooks.effects(),
+                crate::topology::effects::RefSite::CreateCandidates,
+                &refname,
+                commit,
+            )
+            .expect("the authoritative candidates ref");
+        crate::topology::events::CandidateRef {
+            key: ALPHA,
+            generation: GenerationId(0),
+            commit_sha: CommitSha(commit.to_owned()),
+            candidate_ref: GitRef(refname),
+        }
+    }
+}
+
 impl super::candidate::CandidateJournal for Run {
     fn emit(&mut self, body: TopologyEventBody) -> Result<(), UpstrokeError> {
         self.emitter
@@ -1183,7 +1293,7 @@ impl Run {
         write_file(&dispatched.worktree.join(path), content.as_bytes());
         let manager = self.fixture.manager.clone();
         manager
-            .candidate_stage(self.hooks.effects(), &dispatched.slot)
+            .candidate_stage(self.hooks.effects(), &dispatched.slot, &[])
             .expect("stage");
         let tree = manager
             .candidate_write_tree(self.hooks.effects(), &dispatched.slot)

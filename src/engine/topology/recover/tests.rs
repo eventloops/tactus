@@ -114,6 +114,9 @@ struct Damage {
     alpha_kind: Option<TaskKind>,
     host_gate: Option<&'static str>,
     beta_depends_on_alpha: bool,
+    /// Every task's chain is the one Small rung: a merge repair's Mid floor
+    /// then intersects it empty, and the repair is admitted `HumanBinding`.
+    small_only: bool,
 }
 
 impl Fixture {
@@ -520,6 +523,20 @@ fn escalating_chain() -> ChainSummary {
     }
 }
 
+fn small_chain() -> ChainSummary {
+    ChainSummary {
+        task: "alpha".to_owned(),
+        tiers: vec![Tier::Small],
+        attempts_per: 2,
+        bindings: Some(vec![BindingSummary {
+            tier: Tier::Small,
+            agent: AGENT.to_owned(),
+            model: "claude-haiku-4-5".to_owned(),
+            pinned: false,
+        }]),
+    }
+}
+
 fn deep_chain() -> ChainSummary {
     ChainSummary {
         attempts_per: 2,
@@ -598,7 +615,9 @@ fn run_started(
 
         interaction_mode: "attached".to_owned(),
         chains: {
-            let first = if damage.deep_ladder {
+            let first = if damage.small_only {
+                small_chain()
+            } else if damage.deep_ladder {
                 deep_chain()
             } else if damage.two_tier {
                 escalating_chain()
@@ -1644,6 +1663,36 @@ fn attempt_started(attempt: u32) -> TopologyEventBody {
     }
 }
 
+/// The binding the fixture's own chain freezes for rung 0, so a planted
+/// attempt agrees with whatever chain `Damage` selected.
+fn planted_binding(fixture: &Fixture) -> RungBinding {
+    let binding = fixture
+        .started
+        .chains
+        .first()
+        .and_then(|chain| chain.bindings.as_ref())
+        .and_then(|bindings| bindings.first())
+        .expect("the fixture's chain records a binding");
+    RungBinding {
+        tier: binding.tier,
+        agent: binding.agent.clone(),
+        model: binding.model.clone(),
+        pinned: binding.pinned,
+        effort: fixture
+            .started
+            .effort_policy
+            .implementation_for(binding.tier),
+    }
+}
+
+fn attempt_started_in(fixture: &Fixture, attempt: u32) -> TopologyEventBody {
+    let TopologyEventBody::AttemptStarted { mut data } = attempt_started(attempt) else {
+        panic!("attempt_started builds an attempt_started")
+    };
+    data.binding = planted_binding(fixture);
+    TopologyEventBody::AttemptStarted { data }
+}
+
 fn attempt_record(attempt: u32) -> AttemptRecord {
     AttemptRecord {
         attempt,
@@ -2429,6 +2478,223 @@ fn steps_d_and_e_reach_every_generation_not_the_first() {
     }
 }
 
+/// `T-ATTEMPT.resume_action`: "the task worktree scrubbed with force". Step
+/// (d) closes the interrupted attempt's generation; the worktree that
+/// generation owned (R9) goes with the close.
+#[test]
+fn an_interrupted_attempts_worktree_and_intent_are_reclaimed_by_recovery() {
+    let fixture = Fixture::build(
+        "interrupted-worktree-reclaimed",
+        Damage {
+            open_generation: true,
+            extra: vec![attempt_started(1)],
+            ..Damage::default()
+        },
+    );
+    let worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    assert!(
+        worktree.exists()
+            && fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&slot),
+        "the dead incarnation left the in-flight attempt's worktree and intent"
+    );
+
+    let harness = harness();
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(&fixture, &runtime, &certifies);
+    let (result, _) = resume(&fixture, &harness, &given);
+    let recovered = result.expect("a run with an in-flight attempt resumes");
+    assert_eq!(
+        recovered.interrupted, 1,
+        "(d) settles the attempt interrupted"
+    );
+    assert_eq!(
+        replayed(&fixture).task_state(ALPHA),
+        Some(TaskState::Pending),
+        "and the task returns to Pending for a fresh generation"
+    );
+    assert!(
+        !worktree.exists()
+            && !fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&slot),
+        "the closed generation's worktree and intent are reclaimed (worktree={}, intent={})",
+        worktree.exists(),
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+    );
+}
+
+/// PR #249's adequacy review, finding 4's second half. Recovery stops right
+/// after its closing append is durable — `attempt_interrupted` for an
+/// in-flight attempt, `generation_closed` for a retained generation — and
+/// before the scrub. The next recovery finds the generation already `Closed`,
+/// so neither (d) nor (e) selects it: the reclaim has to be derived from the
+/// durable closed state itself, or the checkout and intent outlive every
+/// later resume ([`reclaim_closed_generations`]).
+fn a_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next(retained: bool) {
+    let fixture = Fixture::build(
+        if retained {
+            "retained-close-then-death"
+        } else {
+            "interrupted-close-then-death"
+        },
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_rejected_repair(&fixture);
+    let worktree = plant_repair_worktree(&fixture, repair, rejection.rejecting_head.as_str());
+    let slot = crate::engine::topology::dispatch::task_slot(repair, GEN);
+    let mut planted = vec![
+        repair_dispatched(&rejection, repair, GEN),
+        repair_attempt_started(repair, 1),
+    ];
+    if retained {
+        planted.push(for_task(
+            repair,
+            "repair",
+            attempt_finished(1, retained_by_the_creator("retained-session")),
+        ));
+    }
+    append_events(&fixture, &planted);
+    let has_intent = || {
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&slot)
+    };
+    assert!(worktree.exists() && has_intent());
+    let expected = if retained {
+        "generation_closed"
+    } else {
+        "attempt_interrupted"
+    };
+
+    // The first recovery: its closing append returns an error at `Synced`,
+    // so the close is durable and nothing after the append runs.
+    let first = harness();
+    first
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .arm(
+            EffectSiteId::Event(EventSite::Append),
+            SubEffectPoint::Synced,
+            InjectionMode::ErrorReturn,
+        )
+        .expect("Event.Append has a Synced point");
+    let mut first_hooks = HarnessTopologyHooks::new(Arc::clone(&first));
+    let Err(error) = resume_as(
+        &fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &mut first_hooks,
+    ) else {
+        panic!("the first recovery stops at its durable close append");
+    };
+    assert!(
+        error.to_string().contains(expected),
+        "the interruption is the {expected} append: {error}"
+    );
+    let closed = replayed(&fixture);
+    assert!(
+        matches!(
+            closed
+                .task(repair)
+                .expect("the repair")
+                .generations
+                .first()
+                .expect("its generation")
+                .class,
+            crate::topology::fold::GenerationClass::Closed
+        ),
+        "the close is durable"
+    );
+    assert!(
+        worktree.exists() && has_intent(),
+        "and the interruption precedes the scrub"
+    );
+
+    // The next recovery has nothing in flight and nothing retained to close,
+    // and reclaims the closed generation's checkout and intent all the same.
+    let removes = |harness: &Arc<Mutex<HookHarness>>| {
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(
+                EffectSiteId::Worktree(WorktreeSite::Remove),
+                HookPhase::After,
+            )
+    };
+    let second = harness();
+    let mut second_hooks = HarnessTopologyHooks::new(Arc::clone(&second));
+    let (recovered, handle) = resume_as(
+        &fixture,
+        RESUMER,
+        &runtime_holding_the_record(),
+        &mut second_hooks,
+    )
+    .expect("the next recovery resumes");
+    assert_eq!(recovered.interrupted, 0, "(d) closes nothing");
+    assert_eq!(recovered.retained_closed, 0, "(e) closes nothing");
+    drop(handle);
+    assert!(
+        !worktree.exists() && !has_intent(),
+        "{expected}: a durable close whose scrub never ran is reclaimed by the next recovery \
+         from the closed state (worktree={}, intent={})",
+        worktree.exists(),
+        has_intent()
+    );
+
+    assert!(
+        removes(&second) >= 1,
+        "the reclaim went through `Worktree.Remove`, as every scrub does"
+    );
+
+    // A third recovery finds nothing left to reclaim — not the closed
+    // generation's checkout and nothing else — so the reclaim was complete.
+    // (The second also finished the promotions the interrupted first never
+    // reached, step (f), which is why its removals are not counted exactly.)
+    let third = harness();
+    let mut third_hooks = HarnessTopologyHooks::new(Arc::clone(&third));
+    let (_, handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut third_hooks,
+    )
+    .expect("another complete resume");
+    drop(handle);
+    assert_eq!(
+        removes(&third),
+        0,
+        "after the reclaim a further recovery removes no worktree at all"
+    );
+    assert!(!worktree.exists() && !has_intent());
+}
+
+#[test]
+fn an_interrupted_attempts_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next() {
+    a_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next(false);
+}
+
+#[test]
+fn a_retained_generations_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next() {
+    a_reclaim_the_closing_recovery_never_reached_is_finished_by_the_next(true);
+}
+
 #[test]
 fn retry_refused_after_resume() {
     let fixture = Fixture::build(
@@ -2455,6 +2721,9 @@ fn retry_refused_after_resume() {
         "before the resume the retained generation is retryable, or this test proves nothing"
     );
 
+    let retained_worktree = plant_task_worktree(&fixture, ALPHA, fixture.base_sha.as_str());
+    let retained_slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+
     let harness = harness();
     let runtime = runtime_holding_the_record();
     let certifies = AlwaysCertifies;
@@ -2470,6 +2739,22 @@ fn retry_refused_after_resume() {
     assert!(
         !after.ready_retry(ALPHA),
         "the retained session is gone, so there is no same-session retry to take"
+    );
+    assert!(
+        !retained_worktree.exists()
+            && !fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&retained_slot),
+        "an ordinary generation (e) closes is reclaimed like a repair's: the class, not \
+         the instance the review walked (worktree={}, intent={})",
+        retained_worktree.exists(),
+        fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&retained_slot)
     );
     let refused = after
         .plan_transition(&event(attempt_started(2)))
@@ -3656,7 +3941,7 @@ fn resume_recreates_an_open_no_attempt_worktree_at_its_base() {
 }
 
 #[test]
-fn a_repair_generation_cannot_reach_step_g_in_this_slice() {
+fn an_inherited_lease_on_an_ordinary_task_is_refused_at_the_barrier_before_step_g() {
     let repair = {
         let TopologyEventBody::TaskDispatched { mut data } = dispatched() else {
             unreachable!("`dispatched` builds a `TaskDispatched`")
@@ -3705,8 +3990,10 @@ fn a_repair_generation_cannot_reach_step_g_in_this_slice() {
             .entries()
             .iter()
             .all(|entry| entry.lineage.is_none()),
-        "no entry this slice can build descends from a lineage, so no \
-         `task_dispatched` carrying an inherited lease can be valid"
+        "no original entry descends from a lineage; lineage members enter the registry \
+         only through `merge_rejected`, so an inherited lease on an original is never valid \
+         (a repair generation's own path through (g) is \
+         `a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once`)"
     );
 }
 
@@ -4245,8 +4532,8 @@ fn the_driver_parks_an_attempt_with_the_question_it_raised() {
     );
     assert_eq!(
         parked.options,
-        crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify),
-        "the options are not `question_options`'s"
+        crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify),
+        "the options are the schema-4 list, which promises nothing about typed text"
     );
 }
 
@@ -5825,7 +6112,7 @@ fn plant_queued_candidate_events(fixture: &Fixture) -> PlantedTransaction {
         fixture,
         &[
             dispatched_at(&fixture.base_sha),
-            attempt_started(1),
+            attempt_started_in(fixture, 1),
             alpha_candidate_prepared(fixture, &commit, &tree, &names),
             TopologyEventBody::TaskCandidateCreated {
                 data: crate::topology::events::TaskCandidateCreated {
@@ -7246,6 +7533,34 @@ struct DriveSeams {
     review_cost_usd: Option<f64>,
     run_ceiling_usd: Option<f64>,
     answer: Option<crate::ir::Answer>,
+    /// Which read of the answer source delivers `answer`; the other refuses
+    /// or reports nobody there, so a test says which ingestion path it
+    /// exercises and the other cannot stand in for it.
+    answer_delivery: AnswerDelivery,
+    /// `RunSeams::halts_run`: a declined question halts the run.
+    halts_run: bool,
+    /// Answers come from the run directory's `answers/` through the production
+    /// `EventLogAnswers` with a zero wait, not from `answer`.
+    answers_from_run_dir: bool,
+}
+
+/// How [`DrivenAnswers`] delivers the seam's answer. PR #249's refusals
+/// review found the mock answering `poll` and `resolve` alike, so removing
+/// the pre-step ingestion (M4), replacing the non-blocking poll with the
+/// blocking resolve (M5) and restoring PR8's hard-block refusal (M11) each
+/// passed every topology test: either path satisfied the same assertions.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum AnswerDelivery {
+    /// The answer is already delivered: `poll` returns it, and the blocking
+    /// `resolve` is a refusal — it must never be reached while other work
+    /// is runnable, and a test that gets its answer this way proves the
+    /// non-blocking path carried it.
+    #[default]
+    Polled,
+    /// Terminal-style: `poll` finds nobody there and `resolve` — the hard
+    /// block's prompt — delivers the answer, so a test that gets its answer
+    /// this way proves the hard block ingests it.
+    Blocking,
 }
 
 struct Driven {
@@ -7474,6 +7789,7 @@ impl crate::engine::topology::attempt::ReviewInputPolicy for DrivenPolicy {
 
 struct DrivenAnswers {
     answer: Option<crate::ir::Answer>,
+    delivery: AnswerDelivery,
 }
 
 impl crate::interaction::AnswerSource for DrivenAnswers {
@@ -7481,8 +7797,29 @@ impl crate::interaction::AnswerSource for DrivenAnswers {
         "driven"
     }
 
-    fn resolve(&self, _question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
-        Ok(self.answer.clone().unwrap_or(crate::ir::Answer::Unanswered))
+    fn resolve(&self, question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        match (self.delivery, &self.answer) {
+            (AnswerDelivery::Blocking, answer) => {
+                Ok(answer.clone().unwrap_or(crate::ir::Answer::Unanswered))
+            }
+            (AnswerDelivery::Polled, None) => Ok(crate::ir::Answer::Unanswered),
+            (AnswerDelivery::Polled, Some(_)) => Err(UpstrokeError::Refused {
+                message: format!(
+                    "the blocking resolver was asked {} while a delivered answer was there to \
+                     poll: the hard block ran where the non-blocking ingestion should have",
+                    question.id
+                ),
+            }),
+        }
+    }
+
+    fn poll(&self, _question: &crate::ir::Question) -> Result<crate::ir::Answer, UpstrokeError> {
+        match self.delivery {
+            AnswerDelivery::Polled => {
+                Ok(self.answer.clone().unwrap_or(crate::ir::Answer::Unanswered))
+            }
+            AnswerDelivery::Blocking => Ok(crate::ir::Answer::Unanswered),
+        }
     }
 }
 
@@ -7497,13 +7834,7 @@ fn drive_hooked(
     steps: usize,
     hooks: &mut dyn TopologyHooks,
 ) -> Driven {
-    let runner = DrivenRunner {
-        fails: seams.gate_fails,
-        review_fails: seams.review_fails,
-        times_out: seams.gate_times_out,
-        exit_code: seams.gate_exit_code.unwrap_or(0),
-        runs: Mutex::new(Vec::new()),
-    };
+    let runner = driven_runner(seams);
     let mut driven = drive_with(fixture, seams, steps, &runner, hooks);
     let runs = runner.runs();
     driven.gate_heads = runs
@@ -7585,6 +7916,16 @@ fn drive_with(
     )
 }
 
+fn driven_runner(seams: &DriveSeams) -> DrivenRunner {
+    DrivenRunner {
+        fails: seams.gate_fails,
+        review_fails: seams.review_fails,
+        times_out: seams.gate_times_out,
+        exit_code: seams.gate_exit_code.unwrap_or(0),
+        runs: Mutex::new(Vec::new()),
+    }
+}
+
 fn drive_as(
     fixture: &Fixture,
     incarnation: &str,
@@ -7594,10 +7935,23 @@ fn drive_as(
     runner: &dyn Runner,
     hooks: &mut dyn TopologyHooks,
 ) -> Driven {
-    use crate::engine::topology::run::{RunSeams, TopologyRun};
-
     let (_, handle) = resume_as(fixture, incarnation, resume_runtime, hooks)
         .expect("the resume settles the planted state");
+    drive_handle(fixture, handle, seams, steps, runner, hooks)
+}
+
+/// The steps of [`drive_as`] on a handle the caller already resumed, so a
+/// test can read the `Recovered` the resume produced before the loop moves.
+fn drive_handle(
+    fixture: &Fixture,
+    handle: RunHandle,
+    seams: &DriveSeams,
+    steps: usize,
+    runner: &dyn Runner,
+    hooks: &mut dyn TopologyHooks,
+) -> Driven {
+    use crate::engine::topology::run::{RunSeams, TopologyRun};
+
     let mut run = TopologyRun::resumed(
         handle,
         fixture.inputs(),
@@ -7642,8 +7996,20 @@ fn drive_as(
         cost_usd: seams.review_cost_usd,
         models: Mutex::new(Vec::new()),
     };
-    let answers = DrivenAnswers {
+    let driven_answers = DrivenAnswers {
         answer: seams.answer.clone(),
+        delivery: seams.answer_delivery,
+    };
+    let run_dir_answers = crate::interaction::EventLogAnswers::with_poll(
+        paths.answers(),
+        Duration::ZERO,
+        Duration::from_millis(1),
+        &sleeper,
+    );
+    let answers: &dyn crate::interaction::AnswerSource = if seams.answers_from_run_dir {
+        &run_dir_answers
+    } else {
+        &driven_answers
     };
     let run_seams = RunSeams {
         manager: &manager,
@@ -7655,9 +8021,9 @@ fn drive_as(
         plans: &plans,
         reviews: &reviews,
         input_policy: &input_policy,
-        answers: &answers,
+        answers,
         ids: &FixedIds,
-        halts_run: false,
+        halts_run: seams.halts_run,
     };
     let spend_before = run.spend().run_total();
     let progress = (0..steps)
@@ -8774,7 +9140,8 @@ fn the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshot
 
 #[test]
 fn a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap() {
-    let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);
+    let options =
+        crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify);
     let fixture = Fixture::two_tasks("paid-park");
     plant_stale_verification(&fixture);
     let driven = drive(
@@ -8904,9 +9271,9 @@ fn an_integration_reviews_cost_reaches_the_run_spend() {
 }
 
 #[test]
-fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admission_answer_is_refused_before_any_append()
- {
-    let options = crate::engine::coordinator::question_options(crate::ir::QuestionKind::Clarify);
+fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {
+    let options =
+        crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify);
     let fixture = Fixture::two_tasks("park-answered");
     plant_stale_verification(&fixture);
     append_events(
@@ -8963,16 +9330,26 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
         "an answered park returns the candidate to the queue and it re-verifies: {:?}",
         driven.progress
     );
+}
 
-    let fixture = Fixture::build(
-        "repair-admission-answer",
-        Damage {
-            two_tasks: true,
-            no_automatic_repairs: true,
-            ..Damage::default()
-        },
+fn plant_over_limit_repair(fixture: &Fixture) -> (crate::topology::events::MergeRejected, TaskKey) {
+    let (rejection, key) = plant_rejected_repair(fixture);
+    assert!(
+        matches!(
+            rejection.repair.admission,
+            crate::topology::events::SpawnAdmission::HumanRequired { limit: 0, .. }
+        ),
+        "with no automatic repairs the first repair asks a person"
     );
-    let (candidate, head, _pin) = plant_stale_verification(&fixture);
+    (rejection, key)
+}
+
+/// A stale verification of alpha's candidate at beta's published head,
+/// rejected by review: the rejection registers alpha's first repair, admitted
+/// as the fixture's `max_merge_repairs` decides (`Runnable` at the default of
+/// one, `HumanRequired` under `no_automatic_repairs`).
+fn plant_rejected_repair(fixture: &Fixture) -> (crate::topology::events::MergeRejected, TaskKey) {
+    let (candidate, head, _pin) = plant_stale_verification(fixture);
     let rejection = {
         let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
         let fold = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
@@ -8993,15 +9370,86 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
                 paths: vec![GitPath("candidate.txt".to_owned())],
             },
         )
-        .expect("the rejection registers a repair with human admission")
+        .expect("the rejection registers a repair")
     };
-    assert!(
-        matches!(
-            rejection.repair.admission,
-            crate::topology::events::SpawnAdmission::HumanRequired { limit: 0, .. }
-        ),
-        "with no automatic repairs the first repair asks a person"
+    let key = rejection.repair.key;
+    append_events(
+        fixture,
+        &[TopologyEventBody::MergeRejected {
+            data: Box::new(rejection.clone()),
+        }],
     );
+    (rejection, key)
+}
+
+#[test]
+fn an_over_limit_repair_spends_nothing_until_its_answer_activates_it() {
+    let fixture = Fixture::build(
+        "over-limit-waits",
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (_rejection, repair) = plant_over_limit_repair(&fixture);
+    let kinds_before = durable_kinds(&fixture);
+
+    let driven = drive(&fixture, &DriveSeams::default(), 2);
+    for (index, progress) in driven.progress.iter().enumerate() {
+        assert!(
+            matches!(progress, Ok(Progress::Blocked { questions: 1 })),
+            "step {index}: an over-limit repair is `AwaitingInput` and the run hard-blocks on \
+             its one question with nothing to spend on: {progress:?}"
+        );
+    }
+    assert_eq!(
+        durable_kinds(&fixture),
+        {
+            let mut expected = kinds_before;
+            expected.push("run_resumed".to_owned());
+            expected
+        },
+        "beyond the resume's own `run_resumed`, nothing was appended while the question stood: \
+         no dispatch, no attempt, no spend"
+    );
+    assert!(
+        driven.runs.is_empty(),
+        "no process ran for a repair a person has not approved: {:?}",
+        driven.runs
+    );
+    assert!(
+        (driven.spend_after - driven.spend_before).abs() < 1e-9,
+        "and no spend was recorded"
+    );
+    let fold = replayed(&fixture);
+    assert_eq!(fold.task_state(repair), Some(TaskState::AwaitingInput));
+    assert_eq!(fold.task_state(ALPHA), Some(TaskState::AwaitingRepair));
+}
+
+#[test]
+fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue()
+{
+    for delivery in [AnswerDelivery::Polled, AnswerDelivery::Blocking] {
+        admission_answer_activates_the_repair(delivery);
+    }
+}
+
+/// The whole of a repair's life at the loop, with the admission answer
+/// arriving by one path only: polled before the step, or resolved at the
+/// hard block. Each path activates on its own, so neither can hide the
+/// other's absence.
+fn admission_answer_activates_the_repair(delivery: AnswerDelivery) {
+    let fixture = Fixture::build(
+        &format!("repair-admission-answer-{delivery:?}"),
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_over_limit_repair(&fixture);
+    let candidate = rejection.candidate.clone();
     let question_options = rejection
         .repair
         .admission
@@ -9009,41 +9457,313 @@ fn a_verification_park_answer_is_ingested_at_the_hard_block_and_a_repair_admissi
         .expect("a human admission carries its question")
         .options
         .clone();
-    append_events(
-        &fixture,
-        &[TopologyEventBody::MergeRejected {
-            data: Box::new(rejection),
-        }],
-    );
+    let head_before =
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).expect("the ref exists");
+
     let driven = drive(
         &fixture,
         &DriveSeams {
             answer: Some(crate::ir::Answer::Answered {
                 text: question_options[0].clone(),
             }),
+            answer_delivery: delivery,
+            ..DriveSeams::default()
+        },
+        3,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "step 1 ingests the over-limit activation: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "step 2 dispatches the activated repair, materializes its source candidate and runs its \
+         first attempt through to a candidate: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(2),
+            Some(Ok(Progress::Integrated {
+                key,
+                sequence: crate::topology::events::SequenceId(2),
+                ..
+            })) if *key == repair
+        ),
+        "step 3 integrates the lineage candidate through the same queue: {:?}",
+        driven.progress
+    );
+
+    let kinds: Vec<&str> = driven.log.iter().map(|event| event.body.kind()).collect();
+    let position = |kind: &str| {
+        kinds
+            .iter()
+            .rposition(|seen| *seen == kind)
+            .unwrap_or_else(|| panic!("`{kind}` is not in the log: {kinds:?}"))
+    };
+    assert!(
+        position("question_answered") < position("task_dispatched"),
+        "`question_answered` before dispatch of an activated repair \
+         (`side_effect_vs_event_ordering`): {kinds:?}"
+    );
+
+    let dispatched = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::TaskDispatched { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the repair was dispatched");
+    assert_eq!(
+        dispatched.lease,
+        LeaseGrant::InheritedLineage { root: ALPHA },
+        "a repair executes inside its root's lineage lease"
+    );
+    assert_eq!(
+        dispatched.source_candidate.as_ref(),
+        Some(&candidate),
+        "and records the rejected candidate as the source it was materialized from"
+    );
+    assert_eq!(
+        dispatched.base_sha.0, head_before,
+        "at the integration head current at its actual dispatch"
+    );
+
+    let started = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::AttemptStarted { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the repair's attempt started");
+    assert_eq!(
+        started.materialization_observed,
+        Some(crate::topology::events::Materialization::Clean),
+        "the candidate's change applied cleanly onto the moved head, and the observation is \
+         recorded before the spawn"
+    );
+    assert_eq!(started.resume_session, None, "a first attempt, not a retry");
+
+    let prepared = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::CandidatePrepared { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the repair's candidate was prepared");
+    assert!(
+        matches!(
+            &prepared.lease_effect,
+            crate::topology::events::CandidateLeaseEffect::WidensLineage { root, .. } if *root == ALPHA
+        ),
+        "a lineage member's candidate widens its lineage and takes no lease of its own: {:?}",
+        prepared.lease_effect
+    );
+
+    let merged = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::MergePrepared { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the lineage candidate was published");
+    assert_eq!(
+        merged.disposition,
+        crate::topology::events::PreparedDisposition::Fast,
+        "the repair's base is the head it merges onto, so the publication is exact-base"
+    );
+    assert_eq!(
+        merged.satisfies,
+        vec![ALPHA, repair],
+        "`satisfies` is the canonical ordered closure: the root and its repair"
+    );
+    let task_merged = driven
+        .log
+        .iter()
+        .find_map(|event| match &event.body {
+            TopologyEventBody::TaskMerged { data }
+                if data.sequence == crate::topology::events::SequenceId(2) =>
+            {
+                Some(data)
+            }
+            _ => None,
+        })
+        .expect("task_merged");
+    assert_eq!(
+        task_merged.lease_release,
+        crate::topology::events::MergeLeaseRelease::Lineage { root: ALPHA },
+        "the publication that settles the root releases the lineage lease"
+    );
+
+    let fold = replayed(&fixture);
+    assert_eq!(fold.task_state(ALPHA), Some(TaskState::Merged));
+    assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
+    assert!(
+        !fold.leases().expect("started").any_candidate_or_lineage(),
+        "no lineage lease survives the publication"
+    );
+    assert!(fold.queue().expect("started").is_empty());
+    assert!(!driven.transaction_open);
+    assert_eq!(driven.pipeline_held, 0);
+    assert_eq!(driven.entitlements_held, 0);
+    assert!(driven.invocations_balance);
+    assert!(
+        ref_target(&fixture, candidate.candidate_ref.as_str()).is_some(),
+        "R11: the rejected candidate's candidates ref is never pruned while the run can resume"
+    );
+    assert_eq!(
+        ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(merged.proposed_sha.as_str()),
+        "the integration ref is at the lineage candidate the publication named"
+    );
+
+    // What the worker saw and what was published, as bytes against the
+    // commits, never as SHAs against each other: PR #249's refusals review
+    // (M6) kept the index right and overwrote the checkout, and every SHA
+    // oracle stayed green while the corruption was published.
+    let blob = |commit: &str, path: &str| {
+        String::from_utf8(
+            crate::workspace_manager::fixture::git_out(
+                &fixture.repo_root,
+                &["show", &format!("{commit}:{path}")],
+            )
+            .stdout,
+        )
+        .expect("a text fixture file")
+    };
+    let source_bytes = blob(candidate.commit_sha.as_str(), "candidate.txt");
+    let merged_before = blob(&head_before, "other.txt");
+    assert_eq!(source_bytes, "the candidate edit\n");
+    let worker = driven
+        .runs
+        .iter()
+        .find(|run| run.role == crate::runner::ExecutionRole::Implement)
+        .expect("the repair worker was invoked");
+    assert_eq!(
+        worker.checkout.get("candidate.txt"),
+        Some(&source_bytes),
+        "the clean materialization hands the worker the protected source's bytes: {:?}",
+        worker.checkout
+    );
+    assert_eq!(
+        worker.checkout.get("other.txt"),
+        Some(&merged_before),
+        "and the content already merged at its base, untouched: {:?}",
+        worker.checkout
+    );
+    assert_eq!(
+        blob(merged.proposed_sha.as_str(), "candidate.txt"),
+        source_bytes,
+        "with this fixture's no-edit worker, publishing the repair preserves the source's bytes"
+    );
+    assert_eq!(
+        blob(merged.proposed_sha.as_str(), "other.txt"),
+        merged_before,
+        "and the already merged content"
+    );
+}
+
+/// DESIGN §4 (6): "Questions never stop the runnable frontier", and the
+/// loop's first branch: a delivered answer is ingested before any other work
+/// is admitted. Beta is genuinely runnable and a halting decline is already
+/// delivered — the decline is ingested first, beta never dispatches, and no
+/// process runs. PR #249's refusals review showed the admission fixtures
+/// could not tell: with nothing else runnable, ingestion removed (M4) or the
+/// non-blocking poll replaced by the blocking resolve (M5) both passed,
+/// because the hard block delivered the same answer a step later. Here the
+/// poll is the only source that answers, and beta is what the step spends
+/// on if the poll is skipped.
+#[test]
+fn a_delivered_answer_is_ingested_before_unrelated_runnable_work_dispatches() {
+    let fixture = Fixture::build(
+        "answer-before-frontier",
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let alpha = plant_queued_candidate(&fixture);
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("events parse");
+    let fold = TopologyFold::replay(fixture.inputs(), &events).expect("events replay");
+    let paths = PathSet::Prefixes {
+        paths: vec![GitPath("candidate.txt".to_owned())],
+    };
+    let rejection = crate::engine::topology::repair::merge_rejected(
+        &fold,
+        &FixedIds,
+        &alpha.candidate,
+        fixture.base_sha.clone(),
+        crate::topology::events::SequenceId(0),
+        crate::topology::events::RejectionDisposition::Conflict {
+            paths: paths.clone(),
+        },
+        paths,
+    )
+    .expect("alpha's rejection registers an over-limit repair");
+    let repair = rejection.repair.key;
+    append_events(
+        &fixture,
+        &[TopologyEventBody::MergeRejected {
+            data: Box::new(rejection),
+        }],
+    );
+    let fold = replayed(&fixture);
+    assert!(
+        fold.ready(BETA),
+        "the unrelated task must really be runnable, or this test proves nothing"
+    );
+    assert_eq!(fold.task_state(repair), Some(TaskState::AwaitingInput));
+
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(crate::ir::Answer::Declined),
+            halts_run: true,
             ..DriveSeams::default()
         },
         1,
     );
-    let text = message(
-        driven
-            .progress
-            .first()
-            .expect("one step")
-            .as_ref()
-            .expect_err("a repair-admission answer is refused before any append"),
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: true,
+                ..
+            })) if *key == repair
+        ),
+        "an already delivered halting decline is ingested before unrelated work: {:?}",
+        driven.progress
     );
     assert!(
-        text.contains("repair-admission") && text.contains("Refused before any append"),
-        "{text}"
+        !driven.log.iter().any(|event| matches!(
+            &event.body,
+            TopologyEventBody::TaskDispatched { data } if data.key == BETA
+        )),
+        "beta must not dispatch after a delivered halting decline"
     );
-    assert!(
-        driven
-            .log
-            .iter()
-            .all(|event| !matches!(event.body, TopologyEventBody::QuestionAnswered { .. })),
-        "nothing was appended for the refused answer"
-    );
+    assert!(driven.runs.is_empty(), "no process ran: {:?}", driven.runs);
+    assert!(replayed(&fixture).run_is_ending());
 }
 
 const BETA: TaskKey = TaskKey(1);
@@ -9082,7 +9802,7 @@ fn plant_published_beta_editing(fixture: &Fixture, file: &str, content: &str) ->
         fixture,
         &[
             for_task(BETA, "beta", dispatched_at(&fixture.base_sha)),
-            for_task(BETA, "beta", attempt_started(1)),
+            for_task(BETA, "beta", attempt_started_in(fixture, 1)),
             candidate_prepared_for(fixture, BETA, &commit, &tree, &names, file),
             TopologyEventBody::TaskCandidateCreated {
                 data: crate::topology::events::TaskCandidateCreated {
@@ -10033,4 +10753,1480 @@ fn a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded() {
     let once = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
     let twice = TopologyFold::replay(fixture.inputs(), &events).expect("replays again");
     assert_eq!(once.state(), twice.state(), "replay twice equal");
+}
+
+// ---------------------------------------------------------------------------
+// PR9: a repair across a process boundary.
+// ---------------------------------------------------------------------------
+
+const REPAIR_MATERIALIZE: EffectSiteId = EffectSiteId::Object(ObjectSite::RepairMaterialize);
+
+/// The repair's dispatch as the creator would have appended it: at the head
+/// that rejected the candidate, inside its root's lineage lease, naming the
+/// rejected candidate as its source.
+fn repair_dispatched(
+    rejection: &crate::topology::events::MergeRejected,
+    key: TaskKey,
+    generation: GenerationId,
+) -> TopologyEventBody {
+    repair_dispatched_in(rejection, key, generation, ALPHA)
+}
+
+fn repair_dispatched_in(
+    rejection: &crate::topology::events::MergeRejected,
+    key: TaskKey,
+    generation: GenerationId,
+    root: TaskKey,
+) -> TopologyEventBody {
+    TopologyEventBody::TaskDispatched {
+        data: TaskDispatched {
+            key,
+            generation,
+            base_sha: rejection.rejecting_head.clone(),
+            worktree_path: format!("wt/repair-g{}", generation.0),
+            lease: LeaseGrant::InheritedLineage { root },
+            source_candidate: Some(rejection.candidate.clone()),
+        },
+    }
+}
+
+/// A repair's first attempt at generation 0: the root's one rung, and the
+/// observation a lineage member's attempt must record.
+fn repair_attempt_started(key: TaskKey, attempt: u32) -> TopologyEventBody {
+    TopologyEventBody::AttemptStarted {
+        data: AttemptStarted4 {
+            key,
+            generation: GEN,
+            attempt: AttemptNumber(attempt),
+            rung: 0,
+            binding: RungBinding {
+                tier: Tier::Mid,
+                agent: AGENT.to_owned(),
+                model: "claude-opus-5".to_owned(),
+                pinned: false,
+                effort: Effort::High,
+            },
+            pool: None,
+            resume_session: None,
+            materialization_observed: Some(crate::topology::events::Materialization::Clean),
+        },
+    }
+}
+
+fn retained_by_the_creator(session: &str) -> AttemptSettlement {
+    AttemptSettlement::Retained {
+        retained_session: SessionId(session.to_owned()),
+        retained_incarnation: Epoch(0),
+    }
+}
+
+/// The repair's worktree as the killed creator left it: registered at the
+/// slot the manager derives, at the recorded base, with nothing done in it.
+fn plant_repair_worktree(fixture: &Fixture, key: TaskKey, base: &str) -> PathBuf {
+    plant_task_worktree(fixture, key, base)
+}
+
+/// Any task's generation-0 worktree as a dead incarnation left it: intent
+/// written, worktree added at `base`, nothing done in it.
+fn plant_task_worktree(fixture: &Fixture, key: TaskKey, base: &str) -> PathBuf {
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(key, GEN);
+    manager
+        .write_intent(&mut crate::workspace_manager::NoHooks, &slot)
+        .expect("the repair's intent");
+    manager
+        .add_worktree(&mut crate::workspace_manager::NoHooks, &slot, base)
+        .expect("the repair's worktree")
+}
+
+fn repair_dispatches(log: &[TopologyEvent], key: TaskKey) -> Vec<&TaskDispatched> {
+    log.iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::TaskDispatched { data } if data.key == key => Some(data),
+            _ => None,
+        })
+        .collect()
+}
+
+fn attempt_starts_of(log: &[TopologyEvent], key: TaskKey) -> Vec<&AttemptStarted4> {
+    log.iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::AttemptStarted { data } if data.key == key => Some(data),
+            _ => None,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+enum InterruptedRepairPrefix {
+    /// `task_dispatched` durable, the process killed before `Worktree.Add`.
+    NoWorktree,
+    /// The worktree added and the materialization killed inside its message
+    /// write: the held `MERGE_MSG.lock`, the form the kill sampler first found.
+    HeldMessageLock,
+    /// The materialization completed, its state files cleared by the funnel,
+    /// and the process killed before `attempt_started`: a merged index at the
+    /// base, which the quiescence rule reads as reusable.
+    CompletedMaterialization,
+}
+
+/// `T-REPAIR-DISPATCH`: whatever the kill left between the repair's dispatch
+/// and its first attempt, recovery (g) verifies the worktree at its recorded
+/// base, recreates it when the verification fails, and materializes nothing
+/// (`R6`); the resumed loop continues the same generation and materializes
+/// exactly once — onto a fresh worktree, or onto the one a completed pick
+/// left, whose index the funnel restores to the base's tree before it picks
+/// again (a second pick onto the merged index is not a no-op: it applies the
+/// hunk again) — so the observation recorded before the spawn is the one the
+/// attempt ran on.
+#[test]
+fn a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once()
+{
+    use crate::engine::topology::dispatch::Reuse;
+    use crate::topology::effects::ResidueElement;
+    use crate::workspace_manager::VerifyFailure;
+
+    for prefix in [
+        InterruptedRepairPrefix::NoWorktree,
+        InterruptedRepairPrefix::HeldMessageLock,
+        InterruptedRepairPrefix::CompletedMaterialization,
+    ] {
+        let fixture = Fixture::build(
+            &format!("repair-prefix-{prefix:?}"),
+            Damage {
+                two_tasks: true,
+                ..Damage::default()
+            },
+        );
+        let (rejection, repair) = plant_rejected_repair(&fixture);
+        assert!(
+            matches!(
+                rejection.repair.admission,
+                crate::topology::events::SpawnAdmission::Runnable
+            ),
+            "{prefix:?}: one automatic repair is allowed, so the first is runnable"
+        );
+        append_events(&fixture, &[repair_dispatched(&rejection, repair, GEN)]);
+        let head = rejection.rejecting_head.clone();
+        let slot = crate::engine::topology::dispatch::task_slot(repair, GEN);
+        let worktree = fixture.manager().slot_path(&slot);
+        match prefix {
+            InterruptedRepairPrefix::NoWorktree => {
+                assert!(!worktree.exists());
+            }
+            InterruptedRepairPrefix::HeldMessageLock => {
+                let worktree = plant_repair_worktree(&fixture, repair, head.as_str());
+                crate::workspace_manager::fixture::write_file(
+                    &worktree_git_dir(&worktree).join("MERGE_MSG.lock"),
+                    b"side\n",
+                );
+            }
+            InterruptedRepairPrefix::CompletedMaterialization => {
+                plant_repair_worktree(&fixture, repair, head.as_str());
+                fixture
+                    .manager()
+                    .repair_materialize(
+                        &mut crate::workspace_manager::NoHooks,
+                        &slot,
+                        rejection.candidate.commit_sha.as_str(),
+                    )
+                    .expect("the creator's materialization completed");
+            }
+        }
+
+        let harness = harness();
+        let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+        let (recovered, handle) =
+            resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+                .unwrap_or_else(|error| panic!("{prefix:?}: the resume converges: {error}"));
+        let expected_reuse = match prefix {
+            InterruptedRepairPrefix::NoWorktree => Reuse::Recreated {
+                failure: VerifyFailure::NotRegistered,
+            },
+            InterruptedRepairPrefix::HeldMessageLock => Reuse::Recreated {
+                failure: VerifyFailure::Residue(ResidueElement::MergeMsg),
+            },
+            InterruptedRepairPrefix::CompletedMaterialization => Reuse::Verified,
+        };
+        assert_eq!(
+            recovered.recreated,
+            vec![(repair, GEN, expected_reuse)],
+            "{prefix:?}: (g) acts on exactly the repair's open generation: recreated when \
+             the kill left it non-quiescent, reused when the completed pick left it at its \
+             base with no state file"
+        );
+        assert_eq!(
+            crate::workspace_manager::fixture::git(&worktree, &["rev-parse", "HEAD"]),
+            head.0,
+            "{prefix:?}: at its recorded base, the head that rejected the candidate"
+        );
+        assert_eq!(
+            harness
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .count(REPAIR_MATERIALIZE, HookPhase::Before),
+            0,
+            "{prefix:?}: recovery materializes nothing (`R6`): a recreated repair worktree is \
+             at its base and the continuation is what materializes it"
+        );
+
+        let seams = DriveSeams::default();
+        let runner = driven_runner(&seams);
+        let driven = drive_handle(&fixture, handle, &seams, 2, &runner, &mut hooks);
+        assert!(
+            matches!(
+                driven.progress.first(),
+                Some(Ok(Progress::Settled {
+                    key,
+                    accepted: true,
+                    ..
+                })) if *key == repair
+            ),
+            "{prefix:?}: the loop continues the recreated generation through its first attempt \
+             to a candidate: {:?}",
+            driven.progress
+        );
+        assert!(
+            matches!(
+                driven.progress.get(1),
+                Some(Ok(Progress::Integrated {
+                    key,
+                    sequence: crate::topology::events::SequenceId(2),
+                    ..
+                })) if *key == repair
+            ),
+            "{prefix:?}: and the lineage candidate merges: {:?}",
+            driven.progress
+        );
+        let dispatches = repair_dispatches(&driven.log, repair);
+        assert_eq!(
+            dispatches.len(),
+            1,
+            "{prefix:?}: `T-REPAIR-DISPATCH` continues the dispatched generation; a second \
+             dispatch would be a fresh generation the kill did not earn"
+        );
+        let starts = attempt_starts_of(&driven.log, repair);
+        assert_eq!(starts.len(), 1, "{prefix:?}: one attempt");
+        assert_eq!(
+            starts[0].materialization_observed,
+            Some(crate::topology::events::Materialization::Clean),
+            "{prefix:?}: the observation recorded before the spawn is the continuation's"
+        );
+        assert_eq!(
+            harness
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .count(REPAIR_MATERIALIZE, HookPhase::Before),
+            1,
+            "{prefix:?}: the continuation materializes exactly once, whatever the kill left"
+        );
+        let worker = runner
+            .runs()
+            .into_iter()
+            .find(|run| run.role == crate::runner::ExecutionRole::Implement)
+            .unwrap_or_else(|| panic!("{prefix:?}: the repair worker was invoked"));
+        assert_eq!(
+            worker.checkout.get("candidate.txt").map(String::as_str),
+            Some("the candidate edit\n"),
+            "{prefix:?}: the worker is handed the protected source's bytes, whatever the kill \
+             left: {:?}",
+            worker.checkout
+        );
+        let fold = replayed(&fixture);
+        assert_eq!(
+            fold.task_state(ALPHA),
+            Some(TaskState::Merged),
+            "{prefix:?}"
+        );
+        assert_eq!(
+            fold.task_state(repair),
+            Some(TaskState::Merged),
+            "{prefix:?}"
+        );
+        assert!(driven.invocations_balance, "{prefix:?}");
+        assert_eq!(driven.entitlements_held, 0, "{prefix:?}");
+    }
+}
+
+/// `ST-11` for a repair: a fresh incarnation closes the retained generation
+/// with `LineageHeld` (the lineage keeps its region; the generation held no
+/// lease of its own) and the loop opens the next generation, which is
+/// materialized again from the same recorded source.
+#[test]
+fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again()
+ {
+    let fixture = Fixture::build(
+        "retained-repair",
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_rejected_repair(&fixture);
+    let retained_worktree =
+        plant_repair_worktree(&fixture, repair, rejection.rejecting_head.as_str());
+    let retained_slot = crate::engine::topology::dispatch::task_slot(repair, GEN);
+    append_events(
+        &fixture,
+        &[
+            repair_dispatched(&rejection, repair, GEN),
+            repair_attempt_started(repair, 1),
+            for_task(
+                repair,
+                "repair",
+                attempt_finished(1, retained_by_the_creator("the-repairs-session")),
+            ),
+        ],
+    );
+    assert!(
+        replayed(&fixture).ready_retry(repair),
+        "the retained repair generation is retryable by its own incarnation, or the close \
+         below closes nothing"
+    );
+    assert!(
+        retained_worktree.exists()
+            && fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&retained_slot),
+        "the dead incarnation left the retained generation's worktree and intent, or the \
+         reclaim below reclaims nothing"
+    );
+
+    let harness = harness();
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+    let (recovered, handle) =
+        resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+            .expect("a run with a retained repair session resumes");
+    assert_eq!(
+        recovered.retained_closed, 1,
+        "(e) closes the retained repair generation"
+    );
+    assert!(
+        !retained_worktree.exists(),
+        "PR #249's crash review, finding 2: a generation (e) closes owns nothing (R9), so \
+         its worktree is reclaimed with the close rather than kept for the life of the run"
+    );
+    assert!(
+        !fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .contains(&retained_slot),
+        "and its durable intent with it"
+    );
+    let closed = TopologyFold::parse_log(&fixture.log_bytes())
+        .expect("parses")
+        .into_iter()
+        .find_map(|event| match event.body {
+            TopologyEventBody::GenerationClosed { data } if data.key == repair => Some(data),
+            _ => None,
+        })
+        .expect("the repair's generation is closed");
+    assert_eq!(
+        closed.reason,
+        crate::topology::events::GenerationCloseReason::ResumeDiscardsRetainedSession
+    );
+    assert_eq!(
+        closed.lease,
+        crate::topology::events::LeaseDisposition::LineageHeld,
+        "a lineage member's generation closes with the lineage still holding its region"
+    );
+    assert!(
+        !replayed(&fixture).ready_retry(repair),
+        "the retained session is gone with the incarnation that held it"
+    );
+
+    let seams = DriveSeams::default();
+    let runner = driven_runner(&seams);
+    let driven = drive_handle(&fixture, handle, &seams, 2, &runner, &mut hooks);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "the next generation of the repair runs to a candidate: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Integrated { key, .. })) if *key == repair
+        ),
+        "and merges: {:?}",
+        driven.progress
+    );
+    let dispatches = repair_dispatches(&driven.log, repair);
+    assert_eq!(
+        dispatches
+            .iter()
+            .map(|dispatched| dispatched.generation)
+            .collect::<Vec<_>>(),
+        vec![GEN, GenerationId(1)],
+        "a closed generation is never recreated; the repair opens its next one"
+    );
+    for dispatched in &dispatches {
+        assert_eq!(
+            dispatched.source_candidate.as_ref(),
+            Some(&rejection.candidate),
+            "every generation of the repair is materialized from the rejected candidate"
+        );
+        assert_eq!(
+            dispatched.lease,
+            LeaseGrant::InheritedLineage { root: ALPHA }
+        );
+    }
+    let starts = attempt_starts_of(&driven.log, repair);
+    assert_eq!(
+        starts.len(),
+        2,
+        "the planted attempt and the fresh generation's"
+    );
+    let fresh = starts[1];
+    assert_eq!(fresh.generation, GenerationId(1));
+    assert_eq!(fresh.attempt, AttemptNumber(1));
+    assert_eq!(
+        fresh.resume_session, None,
+        "a fresh generation resumes no session: the retained one died with its incarnation"
+    );
+    assert_eq!(
+        fresh.materialization_observed,
+        Some(crate::topology::events::Materialization::Clean),
+        "and it is materialized again, observing the pick onto its base"
+    );
+    assert_eq!(
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(REPAIR_MATERIALIZE, HookPhase::Before),
+        1,
+        "the closed generation is never re-materialized; the fresh one is, once"
+    );
+    let worker = runner
+        .runs()
+        .into_iter()
+        .find(|run| run.role == crate::runner::ExecutionRole::Implement)
+        .expect("the fresh generation's worker was invoked");
+    assert_eq!(
+        worker.checkout.get("candidate.txt").map(String::as_str),
+        Some("the candidate edit\n"),
+        "the fresh generation hands its worker the protected source's bytes: {:?}",
+        worker.checkout
+    );
+    let fold = replayed(&fixture);
+    assert_eq!(fold.task_state(ALPHA), Some(TaskState::Merged));
+    assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
+    assert!(driven.invocations_balance);
+    assert_eq!(driven.entitlements_held, 0);
+    let (again, _handle) = resume_as(
+        &fixture,
+        "01KZTCCCCCCCCCCCCCCCCCCCCC",
+        &runtime_holding_the_record(),
+        &mut hooks,
+    )
+    .expect("another complete resume after the replacement generation merged");
+    assert_eq!(
+        again.retained_closed, 0,
+        "the prior generation is already closed in the log"
+    );
+    assert!(
+        !retained_worktree.exists()
+            && !fixture
+                .manager()
+                .intents()
+                .expect("intents")
+                .contains(&retained_slot),
+        "the closed generation stays reclaimed across a later resume"
+    );
+}
+
+/// `R11` across a budget stop: the rejected candidate's ref is what keeps the
+/// repair's source reachable, the stop and the resume prune nothing of it, and
+/// the repair dispatches from it once the next epoch opens.
+#[test]
+fn a_rejected_candidates_ref_survives_a_budget_stop_and_the_repair_dispatches_after_the_resume() {
+    let fixture = Fixture::build(
+        "budget-lineage",
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_rejected_repair(&fixture);
+    append_events(
+        &fixture,
+        &[TopologyEventBody::BudgetExceeded {
+            data: BudgetExceeded4 {
+                epoch: Epoch(0),
+                budget: BudgetKind::Run,
+                limit_usd: 1.0,
+                spent_usd: 2.0,
+                key: Some(repair),
+            },
+        }],
+    );
+    let candidate_ref = rejection.candidate.candidate_ref.clone();
+    assert!(
+        replayed(&fixture).budget_stop().is_some(),
+        "the fixture must carry a stop, or this test proves nothing"
+    );
+    assert_eq!(
+        ref_target(&fixture, candidate_ref.as_str()).as_deref(),
+        Some(rejection.candidate.commit_sha.as_str()),
+        "the rejected candidate is protected by its candidates ref when the run stops"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "the resume opens the next epoch and the repair dispatches from the protected \
+         candidate: {:?}",
+        driven.progress
+    );
+    assert_eq!(
+        ref_target(&fixture, candidate_ref.as_str()).as_deref(),
+        Some(rejection.candidate.commit_sha.as_str()),
+        "and the ref is still there afterwards: it is pruned only by finalization"
+    );
+    let dispatches = repair_dispatches(&driven.log, repair);
+    assert_eq!(dispatches.len(), 1);
+    assert_eq!(
+        dispatches[0].source_candidate.as_ref(),
+        Some(&rejection.candidate)
+    );
+    assert!(replayed(&fixture).budget_stop().is_none());
+}
+
+fn answers_of(
+    log: &[TopologyEvent],
+    key: TaskKey,
+) -> Vec<&crate::topology::events::QuestionAnswered4> {
+    log.iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::QuestionAnswered { data } if data.key == key => Some(data),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `ST-12` at the loop: a repair whose Mid floor intersects its root's frozen
+/// ladder empty is admitted `HumanBinding`; the person names an agent, the
+/// answer carries the one-off binding derived once at ingest (E2, `R1`/`R2`:
+/// the repair ladder's floor, pinned, the catalogue's lowest model at or above
+/// it, the policy's effort for that tier), and the repair runs under exactly
+/// that binding.
+#[test]
+fn a_one_off_binding_answer_activates_a_repair_no_frozen_rung_can_run() {
+    for delivery in [AnswerDelivery::Polled, AnswerDelivery::Blocking] {
+        one_off_binding_answer_activates_the_repair(delivery);
+    }
+}
+
+/// `ST-12` with the answer arriving by one path only. The `Blocking` arm is
+/// the one PR8's hard-block refusal would fail: PR #249's refusals review
+/// restored that refusal (M11) and every test passed, because the polled
+/// path had ingested the answer before the block was reached.
+fn one_off_binding_answer_activates_the_repair(delivery: AnswerDelivery) {
+    let fixture = Fixture::build(
+        &format!("one-off-binding-{delivery:?}"),
+        Damage {
+            two_tasks: true,
+            small_only: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_rejected_repair(&fixture);
+    let crate::topology::events::SpawnAdmission::HumanBinding { options, question } =
+        &rejection.repair.admission
+    else {
+        panic!(
+            "a Small-only root leaves the repair's Mid floor with no rung: {:?}",
+            rejection.repair.admission
+        );
+    };
+    assert_eq!(
+        options,
+        &vec![AGENT.to_owned()],
+        "the options are the root's allowed agents"
+    );
+
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(crate::ir::Answer::Answered {
+                text: AGENT.to_owned(),
+            }),
+            answer_delivery: delivery,
+            ..DriveSeams::default()
+        },
+        3,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "step 1 ingests the binding answer: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "step 2 runs the repair under the one-off binding to a candidate: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(2),
+            Some(Ok(Progress::Integrated { key, .. })) if *key == repair
+        ),
+        "step 3 merges the lineage: {:?}",
+        driven.progress
+    );
+
+    let answers = answers_of(&driven.log, repair);
+    assert_eq!(answers.len(), 1);
+    assert_eq!(
+        answers[0].answer,
+        crate::topology::events::Answer4::Answered {
+            option_index: 0,
+            binding_override: Some(crate::topology::events::BindingOverride {
+                key: repair,
+                question: question.id.clone(),
+                option_index: 0,
+                agent: AGENT.to_owned(),
+                model: "claude-sonnet-4-5".to_owned(),
+                effort: Effort::High,
+            }),
+        },
+        "the answer carries the five-field override, derived once at ingest: the \
+         catalogue's lowest `{AGENT}` model at or above the repair ladder's Mid floor and \
+         the policy's Mid effort"
+    );
+    let starts = attempt_starts_of(&driven.log, repair);
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].rung, 0);
+    assert_eq!(
+        starts[0].binding,
+        RungBinding {
+            tier: Tier::Mid,
+            agent: AGENT.to_owned(),
+            model: "claude-sonnet-4-5".to_owned(),
+            pinned: true,
+            effort: Effort::High,
+        },
+        "the attempt runs under the override at the floor, pinned: not under the root's \
+         Small rung, which the repair's floor excludes"
+    );
+    assert_eq!(
+        starts[0].materialization_observed,
+        Some(crate::topology::events::Materialization::Clean)
+    );
+    let fold = replayed(&fixture);
+    assert_eq!(fold.task_state(ALPHA), Some(TaskState::Merged));
+    assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
+    assert!(driven.invocations_balance);
+    assert_eq!(driven.entitlements_held, 0);
+}
+
+/// PR #249's conformance review, finding 1: with two agents offered, the
+/// person picks the second by number at the production parser. That is a
+/// one-off binding to the second agent — `option_index: 1`, the catalogue's
+/// lowest model for it at or above the floor — and not a decline of the
+/// lineage, which is what the parser's last-option rule made of it.
+#[test]
+fn picking_the_last_of_two_offered_agents_binds_the_repair_to_it_rather_than_declining() {
+    let fixture = Fixture::build(
+        "one-off-binding-second-agent",
+        Damage {
+            two_tasks: true,
+            small_only: true,
+            integration_second_opinion: true,
+            ..Damage::default()
+        },
+    );
+    let (_rejection, repair) = plant_rejected_repair(&fixture);
+    let fold = replayed(&fixture);
+    let open = fold
+        .open_questions()
+        .expect("started")
+        .values()
+        .find(|open| open.question.key == repair)
+        .expect("the repair's admission question is open")
+        .clone();
+    let second_agent = crate::engine::topology::scaffold::REVIEW_AGENT;
+    assert_eq!(
+        open.question.options,
+        vec![AGENT.to_owned(), second_agent.to_owned()],
+        "the options are the root's two allowed agents, or this test proves nothing"
+    );
+    let rendered = crate::ir::Question {
+        id: open.question.id.clone(),
+        kind: open.question.kind,
+        affected_tasks: Vec::new(),
+        context: open.question.context.clone(),
+        options: open.question.options.clone(),
+    };
+    let typed = crate::interaction::interpret(&rendered, "2\n");
+    assert_eq!(
+        typed,
+        crate::ir::Answer::Answered {
+            text: second_agent.to_owned()
+        },
+        "`2` at the prompt is the second agent, not a decline"
+    );
+
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(typed),
+            ..DriveSeams::default()
+        },
+        3,
+    );
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "step 1 ingests a binding, not a decline: {:?}",
+        driven.progress
+    );
+    let answers = answers_of(&driven.log, repair);
+    assert_eq!(answers.len(), 1);
+    let crate::topology::events::Answer4::Answered {
+        option_index,
+        binding_override: Some(binding),
+    } = &answers[0].answer
+    else {
+        panic!("the answer is a one-off binding: {:?}", answers[0].answer);
+    };
+    assert_eq!(*option_index, 1, "the second option");
+    assert_eq!(binding.option_index, 1);
+    assert_eq!(binding.agent, second_agent);
+    assert_eq!(
+        binding.model,
+        crate::catalog::CATALOG
+            .iter()
+            .filter(|entry| entry.agent == second_agent && entry.tier >= Tier::Mid)
+            .min_by_key(|entry| entry.tier)
+            .map(|entry| entry.model.to_owned())
+            .expect("the catalogue has a model for the second agent at or above Mid"),
+        "the catalogue's lowest model for the chosen agent at or above the floor"
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "step 2 runs the repair under the second agent: {:?}",
+        driven.progress
+    );
+    let starts = attempt_starts_of(&driven.log, repair);
+    assert_eq!(starts.len(), 1);
+    assert_eq!(starts[0].binding.agent, second_agent);
+    assert!(starts[0].binding.pinned);
+    assert_eq!(starts[0].binding.tier, Tier::Mid);
+    let fold = replayed(&fixture);
+    assert_eq!(
+        fold.task_state(ALPHA),
+        Some(TaskState::Merged),
+        "the lineage merges instead of failing: {:?}",
+        driven.progress
+    );
+    assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
+    assert!(driven.invocations_balance);
+    assert_eq!(driven.entitlements_held, 0);
+}
+
+/// A one-off binding activates only through an option the spawn froze: text
+/// that names no option is refused before anything is appended.
+#[test]
+fn a_binding_answer_naming_no_frozen_option_is_refused_before_any_append() {
+    let fixture = Fixture::build(
+        "one-off-binding-refused",
+        Damage {
+            two_tasks: true,
+            small_only: true,
+            ..Damage::default()
+        },
+    );
+    let (_rejection, repair) = plant_rejected_repair(&fixture);
+    let kinds_before = durable_kinds(&fixture);
+    let driven = drive(
+        &fixture,
+        &DriveSeams {
+            answer: Some(crate::ir::Answer::Answered {
+                text: "gpt-5".to_owned(),
+            }),
+            ..DriveSeams::default()
+        },
+        1,
+    );
+    let refusal = match driven.progress.first() {
+        Some(Err(error)) => error.to_string(),
+        other => panic!("an answer naming no option was not refused: {other:?}"),
+    };
+    assert!(
+        refusal.contains("none of the") && refusal.contains(&format!("task {}", repair.0)),
+        "the refusal names the task and the offered options: {refusal}"
+    );
+    let mut expected = kinds_before;
+    expected.push("run_resumed".to_owned());
+    assert_eq!(
+        durable_kinds(&fixture),
+        expected,
+        "nothing beyond the resume's own record was appended"
+    );
+    assert_eq!(
+        replayed(&fixture).task_state(repair),
+        Some(TaskState::AwaitingInput),
+        "the question is still open"
+    );
+}
+
+/// Declining a repair's admission question fails its lineage: the repair and
+/// its root are terminal, the lineage lease is released, and with
+/// `halts_run` the decline is also the run's halt.
+#[test]
+fn declining_a_repairs_admission_fails_its_lineage_and_halts_the_run_only_when_asked_to() {
+    for (halts_run, delivery) in [
+        (false, AnswerDelivery::Polled),
+        (true, AnswerDelivery::Blocking),
+    ] {
+        let fixture = Fixture::build(
+            &format!("decline-lineage-halts-{halts_run}"),
+            Damage {
+                two_tasks: true,
+                small_only: true,
+                ..Damage::default()
+            },
+        );
+        let (_rejection, repair) = plant_rejected_repair(&fixture);
+        let driven = drive(
+            &fixture,
+            &DriveSeams {
+                answer: Some(crate::ir::Answer::Declined),
+                answer_delivery: delivery,
+                halts_run,
+                ..DriveSeams::default()
+            },
+            2,
+        );
+        assert!(
+            matches!(
+                driven.progress.first(),
+                Some(Ok(Progress::Answered {
+                    key,
+                    declined: true,
+                    ..
+                })) if *key == repair
+            ),
+            "halts_run={halts_run}: the decline is ingested: {:?}",
+            driven.progress
+        );
+        let answers = answers_of(&driven.log, repair);
+        assert_eq!(
+            answers.first().map(|answered| &answered.answer),
+            Some(&crate::topology::events::Answer4::Declined {
+                decline_halts_run: halts_run
+            }),
+            "halts_run={halts_run}: the record says whether the decline halts"
+        );
+        let fold = replayed(&fixture);
+        assert_eq!(
+            fold.task_state(repair),
+            Some(TaskState::Failed),
+            "halts_run={halts_run}: the declined repair fails"
+        );
+        assert_eq!(
+            fold.task_state(ALPHA),
+            Some(TaskState::Failed),
+            "halts_run={halts_run}: and its root with it: a lineage that a person declines \
+             has no further repair to wait for"
+        );
+        assert!(
+            !fold.leases().expect("started").any_candidate_or_lineage(),
+            "halts_run={halts_run}: the lineage lease is released"
+        );
+        assert_eq!(
+            fold.run_is_ending(),
+            halts_run,
+            "halts_run={halts_run}: the run ends on a decline exactly when the seam says so"
+        );
+        let closure = match driven.progress.get(1) {
+            Some(Err(error)) => error.to_string(),
+            other => panic!(
+                "halts_run={halts_run}: with alpha failed and beta merged the run has only \
+                 its closure left, which this build refuses: {other:?}"
+            ),
+        };
+        assert!(
+            closure.contains("closure derives"),
+            "halts_run={halts_run}: {closure}"
+        );
+        assert_eq!(driven.entitlements_held, 0, "halts_run={halts_run}");
+    }
+}
+
+/// `ST-15` for a repair: the incarnation that retained a repair attempt's
+/// session retries it in place, in the same generation, without
+/// materializing again, and the retry records `Retained` as what it observed.
+#[test]
+fn a_repairs_same_session_retry_records_retained_and_is_not_materialized_again() {
+    use crate::engine::topology::run::{RunSeams, TopologyRun};
+    use crate::engine::topology::select::Ceiling;
+
+    let fixture = Fixture::build(
+        "repair-retry-in-place",
+        Damage {
+            two_tasks: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_rejected_repair(&fixture);
+    let caps = vec![(
+        AGENT.to_owned(),
+        Caps {
+            version: "1.2.3".to_owned(),
+            json_output: true,
+            session_resume: true,
+            cost_reporting: true,
+            read_only_mode: true,
+            acp: false,
+            model_list: false,
+        },
+    )];
+    let harness = harness();
+    let (_recovered, handle) =
+        resume_with_real_refs(&fixture, &harness).expect("the healthy resume completes");
+    let mut run = TopologyRun::resumed(handle, fixture.inputs(), Ceiling::unlimited());
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(&harness));
+    let sleeper = RecordingSleeper::default();
+    let manager = fixture.manager();
+    let runner = RecordingRunner::editing();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::erroring();
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let plans = crate::engine::assembly::FrozenPlans {
+        adapters: &adapters,
+        paths: &paths,
+        gates: &[],
+        pools: &[],
+        caps: &caps,
+        worker_timeout: std::time::Duration::from_secs(300),
+        decisions: &[],
+    };
+    let seams = RunSeams {
+        manager: &manager,
+        clock: &Frozen,
+        sleeper: &sleeper,
+        runner: &runner,
+        adapters: &adapters,
+        paths: &paths,
+        plans: &plans,
+        reviews: &crate::engine::attempt::LegacyReviewPasses,
+        input_policy: &crate::engine::attempt::LegacyReviewInputPolicy,
+        answers: &crate::interaction::UnattendedAnswers,
+        ids: &FixedIds,
+        halts_run: false,
+    };
+
+    let first = run
+        .step(&seams, &mut hooks)
+        .expect("the repair dispatches, materializes and its first attempt settles");
+    assert!(
+        matches!(first, Progress::Settled { key, accepted: false, .. } if key == repair),
+        "an agent error is not an acceptable attempt: {first:?}"
+    );
+    let second = run
+        .step(&seams, &mut hooks)
+        .expect("the retry runs in the retained generation");
+    assert!(
+        matches!(second, Progress::Settled { key, accepted: false, .. } if key == repair),
+        "{second:?}"
+    );
+
+    let log = TopologyFold::parse_log(&fixture.log_bytes()).expect("the log parses");
+    let dispatches = repair_dispatches(&log, repair);
+    assert_eq!(
+        dispatches.len(),
+        1,
+        "the retry is the same generation's second attempt, not a fresh dispatch"
+    );
+    assert_eq!(
+        dispatches[0].source_candidate.as_ref(),
+        Some(&rejection.candidate)
+    );
+    let starts: Vec<(u32, bool, Option<crate::topology::events::Materialization>)> =
+        attempt_starts_of(&log, repair)
+            .iter()
+            .map(|started| {
+                (
+                    started.attempt.0,
+                    started.resume_session.is_some(),
+                    started.materialization_observed,
+                )
+            })
+            .collect();
+    assert_eq!(
+        starts,
+        vec![
+            (
+                1,
+                false,
+                Some(crate::topology::events::Materialization::Clean)
+            ),
+            (
+                2,
+                true,
+                Some(crate::topology::events::Materialization::Retained)
+            ),
+        ],
+        "the first attempt observed the pick; the same-session retry resumes the session \
+         and records `Retained`: the worktree it re-enters is the one the first attempt left"
+    );
+    assert_eq!(
+        harness
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .count(REPAIR_MATERIALIZE, HookPhase::Before),
+        1,
+        "the materialization ran once, for the generation; the retry re-runs none of it"
+    );
+    let resumed = runner
+        .requests()
+        .iter()
+        .filter(|request| request.role == crate::runner::ExecutionRole::Implement)
+        .filter(|request| request.command.args.iter().any(|arg| arg == "--resume"))
+        .count();
+    assert_eq!(
+        resumed, 1,
+        "exactly the second worker invocation resumes a session"
+    );
+    assert!(run.invocations_balance());
+}
+
+/// `T-ANSWER` through the production reader: a person publishes the answer into
+/// the run directory's `answers/` while the engine is away, and the next step of
+/// the next incarnation ingests it before selecting anything else.
+#[test]
+fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step() {
+    let fixture = Fixture::build(
+        "answer-file",
+        Damage {
+            two_tasks: true,
+            no_automatic_repairs: true,
+            ..Damage::default()
+        },
+    );
+    let (rejection, repair) = plant_over_limit_repair(&fixture);
+    let question = rejection
+        .repair
+        .admission
+        .question()
+        .expect("a human admission carries its question")
+        .clone();
+    let seams = DriveSeams {
+        answers_from_run_dir: true,
+        ..DriveSeams::default()
+    };
+    let blocked = drive(&fixture, &seams, 1);
+    assert!(
+        matches!(
+            blocked.progress.first(),
+            Some(Ok(Progress::Blocked { questions: 1 }))
+        ),
+        "with no answer file the run hard-blocks: {:?}",
+        blocked.progress
+    );
+
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    let component = crate::util::filename_component(question.id.as_str());
+    crate::rundir::stage_answer(
+        &paths.answers(),
+        &component,
+        &crate::ir::Answer::Answered {
+            text: question.options.first().expect("an option").clone(),
+        },
+        &mut crate::rundir::NoHooks,
+    )
+    .expect("the answer is staged");
+    crate::rundir::publish_answer(&paths.answers(), &component, &mut crate::rundir::NoHooks)
+        .expect("and published");
+
+    let driven = drive(&fixture, &seams, 2);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Answered {
+                key,
+                declined: false,
+                ..
+            })) if *key == repair
+        ),
+        "the next incarnation's first step ingests the published answer: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair
+        ),
+        "and the activated repair runs: {:?}",
+        driven.progress
+    );
+    let answers = answers_of(&driven.log, repair);
+    assert_eq!(answers.len(), 1);
+    assert_eq!(
+        answers[0].via, "event-log",
+        "the record names the production reader that ingested it"
+    );
+    assert_eq!(answers[0].question, question.id);
+}
+
+/// Beta's candidate queued at the base, unmerged, so that a second lineage
+/// can be rooted at beta.
+fn plant_queued_beta(fixture: &Fixture) -> crate::topology::events::CandidateRef {
+    use crate::workspace_manager::fixture::git;
+    let commit = commit_on(
+        fixture,
+        fixture.base_sha.as_str(),
+        "other.txt",
+        "another task\n",
+        "upstroke: task 1 attempt 1",
+    );
+    let tree = CommitSha(git(
+        &fixture.repo_root,
+        &["rev-parse", &format!("{commit}^{{tree}}")],
+    ));
+    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, BETA, GEN);
+    for refname in [&names.prepared_ref, &names.candidate_ref] {
+        git(
+            &fixture.repo_root,
+            &["update-ref", refname.as_str(), commit.as_str()],
+        );
+    }
+    let candidate = crate::topology::events::CandidateRef {
+        key: BETA,
+        generation: GEN,
+        commit_sha: commit.clone(),
+        candidate_ref: names.candidate_ref.clone(),
+    };
+    append_events(
+        fixture,
+        &[
+            for_task(BETA, "beta", dispatched_at(&fixture.base_sha)),
+            for_task(BETA, "beta", attempt_started_in(fixture, 1)),
+            candidate_prepared_for(fixture, BETA, &commit, &tree, &names, "other.txt"),
+            TopologyEventBody::TaskCandidateCreated {
+                data: crate::topology::events::TaskCandidateCreated {
+                    candidate: candidate.clone(),
+                },
+            },
+        ],
+    );
+    candidate
+}
+
+/// A lineage member's prepared candidate: it widens its lineage by the region
+/// its diff touched and takes no lease of its own.
+fn lineage_candidate_prepared(
+    fixture: &Fixture,
+    key: TaskKey,
+    root: TaskKey,
+    commit: &CommitSha,
+    tree: &CommitSha,
+    names: &crate::engine::topology::candidate::CandidateNames,
+    paths: &[&str],
+) -> TopologyEventBody {
+    let first = paths.first().expect("a candidate touches a path");
+    let TopologyEventBody::CandidatePrepared { mut data } =
+        candidate_prepared_for(fixture, key, commit, tree, names, first)
+    else {
+        panic!("candidate_prepared_for builds a candidate_prepared")
+    };
+    let region = PathSet::Prefixes {
+        paths: paths
+            .iter()
+            .map(|path| GitPath((*path).to_owned()))
+            .collect(),
+    };
+    data.actual_paths = region.clone();
+    data.lease_effect = crate::topology::events::CandidateLeaseEffect::WidensLineage {
+        root,
+        paths: region,
+    };
+    TopologyEventBody::CandidatePrepared { data }
+}
+
+/// A commit on `parent` editing several files: `commit_on` for more than one.
+fn commit_editing(
+    fixture: &Fixture,
+    parent: &str,
+    files: &[(&str, &str)],
+    message: &str,
+) -> CommitSha {
+    use crate::workspace_manager::fixture::{git, write_file};
+    let repo = &fixture.repo_root;
+    for (file, content) in files {
+        write_file(&repo.join(file), content.as_bytes());
+        git(repo, &["add", "--", file]);
+    }
+    let tree = git(repo, &["write-tree"]);
+    let commit = git(repo, &["commit-tree", &tree, "-p", parent, "-m", message]);
+    for (file, _) in files {
+        git(repo, &["rm", "-q", "-f", "--", file]);
+    }
+    CommitSha(commit)
+}
+
+/// Two lineages at runtime, overlapping on one path: the younger lineage's
+/// repair has already queued its candidate when the older lineage's repair has
+/// not started. The loop dispatches the older repair first (the younger
+/// candidate is queued but ineligible behind the older lineage it overlaps),
+/// publishes the older lineage, and only then the younger — lineage order,
+/// not queue position.
+#[test]
+fn two_lineages_publish_in_lineage_order_and_the_younger_candidate_waits_behind_the_older() {
+    use crate::workspace_manager::fixture::git;
+
+    let fixture = Fixture::two_tasks("two-lineages");
+    let alpha = plant_queued_candidate(&fixture);
+    let beta = plant_queued_beta(&fixture);
+    let base = fixture.base_sha.clone();
+
+    let reject =
+        |candidate: &crate::topology::events::CandidateRef, sequence: u32, contended: &[&str]| {
+            let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+            let fold = TopologyFold::replay(fixture.inputs(), &events).expect("replays");
+            let paths = PathSet::Prefixes {
+                paths: contended
+                    .iter()
+                    .map(|path| GitPath((*path).to_owned()))
+                    .collect(),
+            };
+            let rejection = crate::engine::topology::repair::merge_rejected(
+                &fold,
+                &FixedIds,
+                candidate,
+                base.clone(),
+                crate::topology::events::SequenceId(sequence),
+                crate::topology::events::RejectionDisposition::Conflict {
+                    paths: paths.clone(),
+                },
+                paths,
+            )
+            .expect("the conflict registers a repair");
+            assert!(
+                matches!(
+                    rejection.repair.admission,
+                    crate::topology::events::SpawnAdmission::Runnable
+                ),
+                "sequence {sequence}: the first repair of a lineage is runnable"
+            );
+            append_events(
+                &fixture,
+                &[TopologyEventBody::MergeRejected {
+                    data: Box::new(rejection.clone()),
+                }],
+            );
+            rejection
+        };
+    // Both conflicts contend `shared.txt`, so the two lineage regions overlap
+    // and the younger lineage's candidate, which touches it, queues behind the
+    // older lineage.
+    let rejection_a = reject(&alpha.candidate, 0, &["candidate.txt", "shared.txt"]);
+    let repair_a = rejection_a.repair.key;
+    let rejection_b = reject(&beta, 1, &["other.txt", "shared.txt"]);
+    let repair_b = rejection_b.repair.key;
+    assert!(
+        repair_a < repair_b,
+        "the older lineage's repair registered first"
+    );
+
+    // The younger lineage's repair already ran to a candidate.
+    let repaired_b = commit_editing(
+        &fixture,
+        base.as_str(),
+        &[
+            ("other.txt", "another task, repaired\n"),
+            ("shared.txt", "the younger lineage's resolution\n"),
+        ],
+        "upstroke: task 3 attempt 1",
+    );
+    let tree_b = CommitSha(git(
+        &fixture.repo_root,
+        &["rev-parse", &format!("{repaired_b}^{{tree}}")],
+    ));
+    let names_b = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, repair_b, GEN);
+    for refname in [&names_b.prepared_ref, &names_b.candidate_ref] {
+        git(
+            &fixture.repo_root,
+            &["update-ref", refname.as_str(), repaired_b.as_str()],
+        );
+    }
+    let candidate_b = crate::topology::events::CandidateRef {
+        key: repair_b,
+        generation: GEN,
+        commit_sha: repaired_b.clone(),
+        candidate_ref: names_b.candidate_ref.clone(),
+    };
+    append_events(
+        &fixture,
+        &[
+            repair_dispatched_in(&rejection_b, repair_b, GEN, BETA),
+            repair_attempt_started(repair_b, 1),
+            lineage_candidate_prepared(
+                &fixture,
+                repair_b,
+                BETA,
+                &repaired_b,
+                &tree_b,
+                &names_b,
+                &["other.txt", "shared.txt"],
+            ),
+            TopologyEventBody::TaskCandidateCreated {
+                data: crate::topology::events::TaskCandidateCreated {
+                    candidate: candidate_b,
+                },
+            },
+        ],
+    );
+    let before = replayed(&fixture);
+    assert!(
+        before
+            .queue()
+            .expect("started")
+            .get(repair_b, GEN)
+            .is_some(),
+        "the younger lineage's candidate is queued"
+    );
+    assert!(
+        before.eligible_integration_candidate().is_none(),
+        "and ineligible: it overlaps the older lineage's region, and that lineage has no \
+         candidate yet"
+    );
+
+    let driven = drive(&fixture, &DriveSeams::default(), 3);
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Settled {
+                key,
+                accepted: true,
+                ..
+            })) if *key == repair_a
+        ),
+        "step 1 dispatches the older lineage's repair rather than integrating the younger's \
+         queued candidate: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(1),
+            Some(Ok(Progress::Integrated {
+                key,
+                sequence: crate::topology::events::SequenceId(2),
+                ..
+            })) if *key == repair_a
+        ),
+        "step 2 publishes the older lineage: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(
+            driven.progress.get(2),
+            Some(Ok(Progress::Integrated {
+                key,
+                sequence: crate::topology::events::SequenceId(3),
+                ..
+            })) if *key == repair_b
+        ),
+        "step 3 publishes the younger, re-verified onto the head the older left: {:?}",
+        driven.progress
+    );
+    let merged: Vec<(
+        u32,
+        Vec<TaskKey>,
+        crate::topology::events::MergeLeaseRelease,
+    )> = driven
+        .log
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::TaskMerged { data } => Some((
+                data.sequence.0,
+                data.satisfies.clone(),
+                data.lease_release.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        merged,
+        vec![
+            (
+                2,
+                vec![ALPHA, repair_a],
+                crate::topology::events::MergeLeaseRelease::Lineage { root: ALPHA },
+            ),
+            (
+                3,
+                vec![BETA, repair_b],
+                crate::topology::events::MergeLeaseRelease::Lineage { root: BETA },
+            ),
+        ],
+        "each publication satisfies its lineage's closure and releases its lineage lease, \
+         in lineage order"
+    );
+    let fold = replayed(&fixture);
+    for key in [ALPHA, BETA, repair_a, repair_b] {
+        assert_eq!(fold.task_state(key), Some(TaskState::Merged), "task {key}");
+    }
+    assert!(!fold.leases().expect("started").any_candidate_or_lineage());
+    assert!(fold.queue().expect("started").is_empty());
+    assert!(driven.invocations_balance);
+    assert_eq!(driven.entitlements_held, 0);
 }

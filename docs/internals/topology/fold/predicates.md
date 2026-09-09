@@ -155,28 +155,24 @@ moment a repair is registered.
 
 The binding rung `rung` of `key` is frozen as.
 
-**The eleventh reader, and it is deliberately only half of the fold's
-rule.** `check_attempt_started` accepts a binding that matches the
-human override when one is recorded, and the frozen rung otherwise.
-This returns the frozen rung's, and nothing else, for two reasons.
-
-First, no override is constructible in a run this crate currently
-drives: a `BindingOverride` arrives from an `Answered` event, and the
-loop's answer-ingest branch is not implemented, so the override arm has
-no reachable input. Second, and more important, **the fold's override
-check is partial**: `matches_override` compares agent, model and effort
-and says nothing about `tier` or `pinned`. A caller that built an
-override binding would be choosing those two fields unchallenged, and
-this reader is not the place to invent a rule the packet states
-somewhere the author of this method has not read.
-
-So a caller holding an override must not use this. The intended shape,
-when the answers branch lands, is that this method grows the second arm
-together with the passage that decides those two fields — not that a
-caller composes one from [`Self::binding_override`] and this.
+**The frozen half of the fold's rule.** `check_attempt_started` accepts
+a binding that matches the human override when one is recorded, and the
+frozen rung otherwise; this returns the frozen rung's and nothing else,
+and [`Self::rung_binding`] is the whole rule. A caller planning or
+recording an attempt reads that one, so an override is never composed
+from [`Self::binding_override`] and this by hand.
 
 `None` when the run has no registry, the task is not registered, or the
 ladder has no such rung.
+
+## `impl TopologyFold` › `pub fn rung_binding(&self, key: TaskKey, rung: u32) -> Option<RungBinding> {`
+
+The binding attempt `rung` of `key` runs under, as `check_attempt_started`
+will accept it: the validated override at the ladder's frozen floor,
+pinned, when one is recorded (E2 — `RungBinding::from_override`, all five
+fields), else the frozen rung. `None` for an override on a ladder that
+records no floor: there is no tier to bind at, and the validator refuses
+such an attempt for the same reason.
 
 ## `impl TopologyFold` › `pub fn open_no_attempt(&self, key: TaskKey) -> Option<GenerationId> {`
 

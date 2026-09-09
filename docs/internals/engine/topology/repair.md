@@ -80,9 +80,16 @@ required to carry (`pr8-triage.md` §5, record F1).
 The root's body followed by a merge-repair section: the rejected
 candidate's commit, ref, task and generation, the sequence, the rejecting
 head, and the evidence — the conflict paths, or the verification's
-verdict, gate outcome, review passes and detail. The other facts of the
-rejection (the lease effect, the admission) are the event's and the
-fold's, not the worker's.
+verdict, gate outcome, review passes and detail. For a conflict it also
+states the resolution protocol: resolve each path with file tools, declare
+it in the resolution manifest (`workspace_manager::RESOLUTION_MANIFEST`, as
+`resolved <path>` or `deleted <path>`), run no git command; the engine
+stages what is declared and refuses what is not (DESIGN §26.4), and reads
+the manifest once — removed when acted on, written again by a later attempt
+only for a resolution it changes. It once told the worker to `git add`/`git
+rm` the path, which no edit profile can. The
+other facts of the rejection (the lease effect, the admission) are the
+event's and the fold's, not the worker's.
 
 ## `fn render_paths(paths: &PathSet) -> String {`
 
@@ -136,3 +143,18 @@ and review results.
 `VerificationRecord.verdict` is `GatesFailed` when a gate refused,
 `Rejected` when a reviewer did; `gates_passed` is whether every gate
 passed; `reviews` are the pass records; `detail` is the failure's reason.
+
+## `pub fn one_off_binding(`
+
+The `BindingOverride` a `HumanBinding` answer activates, derived once at
+ingest (E2 as the errata read it): the repair ladder's frozen floor is the
+tier, the binding is pinned, the model is the catalogue's lowest for the
+chosen agent at or above that floor, and the effort is the policy's for
+that tier. Refused when the ladder records no floor (nothing to bind at)
+or the catalogue knows no such model, before anything is appended.
+
+## `fn catalogued_model(agent: &str, floor: Tier) -> Option<String> {`
+
+The catalogue's first entry for `agent` at the lowest tier at or above
+`floor`, which is what "the option names an agent, not a model" resolves
+to. `None` when the agent has no model there.

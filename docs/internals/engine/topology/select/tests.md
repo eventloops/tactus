@@ -256,10 +256,11 @@ than the refusal.
 Every branch an intermediate build *is* entitled to perform survives
 the checkpoint unchanged.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {`
 
 **Which of `Step`'s variants cross the checkpoint, counted rather than
-asserted in prose.**
+asserted in prose.** Seven cross and two do not since PR9 moved
+`RepairDispatch` across; the history below is why the count is a test.
 
 `Admitted`'s doc said "[`Step`] has seven variants and this has five.
 The two that are missing…" for as long as `Step` had **eight** and three
@@ -273,12 +274,12 @@ The `match` below has **no wildcard arm**, so adding a variant to `Step`
 stops this file compiling until someone says which side it falls on.
 That is the part a count in a doc comment cannot do.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {` › `let mut names = Vec::new();`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {` › `let mut names = Vec::new();`
 
 Exhaustive by construction: no `_` arm, so a ninth variant is a
 compile error here rather than a silently untested branch.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_five_three() {` › `let mut distinct = names.clone();`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {` › `let mut distinct = names.clone();`
 
 On a COPY: `names` must stay in the list's order, because it is
 zipped with it below. Sorting it in place paired every step with
@@ -624,7 +625,16 @@ registry, and the state `select` offers `RepairDispatch` from.
 
 Every other task is settled so the repair is the first ready key.
 
-## `fn a_repair_origin_task_is_refused_at_the_checkpoint_before_the_ceiling_and_any_append() {` › `let mut spend = Spend::new();`
+## `fn a_repair_origin_task_crosses_the_checkpoint_and_the_ceiling_binds_it_like_any_dispatch() {`
 
-The ceiling is not consulted for a step the checkpoint refuses: a
-`budget_exceeded` is an append, and the refusal is before any.
+A runnable repair is selected as `RepairDispatch`, crosses the checkpoint
+as `Admitted::RepairDispatch`, and is bound by the ceiling like any
+dispatch: a breach names the repair's key, and after the dispatch the
+same generation is offered again as a continuation. PR8's refusal of
+this step, and the "not consulted" ceiling that went with it, are gone
+with `T-REPAIR-DISPATCH`.
+
+## `fn a_repair_origin_task_crosses_the_checkpoint_and_the_ceiling_binds_it_like_any_dispatch() {` › `let mut spend = Spend::new();`
+
+The ceiling is consulted for a repair dispatch as for any other; a repair
+spends like any attempt.

@@ -2966,3 +2966,33 @@ verified and rejected in turn.
 The shape a merge repair freezes when `mid` intersects the root's
 ladder empty (`pr8-plan.md` R10): the fold's own ladder check accepts
 it, because an absent ceiling is the maximum of no tier.
+
+## `fn an_override_replaces_the_frozen_binding_for_every_later_attempt() {`
+
+E2 as the errata read it: the accepted binding under an override is
+exactly `RungBinding::from_override(binding, floor)` — tier the ladder's
+frozen floor, pinned — and a move in any of the five fields, the tier
+below or above the floor and the pin included, is refused. An override on
+a ladder that records no floor has no binding at all: `rung_binding`
+answers `None` and the attempt is refused naming the missing floor.
+
+## `fn a_repair_members_terminal_failure_folds_its_lineage_live_and_on_replay() {`
+
+B2: a repair's terminal failure fails its lineage — root and members
+`Failed`, the lineage lease released, the same fold live and on replay.
+
+## `fn an_ordinary_tasks_terminal_failure_leaves_a_live_lineage_exactly_as_it_was() {`
+
+The negative half of B2: a task outside the lineage failing changes
+nothing in it.
+
+## `fn a_lineage_lease_is_released_exactly_once_and_a_second_release_is_refused() {`
+
+ST-05 for a lineage lease: the publication that settles the root releases
+it, and a second release finds nothing to release.
+
+## `fn a_rejection_already_folded_is_refused_when_it_arrives_again() {`
+
+A rejection is folded once: replayed at the same sequence, or against the
+same candidate at the next, it finds no open transaction and no queued
+candidate, and is refused with the registry and the lineage unchanged.

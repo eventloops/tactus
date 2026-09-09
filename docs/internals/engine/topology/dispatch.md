@@ -221,6 +221,12 @@ Git put it.
 
 The lease relationship, and for a repair the candidate to materialize.
 
+## `pub struct Dispatched` › `pub materialized: Option<Materialization>,`
+
+What a repair's materialization observed — `Clean`, `Conflict` or
+`Empty` — kept on the value so `attempt_started` records it before the
+spawn. `None` for an ordinary dispatch.
+
 ## `impl Dispatched` › `pub fn quiescence(&self) -> Quiescence {`
 
 The quiescence a reuse of this worktree is checked against.
@@ -395,7 +401,8 @@ have to come from `git worktree list`; it is owed, not claimed here.
 ## `if dispatched.source().is_some() {`
 
 (4) A repair's materialization, which `ObjectSite::RepairMaterialize`
-itself places `Adjacent::After(DurableEvent::TaskDispatched)`.
+itself places `Adjacent::After(DurableEvent::TaskDispatched)`. What it
+observed rides on the value for the attempt to record.
 
 ## `pub struct DispatchRequest {`
 
@@ -559,14 +566,26 @@ failure.
 
 ## `pub fn materialize_repair(`
 
-Re-run a repair's recorded materialization in a verified or fresh worktree.
+Run, or re-run, a repair's recorded materialization in a verified or fresh
+worktree, and say what it observed.
 
-`Object.RepairMaterialize` is `git cherry-pick --no-commit`, whose merge
-objects are referenced by the worktree index (R9). It is idempotent only in
-the sense that re-running it *in a worktree at the recorded base* reproduces
-the same index — which is exactly why `T-DISPATCH` says "re-run the recorded
-materialization in a **verified or fresh** worktree" and why a caller reaches
-this through [`resume_open_no_attempt`] rather than directly.
+`Object.RepairMaterialize` restores the worktree's index and checkout to
+`HEAD`'s tree (`git read-tree --reset -u HEAD`), then runs
+`git cherry-pick --no-commit`, whose merge objects are referenced by the
+worktree index (R9), and removes the state files the pick leaves
+(`MERGE_MSG`, `AUTO_MERGE`) so the worktree is quiescent again. It is
+idempotent in a worktree at the recorded base **because of the restore**: a
+fresh worktree and one whose index already holds a completed pick both get
+one pick onto the base's tree. A pick onto the merged index is not a no-op
+— it is a three-way merge, and PR #249's crash review measured it applying
+its hunk again on every resume
+(`a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces`)
+— which is why `T-DISPATCH`'s "re-run the recorded materialization in a
+**verified or fresh** worktree" needs the funnel to start from the base
+whatever the verify found, and why a caller reaches this through
+[`resume_open_no_attempt`] rather than directly. The observation is the
+funnel's `Materialized`, mapped one-to-one onto the wire's
+`Materialization` by [`observed_kind`].
 
 ### Errors
 
@@ -580,13 +599,24 @@ The whole of `T-DISPATCH`'s resume action for a live process, in order.
 
 Verify-or-recreate first, then — for a repair — the materialization, because
 the materialization is what has to land in a worktree that is already known
-good. A repair whose materialization *completed* before the kill leaves
-`CHERRY_PICK_HEAD` in its git dir, which `Worktree.Verify` reads as
-administrative residue and refuses, so such a worktree is recreated and
-re-materialized rather than reused. That is convergent and deliberate: the
-alternative is a verify that tries to decide whether a half-applied index is
-the same half-applied index, which is not a question a read-only observation
-can answer.
+good. Measured on git 2.43 (`--no-commit` leaves no `CHERRY_PICK_HEAD`): a
+kill inside the pick leaves one of five states — nothing, `index.lock`, the
+merged index with no state file, the merged index with `MERGE_MSG.lock`
+held, the merged index with `MERGE_MSG`. The two lock forms and `MERGE_MSG`
+are what `Worktree.Verify` reads and recreates from. The merged index with
+no state file — the index published and unlocked, the process dead before
+`MERGE_MSG.lock` — is indistinguishable from a pick that completed, whose
+state files the funnel cleared: neither leaves anything the verify reads,
+so the worktree is reused as it stands (`Reuse::Verified`) and the funnel
+restores the base's tree before it picks again, reporting the same
+observation
+(`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`,
+for the clean and the conflicting source). Either way the result is one
+pick onto the base's tree in a worktree at the recorded base, and
+[`Resumed`] carries both what the verify decided and what the
+materialization observed. (This note once listed only the residue-bearing
+states for a kill inside the pick; PR #249's fourth-round record review
+found the copy.)
 
 ### Errors
 
@@ -626,3 +656,19 @@ Forced removal of a worktree and then its intent.
 administrative residue left by an interrupted command … never blocks
 reclaim". Worktree first, then intent, so that the durable record naming the
 worktree outlives the worktree rather than the other way round.
+
+## `const fn observed_kind(observed: Materialized) -> Materialization {`
+
+The funnel's observation as the wire records it. The funnel's three
+variants are matched exhaustively, so a fourth funnel outcome is a compile
+error here; the wire's `Materialization` already has a fourth, `Retained`,
+which a same-generation retry records and no materialization ever observes,
+and a fifth on that side would not fail this match — the record's Class A
+inventory is what says the two enums correspond. (This note once claimed the
+guard both ways; PR #249's fourth-round record review read the enums.)
+
+## `pub struct Resumed {`
+
+What [`resume_open_no_attempt`] did: whether the worktree was reused or
+recreated, and — for a repair — what the materialization observed, which
+is what the continuation's `attempt_started` records.

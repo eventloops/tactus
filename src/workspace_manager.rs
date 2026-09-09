@@ -62,6 +62,7 @@
     clippy::disallowed_macros
 )]
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write as _;
@@ -687,6 +688,417 @@ impl Slot {
 
 mod worktree;
 pub use self::worktree::{Quiescence, VerifyFailure, WorktreeRecord};
+
+/// What a repair materialization observed in its worktree; see
+/// [`WorkspaceManager::repair_materialize`].
+///
+/// The three shapes a `git cherry-pick --no-commit` of a protected source
+/// candidate reaches without being an error. `attempt_started` records the
+/// corresponding `Materialization` before the worker is spawned; the wire's
+/// fourth variant, `Retained`, is a same-generation retry's, and no
+/// materialization runs for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Materialized {
+    /// The candidate's change applied and the index now carries it.
+    Clean,
+    /// The change conflicted; the index carries unmerged entries and the
+    /// worker's first job is to resolve them.
+    Conflict,
+    /// The change is already present on this base, so the index carries
+    /// nothing new. `repairs.empty_source`: "an Empty observation proceeds as
+    /// an ordinary attempt; an empty diff fails under the existing rule".
+    Empty,
+}
+
+/// The resolution manifest: the file a repair worker writes at the root of
+/// its worktree to say which conflicted paths it resolved, and how.
+///
+/// `DESIGN.md` §26.4: the worker "resolves each conflicted file with its file
+/// tools and records the paths it resolved in the run's resolution manifest;
+/// it runs no git command, because the engine owns git (§4)". The manifest is
+/// what makes that sentence hold. An edit profile has file tools and gate
+/// commands and nothing else (§16, §20), so no worker can stage a resolution
+/// — PR #249's second repair round measured it for all three adapters, and
+/// Codex's `workspace-write` sandbox keeps `.git` read-only, the one switch
+/// that admits `git add` admitting `git commit` with it. And the index alone
+/// cannot say whether an unmerged entry was *resolved* or *abandoned*: a
+/// `-merge` binary conflict resolved keep-ours is, in the file bytes,
+/// identical to one the worker never touched. So the declaration carries the
+/// intent: the engine stages what is declared
+/// ([`WorkspaceManager::candidate_stage`]) and refuses what is not.
+///
+/// One line per path: `resolved <path>` for a path whose working-tree content
+/// (or absence) is the resolution, `deleted <path>` for a path resolved by
+/// deleting it. Blank lines and `#` comments are skipped. A leading list
+/// bullet, one colon after the keyword, and backticks or double quotes around
+/// the path are tolerated; `./` in front of the path is dropped; a Windows
+/// worker's `\r\n` and backslashes read as their Unix spellings. A quoted
+/// path is taken exactly, so a name that begins or ends with whitespace is
+/// written in quotes (`resolved " c.txt "`); an unquoted one is trimmed.
+/// Anything else — a second colon, a keyword that is neither word, a line
+/// with no path — is a malformed manifest ([`ResolutionManifest::parse`]),
+/// and a capture that reads one stages nothing.
+///
+/// A path is spelt as the index spells it ([`Declaration::names`]): the same
+/// characters, in the same case and the same Unicode form. A spelling that
+/// differs only by case matches nothing and, declared beside the index's
+/// spelling with the other keyword, is refused as a contradiction on every
+/// platform, because on a case-insensitive filesystem the two name one file
+/// (`plan_resolutions` in `engine::topology::attempt`). A spelling in another
+/// Unicode normalization form is not read as an alias: it matches nothing,
+/// and a pair that differs only in normalization form is not refused — the
+/// boundary `PR249-MANIFEST-NORMALIZATION-ALIAS` records, since the standard
+/// library carries no normalization tables.
+///
+/// A root-level file, deliberately: the Claude adapter denies the worker
+/// every write under `.upstroke/`, `.git/` and `.claude/`, and the run
+/// directory is not in a task worktree at all. The name is reserved for the
+/// protocol, and what the reservation means is stated exactly by
+/// [`ManifestName`]: the worker's manifest — an untracked regular file of
+/// this name, under whatever spelling the checkout lists it by, since a
+/// checkout that folds case may hold the worker's write under a case variant
+/// of the name ([`ManifestName::Manifest`]'s `spelling`) — is never part of a
+/// candidate, because [`WorkspaceManager::candidate_stage`] excludes it, by
+/// that spelling, from the `add -A` whenever the ignore rules would not
+/// already keep it out, and stages whatever the index still held under the
+/// name when the file stands where a directory was; a file of this name the
+/// repository *tracks* — as spelt, or
+/// in another case, which on a checkout that folds case is the same file —
+/// or a directory of this name, is the repository's own and not a manifest at
+/// all, so an ordinary capture stages it like any other path and a conflict
+/// repair — which has to read the manifest — is refused before it stages
+/// anything ([`WorkspaceManager::resolution_manifest`]). A repository that
+/// tracks a file of this name in any case therefore cannot run the
+/// conflict-repair protocol, and is told so rather than having its file read
+/// as declarations.
+///
+/// **The manifest does not outlive a capture that completes with it.** The
+/// capture that reads it and stages what it declares removes it, and one that
+/// finds nothing for it to govern removes it unread — `candidate_stage`
+/// removes the worker's file whatever the capture did with it, as the last
+/// step of its staging — so that a declaration is applied once, by the
+/// capture of the attempt that wrote it: a same-generation retry that revises
+/// a resolution writes the manifest again, and one that revises nothing
+/// writes nothing, its edits and deletions captured by the ordinary `add -A`
+/// like any path's. Two captures leave a manifest standing: one that refuses
+/// it, which stages nothing, and one that does not reach the removal — a Git
+/// error at the declared staging or the `add -A`, a held `index.lock`, the
+/// process killed — which leaves whatever it had staged in the index (PR
+/// #249's sixth-round manifest-contract review executed the first two). A
+/// further capture of that worktree would read the manifest again; the driver
+/// makes none, since a refusal is not resumable and a capture error interrupts
+/// the attempt, and either closes the generation, so the next attempt is a
+/// fresh generation and worktree (`design/26` §26.4; until that round this
+/// paragraph said only a refused manifest stays and that the next capture
+/// reads it). Nothing else leaves a manifest standing. Until PR #249's fifth
+/// repair round a manifest the capture did not read was kept, on the argument
+/// that nothing could govern it later; its adequacy and manifest-contract
+/// reviews each declared a settled deletion again while nothing was governed,
+/// recreated the path in the next attempt, and had the attempt after that
+/// read the standing declaration and delete the replacement — the index's
+/// resolve-undo record survives a deletion, and an ordinary addition puts the
+/// path back under it, so an empty governed set says nothing about the next
+/// capture's.
+pub const RESOLUTION_MANIFEST: &str = ".upstroke-resolved";
+
+/// The manifest word for a path whose working-tree content is the resolution.
+pub const RESOLVED_KEYWORD: &str = "resolved";
+
+/// The manifest word for a path resolved by deleting it.
+pub const DELETED_KEYWORD: &str = "deleted";
+
+/// How the worker declared one conflicted path resolved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionKind {
+    /// `resolved <path>`: whatever the working tree holds at the path is the
+    /// resolution — the bytes the worker wrote, or, where its tools removed
+    /// the file, its absence (`git add` stages a removal too).
+    Resolved,
+    /// `deleted <path>`: the path is resolved by deleting it, whether or not
+    /// the file is still there. A worker whose file tools cannot delete says
+    /// so here, and the engine's `git rm` removes it.
+    Deleted,
+}
+
+/// One line of a parsed manifest: a path as the worker spelt it, and how it
+/// says the path is resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declaration {
+    pub path: String,
+    pub kind: ResolutionKind,
+}
+
+impl Declaration {
+    /// Whether this declaration names `index_path`, an unmerged entry as the
+    /// index spells it (forward slashes, relative to the worktree root).
+    ///
+    /// Compared as paths, not as strings: `std::path` reads a Windows
+    /// worker's backslashes as separators on Windows and as ordinary bytes
+    /// elsewhere, which is what each platform's Git does with them too.
+    #[must_use]
+    pub fn names(&self, index_path: &str) -> bool {
+        Path::new(&self.path)
+            .components()
+            .eq(Path::new(index_path).components())
+    }
+
+    /// Whether this declaration spells `index_path` in another case: the same
+    /// components once every character is lowercased, and not the same
+    /// components as written.
+    ///
+    /// The alias is read for one purpose, refusing: a case-insensitive
+    /// filesystem reads `dir/c.txt` and `Dir/C.txt` as one file, so a manifest
+    /// that declares one `resolved` and the other `deleted` contradicts itself
+    /// there, and a manifest whose only declaration of an entry is in the
+    /// wrong case names that file on such a filesystem and nothing on a
+    /// case-sensitive one. Both are refused on every platform, so that a
+    /// manifest means the same thing wherever it is read; neither is ever
+    /// matched, so staging keeps the index's spelling. Only case is folded,
+    /// and it is folded **one character at a time** (`char::to_lowercase`),
+    /// never as a string: `str::to_lowercase` is contextual, and turns a
+    /// final capital sigma into `ς` while leaving `σ` alone, so it read `ΟΣ`
+    /// and `οσ` — an ordinary capital/small pair, and one file on Windows,
+    /// measured on the guest — as different names, and PR #249's fourth-round
+    /// manifest-contract and adequacy reviews each captured the contradiction
+    /// unrefused. A pair that differs by `σ` against `ς` is not an alias here,
+    /// which is what the guest's filesystem says of it too. No tables the
+    /// standard library lacks are consulted, and Unicode normalization forms
+    /// are not compared ([`RESOLUTION_MANIFEST`]).
+    #[must_use]
+    pub fn names_in_another_case(&self, index_path: &str) -> bool {
+        let fold = |path: &str| -> Vec<String> {
+            Path::new(path)
+                .components()
+                .map(|component| {
+                    component
+                        .as_os_str()
+                        .to_string_lossy()
+                        .chars()
+                        .flat_map(char::to_lowercase)
+                        .collect()
+                })
+                .collect()
+        };
+        !self.names(index_path) && fold(&self.path) == fold(index_path)
+    }
+}
+
+/// What holds the root-level name the resolution manifest reserves
+/// ([`RESOLUTION_MANIFEST`]) in a task worktree, read by
+/// [`WorkspaceManager::manifest_name`].
+///
+/// The reservation is a name, and a name can be taken. This is the whole
+/// statement of what the engine treats as its own and what it does not: the
+/// worker's manifest is an **untracked regular file**; everything else that can
+/// hold the name is the repository's, and so is the name itself when the index
+/// holds it in another case. `candidate_stage` and `resolution_manifest` both
+/// decide from this one reading, so the exclusion and the read cannot disagree
+/// about which file is the manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ManifestName {
+    /// Nothing is at the path, and the index holds no entry at the name.
+    Absent,
+    /// An untracked regular file: the worker's manifest. `spelling` is the
+    /// name as the checkout lists the file — `git ls-files --others` walks
+    /// the directory and reports the entry it finds — which is the name as
+    /// written except on a checkout that folds case, where the worker's write
+    /// to `.upstroke-resolved` may have landed in an entry the directory
+    /// already held under another case (PR #249's fifth-round
+    /// manifest-contract review, natively on the Windows guest: the worker
+    /// created `.Upstroke-Resolved`, wrote its declaration through the
+    /// lowercase name, and the exact-spelling reads listed nothing, so the
+    /// file was classified ignored, staged into the candidate by the bare
+    /// `add -A` with its declaration text, and left on disk). The exclusion
+    /// and the removal name the file by this spelling, and the read opens it
+    /// by this spelling, so the three cannot identify different files; on a
+    /// checkout that does not fold case an untracked case variant beside the
+    /// worker's file is a second file, staged as one. `ignored` is whether
+    /// the repository's ignore rules keep the file out of `add -A` by
+    /// themselves — when they do, no exclusion is needed, and one exactly
+    /// naming an ignored path makes `git add` fail (measured on git 2.43: the
+    /// exclusion item is matched against the ignored paths it collects, and
+    /// `add` exits 1 "The following paths are ignored"). `displaces_directory`
+    /// is whether the index still holds entries *under* the name — a
+    /// directory of the repository's whose files the working tree no longer
+    /// holds, since a regular file stands where it was. The exclusion is a
+    /// directory prefix as well as a name, and would keep the deletion of
+    /// every one of them out of the candidate (PR #249's fourth-round
+    /// manifest-contract review: `.upstroke-resolved/data.txt` deleted with
+    /// its directory, a manifest written at the name, and the captured tree
+    /// still holding the file), so `candidate_stage` stages what the index
+    /// held under the name by its own pathspec first — with `add -u`, which
+    /// walks the index and never the directory, because the `add -A` the
+    /// fourth round used collected the ignored regular file at the name as a
+    /// path its pathspec named and exited 1 after staging the deletion (PR
+    /// #249's fifth-round regression review).
+    Manifest {
+        spelling: String,
+        ignored: bool,
+        displaces_directory: bool,
+    },
+    /// The index holds an entry at the name, at any stage — as the name is
+    /// spelt, or in another case: a file the repository tracks, so
+    /// application data, whatever the working tree holds there now.
+    /// `spelling` is the index's. A case variant is the repository's on every
+    /// platform, so that a repository means one thing wherever it is checked
+    /// out: on a checkout that folds case the worker's write to the lowercase
+    /// name *is* a write to that file — PR #249's fourth-round
+    /// manifest-contract review, natively on the Windows guest: the tracked
+    /// `.UPSTROKE-RESOLVED` overwritten, both exact-spelling reads empty, the
+    /// declaration text staged into the candidate under the tracked name —
+    /// and on one that does not, the protocol would run for a plan that
+    /// cannot run elsewhere.
+    Tracked { spelling: String },
+    /// Untracked and not a regular file — a directory (`.upstroke-resolved/`
+    /// with contents of the repository's own), a symbolic link, or something
+    /// else. `what` names it for the refusal.
+    Other { what: &'static str },
+}
+
+/// The one entry among `records` that is `name`: the record spelt as `name`
+/// is when there is one, and otherwise the record that differs from it by
+/// ASCII case alone.
+///
+/// The rule [`WorkspaceManager::manifest_name`] applies to the index's
+/// records and to the directory's alike, so that a tracked name and an
+/// untracked one are found the same way. Exact first: on a checkout that does
+/// not fold case an entry at the name and one at a variant are two files and
+/// the one spelt as written is the manifest's; on one that does, the two
+/// cannot both exist, and whichever spelling the checkout holds is where the
+/// worker's write went (PR #249's fourth- and fifth-round manifest-contract
+/// reviews, natively on the Windows guest: a tracked `.UPSTROKE-RESOLVED`,
+/// then an untracked `.Upstroke-Resolved`, each the lowercase name's file).
+/// `name` has only ASCII to fold, which is why `eq_ignore_ascii_case` is the
+/// whole comparison; entries under the name (`<name>/…`) are neither equal
+/// nor a case of it.
+fn name_spelling<'a>(records: &[&'a [u8]], name: &[u8]) -> Option<&'a [u8]> {
+    records
+        .iter()
+        .copied()
+        .find(|record| *record == name)
+        .or_else(|| {
+            records
+                .iter()
+                .copied()
+                .find(|record| record.eq_ignore_ascii_case(name))
+        })
+}
+
+/// One conflicted path's declared resolution, reconciled against the index
+/// and ready to be staged by [`WorkspaceManager::candidate_stage`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredResolution {
+    /// The path as the index spells it, never as the manifest did.
+    pub path: String,
+    pub kind: ResolutionKind,
+}
+
+impl DeclaredResolution {
+    /// The staging command the engine runs for this resolution inside
+    /// `Object.CandidateStage`: `git add -- :(literal)<path>` or
+    /// `git rm --quiet -- :(literal)<path>`.
+    ///
+    /// `:(literal)` because the path is an exact index entry and not a
+    /// pattern: without it `a[1].txt` is a glob, and a path beginning with
+    /// `:` is pathspec magic. The fixed words are
+    /// [`WorkspaceManager::RESOLUTION_ADD_ARGV`] and
+    /// [`WorkspaceManager::RESOLUTION_RM_ARGV`], kept as lists for the reason
+    /// [`WorkspaceManager::CANDIDATE_STAGE_ARGV`] gives.
+    #[must_use]
+    pub fn argv(&self) -> Vec<OsString> {
+        let fixed: &[&str] = match self.kind {
+            ResolutionKind::Resolved => &WorkspaceManager::RESOLUTION_ADD_ARGV,
+            ResolutionKind::Deleted => &WorkspaceManager::RESOLUTION_RM_ARGV,
+        };
+        let mut argv: Vec<OsString> = fixed.iter().map(OsString::from).collect();
+        argv.push(OsString::from(format!(":(literal){}", self.path)));
+        argv
+    }
+}
+
+/// What the worker's resolution manifest said, as read at capture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResolutionManifest {
+    /// No manifest was written: nothing is declared resolved.
+    Absent,
+    /// Every line parsed. Duplicates are kept as written; the capture
+    /// reconciles them against the index's unmerged entries.
+    Declared(Vec<Declaration>),
+    /// A line that is neither form, or a file that is not UTF-8. Nothing is
+    /// staged from such a manifest; `detail` is what the worker is told.
+    Malformed { detail: String },
+}
+
+impl ResolutionManifest {
+    /// Read a manifest's text under the grammar [`RESOLUTION_MANIFEST`]
+    /// states.
+    #[must_use]
+    pub fn parse(text: &str) -> Self {
+        let mut declared = Vec::new();
+        for (index, raw) in text.lines().enumerate() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // A list bullet in front of the line is tolerated, once.
+            let line = line
+                .strip_prefix('-')
+                .or_else(|| line.strip_prefix('*'))
+                .map_or(line, str::trim_start);
+            let Some((keyword, rest)) = line.split_once(char::is_whitespace) else {
+                return Self::malformed(index, raw);
+            };
+            // One colon after the keyword is tolerated; `resolved:::` is not the
+            // grammar, and `trim_end_matches` read it as if it were.
+            let kind = match keyword.strip_suffix(':').unwrap_or(keyword) {
+                RESOLVED_KEYWORD => ResolutionKind::Resolved,
+                DELETED_KEYWORD => ResolutionKind::Deleted,
+                _ => return Self::malformed(index, raw),
+            };
+            let path = unquoted(rest.trim());
+            if path.is_empty() {
+                return Self::malformed(index, raw);
+            }
+            declared.push(Declaration {
+                path: path.to_owned(),
+                kind,
+            });
+        }
+        Self::Declared(declared)
+    }
+
+    fn malformed(index: usize, raw: &str) -> Self {
+        Self::Malformed {
+            detail: format!(
+                "line {} of `{RESOLUTION_MANIFEST}` is neither `{RESOLVED_KEYWORD} <path>` nor \
+                 `{DELETED_KEYWORD} <path>`: {}",
+                index + 1,
+                raw.trim_end()
+            ),
+        }
+    }
+}
+
+/// A manifest path without the quoting and the `./` a worker may have put
+/// around it.
+///
+/// What is inside the quotes is the path, exactly: a quoted `" c.txt "` names
+/// the index entry ` c.txt `, spaces and all, which is what quoting is for. An
+/// earlier version trimmed inside the quotes as well, so the quoted form could
+/// not name an entry whose name begins or ends with whitespace, and PR #249's
+/// manifest-contract review refused the real conflicted entry that way.
+fn unquoted(path: &str) -> &str {
+    let path = ['`', '"']
+        .into_iter()
+        .find_map(|quote| path.strip_prefix(quote)?.strip_suffix(quote))
+        .unwrap_or(path);
+    let path = path.strip_prefix("./").unwrap_or(path);
+    if cfg!(windows) {
+        path.strip_prefix(".\\").unwrap_or(path)
+    } else {
+        path
+    }
+}
 
 /// What a failed proposal cherry-pick left behind; see
 /// [`WorkspaceManager::proposal_state`].
@@ -1605,7 +2017,102 @@ impl WorkspaceManager {
     /// `PR5D-PROCESS-FUNNEL-TAKES-NO-SITE` in `reviews/findings/`, owned by
     /// PR6/PR7 with `src/runner/**` frozen — and this comment does not claim it
     /// does.
+    ///
+    /// This list is the whole argv of an ordinary capture. [`Self::candidate_stage`]
+    /// appends one pathspec beside it in one case only — an untracked,
+    /// unignored regular file holds the manifest's name —
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] followed by the spelling
+    /// the checkout lists that file by; the two whole lists it runs beside
+    /// this one in the manifest's states
+    /// ([`Self::CANDIDATE_STAGE_DISPLACED_DIRECTORY_ARGV`], and
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV`] with
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC`] and the same
+    /// spelling) are separate children of the same funnel, not arguments of
+    /// this one. Those two spelled pathspecs are the two dynamic arguments the
+    /// argv tripwire declares for the funnel. The sampler's populated worktree
+    /// holds no such file, so the child it runs is the child the funnel runs
+    /// there.
     pub(crate) const CANDIDATE_STAGE_ARGV: [&str; 4] = ["add", "-A", "--", "."];
+    /// The magic of the pathspec [`Self::candidate_stage`] appends to
+    /// [`Self::CANDIDATE_STAGE_ARGV`] to keep the worker's resolution manifest
+    /// ([`RESOLUTION_MANIFEST`]) out of the candidate, completed by the
+    /// spelling the checkout lists the file by ([`ManifestName::Manifest`]):
+    /// `:(exclude,top)` names the root-level path whatever the working
+    /// directory, `literal` takes the spelling as itself. Appended only when
+    /// [`ManifestName::Manifest`] holds the name and the ignore rules do not
+    /// already keep it out. The second repair round's version was
+    /// unconditional, in the shared list, under a comment claiming "an
+    /// exclusion that matches nothing excludes nothing": it also matched a
+    /// tracked file of that name (whose edit an ordinary capture then dropped
+    /// from the tree with no refusal), every descendant of a directory of that
+    /// name (a pathspec is a directory prefix too), and, exactly naming an
+    /// ignored path, made `add` fail — PR #249's third-round regression and
+    /// manifest-contract reviews, one witness each. Until the fifth round it
+    /// spelt the name as written, and on the Windows guest excluded nothing
+    /// when the directory held the worker's file as `.Upstroke-Resolved`.
+    /// `CANDIDATE_STAGE_ARGV`'s doc records why the exclusion is not in the
+    /// list.
+    pub(crate) const CANDIDATE_STAGE_MANIFEST_EXCLUSION: &str = ":(exclude,top,literal)";
+    /// The `add -u` [`Self::candidate_stage`] runs first when the worker's
+    /// manifest displaces a directory of the repository's
+    /// ([`ManifestName::Manifest`] with `displaces_directory`): the index
+    /// still holds entries under the manifest's name, the working tree holds a
+    /// regular file there, and [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] —
+    /// a directory prefix as well as a name — would keep every one of their
+    /// deletions out of the candidate (PR #249's fourth-round manifest-contract
+    /// review: `.upstroke-resolved/data.txt` deleted with its directory, a
+    /// manifest written at the name, the captured tree still holding the
+    /// file). `-u` and not `-A`: what this command stages is what the index
+    /// held under the name — deletions and modifications of tracked entries —
+    /// and `-u` walks the index alone, while `-A` also walks the directory
+    /// collecting untracked paths its pathspec names, and a pathspec
+    /// `<name>/` names an ignored regular file at `<name>` as a path under
+    /// it (git's `exclude_matches_pathspec`: an item longer than an ignored
+    /// path with `/` at the path's length collects it), so the fourth
+    /// round's `add -A` staged the deletion and then exited 1 "The following
+    /// paths are ignored", and `git_ok` aborted the capture with the declared
+    /// resolution already staged (PR #249's fifth-round regression review;
+    /// measured on git 2.43, `-u` exits 0 in the same state). The trailing
+    /// slash matches the index's entries under the name and never the regular
+    /// file at it — a pathspec longer than a name cannot match that name —
+    /// and `icase` matches the directory in another case on a checkout that
+    /// folds case, while on one that does not it restages a directory the
+    /// `add -A -- .` stages anyway. Measured on git 2.43: with nothing under
+    /// the name in the index the pathspec matches nothing and `add -u` exits
+    /// 128, which is why the command runs only in that state.
+    pub(crate) const CANDIDATE_STAGE_DISPLACED_DIRECTORY_ARGV: [&str; 4] =
+        ["add", "-u", "--", ":(top,literal,icase).upstroke-resolved/"];
+    /// The removal of the worker's manifest [`Self::candidate_stage`] runs
+    /// after the `add -A` whenever the name holds the worker's manifest
+    /// ([`ManifestName::Manifest`]), read or not: `git clean` of the one
+    /// untracked path, `-x` so that an ignored manifest goes the same way,
+    /// `--force` because `clean.requireForce` defaults on, and the pathspec
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC`] completed by the
+    /// spelling the checkout lists the file by. A tracked file of the name
+    /// never reaches it (a conflict repair refused before staging; an ordinary
+    /// capture's `manifest_name` reads `Tracked`), and `clean` would not touch
+    /// one.
+    pub(crate) const CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV: [&str; 5] =
+        ["clean", "--quiet", "--force", "-x", "--"];
+    /// The magic of the pathspec that completes
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV`]: the root-level path,
+    /// taken as itself, spelt as the checkout lists it. Until PR #249's fifth
+    /// round the pathspec spelt the name as written, and on the Windows guest
+    /// left a manifest the directory held as `.Upstroke-Resolved` in place.
+    pub(crate) const CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC: &str = ":(top,literal)";
+    /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes the `:(literal)` pathspec of
+    /// one declared resolution ([`DeclaredResolution::argv`]); run inside the
+    /// same `Object.CandidateStage` funnel, before the list above, and not
+    /// sampled — the sampled child of that site is the `add -A`.
+    pub(crate) const RESOLUTION_ADD_ARGV: [&str; 2] = ["add", "--"];
+    /// See [`Self::RESOLUTION_ADD_ARGV`]: the resolution by deletion.
+    /// `--force` overrides `rm`'s up-to-date check, which refuses a path with
+    /// changes staged in the index — the state a retained retry revising an
+    /// earlier attempt's `resolved` to `deleted` finds the path in (measured
+    /// on git 2.43: "the following file has changes staged in the index",
+    /// exit 1). An unmerged path needed no override; the flag changes nothing
+    /// there.
+    pub(crate) const RESOLUTION_RM_ARGV: [&str; 4] = ["rm", "--quiet", "--force", "--"];
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes no dynamic argument.
     pub(crate) const CANDIDATE_WRITE_TREE_ARGV: [&str; 1] = ["write-tree"];
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes the commit to pick.
@@ -2380,10 +2887,83 @@ impl WorkspaceManager {
     // The Object group (R9 / R10 / R24 / R27)
     // -----------------------------------------------------------------------
 
-    /// `Object.CandidateStage` — `git add -A` in the task worktree.
+    /// `Object.CandidateStage` — the worker's declared conflict resolutions
+    /// staged one by one, then `git add -A` in the task worktree, then the
+    /// worker's manifest removed.
     ///
     /// The blob objects it writes are referenced by that worktree's index: R9,
     /// which is exactly what `ObjectSite::CandidateStage.row()` answers.
+    ///
+    /// # The engine stages the worker's resolutions
+    ///
+    /// `resolutions` is what the capture reconciled between the index's
+    /// conflicted entries and the worker's manifest ([`RESOLUTION_MANIFEST`]):
+    /// each is staged by its own `git add -- :(literal)<path>` or `git rm
+    /// --quiet --force -- :(literal)<path>` ([`DeclaredResolution::argv`])
+    /// before the `add -A`, because `add -A` collapses every unmerged entry
+    /// unconditionally — an untouched conflicted file is staged with its
+    /// markers inside — and so destroys the very record of what was still
+    /// conflicted. The engine runs these and the worker never does: §4, "the
+    /// engine creates branches, stages, commits". The caller stages nothing
+    /// while any unmerged entry is undeclared (`AttemptContext::capture`
+    /// refuses first), so an ordinary capture passes an empty list and runs
+    /// the one `add -A` it always ran.
+    ///
+    /// # The manifest stays out of the candidate
+    ///
+    /// The `add -A` gets [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] appended,
+    /// completed by the spelling the checkout lists the file by, exactly when
+    /// [`Self::manifest_name`] reads the worker's manifest at the root — an
+    /// untracked regular file the ignore rules do not already keep out
+    /// ([`ManifestName::Manifest`] with `ignored: false`). In every other
+    /// state of that name the list runs bare, which is what an ordinary
+    /// capture always ran: an absent name needs no exclusion; an ignored
+    /// manifest is kept out by the ignore rules, and an exclusion exactly
+    /// naming it would make `add` fail; a tracked file of that name — as
+    /// spelt, or in another case — is the repository's data and its edit is
+    /// staged like any other; a directory of that name holds ordinary paths
+    /// and a pathspec exclusion would have excluded every one of them. The
+    /// exclusion is a directory prefix as well as a name, so when the worker's
+    /// manifest stands where a directory of the repository's was (`Manifest`
+    /// with `displaces_directory`) what the index still holds under the name
+    /// is staged first, by [`Self::CANDIDATE_STAGE_DISPLACED_DIRECTORY_ARGV`],
+    /// their deletions included. So the candidate never carries the worker's
+    /// manifest, and never silently omits a path of the repository's own.
+    ///
+    /// # The manifest does not outlive the capture
+    ///
+    /// When the name holds the worker's manifest, the file is removed after
+    /// the `add -A` by [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV`] — whether
+    /// the caller read it and is staging what it declared, or found nothing
+    /// for it to govern and did not read it. A declaration is applied once, by
+    /// the capture of the attempt that wrote it. The manifest is the worker's
+    /// message to that capture, and a message left standing after it was
+    /// reread by a later capture of a retained generation as if freshly
+    /// written: PR #249's fourth-round regression and manifest-contract
+    /// reviews each declared `deleted c.txt` in attempt 1, recreated `c.txt`
+    /// with a file write in attempt 2 (an ordinary addition — a settled
+    /// deletion governs nothing) and edited another file in attempt 3, and the
+    /// third capture, finding the recreated path governed again (the index's
+    /// resolve-undo record survives the deletion, and the addition put an
+    /// entry back beside it), reread the standing declaration and removed the
+    /// file from the disk and the candidate, reporting success. The fourth
+    /// round removed the manifest a capture *acted on*, and its adequacy and
+    /// manifest-contract reviews then declared the settled deletion again in
+    /// attempt 2 — nothing governed, the manifest not read and kept —
+    /// recreated the file in attempt 3 and lost it in attempt 4 the same way.
+    /// Nothing in the index distinguishes a recreated path from one a retry is
+    /// revising to a deletion; what distinguishes them is whether the
+    /// declaration is the current attempt's, and the manifest's presence is
+    /// that record exactly when no completed capture leaves one behind. A
+    /// capture that refuses the manifest never reaches this funnel and leaves
+    /// it standing with nothing staged; one that fails inside this funnel
+    /// before the removal — the declared staging, the displaced staging or the
+    /// `add -A` returning a Git error — leaves it standing with whatever was
+    /// staged. A further capture of the worktree would read it again; the
+    /// driver makes none, because either outcome closes the generation
+    /// ([`RESOLUTION_MANIFEST`]'s doc, `design/26` §26.4). Until PR #249's
+    /// sixth repair round this paragraph said the next capture reads a refused
+    /// manifest.
     ///
     /// # Errors
     ///
@@ -2392,6 +2972,7 @@ impl WorkspaceManager {
         &self,
         hooks: &mut dyn EffectHooks,
         slot: &Slot,
+        resolutions: &[DeclaredResolution],
     ) -> Result<(), UpstrokeError> {
         self.revalidate()?;
         let path = self.slot_target(slot)?;
@@ -2400,13 +2981,49 @@ impl WorkspaceManager {
             EffectSiteId::Object(ObjectSite::CandidateStage),
             || {
                 self.revalidate_acted_through(Primitive::CandidateStage, Some(slot), None)?;
-                self.git_ok(
-                    &path,
-                    &Self::CANDIDATE_STAGE_ARGV
+                for resolution in resolutions {
+                    self.git_ok(&path, &resolution.argv())?;
+                }
+                let name = self.manifest_name(&path)?;
+                if matches!(
+                    &name,
+                    ManifestName::Manifest {
+                        displaces_directory: true,
+                        ..
+                    }
+                ) {
+                    let displaced: Vec<OsString> = Self::CANDIDATE_STAGE_DISPLACED_DIRECTORY_ARGV
                         .iter()
                         .map(OsString::from)
-                        .collect::<Vec<_>>(),
-                )?;
+                        .collect();
+                    self.git_ok(&path, &displaced)?;
+                }
+                let mut argv: Vec<OsString> = Self::CANDIDATE_STAGE_ARGV
+                    .iter()
+                    .map(OsString::from)
+                    .collect();
+                if let ManifestName::Manifest {
+                    spelling,
+                    ignored: false,
+                    ..
+                } = &name
+                {
+                    let mut exclusion = OsString::from(Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION);
+                    exclusion.push(spelling);
+                    argv.push(exclusion);
+                }
+                self.git_ok(&path, &argv)?;
+                if let ManifestName::Manifest { spelling, .. } = &name {
+                    let mut clean: Vec<OsString> = Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV
+                        .iter()
+                        .map(OsString::from)
+                        .collect();
+                    let mut pathspec =
+                        OsString::from(Self::CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC);
+                    pathspec.push(spelling);
+                    clean.push(pathspec);
+                    self.git_ok(&path, &clean)?;
+                }
                 Ok(())
             },
         )
@@ -2679,22 +3296,94 @@ impl WorkspaceManager {
     }
 
     /// `Object.RepairMaterialize` — `git cherry-pick --no-commit` in a repair
-    /// worktree.
+    /// worktree, and what it left there.
     ///
     /// The merge objects it writes are referenced by that worktree's index: R9.
-    /// `--no-commit` deliberately leaves `CHERRY_PICK_HEAD` behind, which is
-    /// why the residue classifier reads the *index* for this site's after
-    /// phase and never reads `CHERRY_PICK_HEAD` as residue on its own here.
+    ///
+    /// # Why a conflict is a result and not an error
+    ///
+    /// `attempt_started.materialization_observed` is
+    /// `Clean | Conflict | Empty | Retained`, and a repair of a
+    /// `RejectionDisposition::Conflict` is *expected* to conflict: leaving the
+    /// conflict in the worktree is what gives the agent something to resolve,
+    /// and [`Self::unresolved_conflicts`] is the rule that catches a worker
+    /// that resolves nothing, or declares nothing resolved
+    /// ([`RESOLUTION_MANIFEST`]). So a non-zero exit whose index
+    /// carries unmerged entries is [`Materialized::Conflict`], and only a
+    /// non-zero exit *without* them is the Git error it was before.
+    ///
+    /// # The three shapes, measured
+    ///
+    /// git 2.43.0 on `x86_64-unknown-linux-gnu`, on purpose-built repositories
+    /// (2026-09-08):
+    ///
+    /// | case | exit | `ls-files --unmerged` | `diff --cached --quiet` |
+    /// |---|---|---|---|
+    /// | the change applies | 0 | empty | 1 |
+    /// | the change is already present | 0 | empty | 0 |
+    /// | the change conflicts | 1 | three stage entries | — |
+    /// | the commit is not an object | 128 | — | — |
+    ///
+    /// The last is defence in depth only: `T-DISPATCH` refuses a dispatch whose
+    /// source candidate object is missing before this is reached, and R11
+    /// protects it for as long as the run can resume.
+    ///
+    /// **`--no-commit` does not leave `CHERRY_PICK_HEAD` behind** in any of the
+    /// three cases on git 2.43; it leaves `MERGE_MSG` and `AUTO_MERGE`. This
+    /// funnel removes both once the pick has ended, whatever it ended as: the
+    /// engine never commits in the worktree, so neither file serves anything,
+    /// and `MERGE_MSG` is one of the names `Worktree.Verify` reads as
+    /// administrative residue — left in place it would make every same-session
+    /// retry of a repair generation fail its `HoldsTree` verification and close
+    /// the generation, which `ST-15` (repair) forbids. The after phase of this
+    /// site is therefore the index holding the pick and no state file, which is
+    /// why the residue classifier reads the *index* for it. A kill before the
+    /// removal leaves one of five states (the record's §8, measured on the
+    /// kill sampler): nothing; `index.lock`; the merged index with no state
+    /// file; the merged index with `MERGE_MSG.lock` held; the merged index
+    /// with `MERGE_MSG`. The two lock forms and `MERGE_MSG` fail the
+    /// quiescence check and the worktree is recreated; the merged index with
+    /// no state file — the index published and unlocked, the process dead
+    /// before `MERGE_MSG.lock` — is indistinguishable from a completed
+    /// materialization and verifies `Reuse::Verified` exactly as one does
+    /// (`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`),
+    /// and both converge because the next materialization restores the base's
+    /// tree before it picks (below). (This paragraph once said every such kill
+    /// leaves `MERGE_MSG` or its lock and is recreated from; PR #249's
+    /// fourth-round record review found the copy.)
+    ///
+    /// # The pick starts from the base's tree, every time
+    ///
+    /// A worktree that verified at its base may still hold a pick: the
+    /// packet's quiescence rule reads `HEAD`, the index lock and the state
+    /// files, not the index against the base's tree, so a materialization
+    /// that completed before its process died passes `Worktree.Verify` with
+    /// its merged index in place. A cherry-pick onto that index is **not** a
+    /// no-op — it is a three-way merge, and PR #249's crash review measured it
+    /// applying its hunk a second time (`a a y c b c a` picked with
+    /// `c b -> c c b x` gave `a a y c c b x c a`, and a second pick onto that
+    /// `a a y c c c b x c a`; one more line per resume). So the funnel first
+    /// restores the index and working tree to `HEAD`'s tree with
+    /// `git read-tree --reset -u HEAD` — which also discards unmerged entries
+    /// and any edit, and touches no ref, no `ORIG_HEAD`, and no untracked file
+    /// — and only then picks. Every materialization is therefore one pick
+    /// onto the base's tree, whatever the worktree held, which is what makes
+    /// re-running it after a kill deterministic
+    /// (`a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces`,
+    /// `a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
+    /// A kill inside the restore leaves `index.lock` (this site's `IndexLock`
+    /// element) or an index at the base with a partly rewritten checkout, and
+    /// the next materialization restores again.
     ///
     /// # Errors
     ///
-    /// The containment refusals or a Git error.
+    /// The containment refusals, or a Git error that is not a conflict.
     pub fn repair_materialize(
         &self,
         hooks: &mut dyn EffectHooks,
         slot: &Slot,
         commit: &str,
-    ) -> Result<(), UpstrokeError> {
+    ) -> Result<Materialized, UpstrokeError> {
         self.revalidate()?;
         let path = self.slot_target(slot)?;
         funnel(
@@ -2705,14 +3394,457 @@ impl WorkspaceManager {
                 self.git_ok(
                     &path,
                     &[
+                        OsString::from("read-tree"),
+                        OsString::from("--reset"),
+                        OsString::from("-u"),
+                        OsString::from("HEAD"),
+                    ],
+                )?;
+                let output = self.git(
+                    &path,
+                    &[
                         OsString::from("cherry-pick"),
                         OsString::from("--no-commit"),
                         OsString::from(commit),
                     ],
                 )?;
-                Ok(())
+                if output.status.success() {
+                    let observed = if self.staged_against_head(&path)? {
+                        Materialized::Clean
+                    } else {
+                        Materialized::Empty
+                    };
+                    self.clear_pick_state(&path)?;
+                    return Ok(observed);
+                }
+                if !self.unmerged_records(&path)?.is_empty() {
+                    self.clear_pick_state(&path)?;
+                    return Ok(Materialized::Conflict);
+                }
+                Err(UpstrokeError::Git {
+                    message: format!(
+                        "git cherry-pick --no-commit {commit} failed in {} and left no unmerged \
+                         entry, so it is not the conflict a repair materializes through: {}",
+                        path.display(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                })
             },
         )
+    }
+
+    /// The state files `cherry-pick --no-commit` leaves in the worktree's git
+    /// dir once it has ended, removed so the worktree is quiescent again
+    /// ([`Self::repair_materialize`] says why). Absence is the ordinary case
+    /// for a pick that never got as far as writing them.
+    fn clear_pick_state(&self, path: &Path) -> Result<(), UpstrokeError> {
+        let Some(git_dir) = self.worktree_git_dir(path)? else {
+            return Ok(());
+        };
+        for name in ["MERGE_MSG", "AUTO_MERGE"] {
+            let file = git_dir.join(name);
+            match fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(UpstrokeError::Filesystem {
+                        operation: "remove",
+                        path: file,
+                        source,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the worktree's index differs from its `HEAD`.
+    ///
+    /// `git diff --cached --quiet` implies `--exit-code`: 0 is "no difference",
+    /// 1 is "there is one", and anything else is a failure to answer, which is
+    /// reported rather than read as either. The `--cached` form compares the
+    /// index with `HEAD` and never consults the working tree, so no refresh
+    /// applies to it ([`Self::proposal_state`] records the measurement).
+    fn staged_against_head(&self, cwd: &Path) -> Result<bool, UpstrokeError> {
+        let argv = [
+            OsString::from("diff"),
+            OsString::from("--cached"),
+            OsString::from("--quiet"),
+        ];
+        let output = self.git(cwd, &argv)?;
+        match output.status.code() {
+            Some(0) => Ok(false),
+            Some(1) => Ok(true),
+            code => Err(UpstrokeError::Git {
+                message: format!(
+                    "git diff --cached --quiet in {} answered {code:?} rather than 0 or 1: {}",
+                    cwd.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            }),
+        }
+    }
+
+    /// The index's unmerged entries as `--name-status --diff-filter=U -z`
+    /// records: the read [`Self::proposal_state`] makes, shared so that the two
+    /// conflict readers cannot disagree about what an unmerged entry is.
+    ///
+    /// `diff-files` rather than the porcelain `git diff`, for the reason
+    /// [`Self::proposal_state`] records: porcelain `diff` refreshes the index
+    /// and that refresh writes.
+    fn unmerged_records(&self, cwd: &Path) -> Result<Vec<u8>, UpstrokeError> {
+        self.git_ok(
+            cwd,
+            &[
+                OsString::from("diff-files"),
+                OsString::from("--name-status"),
+                OsString::from("--diff-filter=U"),
+                OsString::from("-z"),
+            ],
+        )
+    }
+
+    /// The conflicted paths of a repair worktree the worker left unresolved:
+    /// every path the index still holds unmerged.
+    ///
+    /// **A read, so it takes no hooks and names no effect site**, like
+    /// [`Self::changed_paths`]: it stages nothing, writes no index and creates
+    /// no object.
+    ///
+    /// `repairs.dispatch`: "unresolved index entries fail capture before gates";
+    /// DESIGN §26.4: the engine "reads the index's unmerged entries as the
+    /// sole record of what is still conflicted — no file is scanned for
+    /// markers". The rule is read where it is stated, in the index: an entry
+    /// is conflicted while its stage entries remain, whatever the working-tree
+    /// file looks like, and it stops being one when the engine stages the
+    /// resolution the worker declared for it ([`RESOLUTION_MANIFEST`],
+    /// [`Self::candidate_stage`]). This deliberately does **not** read the
+    /// file for conflict markers: PR #249's conformance review materialized a
+    /// conflict under a legitimate `conflict-marker-size=8` attribute, and
+    /// another under `-merge`, which leaves the current side in place with no
+    /// marker at all; a marker scan read both as resolved, the capture staged
+    /// them, and unresolved work reached the gates. The index has no formats.
+    ///
+    /// A path that does not decode is reported as one unresolved entry naming
+    /// the reason, because it cannot be inspected and a capture must not pass
+    /// on a list it could not read.
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals or a Git error from the unmerged read.
+    pub fn unresolved_conflicts(&self, slot: &Slot) -> Result<Vec<String>, UpstrokeError> {
+        self.revalidate()?;
+        let path = self.slot_target(slot)?;
+        let records = self.unmerged_records(&path)?;
+        match parsers::changed_path_records(&records) {
+            Ok(paths) => Ok(paths
+                .into_iter()
+                .map(|entry| entry.as_str().to_owned())
+                .collect()),
+            Err(error) => Ok(vec![format!(
+                "(an unmerged entry this process cannot inspect: {error})"
+            )]),
+        }
+    }
+
+    /// The worker's resolution manifest, read from the root of the slot's
+    /// worktree ([`RESOLUTION_MANIFEST`]).
+    ///
+    /// **A read, so it takes no hooks and names no effect site**, like
+    /// [`Self::unresolved_conflicts`]. An absent name is
+    /// [`ResolutionManifest::Absent`]; a file that is not UTF-8 is
+    /// [`ResolutionManifest::Malformed`], the worker's failure rather than
+    /// this process's; any other failure to read it is the I/O error it is.
+    ///
+    /// **A name the repository has taken is refused, not read.** The capture
+    /// calls this only when the index holds a conflicted entry for the
+    /// manifest to govern, and then the manifest must be the worker's:
+    /// [`Self::manifest_name`] reading [`ManifestName::Tracked`] — the
+    /// repository tracks a file of this name, as spelt or in another case — or
+    /// [`ManifestName::Other`] — a directory or a link holds it — is a refusal
+    /// naming what holds the name,
+    /// before anything is staged, because the repository's own bytes are not
+    /// declarations and a conflict repair cannot be declared in a repository
+    /// that has taken the name (`RESOLUTION_MANIFEST`'s boundary; PR #249's
+    /// third-round record review materialized a source candidate that tracked
+    /// the name and found the file in the captured tree).
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals, the taken-name refusal, a Git error from the
+    /// index read, or an I/O error other than the file's absence.
+    pub fn resolution_manifest(&self, slot: &Slot) -> Result<ResolutionManifest, UpstrokeError> {
+        self.revalidate()?;
+        let worktree = self.slot_target(slot)?;
+        let spelling = match self.manifest_name(&worktree)? {
+            ManifestName::Absent => return Ok(ResolutionManifest::Absent),
+            ManifestName::Manifest { spelling, .. } => spelling,
+            ManifestName::Tracked { spelling } if spelling == RESOLUTION_MANIFEST => {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "the repository tracks `{RESOLUTION_MANIFEST}` at the root of {}, the \
+                         name the resolution manifest reserves, so the worker's declarations \
+                         cannot be read from it: a conflict repair cannot be declared in this \
+                         repository while a tracked file holds that name",
+                        worktree.display()
+                    ),
+                });
+            }
+            ManifestName::Tracked { spelling } => {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "the repository tracks `{spelling}` at the root of {}, which differs \
+                         from `{RESOLUTION_MANIFEST}`, the name the resolution manifest \
+                         reserves, by case alone; on a checkout that folds case the worker's \
+                         manifest is that file, so the worker's declarations cannot be read \
+                         from the name: a conflict repair cannot be declared in this \
+                         repository while a tracked file holds that name in any case",
+                        worktree.display()
+                    ),
+                });
+            }
+            ManifestName::Other { what } => {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "`{RESOLUTION_MANIFEST}` at the root of {} is {what}, not the worker's \
+                         resolution manifest, so the worker's declarations cannot be read: a \
+                         conflict repair cannot be declared in this repository while {what} \
+                         holds that name",
+                        worktree.display()
+                    ),
+                });
+            }
+        };
+        let path = worktree.join(spelling);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ResolutionManifest::Absent);
+            }
+            Err(source) => return Err(UpstrokeError::Io { path, source }),
+        };
+        Ok(match String::from_utf8(bytes) {
+            Ok(text) => ResolutionManifest::parse(&text),
+            Err(_) => ResolutionManifest::Malformed {
+                detail: format!("`{RESOLUTION_MANIFEST}` is not UTF-8"),
+            },
+        })
+    }
+
+    /// The conflicted paths of a repair worktree a previous capture of the
+    /// same generation already resolved: every path the index records as
+    /// resolved from unmerged stages and still holds.
+    ///
+    /// **A read, so it takes no hooks and names no effect site**, like
+    /// [`Self::unresolved_conflicts`], and its companion: together they are
+    /// the set of paths the worker's manifest governs. A same-generation
+    /// retry re-enters the worktree the previous attempt left, index
+    /// included, and that attempt's capture staged the resolutions it
+    /// declared, so nothing is unmerged any more — yet the retry may need to
+    /// revise one, and `deleted <path>` exists for a worker whose file tools
+    /// cannot delete. PR #249's third-round regression review declared
+    /// `resolved c.txt`, retained the generation on a gate failure, declared
+    /// `deleted c.txt` and captured: nothing was unmerged, the manifest went
+    /// unread and `c.txt` survived. What records that `c.txt` was conflicted
+    /// is Git's own index: staging a resolution over unmerged stages writes
+    /// the resolve-undo extension (`REUC`; `git ls-files --resolve-undo`),
+    /// the record `git checkout -m <path>` recreates a conflict from. It is
+    /// written by both `git add` and `git rm` over unmerged stages, survives
+    /// `add -A` and `write-tree`, and is cleared by the `read-tree --reset`
+    /// every fresh materialization runs first, so it holds exactly the
+    /// entries a capture of this generation resolved (measured on git 2.43;
+    /// the extension has been written since git 1.7.0).
+    ///
+    /// **And still holds**: a path resolved by deletion has no index entry to
+    /// re-stage or remove, so a declaration naming it again would make `git
+    /// add` or `git rm` fail on a pathspec that matches nothing. Such a path
+    /// governs nothing: the deletion stands, a re-declared deletion does
+    /// nothing, and a file the worker recreates there is an ordinary addition
+    /// the `add -A` stages — after which the index holds the path again
+    /// beside the resolve-undo record that still names it, and the path is
+    /// governed once more, by whatever the *next* manifest says. No earlier
+    /// manifest is there to be reread by then: the capture that acted on one
+    /// removed it, and a capture that found nothing for one to govern removed
+    /// it unread ([`Self::candidate_stage`]), which is what keeps a settled
+    /// deletion from being applied to the recreated file — PR #249's
+    /// fourth-round regression and manifest-contract reviews found the
+    /// acted-on declaration reread, and its fifth-round adequacy and
+    /// manifest-contract reviews the unread one, re-declared while the path
+    /// had no entry and read two attempts later once it had one again.
+    ///
+    /// The paths still held are read from the whole index (`ls-files --stage
+    /// -z`, unfiltered) and intersected here, rather than passed to Git as
+    /// arguments: the recorded paths are unbounded in number and length, and
+    /// PR #249's fourth-round regression review ran the earlier form against
+    /// a valid index of 13,000 resolved paths of 180 characters each and had
+    /// `Argument list too long (os error 7)` abort the capture before any
+    /// gate, while `add -A`, `write-tree` and the unfiltered reads all
+    /// succeeded (Windows caps a command line lower still). The whole index is
+    /// what `add -A` walks anyway.
+    ///
+    /// A record this process cannot decode is a Git error — these are paths
+    /// the engine itself staged from a list it decoded — rather than an entry
+    /// the worker is told about.
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals or a Git error.
+    pub fn resolved_conflicts(&self, slot: &Slot) -> Result<Vec<String>, UpstrokeError> {
+        self.revalidate()?;
+        let path = self.slot_target(slot)?;
+        let recorded = self.git_ok(
+            &path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--resolve-undo"),
+                OsString::from("-z"),
+            ],
+        )?;
+        let mut resolved: Vec<String> = parsers::stage_record_paths(&recorded)
+            .into_iter()
+            .map(|record| {
+                parsers::decode_index_path(record).map_err(|reason| UpstrokeError::Git {
+                    message: format!(
+                        "a resolve-undo record of the index of {} cannot be read: {reason}",
+                        path.display()
+                    ),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        resolved.sort();
+        resolved.dedup();
+        if resolved.is_empty() {
+            return Ok(resolved);
+        }
+        let held = self.git_ok(
+            &path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--stage"),
+                OsString::from("-z"),
+            ],
+        )?;
+        let held: HashSet<&[u8]> = parsers::stage_record_paths(&held).into_iter().collect();
+        resolved.retain(|entry| held.contains(entry.as_bytes()));
+        Ok(resolved)
+    }
+
+    /// What holds the root-level name the resolution manifest reserves in the
+    /// worktree at `path` ([`ManifestName`]).
+    ///
+    /// Four reads, in the order the answer depends on them: the index by
+    /// name in any case (`ls-files --stage -- :(top,literal,icase)<name>`,
+    /// which lists an entry at the name, one at a case variant of it, and the
+    /// entries under either — a pathspec is a directory prefix too; an entry
+    /// at the name or a variant, at any stage, is [`ManifestName::Tracked`]
+    /// with the index's spelling, whatever the working tree holds, and the
+    /// entries under the name are remembered for the regular-file answer);
+    /// then the working tree without following a link (`symlink_metadata`:
+    /// absent, a regular file, or something else); then, for a regular file,
+    /// the spelling the checkout lists it by (`ls-files --others --
+    /// :(top,literal,icase)<name>`, every untracked entry at the name in any
+    /// case, ignored or not, of which the one spelt as written is the file
+    /// when it is listed and the one case variant is otherwise — a checkout
+    /// that folds case holds one entry for the name, and the worker's write
+    /// landed in it); then whether `add -A` would stage that entry (`ls-files
+    /// --others --exclude-standard` with the same pathspec lists it exactly
+    /// when it is untracked and not ignored). `icase` folds ASCII case, which
+    /// is all the name has, and [`name_spelling`] is the one rule that picks
+    /// the entry, for the index and for the directory alike. The
+    /// exact-spelling reads answered nothing for a tracked
+    /// `.UPSTROKE-RESOLVED` while the lowercase name, on Windows, was that
+    /// very file (PR #249's fourth-round manifest-contract review, natively on
+    /// the guest), which read the repository's file as the worker's manifest
+    /// and staged it; and nothing for an untracked `.Upstroke-Resolved` the
+    /// worker had written its declaration into through the lowercase name
+    /// (the fifth round's, the same way), which classified the worker's
+    /// manifest as ignored, staged it into the candidate under that spelling
+    /// and left it on disk. A regular file at the name that the directory
+    /// walk lists under no spelling of it is Git and the filesystem
+    /// disagreeing, and is reported as a Git error rather than guessed at.
+    fn manifest_name(&self, path: &Path) -> Result<ManifestName, UpstrokeError> {
+        let name = RESOLUTION_MANIFEST.as_bytes();
+        let tracked = self.git_ok(
+            path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--stage"),
+                OsString::from("-z"),
+                OsString::from("--"),
+                OsString::from(format!(":(top,literal,icase){RESOLUTION_MANIFEST}")),
+            ],
+        )?;
+        let records = parsers::stage_record_paths(&tracked);
+        if let Some(spelling) = name_spelling(&records, name) {
+            return Ok(ManifestName::Tracked {
+                spelling: String::from_utf8_lossy(spelling).into_owned(),
+            });
+        }
+        let displaces_directory = records.iter().any(|record| {
+            record
+                .get(..name.len())
+                .is_some_and(|head| head.eq_ignore_ascii_case(name))
+                && record.get(name.len()) == Some(&b'/')
+        });
+        let file = path.join(RESOLUTION_MANIFEST);
+        let kind = match fs::symlink_metadata(&file) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ManifestName::Absent);
+            }
+            Err(source) => return Err(UpstrokeError::Io { path: file, source }),
+        };
+        if !kind.is_file() {
+            return Ok(ManifestName::Other {
+                what: if kind.is_dir() {
+                    "a directory"
+                } else if kind.is_symlink() {
+                    "a symbolic link"
+                } else {
+                    "neither a regular file nor a directory"
+                },
+            });
+        }
+        let listed = self.git_ok(
+            path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--others"),
+                OsString::from("-z"),
+                OsString::from("--"),
+                OsString::from(format!(":(top,literal,icase){RESOLUTION_MANIFEST}")),
+            ],
+        )?;
+        let listed = parsers::plain_record_paths(&listed);
+        let Some(spelling) = name_spelling(&listed, name) else {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "`{RESOLUTION_MANIFEST}` at the root of {} is a regular file the working \
+                     tree holds and `git ls-files --others` lists under no spelling of the \
+                     name, so the worker's manifest cannot be told from the repository's \
+                     files",
+                    path.display()
+                ),
+            });
+        };
+        let stageable = self.git_ok(
+            path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--others"),
+                OsString::from("--exclude-standard"),
+                OsString::from("-z"),
+                OsString::from("--"),
+                OsString::from(format!(":(top,literal,icase){RESOLUTION_MANIFEST}")),
+            ],
+        )?;
+        Ok(ManifestName::Manifest {
+            spelling: String::from_utf8_lossy(spelling).into_owned(),
+            ignored: !parsers::plain_record_paths(&stageable)
+                .into_iter()
+                .any(|record| record == spelling),
+            displaces_directory,
+        })
     }
 
     /// Whether `object` is an object this repository has.

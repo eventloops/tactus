@@ -1681,11 +1681,15 @@ Where the protocol's reopen reports a torn-tail normalization.
 `recovery_order` (d), and `T-ATTEMPT`'s resume action: an attempt whose
 coordinator died is not retried in place, it is settled `interrupted` and
 its generation closed, so the next dispatch opens a fresh generation at the
-task's base.
+task's base — and "the task worktree scrubbed with force", which is the
+same resume action's next clause: the closed generation owns its worktree
+and intent (R9) and a Closed generation owns nothing, so both are reclaimed
+once the close is durable ([`reclaim_closed_generations`], after (e)).
 
 ### Errors
 
-Whatever [`emit`] refuses or fails at.
+Whatever [`emit`] refuses or fails at, or the scrub's containment refusals
+or Git error.
 
 ## `pub fn close_retained_idle(`
 
@@ -1697,9 +1701,41 @@ not that incarnation: `T-RESUME`'s authoritative state says "retained_session
 authority already invalid for the new incarnation", so the generation closes
 rather than being resumed into.
 
+**And its worktree and intent are reclaimed with the close.** PR #249's
+crash review planted a retained repair generation's real worktree, resumed,
+ran the replacement generation to a merge, resumed again, and found the
+closed generation's checkout and durable intent still there: nothing
+reclaimed a generation (e) had closed, so every retained generation a dead
+incarnation left accumulated for the life of the run. `cleanup` allows a
+task worktree to be scrubbed once "the generation is Closed", R9 owns it by
+generation, and the same omission sat in (d). The first repair scrubbed
+after each append, and the adequacy review then stopped a recovery between
+that append and its scrub: the next recovery found the generation already
+`Closed`, neither (d) nor (e) selected it, and the leak was back. So the
+reclaim is no longer the closing step's own: [`reclaim_closed_generations`]
+runs once after (e) over the durable state — every `Closed` generation whose
+intent the execution root still carries — whichever incarnation appended the
+close. The live retry close (`RetryOutcome::Close`, `WorktreeMissing`) still
+scrubs nothing in the live run: the attempt-level test pins that a retry
+itself removes nothing, and a live run's closed worktree is run-end
+closure's (PR10); the next resume's sweep reclaims it like any other closed
+generation's.
+
 ### Errors
 
-Whatever [`emit`] refuses or fails at.
+Whatever [`emit`] refuses or fails at, or the scrub's containment refusals
+or Git error.
+
+## `fn reclaim_closed_generations(`
+
+Scrub the worktree and intent of every closed generation the execution root
+still carries, from the durable state: the fold's `Closed` generations
+against `intents()`, not a list of what this recovery closed. The scrub is
+`dispatch::scrub`, forced and idempotent. A generation whose intent is gone
+is not touched, so a resume with nothing to reclaim executes no
+`Worktree.Remove`; a generation closed by a recovery that died before its
+scrub, by the live loop, or by this pass's own (d) and (e) is reclaimed here
+alike. Task slots only: staging and snapshot residue have their own steps.
 
 ## `pub fn run_resumed(`
 
@@ -1973,26 +2009,29 @@ layer for a value no path below this one reads.
 
 ### Errors
 
-[`UpstrokeError::Refused`] for a generation whose lease is an inherited
-lineage — a repair, whose resume action is to re-materialize its source
-candidate, and whose source the fold does not retain. `checkpoint_refusals`
-gives repair execution to PR8, so this build refuses rather than
-reconstructing a materialization it cannot prove. **The arm is unreachable
-in this slice and both walls are measured** by
-`a_repair_generation_cannot_reach_step_g_in_this_slice`: the fold refuses an
-inherited lease on an ordinary task at the barrier's checked replay, and
-`TaskRegistry::originals_with_agents` gives every entry `lineage: None`, so
-there is no task the lease would be legal on. That test fails the day a
-slice admits repairs, which is when this arm becomes reachable. Also
-refused when a generation holding its lease has no recorded region, which
-is a fold that disagrees with itself rather than a state to guess at.
-Otherwise the containment refusals or a Git error from
-[`resume_open_no_attempt`].
+**(g) materializes nothing (`R6`).** A repair generation is verified or
+recreated at its base exactly like an ordinary one; its source is read from
+its own `task_dispatched` (`dispatched_source`) so the loop's continuation
+can re-materialize it once. Materializing here too would run the pick twice
+when the continuation runs, or leave a worktree whose materialization the
+loop could not tell from the kill's. Three of the states a kill leaves
+between `task_dispatched` and `attempt_started` — no worktree, a worktree
+with the pick's residue, a completed pick (the shape a kill after the index
+publish leaves too) — are each driven through this step and the
+continuation by
+`a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once`.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {`
+### Errors
+
+[`UpstrokeError::Refused`] when a repair generation's `task_dispatched`
+names no source candidate: the log disagrees with the registry and nothing
+is recreated from a guess. Otherwise the containment refusals or a Git
+error from [`verify_or_recreate`].
+
+## `fn open_no_attempt(`
 
 Every `OpenNoAttempt` generation the proven prefix records, with what a
-rebuild of it needs.
+rebuild of it needs — for a repair, the source its dispatch recorded.
 
 Sibling of [`retained_idle`] and [`in_flight`], and deliberately shaped like
 them: one enumerator per generation class, so "which class does this step
@@ -2000,12 +2039,16 @@ act on" is a property of the function the step calls rather than of a
 predicate the step re-derives. Two rules that can disagree is the shape this
 slice has paid for repeatedly.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {` › `let Some(open) = fold.open_no_attempt(key) else {`
+## `fn open_no_attempt(` › `let Some(open) = fold.open_no_attempt(key) else {`
 
 The class question is the fold's, through `open_no_attempt`. The
 repair refusal below is recovery's own policy and stays here.
 
-## `fn open_no_attempt(fold: &TopologyFold) -> Result<Vec<OpenGeneration>, UpstrokeError> {` › `source: None,`
+## `fn open_no_attempt(` › `let source = match generation.lease {`
+
+A repair's source is read from its own `task_dispatched` — the log, not
+the registry — so what (g) hands the loop is what the interrupted dispatch
+recorded, and a dispatch that names none refuses.
 
 `None` is not a guess. An ordinary generation has no
 materialization to reproduce, and the repair case returned

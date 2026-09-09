@@ -3,8 +3,8 @@
 use crate::error::UpstrokeError;
 use crate::ir::{QuestionKind, Tier};
 use crate::topology::events::{
-    CandidateRef, CommitSha, FrozenQuestion, FrozenSpawn, MergeRejected, RejectionDisposition,
-    RejectionLeaseEffect, SequenceId, SpawnAdmission, VerificationRecord,
+    BindingOverride, CandidateRef, CommitSha, FrozenQuestion, FrozenSpawn, MergeRejected,
+    RejectionDisposition, RejectionLeaseEffect, SequenceId, SpawnAdmission, VerificationRecord,
 };
 use crate::topology::fold::TopologyFold;
 use crate::topology::paths::PathSet;
@@ -139,7 +139,20 @@ fn repair_body(
         RejectionDisposition::Conflict { paths } => {
             body.push_str("\nThe cherry-pick onto that head conflicted in: ");
             body.push_str(&render_paths(paths));
-            body.push_str(".\n");
+            body.push_str(&format!(
+                ".\nEach conflicted path is left unmerged in the index for you to resolve with \
+                 your file tools. Then record it in the resolution manifest `{}` at the root of \
+                 the worktree, one line per path: `{} <path>` when the file's working-tree \
+                 content is the resolution, `{} <path>` to resolve it by deleting the file. The \
+                 engine stages what you declare; run no git command. A result with an unmerged \
+                 entry you did not declare is refused before any gate runs. The manifest is read \
+                 at capture and removed by it, unless the capture refused it, in which case it \
+                 stays for you to correct; in a later attempt of this repair, write it again only \
+                 for a path whose resolution you are changing.\n",
+                crate::workspace_manager::RESOLUTION_MANIFEST,
+                crate::workspace_manager::RESOLVED_KEYWORD,
+                crate::workspace_manager::DELETED_KEYWORD,
+            ));
         }
         RejectionDisposition::CodeRejected { verification } => {
             body.push_str(&format!(
@@ -256,7 +269,7 @@ fn admission_for(
                     "this lineage has consumed its {limit} automatic repair(s); a person must \
                      approve another attempt with the latest evidence, or decline the lineage"
                 ),
-                crate::engine::coordinator::question_options(QuestionKind::Continue),
+                crate::engine::coordinator::topology_question_options(QuestionKind::Continue),
             ),
         };
     }
@@ -298,6 +311,44 @@ fn refused(message: &str) -> UpstrokeError {
     UpstrokeError::Refused {
         message: message.to_owned(),
     }
+}
+
+pub fn one_off_binding(
+    entry: &TaskEntry,
+    key: TaskKey,
+    question: &crate::ir::QuestionId,
+    option_index: u32,
+    agent: &str,
+) -> Result<BindingOverride, UpstrokeError> {
+    let floor = entry.ladder.floor.ok_or_else(|| {
+        refused(&format!(
+            "task {key} waits for a one-off binding and its ladder records no floor, so there is \
+             no tier the binding would run at; nothing was appended"
+        ))
+    })?;
+    let model = catalogued_model(agent, floor).ok_or_else(|| {
+        refused(&format!(
+            "task {key} was answered with agent `{agent}` and this build's model catalogue knows \
+             no `{agent}` model at tier `{floor}` or above, which is the floor its repair ladder \
+             froze; nothing was appended"
+        ))
+    })?;
+    Ok(BindingOverride {
+        key,
+        question: question.clone(),
+        option_index,
+        agent: agent.to_owned(),
+        model,
+        effort: entry.ladder.effort.implementation_for(floor),
+    })
+}
+
+fn catalogued_model(agent: &str, floor: Tier) -> Option<String> {
+    crate::catalog::CATALOG
+        .iter()
+        .filter(|entry| entry.agent == agent && entry.tier >= floor)
+        .min_by_key(|entry| entry.tier)
+        .map(|entry| entry.model.to_owned())
 }
 
 #[must_use]

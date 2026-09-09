@@ -471,6 +471,46 @@ The tree `git write-tree` printed.
 The commit the tree is judged against, and the parent of every snapshot's
 ephemeral commit.
 
+## `pub struct Capture` › `pub unresolved: Vec<String>,`
+
+What kept the capture from proceeding (`R9`): every path the index still
+held unmerged that the worker's resolution manifest did not declare resolved
+(or that could not be decoded), and the manifest's own problem, in
+parentheses, when it had one. Read *before* staging: `git add -A` would
+record the markers as the resolution. Non-empty means nothing was staged,
+`tree` is the base's, and the assessment fails the attempt before any gate.
+
+## `struct ResolutionPlan {`
+
+The capture's reconciliation of the paths the worker's manifest governs with
+what it declares: `staged`, the governed paths the manifest declared, each
+with how, spelt as the index spells them; `refused`, every unmerged entry it
+did not declare, every contradiction, plus the manifest's problem when it has
+one. A plan with anything refused stages nothing.
+
+## `fn plan_resolutions(`
+
+Three inputs, two governed lists and the manifest: `unmerged`, the index's
+conflicted entries, every one of which must be declared; `resolved`, the
+entries a previous capture of this generation resolved and the index still
+holds (`resolved_conflicts`), which a declaration may revise and silence
+leaves to the ordinary `add -A`. No manifest: every unmerged entry refused,
+every resolved entry left to the `add -A` — so an absent manifest in a
+retained retry with nothing unmerged is an ordinary capture. A malformed one:
+every governed path refused and the detail appended as one more entry, so
+the worker is told the line. A parsed one, per governed path: declared one
+way as the index spells it (`Declaration::names`, a path comparison), staged
+that way — a resolved path declared `deleted` is the revision the retry
+exists for; declared both ways, refused rather than guessed; declared one way
+exactly and the other in another case (`names_in_another_case`, a spelling
+that governs nothing itself), refused as a contradiction; declared only in
+another case, refused naming the index's spelling; undeclared, refused if
+unmerged and left to the `add -A` if resolved. A declaration naming a path in
+neither list is nothing. (This note described the two-argument planner —
+"no manifest: everything refused", "a declaration of a path that is not
+unmerged is nothing" — until PR #249's fifth repair round, three rounds after
+the resolved list was added; its manifest-contract review found the copy.)
+
 ## `fn captured_object_id(source: &str, value: String) -> Result<ObjectId, UpstrokeError> {`
 
 One of the capture's recorded ids as an [`ObjectId`], or a Git error.
@@ -836,6 +876,81 @@ publishing the index or cache-tree". The staged objects are behind the
 **task index** afterwards (R9), which is what makes them recoverable by
 scrubbing the worktree rather than by anything cleverer.
 
+**A repair's conflicted paths are read first, and the worker's
+resolutions are staged for it.** Two reads name what the manifest governs:
+`unresolved_conflicts`, the index's unmerged entries, whatever their
+working-tree files look like; and `resolved_conflicts`, the entries a
+previous capture of this generation resolved and the index still holds —
+Git's resolve-undo record, which staging a resolution over unmerged stages
+writes and the funnel's `read-tree --reset` clears before every fresh
+materialization. When either names anything, the capture reads the worker's
+resolution manifest (`workspace_manager::RESOLUTION_MANIFEST`, a root-level
+file the worker writes with its file tools) and reconciles the three
+(`plan_resolutions`): every governed path the manifest declares `resolved`
+or `deleted`, as the index spells it, is staged by the engine's own
+`git add -- :(literal)<path>` or `git rm --quiet --force -- :(literal)<path>`
+inside `Object.CandidateStage`, before the `add -A`; an unmerged path it does
+not declare, a manifest that does not parse, a path declared both ways, and
+a path declared in another case — beside the index's spelling with the other
+keyword, or alone — each refuse the whole capture, which returns the base's
+tree with those entries and stages nothing, so an unresolved conflict cannot
+be captured as the worker's work and a declared subset is never staged
+beside a refused one. A resolved path the manifest does not name is left to
+the ordinary `add -A`, which stages its edits or its deletion like any
+path's — nothing is preserved from the previous capture (PR #249's
+fourth-round record review found this note promising that it was); one the
+manifest names again is re-staged from the working tree, or removed — the
+case `deleted` exists for, a worker whose tools cannot delete correcting
+itself in a retained generation (PR #249's third-round regression review
+found the manifest unread there and the correction lost). **The manifest
+does not outlive the capture that finds it**: `candidate_stage` removes the
+worker's file after the `add -A` (a `git clean` of the one untracked path,
+by the spelling the checkout lists it under, inside the same funnel) whether
+the capture read it or not, so that a declaration is applied once, by the
+capture of the attempt that wrote it. The fourth-round regression and
+manifest-contract reviews each found a settled `deleted c.txt` reread two
+attempts later, once the worker had recreated the file and the ordinary
+addition had put an index entry back beside the resolve-undo record, and
+the recreated file removed from the disk and the candidate; that round
+removed the manifest a capture acted on, and the fifth round's adequacy and
+manifest-contract reviews found the same loss one attempt longer — the
+deletion re-declared while nothing was governed, the manifest kept unread,
+the path recreated, and the declaration read in the attempt after. A
+refused manifest is left standing with nothing staged, and so is one whose
+capture fails before the removal — the sixth round's manifest-contract
+review executed a required clean filter failing the `add -A` after the
+declared resolution was staged, and a held `index.lock` before anything
+was; a further capture of the worktree would read either again, and the
+driver makes none: a refusal fails the attempt as the worker's and is not
+resumable, a capture error interrupts it, and either closes the generation,
+so the next attempt is a fresh generation and worktree (until PR #249's
+sixth repair round this note said a refused manifest stays for the worker
+to correct and the next capture reads it). When the index holds nothing the manifest
+governs, the manifest is not read at all, and whatever the file says has no
+effect; a malformed manifest stages nothing *in a capture that reads it*,
+which is the whole of that promise.
+After staging, the index is read once more and an unmerged entry left is a
+Git error, never a passing capture. A repository that has taken the
+manifest's name — a tracked file of it, as spelt or in another case, or a
+directory — cannot have a conflict repair declared in it:
+`resolution_manifest` refuses before anything is staged, naming what holds
+the name, while an ordinary capture there stages that path like any other
+(`WorkspaceManager::manifest_name`); a worker's file standing where a
+tracked directory of the name was is the worker's, and what the index still
+held under the name is staged first, deletions included.
+The worker runs no git command (DESIGN §26.4): PR #249's regression review
+assembled the production Claude Code and Copilot permissions and found file
+tools and gate commands only, so a rule that needed the worker's `git add`
+— the first repair round's — could be met by no supported adapter, and the
+design-staging decision measured that Codex's `workspace-write` sandbox
+cannot admit staging without admitting `commit`. Before that the capture
+read the files for `<<<<<<< ` markers; the conformance review materialized
+conflicts under `conflict-marker-size=8` and `-merge`, both of which the
+scan read as resolved and the capture staged. What a declared resolution's
+correctness meets is the configured validation: with no gate and no
+reviewer, a file declared resolved with its markers still in it is accepted
+(`a_declared_resolution_reaches_the_configured_checks_which_decide_what_they_detect`).
+
 ### Errors
 
 The containment refusals or a Git error.
@@ -843,6 +958,14 @@ The containment refusals or a Git error.
 ## `impl AttemptContext<'_>` › `pub fn assess(`
 
 The ladder's cheap rungs: **outcome sanity, then the diff.**
+
+**An unresolved conflict pre-empts the diff-shaped verdicts.** A completed
+worker that left conflicted paths is reported as that
+(`classify::unresolved_conflict_failure`) ahead of `evaluate_outcome`'s
+empty-diff verdict — an unresolved capture carries the base's tree, so its
+diff is empty for a reason the empty-diff feedback would misdescribe — but
+behind the worker's own end: an error exit, a timeout or a question it
+asked is reported as what it is.
 
 Both answers come from the production authorities rather than being
 formed here — `engine::attempt::evaluate_outcome` for what the worker's

@@ -17,7 +17,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::error::UpstrokeError;
-use crate::ir::{Answer, Question, QuestionId, QuestionKind};
+use crate::ir::{Answer, Question, QuestionId};
 use crate::ulid;
 use crate::util;
 
@@ -200,6 +200,14 @@ pub fn notifiers_for(ids: &[String], warnings: &mut Vec<String>) -> Vec<&'static
 pub trait AnswerSource {
     fn id(&self) -> &'static str;
     fn resolve(&self, question: &Question) -> Result<Answer, UpstrokeError>;
+
+    // The non-blocking half: what an answer already delivered says, without
+    // prompting anyone or waiting for anything. The schema-4 loop's ingest branch
+    // asks this before every selection while other work is runnable; `resolve`
+    // is the hard block's "attached-terminal prompt or wait_on_block".
+    fn poll(&self, _question: &Question) -> Result<Answer, UpstrokeError> {
+        Ok(Answer::Unanswered)
+    }
 }
 
 pub struct UnattendedAnswers;
@@ -277,6 +285,10 @@ impl AnswerSource for EventLogAnswers<'_> {
         "event-log"
     }
 
+    fn poll(&self, question: &Question) -> Result<Answer, UpstrokeError> {
+        Ok(read_answer(&self.dir, &question.id)?.unwrap_or(Answer::Unanswered))
+    }
+
     fn resolve(&self, question: &Question) -> Result<Answer, UpstrokeError> {
         if let Some(answer) = read_answer(&self.dir, &question.id)? {
             return Ok(answer);
@@ -334,16 +346,25 @@ pub fn interpret(question: &Question, raw: &str) -> Answer {
 pub(crate) fn answer_for_option(question: &Question, choice: usize) -> Option<Answer> {
     let index = choice.checked_sub(1)?;
     let option = question.options.get(index)?;
-    let is_decline = question.kind != QuestionKind::Clarify
-        && question.options.len() >= 2
-        && index + 1 == question.options.len();
-    Some(if is_decline {
+    Some(if is_decline_option(option) {
         Answer::Declined
     } else {
         Answer::Answered {
             text: option.clone(),
         }
     })
+}
+
+pub(crate) const DECLINE_SPEND_OPTION: &str =
+    "decline (`skip`) — this task fails and its dependents are blocked";
+
+pub(crate) const GIVE_UP_OPTION: &str =
+    "give up on this task (`skip`) — its dependents will be blocked";
+
+pub(crate) const DECLINE_OPTIONS: [&str; 2] = [DECLINE_SPEND_OPTION, GIVE_UP_OPTION];
+
+pub(crate) fn is_decline_option(option: &str) -> bool {
+    DECLINE_OPTIONS.contains(&option)
 }
 
 pub fn answers_for<'a>(
@@ -392,7 +413,7 @@ mod tests {
             kind: QuestionKind::Unblock,
             affected_tasks: vec![TaskId::from("fix-obo")],
             context: "Every rung failed on the same assertion.".to_owned(),
-            options: vec!["retry on frontier".to_owned(), "skip the task".to_owned()],
+            options: vec!["retry on frontier".to_owned(), GIVE_UP_OPTION.to_owned()],
         }
     }
 
@@ -422,6 +443,22 @@ mod tests {
             Answer::Declined,
             "the numbered give-up option is the same action as typing `skip`"
         );
+        for decline in DECLINE_OPTIONS {
+            let mut q = question();
+            q.options = vec![decline.to_owned(), "retry on frontier".to_owned()];
+            assert_eq!(
+                interpret(&q, "1"),
+                Answer::Declined,
+                "a decline option is a decline wherever the list puts it: {decline:?}"
+            );
+            assert_eq!(
+                interpret(&q, "2"),
+                Answer::Answered {
+                    text: "retry on frontier".to_owned()
+                },
+                "and the option after it is not one"
+            );
+        }
         assert_eq!(
             interpret(&question(), "7"),
             Answer::Answered {
@@ -434,6 +471,46 @@ mod tests {
                 text: "use base64 cursors".to_owned()
             }
         );
+    }
+
+    /// PR #249's conformance review, finding 1: a schema-4 `HumanBinding`
+    /// question offers agents, and the person picks one of them by number.
+    /// Choosing the last agent offered is choosing that agent; a decline is
+    /// what the engine's own decline option says, or what `skip` says.
+    #[test]
+    fn picking_the_last_agent_offered_by_number_names_that_agent_and_declines_nothing() {
+        let binding = Question {
+            id: QuestionId::from("q-BIND"),
+            kind: QuestionKind::Unblock,
+            affected_tasks: vec![TaskId::from("fix-obo-repair-1")],
+            context: "the merge repair's tier floor of mid intersected empty with the task's \
+                      frozen pin and ceiling; a person must name an agent to run it, or \
+                      decline the lineage"
+                .to_owned(),
+            options: vec!["claude-code".to_owned(), "copilot".to_owned()],
+        };
+        assert_eq!(
+            interpret(&binding, "2\n"),
+            Answer::Answered {
+                text: "copilot".to_owned()
+            },
+            "the second of two agents is an agent, not the decline the last option of a \
+             coordinator-authored list stands for"
+        );
+        assert_eq!(
+            answer_for_option(&binding, 2),
+            Some(Answer::Answered {
+                text: "copilot".to_owned()
+            })
+        );
+        assert_eq!(
+            interpret(&binding, "1"),
+            Answer::Answered {
+                text: "claude-code".to_owned()
+            }
+        );
+        assert_eq!(interpret(&binding, "skip"), Answer::Declined);
+        assert_eq!(answer_for_option(&binding, 3), None);
     }
 
     #[test]

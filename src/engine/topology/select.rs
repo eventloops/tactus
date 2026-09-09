@@ -154,6 +154,7 @@ pub enum Step {
     RepairDispatch {
         key: TaskKey,
         generation: GenerationId,
+        continuing: bool,
     },
     Backoff,
     HardBlock {
@@ -174,6 +175,11 @@ pub enum Admitted {
         attempt: AttemptNumber,
     },
     Dispatch {
+        key: TaskKey,
+        generation: GenerationId,
+        continuing: bool,
+    },
+    RepairDispatch {
         key: TaskKey,
         generation: GenerationId,
         continuing: bool,
@@ -214,7 +220,11 @@ pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {
     }
     if let Some((key, generation, continuing)) = first_ready(fold) {
         if is_repair(fold, key) {
-            return Step::RepairDispatch { key, generation };
+            return ceiling_or(ceiling, spend, epoch, key, || Step::RepairDispatch {
+                key,
+                generation,
+                continuing,
+            });
         }
         return ceiling_or(ceiling, spend, epoch, key, || Step::Dispatch {
             key,
@@ -257,15 +267,14 @@ pub fn checkpoint(step: Step) -> Result<Admitted, UpstrokeError> {
         Step::Integrate { candidate } => Ok(Admitted::Integrate { candidate }),
         Step::Backoff => Ok(Admitted::Backoff),
         Step::HardBlock { questions } => Ok(Admitted::HardBlock { questions }),
-        Step::RepairDispatch { key, generation } => Err(UpstrokeError::Refused {
-            message: format!(
-                "this build does not dispatch a repair: task {key} is a Repair-origin task ready \
-                 to open generation {}, and repair execution — `T-REPAIR-DISPATCH`, the \
-                 materialization of its source candidate and the `LineageHeld` settlements — \
-                 is PR9's, so `checkpoint_refusals` has PR8 refuse the dispatch before any \
-                 append. Nothing was appended and no worktree was created",
-                generation.0
-            ),
+        Step::RepairDispatch {
+            key,
+            generation,
+            continuing,
+        } => Ok(Admitted::RepairDispatch {
+            key,
+            generation,
+            continuing,
         }),
         Step::Closure(outcome) => Err(UpstrokeError::Refused {
             message: format!(

@@ -706,6 +706,27 @@ How many distinct rungs those attempts spent, at least one.
 
 The subject of a schema-3 task and its progress.
 
+## `pub(super) fn question_options(kind: QuestionKind) -> Vec<String> {`
+
+The legacy engine's options for a parked task's question: the engine's
+instructions to the operator, with the decline actions taken from
+`interaction::DECLINE_OPTIONS` so that a numbered pick of one is read as the
+decline it is. "typed free text is sent back to the agent" is true here:
+`answer_question` turns a non-canned answer into human feedback for the next
+attempt.
+
+## `pub(super) fn topology_question_options(kind: QuestionKind) -> Vec<String> {`
+
+The schema-4 driver's options for the same kinds, worded for what that
+engine does with an answer. `question_answered(schema 4)` records an option
+index and, for a binding, an override; it has no field for typed text, so a
+typed answer un-parks the task and reaches no agent
+(`PR249-ANSWER-TEXT-NOT-CARRIED`). PR8's fourteenth review found the
+`Clarify` list promising delivery the driver does not make; this list
+promises nothing it cannot keep, and its give-up option is the shared
+constant, so `answer_for_option` reads it as a decline. `ApproveSpend` is
+not a kind this driver raises and keeps the legacy pair for totality.
+
 ## `pub(super) fn question_context(`
 
 The context a parked task's question quotes back to the human.

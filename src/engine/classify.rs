@@ -131,3 +131,35 @@ pub(crate) fn attempt_record(attempt: u32, facts: AttemptFacts<'_>) -> AttemptRe
 pub(crate) fn review_input_failure(problem: String) -> AttemptFailure {
     AttemptFailure::new(FailureKind::ReviewInputOpaque, problem).from_reviewer()
 }
+
+pub(crate) fn unresolved_conflict_failure(entries: &[String]) -> AttemptFailure {
+    use crate::workspace_manager::{DELETED_KEYWORD, RESOLUTION_MANIFEST, RESOLVED_KEYWORD};
+
+    AttemptFailure::new(
+        FailureKind::AgentError,
+        format!(
+            "the worker left {} conflicted path(s) unresolved at capture: {}",
+            entries.len(),
+            entries
+                .iter()
+                .map(|entry| format!("`{entry}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    )
+    .with_feedback(format!(
+        "The repair worktree was materialized with the rejected candidate and these entries \
+         were still unmerged in the index, or undeclared, when the result was captured: {}. \
+         Resolve every conflict in the working tree with your file tools — remove the conflict \
+         markers and keep the behaviour already merged; for a file Git left without markers, \
+         write the bytes you intend — then record each resolved path in the resolution \
+         manifest `{RESOLUTION_MANIFEST}` at the root of the worktree, one per line: \
+         `{RESOLVED_KEYWORD} <path>` for a path whose working-tree content is the resolution, \
+         `{DELETED_KEYWORD} <path>` for a path resolved by deleting it. The engine stages what \
+         the manifest declares; a path left unmerged and undeclared is refused before any gate \
+         runs. Run no git command. The manifest is read at capture and removed by it, unless \
+         the capture refused it, in which case it stays for you to correct; in a later attempt \
+         of this repair, write it again only for a path whose resolution you are changing.",
+        entries.join(", ")
+    ))
+}

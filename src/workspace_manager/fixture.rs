@@ -351,6 +351,13 @@ pub(crate) fn remove_file(path: &Path) {
     }
 }
 
+/// Remove the empty directory at `path`: a worker's file operation, standing
+/// for a tool that removes a directory it has emptied.
+pub(crate) fn remove_dir(path: &Path) {
+    fs::remove_dir(path)
+        .unwrap_or_else(|error| panic!("removing the directory {}: {error}", path.display()));
+}
+
 /// Run this test binary again, `--exact --ignored`, with `env` set, and
 /// return its exit status.
 ///
@@ -390,10 +397,54 @@ pub(crate) struct KillableGitChild {
     fired: Option<std::time::Duration>,
 }
 
+/// The `git` a sampled child runs, so that a kill of the child is a kill of
+/// git.
+///
+/// On Unix that is `git` on the `PATH`. On Windows `git` on the `PATH` is Git
+/// for Windows' `cmd\git.exe`, a 46 KB launcher that starts the real
+/// `mingw64\bin\git.exe` as its own child and waits for it, so a
+/// `Child::kill` there ends the launcher and the pick runs on to completion:
+/// the winguest lane at `56ea88c9` recorded 30 kills, ten of which found no
+/// write and twenty a finished pick, none an interruption
+/// (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`). So the sampled child is the real
+/// binary, found through `git --exec-path` (`<prefix>/mingw64/libexec/git-core`)
+/// as `<prefix>/mingw64/bin/git.exe`, whose DLLs sit beside it. Resolved
+/// once per process; `git` when that layout is absent.
+pub(crate) fn sampled_git() -> &'static Path {
+    static RESOLVED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    RESOLVED.get_or_init(|| {
+        let fallback = PathBuf::from("git");
+        if !cfg!(windows) {
+            return fallback;
+        }
+        let Ok(output) = Command::new("git")
+            .arg("--exec-path")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+        else {
+            return fallback;
+        };
+        if !output.status.success() {
+            return fallback;
+        }
+        let exec_path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+        match exec_path
+            .parent()
+            .and_then(Path::parent)
+            .map(|prefix| prefix.join("bin").join("git.exe"))
+        {
+            Some(real) if real.is_file() => real,
+            _ => fallback,
+        }
+    })
+}
+
 impl KillableGitChild {
-    /// Spawn `git -C cwd <args>` with its streams discarded.
+    /// Spawn `git -C cwd <args>` with its streams discarded; [`sampled_git`]
+    /// says which `git`.
     pub(crate) fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let child = Command::new("git")
+        let child = Command::new(sampled_git())
             .arg("-C")
             .arg(cwd)
             .args(["-c", "core.fsmonitor=false"])

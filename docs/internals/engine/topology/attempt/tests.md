@@ -1000,3 +1000,339 @@ values, so a malformed one is the tool or the engine misbehaving. Reaching
 `ObjectId::new` with a `?` made it `UpstrokeError::Refused`, which says a
 caller offered something it should not have. Witnessed by restoring that
 `?`: the error becomes `Refused` and the first assertion fails.
+
+## `fn declare(worktree: &Path, manifest: &str) {`
+
+The worker's whole conflict-resolution vocabulary, a file write: the
+manifest goes where the engine designates it, with the tools an edit profile
+has. Nothing here shells out to git, because the real worker cannot — the
+helper this replaced (`git(&worktree, &["add", "--", "c.txt"])`, PR #249's
+first repair round) staged through a privilege production lacks, and the
+regression review's witness passed before that round and failed after it.
+
+## `fn an_unresolved_conflict_fails_the_capture_before_any_gate_and_a_declared_one_is_staged_by_the_engine() {`
+
+`R9`: a path the index still holds unmerged is read before staging, so
+nothing is staged and the tree is the base's; the assessment fails
+`AgentError` naming the path, with feedback that names the manifest, its two
+words and "run no git command", and no gate or reviewer runs. Rewriting the
+file without its markers changes nothing until the worker declares it; once
+it has, the engine stages the resolution in the one `Object.CandidateStage`
+execution, the index holds no unmerged entry, the tree carries the
+resolution and not the manifest, and the manifest — acted on — is consumed.
+
+## `fn a_declared_deletion_resolves_a_conflict_and_an_undeclared_missing_file_does_not() {`
+
+A conflicted path whose file is gone is still an unmerged entry; `deleted
+<path>` in the manifest has the engine `git rm` it, and the captured tree
+then records the deletion.
+
+## `fn a_conflict_rendered_with_a_longer_marker_size_is_unresolved_at_capture() {`
+
+PR #249's conformance review, finding 2: the unmerged entry is what makes a
+path unresolved, not the seven-character marker a scan would look for. A
+`conflict-marker-size=8` conflict the worker left alone is refused before
+staging while its other edit stands, and a declared resolution captures.
+
+## `fn an_untouched_binary_conflict_is_unresolved_at_capture_and_a_declared_keep_ours_is_staged() {`
+
+The same finding's other format: a `-merge` path Git leaves as the current
+side with no marker at all. Untouched it is refused; declared resolved with
+not one byte changed — keep-ours, byte-identical to abandonment — it
+captures with the published side, which is why the declaration and not the
+content carries the intent.
+
+## `fn four_shapes(run: &mut Run) -> (String, String) {`
+
+Default markers, `conflict-marker-size=8`, a `-merge` binary and a
+delete/modify in one worktree: the base changes four files the ancestor had
+and one candidate commit (`commit_changing`) changes three differently and
+deletes the fourth. A cherry-pick applies one commit's change against its
+parent, so a chain of one-file source commits would conflict in its tip
+alone — the first draft of this fixture did, and only `d.txt` was unmerged.
+
+## `fn four_conflict_shapes_declared_at_once_are_staged_by_the_engine_into_one_tree() {`
+
+Two files rewritten, the binary kept, the deletion chosen for the fourth,
+all four declared: one `Object.CandidateStage` execution stages three
+`git add`s and one `git rm`, the index holds no unmerged entry, the engine
+removed the file the worker declared deleted (its tools could not), and the
+tree carries the three kept paths, not the fourth and not the manifest.
+
+## `fn four_conflict_shapes_undeclared_are_all_refused_before_any_gate_and_nothing_is_staged() {`
+
+The refusal side of the same conflict. Nothing declared: all four refused,
+named in the `AgentError`, no gate and no reviewer. Three declared and one
+forgotten: only the forgotten path is refused, and the three are not staged
+either — a capture is all or nothing, and the declared deletion removes
+nothing until a capture proceeds. A manifest with a line the grammar does
+not admit: every path refused and the line quoted back as a fifth entry.
+
+## `fn an_edit_only_worker_completes_a_conflict_repair_through_file_writes_alone() {`
+
+PR #249's regression review, the P1, in the reviewer's own shape. The
+production Claude Code worker command is assembled through
+`WorkerAssembly`, its generated `permissions.allow` read back — file tools
+and `Bash(cargo test)`, no rule naming git — and its deny list checked not
+to cover the manifest's root-level path; Copilot's `permission_args` are
+writes and the gate. The repair is then completed through the one operation
+both admit, a file write: the resolved bytes and the manifest. The review's
+witness did the same and failed at `3bce2c6a` with `unresolved == ["c.txt"]`.
+
+## `fn a_declared_path_is_staged_literally_whatever_characters_it_holds() {`
+
+`a[1].txt` is a glob to a pathspec and a file to the index; `sp ace.txt` is
+one path. Declared in backticks, with `./` in front and CRLF line endings —
+the grammar's tolerances — both are staged as themselves through
+`:(literal)`.
+
+## `fn a_resolution_manifest_written_where_nothing_conflicted_is_ignored_and_stays_out_of_the_candidate() {`
+
+An ordinary attempt's worker that writes a manifest anyway: the index holds
+nothing the manifest governs, so it is not read, the work is captured, and
+the manifest — an untracked regular file the ignore rules do not cover — is
+kept out by the exclusion `candidate_stage` appends for exactly that state,
+and removed by the same staging, unread. Then the same with a manifest the
+grammar refuses: read on its own it is malformed, and the capture, which
+does not read it, stages the work as before and removes it as before. "A
+malformed manifest stages nothing" is a promise about a capture that reads
+one (the third round's manifest-contract review, finding 6).
+
+## `fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_rest() {`
+
+`ResolutionManifest::parse` against what a worker is likely to write —
+CRLF, comments, blank lines, a list bullet, one colon after the keyword,
+backticks and quotes around the path, `./`, surrounding whitespace — and
+what it refuses, each with the line named: a second colon among them, and
+a quoted path is what the quotes hold, whitespace included (the third
+round's manifest-contract review, findings 4 and 5). `Declaration::names`
+as a path comparison, a backslash a separator exactly where the platform's
+Git reads it as one; `names_in_another_case` as the one alias that is
+read, for refusing — a normalization form is not a case. And
+`plan_resolutions` over both governed lists: no manifest refuses every
+unmerged entry, a declaration of a path in neither list is nothing, a path
+declared both ways is refused rather than guessed, a contradiction in two
+cases and a lone respelling in another case are refused naming the index's
+spelling while two index entries that differ only by case are two files and
+a normalization-form pair is not read as a contradiction (the recorded
+boundary), a malformed manifest refuses everything it governs and says why;
+a resolved path is left to the `add -A` when undeclared, is revised to a
+deletion when declared so, and is governed once when the index holds it
+unmerged too. And `names_in_another_case` folds per character: `ΟΣ` beside
+`οσ` and `AΣ` beside `aσ` are aliases, which the contextual string fold
+denied (PR #249's fourth-round manifest-contract and adequacy reviews), and
+`ς` against `σ` is not one, as the Windows guest's filesystem also says.
+
+## `fn an_already_present_source_proceeds_as_an_ordinary_attempt_whose_empty_diff_fails_honestly() {`
+
+`repairs.empty_source`: an `Empty` observation proceeds as an ordinary
+attempt; a worker that then changes nothing fails under the existing
+empty-diff rule rather than through a no-candidate settlement that does
+not exist (a deferred decision).
+
+## `fn retry_in_place(`
+
+`run::retry_ready` in the fixture's hands: the previous attempt retained
+with a gate failure, `settle::retry` reserving and verifying the worktree
+against the retained tree, the authorized attempt started with what the
+fold recorded for it, the reservation converted. Returned rather than
+dropped because a retry's reservation is the caller's to keep alive while
+its attempt runs.
+
+## `fn blob_in(worktree: &Path, tree: &str, path: &str) -> Vec<u8> {`
+
+The bytes a captured tree holds at a path, read from the object rather
+than the working tree: what the queue would publish.
+
+## `fn a_retained_retry_revises_a_declared_resolution_to_a_deletion_and_a_settled_deletion_is_not_reapplied() {`
+
+PR #249's third-round regression review, finding 2. Attempt 1 resolves
+`c.txt` and declares it; the capture stages it, consumes the manifest, and
+the index's resolve-undo record now names it (`resolved_conflicts`, empty
+before). Attempt 2 in the retained worktree declares `deleted c.txt`:
+nothing is unmerged, the manifest is read all the same because the index
+still holds what a capture resolved, the engine's `git rm --force` removes
+the file the worker's tools could not, the tree no longer carries it, and
+that manifest is consumed in turn — at `698777b0` the manifest went unread
+and the capture reported success with `c.txt` in the tree and on disk.
+Attempt 3, the worker declaring `deleted c.txt` again: the deleted path
+has no entry left to govern, so the index holds nothing the manifest
+governs, the manifest is not read — and is removed with the capture all the
+same, since the fifth round (it stayed until then, and the four-attempt test
+below is what a kept one did) — no `git rm` runs against a pathspec that
+matches nothing, and the worker's other edit is captured as usual. The log
+replays.
+
+## `fn a_retained_retry_reads_the_manifest_while_the_index_holds_what_a_capture_resolved() {`
+
+The other half of the retained rule: a manifest the grammar refuses, in
+the retry, refuses the capture and stages nothing, and stays for the worker
+to correct — the entry is still governed, so the malformed-manifest promise
+holds here — while the corrected manifest re-stages the resolution from the
+file's new content and is consumed; with no manifest and the entry still
+governed, an ordinary capture stages what the tree holds — the file's newer
+content, nothing preserved from the previous capture (PR #249's fourth-round
+record review, finding 1, found the notes promising that it was).
+
+## `fn a_tracked_file_of_the_manifests_name_is_the_repositorys_and_a_conflict_repair_there_is_refused() {`
+
+The name, taken. An ordinary attempt in a repository that tracks
+`.upstroke-resolved`: the worker's edit to that file is in the captured
+tree — the third round's regression review found the old content there,
+silently, under the unconditional exclusion. A conflict repair materialized
+from a candidate that carries the file (the record review's witness): the
+pick places it in the index, and the capture that needs the manifest refuses
+`UpstrokeError::Refused` naming the tracked name, before anything is staged.
+The same candidate picked cleanly: nothing to govern, the manifest unread,
+and the candidate's file captured as the data it is.
+
+## `fn an_ignored_manifest_is_read_and_kept_out_of_the_candidate_by_the_ignore_rules_alone() {`
+
+The manifest-contract review's finding 1: a committed `.gitignore` naming
+the manifest, and a required clean filter that would fail on it, so that
+any `add` reaching the file is loud. The declaration is read, `c.txt` and
+the untracked `.gitattributes` are staged, the manifest is not, and no
+exclusion is appended — the one that exactly named an ignored path made
+`git add -A` exit 1 at `698777b0`; consumed like any manifest the capture
+acted on, since the `clean` carries `-x`.
+
+## `fn a_directory_of_the_manifests_name_is_the_repositorys_and_its_contents_are_captured() {`
+
+The manifest-contract review's finding 2: a pathspec exclusion is a
+directory prefix too. An untracked `.upstroke-resolved/data.txt` beside an
+ordinary edit, both captured; a tracked one edited, the edit captured (the
+old content stayed in the tree at `698777b0`); and with a conflict to
+declare, the worker cannot write the manifest where a directory stands, and
+the capture refuses naming "a directory" rather than failing on the I/O
+error the read would otherwise raise.
+
+## `fn a_declaration_in_another_case_is_refused_and_the_checkout_says_whether_it_named_the_file() {`
+
+The manifest-contract review's finding 3, whose filesystem half was
+reasoned; this establishes it on each platform CI runs. `Dir/C.txt`
+conflicted, and the checkout is asked whether `dir/c.txt` is that file —
+yes on Windows and macOS, no on Linux, asserted so that the record's
+platform statement is measured rather than assumed. The rule is the same on
+all three: the pair `resolved Dir/C.txt` / `deleted dir/c.txt` is refused
+as a contradiction, the lone `resolved dir/c.txt` is refused naming the
+index's spelling, and `resolved Dir/C.txt` captures. Then the boundary the
+exact rule leaves: `café.txt` composed, its decomposed respelling names the
+file on macOS alone, and the engine reads it as nothing everywhere — the
+pair is not refused and the composed declaration is staged. Pinned so that
+folding normalization (`PR249-MANIFEST-NORMALIZATION-ALIAS`) moves this
+test with it.
+
+## `fn a_quoted_declaration_names_an_entry_exactly_whitespace_included() {`
+
+The manifest-contract review's finding 4. An index entry ` c.txt `, spaces
+and all: unquoted, the trim leaves `c.txt` and the entry stays undeclared;
+quoted, the path is what the quotes hold and the resolution is staged. Unix
+only, because Windows does not hold such a name.
+
+## `fn a_declared_resolution_reaches_the_configured_checks_which_decide_what_they_detect() {`
+
+The record and manifest-contract reviews' shared witness against
+`design/26` §26.4's old word "caught": markers left in `c.txt`, the file
+declared resolved, no gate and no reviewer in the plan. The capture stages
+the declaration, no cheap rung reads the markers, and the judgment accepts.
+What a wrong declaration reaches is the configured validation; the design
+now says so.
+
+## `fn a_settled_deletion_is_not_revived_by_the_manifest_that_made_it_once_the_path_is_recreated() {`
+
+PR #249's fourth-round regression and manifest-contract reviews, one
+witness each, in their shape. Attempt 1 declares `deleted c.txt` and the
+capture removes the file and consumes the manifest; `resolved_conflicts`
+is empty, a settled deletion governing nothing. Attempt 2 recreates the
+file with a file write and declares nothing: an ordinary addition, and the
+read now names the path again — the resolve-undo record survived the
+deletion and the addition put an index entry back beside it, which is the
+state the reviewers' third capture reread the standing declaration in and
+removed the file from the disk and the candidate. Attempt 3 edits another
+file: one staging, the recreated file on disk and in the tree with the
+bytes of attempt 2. The log replays.
+
+## `fn a_manifest_standing_where_a_tracked_directory_was_hides_none_of_its_deletions() {`
+
+The manifest-contract review's finding 1 of the fourth round. An ordinary
+attempt whose base tracks `.upstroke-resolved/data.txt`: the worker removes
+the file and its directory with file operations, writes a regular file at
+the name, edits another file and writes a nested `sub/.upstroke-resolved`.
+The captured tree holds the edit and the nested file, not the worker's
+file, and not the deleted `data.txt` — at `b2946956` the exclusion, a
+directory prefix, kept that deletion out and the tree still held the file.
+The idle manifest, read by nothing, is removed with the capture. Then a
+conflict repair whose
+worker removes the directory and declares: the file at the name is the
+worker's manifest, read and consumed, the resolution and the directory's
+deletion both in the tree, one `Object.CandidateStage` execution.
+
+## `fn a_tracked_file_of_the_manifests_name_in_another_case_is_the_repositorys_on_every_platform() {`
+
+The manifest-contract review's finding 2 of the fourth round, established
+natively on the Windows guest. The base tracks `.UPSTROKE-RESOLVED`; the
+worker resolves `c.txt` and writes its manifest at the lowercase name,
+which the test first reads back through the tracked name to record what
+the checkout did — the tracked file's bytes on Windows and macOS, a second
+file on Linux. The capture refuses (`Refused`, naming `.UPSTROKE-RESOLVED`
+and "by case alone"), stages nothing, and leaves the index unmerged; at
+`b2946956` the exact-spelling reads found nothing and the repository's
+file, overwritten, was read as the manifest and staged. An ordinary attempt
+in that repository then edits the tracked file and is captured with the
+edit.
+
+## `fn a_case_alias_is_read_per_character_so_a_final_sigma_hides_no_contradiction() {`
+
+The manifest-contract and adequacy reviews' shared finding of the fourth
+round: `ΟΣ` conflicted and declared `resolved` beside `deleted οσ`. The
+test first shows the contextual fold unequal on the pair, then records per
+platform whether the checkout reads `οσ` as the conflicted file (the guest
+said it does), and asserts the same three outcomes as the `Dir/C.txt` test:
+the pair refused as a contradiction, the lone respelling refused naming the
+index's spelling, the index's spelling staged. The reviewers' witness — and
+the adequacy review's Unicode-to-ASCII mutation of the fold, which survived
+every scoped test at `b2946956` — fail here.
+
+## `fn a_declaration_no_capture_read_does_not_outlive_it_so_a_recreated_path_is_governed_by_no_stale_one() {`
+
+PR #249's fifth-round adequacy and manifest-contract reviews, one witness
+each, in their shape — the sequence the fourth round's repair did not reach,
+because it removed the manifest a capture *acted on* and this one never
+acts on the manifest it loses to. Attempt 1 declares `deleted c.txt`,
+consumed. Attempt 2 declares it again while the path has no entry, and
+edits another file: nothing is governed, the manifest is not read, the edit
+is captured, and the manifest is removed with the capture — the assertion
+the reviewers' witnesses fail without, since at `6448262e` it stayed.
+Attempt 3 recreates the file: an ordinary addition, after which
+`resolved_conflicts` names the path again. Attempt 4 edits another file: one
+staging, the recreated file on disk and in the tree with attempt 3's bytes —
+at `6448262e` this capture read attempt 2's declaration and deleted it. The
+log replays.
+
+## `fn an_ignored_manifest_standing_where_a_tracked_directory_was_captures() {`
+
+PR #249's fifth-round regression review, both shapes it executed. The base
+tracks `.upstroke-resolved/data.txt` and ignores `.upstroke-resolved`; the
+worker deletes the file and its directory, writes its manifest at the name
+and edits another file — and in the repair shape resolves and declares
+`c.txt`. At `6448262e` the `add -A` of what the index held under the name
+staged the deletion and exited 1, "The following paths are ignored", and
+the capture aborted with the resolution already staged; `add -u` walks the
+index alone. One staging; the edit, the resolution and the `.gitignore` in
+the tree, the deleted file and the worker's file not; the ignored manifest
+removed.
+
+## `fn an_untracked_file_of_the_manifests_name_in_another_case_is_the_workers_where_the_checkout_folds_case() {`
+
+PR #249's fifth-round manifest-contract review, established natively on the
+Windows guest. An untracked `.Upstroke-Resolved` is written first; the worker
+then writes its declaration through the lowercase name, and the test records
+per platform whether the two are one file — the variant's bytes are the
+declaration on Windows and macOS, and not on Linux. The capture reads the
+manifest under the spelling the checkout lists (at `6448262e` the
+exact-spelling reads found nothing, classified it ignored, staged it into the
+candidate as `.Upstroke-Resolved` with the declaration text and left it on
+disk), stages the resolution, keeps every spelling of the name out of the
+candidate where the two are one file, and removes it under that spelling;
+where they are two files, the variant is a second file of the repository's,
+captured as one, and the manifest spelt as written is excluded and removed.
