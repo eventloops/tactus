@@ -2996,3 +2996,80 @@ it, and a second release finds nothing to release.
 A rejection is folded once: replayed at the same sequence, or against the
 same candidate at the next, it finds no open transaction and no queued
 candidate, and is refused with the registry and the lineage unchanged.
+
+## `fn fold_step(fold: &mut TopologyFold, log: &mut Vec<TopologyEvent>, event: TopologyEvent) {`
+
+Apply one event and keep it, so the log the test replays is exactly the
+sequence the live fold saw.
+
+## `fn queue_logged(`
+
+An ordinary task dispatched at `base`, attempted, and its candidate
+prepared and created, every event logged.
+
+## `fn repair_spawn_of(key: TaskKey, root: TaskKey, root_id: &str) -> FrozenSpawn {`
+
+[`repair_spawn`] for a root other than alpha: its own display id, so
+three lineages can register three repairs, and no dependencies, since the
+wide plan's tasks have none.
+
+## `fn conflict_creating_lineage(`
+
+The `merge_rejected` that creates a lineage at `root` and registers
+`repair` as its first member: a conflict, opening and closing its own
+transaction at `sequence`.
+
+## `fn repair_dispatched(repair: TaskKey, root: TaskKey, base: &CommitSha) -> TopologyEvent {`
+
+A repair dispatched inside its lineage's lease from the candidate its
+root's rejection protected.
+
+## `fn repair_candidate_prepared(`
+
+The repair's candidate, whose diff touched `paths` and whose creation
+widens the lineage by exactly them.
+
+## `fn repair_queued(`
+
+A repair dispatched, attempted, and its candidate prepared and created,
+every event logged.
+
+## `fn lineage_published(`
+
+The fast publication of a repair's candidate and the `task_merged` that
+settles its root and releases the lineage lease.
+
+## `fn lineage_age(fold: &TopologyFold, root: TaskKey) -> u32 {`
+
+The age the fold holds for a lineage.
+
+## `fn refused_live_and_on_wide_replay(`
+
+[`refused_live_and_on_replay`] over the wide plan's inputs.
+
+## `fn an_age_once_granted_is_never_reused_and_a_lineage_created_after_a_release_waits_behind_every_survivor()`
+
+The lease table and the queue alone, on the sequence G4's verification
+derived (`G4-LINEAGE-AGE-REUSED-AFTER-RELEASE`): two lineages, the older
+released, a third created and widened onto the survivor's region. The
+third's age is above every survivor's, the queue holds its member behind
+the survivor and not the other way round, and across a second release the
+granted ages are `0, 1, 2, 3` with no repeat; a holding replaced in place
+keeps its age. On the frozen tree at `74da2cbb` the third lineage took age
+1, the survivor's, and its member was eligible.
+
+## `fn a_lineage_created_after_a_release_waits_behind_the_older_survivor_it_widens_onto_live_and_on_replay()`
+
+The same sequence through the fold's doors, on the wide plan: three
+ordinary candidates rejected into lineages at sequences 0, 1 and 3, the
+first lineage's repair published at 2 while the second, with no candidate
+yet, survives; the third lineage's repair touches the survivor's region and
+its candidate creation widens the lineage onto it. The queue answers
+`BehindOlderLineage`, the fold offers nothing to integrate, and an
+integration start for the third lineage's candidate is refused live and on
+replay. The survivor's own repair then queues behind it in position and
+goes first in eligibility; once it is published, the third lineage's
+candidate is next. The whole log replays to the live state, ages included.
+On the frozen tree at `74da2cbb` this sequence gave the third lineage age
+1, the survivor's, and the fold accepted the integration start live and on
+replay: the overtake G4's verification found.

@@ -10433,3 +10433,361 @@ fn a_lineage_lease_is_released_exactly_once_and_a_second_release_is_refused() {
     let replayed = TopologyFold::replay(inputs(), &log).expect("the log replays");
     assert_eq!(fold.state(), replayed.state());
 }
+
+fn fold_step(fold: &mut TopologyFold, log: &mut Vec<TopologyEvent>, event: TopologyEvent) {
+    apply(fold, &event);
+    log.push(event);
+}
+
+fn queue_logged(
+    fold: &mut TopologyFold,
+    log: &mut Vec<TopologyEvent>,
+    key: TaskKey,
+    base: &CommitSha,
+) {
+    fold_step(fold, log, dispatch(key, 0, base));
+    let start = attempt_started(fold, key, 0, 1, 0);
+    fold_step(fold, log, start);
+    fold_step(fold, log, candidate_prepared(key, 0, base));
+    fold_step(fold, log, candidate_created(key, 0));
+}
+
+fn repair_spawn_of(key: TaskKey, root: TaskKey, root_id: &str) -> FrozenSpawn {
+    let mut spawn = repair_spawn(key, root, root);
+    spawn.entry.display_id = TaskId::from(
+        crate::topology::registry::repair_display_id(0, &TaskId::from(root_id)).as_str(),
+    );
+    spawn.entry.deps = Vec::new();
+    spawn.entry.display_deps = Vec::new();
+    spawn
+}
+
+fn conflict_creating_lineage(
+    root: TaskKey,
+    root_id: &str,
+    repair: TaskKey,
+    sequence: u32,
+) -> TopologyEvent {
+    ev(TopologyEventBody::MergeRejected {
+        data: Box::new(MergeRejected {
+            sequence: SequenceId(sequence),
+            candidate: candidate_of(root, 0),
+            rejecting_head: sha("head"),
+            disposition: RejectionDisposition::Conflict {
+                paths: region(root),
+            },
+            repair: repair_spawn_of(repair, root, root_id),
+            lease_effect: RejectionLeaseEffect::CreatesLineage {
+                root,
+                paths: region(root),
+            },
+        }),
+    })
+}
+
+fn repair_dispatched(repair: TaskKey, root: TaskKey, base: &CommitSha) -> TopologyEvent {
+    ev(TopologyEventBody::TaskDispatched {
+        data: TaskDispatched {
+            key: repair,
+            generation: GenerationId(0),
+            base_sha: base.clone(),
+            worktree_path: format!("/private/workspaces/tasks/k{}-g0", repair.0),
+            lease: LeaseGrant::InheritedLineage { root },
+            source_candidate: Some(candidate_of(root, 0)),
+        },
+    })
+}
+
+fn repair_candidate_prepared(
+    repair: TaskKey,
+    root: TaskKey,
+    base: &CommitSha,
+    paths: PathSet,
+) -> TopologyEvent {
+    let mut prepared = candidate_prepared(repair, 0, base);
+    let data = candidate_prepared_mut(&mut prepared);
+    data.actual_paths = paths.clone();
+    data.lease_effect = CandidateLeaseEffect::WidensLineage { root, paths };
+    prepared
+}
+
+fn repair_queued(
+    fold: &mut TopologyFold,
+    log: &mut Vec<TopologyEvent>,
+    repair: TaskKey,
+    root: TaskKey,
+    base: &CommitSha,
+    paths: PathSet,
+) {
+    fold_step(fold, log, repair_dispatched(repair, root, base));
+    let start = repair_attempt_started(fold, repair);
+    fold_step(fold, log, start);
+    fold_step(
+        fold,
+        log,
+        repair_candidate_prepared(repair, root, base, paths),
+    );
+    fold_step(fold, log, candidate_created(repair, 0));
+}
+
+fn lineage_published(
+    repair: TaskKey,
+    root: TaskKey,
+    sequence: u32,
+    base: &CommitSha,
+) -> [TopologyEvent; 2] {
+    [
+        fast_publication(repair, 0, sequence, base, vec![root, repair]),
+        ev(TopologyEventBody::TaskMerged {
+            data: TaskMerged {
+                sequence: SequenceId(sequence),
+                merged_sha: sha(&format!("commit-{}-0", repair.0)),
+                satisfies: vec![root, repair],
+                lease_release: MergeLeaseRelease::Lineage { root },
+            },
+        }),
+    ]
+}
+
+fn lineage_age(fold: &TopologyFold, root: TaskKey) -> u32 {
+    fold.leases()
+        .expect("the run has started")
+        .lineage(root)
+        .unwrap_or_else(|| panic!("lineage {root} is held"))
+        .age
+}
+
+fn refused_live_and_on_wide_replay(
+    fold: &TopologyFold,
+    log: &[TopologyEvent],
+    event: &TopologyEvent,
+) -> FoldError {
+    let live = refuse(fold, event);
+    let mut replayed = log.to_vec();
+    replayed.push(event.clone());
+    let on_replay = TopologyFold::replay(wide_inputs(), &replayed)
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "a replay of the log plus `{}` must refuse",
+                event.body.kind()
+            )
+        });
+    assert_eq!(
+        live, on_replay,
+        "the live path and the replay refuse differently"
+    );
+    live
+}
+
+#[test]
+fn an_age_once_granted_is_never_reused_and_a_lineage_created_after_a_release_waits_behind_every_survivor()
+ {
+    let policy = path_policy();
+    let mut leases = LeaseTable::new();
+    let age = |leases: &LeaseTable, root: TaskKey| {
+        leases
+            .lineage(root)
+            .unwrap_or_else(|| panic!("lineage {root} is held"))
+            .age
+    };
+    leases.grant(LeaseOwner::Lineage { root: ZETA }, prefixes(&["src/Zebra"]));
+    leases.grant(
+        LeaseOwner::Lineage { root: ALPHA },
+        prefixes(&["src/alpha"]),
+    );
+    let mut granted = vec![age(&leases, ZETA), age(&leases, ALPHA)];
+
+    leases.release(LeaseOwner::Lineage { root: ZETA });
+    assert_eq!(leases.lineages().len(), 1, "one survivor");
+    leases.widen_lineage(MID, &prefixes(&["src/mid"]));
+    leases.widen_lineage(MID, &prefixes(&["src/alpha/lib.rs"]));
+    let younger = age(&leases, MID);
+    granted.push(younger);
+    assert!(
+        younger > age(&leases, ALPHA),
+        "a lineage created after a release is younger than every survivor: {younger} against {}",
+        age(&leases, ALPHA)
+    );
+
+    let member = |root: TaskKey| QueueEntry {
+        candidate: candidate_of(BETA, 0),
+        paths: prefixes(&["src/alpha/lib.rs"]),
+        lineage_root: Some(root),
+        verification_deferred: false,
+        defers: 0,
+        sequence: None,
+    };
+    let never_parked = |_: TaskKey| false;
+    assert_eq!(
+        CandidateQueue::ineligible(&member(MID), &never_parked, &leases, &policy),
+        Some(Ineligible::BehindOlderLineage { root: ALPHA }),
+        "the lineage created after the release waits behind the survivor it overlaps"
+    );
+    assert_eq!(
+        CandidateQueue::ineligible(&member(ALPHA), &never_parked, &leases, &policy),
+        None,
+        "and the survivor's own member is not held back by the lineage created after it"
+    );
+
+    leases.release(LeaseOwner::Lineage { root: ALPHA });
+    leases.grant(LeaseOwner::Lineage { root: MID }, prefixes(&["src/mid"]));
+    assert_eq!(
+        age(&leases, MID),
+        younger,
+        "a holding replaced in place keeps the age it was created with"
+    );
+    leases.grant(
+        LeaseOwner::Lineage { root: BETA },
+        prefixes(&["src/repairs"]),
+    );
+    granted.push(age(&leases, BETA));
+    assert_eq!(
+        granted,
+        vec![0, 1, 2, 3],
+        "ages are granted in creation order and never reused, whatever was released in between"
+    );
+}
+
+#[test]
+fn a_lineage_created_after_a_release_waits_behind_the_older_survivor_it_widens_onto_live_and_on_replay()
+ {
+    const OLDER_REPAIR: TaskKey = TaskKey(4);
+    const SURVIVOR_REPAIR: TaskKey = TaskKey(5);
+    const YOUNGER_REPAIR: TaskKey = TaskKey(6);
+    let base = sha("base");
+    let head = sha("head");
+    let proposal = sha("proposal");
+    let policy = path_policy();
+    let started_event = wide_run_started_event(3);
+    let mut fold = TopologyFold::new(wide_inputs());
+    apply(&mut fold, &started_event);
+    let mut log = vec![started_event];
+
+    for key in [ZETA, ALPHA] {
+        queue_logged(&mut fold, &mut log, key, &base);
+    }
+    fold_step(
+        &mut fold,
+        &mut log,
+        conflict_creating_lineage(ZETA, "zeta", OLDER_REPAIR, 0),
+    );
+    fold_step(
+        &mut fold,
+        &mut log,
+        conflict_creating_lineage(ALPHA, "alpha", SURVIVOR_REPAIR, 1),
+    );
+    assert_eq!(lineage_age(&fold, ZETA), 0);
+    assert_eq!(lineage_age(&fold, ALPHA), 1);
+
+    repair_queued(&mut fold, &mut log, OLDER_REPAIR, ZETA, &base, region(ZETA));
+    for event in lineage_published(OLDER_REPAIR, ZETA, 2, &base) {
+        fold_step(&mut fold, &mut log, event);
+    }
+    let leases = fold.leases().expect("started");
+    assert!(!leases.holds(LeaseOwner::Lineage { root: ZETA }));
+    assert!(leases.holds(LeaseOwner::Lineage { root: ALPHA }));
+    assert_eq!(
+        leases.lineages().len(),
+        1,
+        "one live lineage, the survivor, which has no candidate"
+    );
+
+    queue_logged(&mut fold, &mut log, MID, &base);
+    fold_step(
+        &mut fold,
+        &mut log,
+        conflict_creating_lineage(MID, "mid", YOUNGER_REPAIR, 3),
+    );
+    assert!(
+        lineage_age(&fold, MID) > lineage_age(&fold, ALPHA),
+        "a lineage created after a release is younger than every survivor: {} against {}",
+        lineage_age(&fold, MID),
+        lineage_age(&fold, ALPHA)
+    );
+
+    let contended = prefixes(&["src/alpha/lib.rs", "src/mid"]);
+    repair_queued(&mut fold, &mut log, YOUNGER_REPAIR, MID, &base, contended);
+    let leases = fold.leases().expect("started");
+    let younger = leases.lineage(MID).expect("the younger lineage");
+    let survivor = leases.lineage(ALPHA).expect("the surviving lineage");
+    assert!(
+        regions_overlap(&younger.paths, &survivor.paths, &policy),
+        "the candidate's creation widened the younger lineage onto the survivor's region"
+    );
+    let entry = fold
+        .queue()
+        .expect("started")
+        .get(YOUNGER_REPAIR, GenerationId(0))
+        .expect("the younger lineage's candidate is queued");
+    assert_eq!(
+        CandidateQueue::ineligible(entry, &|_: TaskKey| false, leases, &policy),
+        Some(Ineligible::BehindOlderLineage { root: ALPHA }),
+        "the queue recognises the survivor as the older lineage"
+    );
+    assert_eq!(
+        fold.eligible_integration_candidate(),
+        None,
+        "nothing is integrable while the older overlapping lineage has no candidate"
+    );
+    let overtake = verification_started(YOUNGER_REPAIR, 0, 4, &head, &proposal);
+    assert!(
+        matches!(
+            refused_live_and_on_wide_replay(&fold, &log, &overtake),
+            FoldError::NotFirstEligible { key, .. } if key == YOUNGER_REPAIR.0
+        ),
+        "an integration of the younger lineage's candidate is refused live and on replay"
+    );
+
+    repair_queued(
+        &mut fold,
+        &mut log,
+        SURVIVOR_REPAIR,
+        ALPHA,
+        &base,
+        region(ALPHA),
+    );
+    let queued: Vec<TaskKey> = fold
+        .queue()
+        .expect("started")
+        .entries()
+        .iter()
+        .map(QueueEntry::key)
+        .collect();
+    assert_eq!(
+        queued,
+        vec![YOUNGER_REPAIR, SURVIVOR_REPAIR],
+        "queue position is creation order"
+    );
+    assert_eq!(
+        fold.eligible_integration_candidate(),
+        Some(&candidate_of(SURVIVOR_REPAIR, 0)),
+        "eligibility is lineage order: the older lineage's candidate goes first"
+    );
+    for event in lineage_published(SURVIVOR_REPAIR, ALPHA, 4, &base) {
+        fold_step(&mut fold, &mut log, event);
+    }
+    assert!(
+        !fold
+            .leases()
+            .expect("started")
+            .holds(LeaseOwner::Lineage { root: ALPHA })
+    );
+    assert_eq!(
+        fold.eligible_integration_candidate(),
+        Some(&candidate_of(YOUNGER_REPAIR, 0)),
+        "with the older lineage settled, the younger lineage's candidate is next"
+    );
+    accepts(
+        &fold,
+        &verification_started(YOUNGER_REPAIR, 0, 5, &head, &proposal),
+    );
+
+    let replayed = TopologyFold::replay(wide_inputs(), &log).expect("the log replays");
+    assert_eq!(
+        fold.state(),
+        replayed.state(),
+        "the ages are derived from the log alone"
+    );
+    assert_eq!(lineage_age(&replayed, MID), 2);
+}
