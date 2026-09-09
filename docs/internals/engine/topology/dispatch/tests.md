@@ -221,8 +221,17 @@ verified or fresh worktree".
 Both sides of the materialization, because they leave different worktrees
 and the recovery has to converge from each: killed *before* it, the worktree
 is at the base with a clean index; killed *after* it, the worktree carries
-the merge objects **and** `CHERRY_PICK_HEAD`, which `Worktree.Verify` reads
-as administrative residue and refuses.
+the merged index and, in this test's after-phase kill, the funnel's
+`MERGE_MSG` and `AUTO_MERGE` not yet cleared, which `Worktree.Verify` reads
+as administrative residue and recreates from. Not `CHERRY_PICK_HEAD`:
+`cherry-pick --no-commit` never writes it (measured on git 2.43, clean and
+conflicting picks alike; the record's R5). A kill between the index's
+publish and `MERGE_MSG.lock` leaves the merged index with no state file at
+all, which verifies like a completed pick and converges through the funnel's
+restore of the base's tree (`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
+This paragraph said until PR #249's fifth repair round that the after-kill
+worktree carries `CHERRY_PICK_HEAD` and is refused; its record review found
+the copy.
 
 The oracle is the recorded source, not a path list: after recovery the
 worktree's index must hold exactly what an uninterrupted materialization

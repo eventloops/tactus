@@ -305,8 +305,12 @@ fn after_reference_present(
             Ok(target.base.is_some_and(|base| head != base))
         }
         // `cherry-pick --no-commit` publishes its merge objects through the
-        // repair worktree's index. CHERRY_PICK_HEAD survives a *successful*
-        // `--no-commit`, so it is never the discriminator here.
+        // repair worktree's index. `--no-commit` never writes CHERRY_PICK_HEAD
+        // — not on a clean pick, not on a conflicting one (measured on git
+        // 2.43; `repair_materialize`'s doc) — so the file cannot be the
+        // discriminator here, and the index against `HEAD` is. (This comment
+        // said until PR #249's fifth repair round that CHERRY_PICK_HEAD
+        // "survives a successful `--no-commit`"; the record review found it.)
         EffectSiteId::Object(ObjectSite::RepairMaterialize) => {
             if index_lock_present(worktree)? {
                 return Ok(false);

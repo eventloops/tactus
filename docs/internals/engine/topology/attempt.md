@@ -482,20 +482,34 @@ record the markers as the resolution. Non-empty means nothing was staged,
 
 ## `struct ResolutionPlan {`
 
-The capture's reconciliation of the index's unmerged entries with the
-worker's manifest: `staged`, the unmerged paths the manifest declared, each
+The capture's reconciliation of the paths the worker's manifest governs with
+what it declares: `staged`, the governed paths the manifest declared, each
 with how, spelt as the index spells them; `refused`, every unmerged entry it
-did not declare, plus the manifest's problem when it has one. A plan with
-anything refused stages nothing.
+did not declare, every contradiction, plus the manifest's problem when it has
+one. A plan with anything refused stages nothing.
 
-## `fn plan_resolutions(unmerged: &[String], manifest: &ResolutionManifest) -> ResolutionPlan {`
+## `fn plan_resolutions(`
 
-No manifest: everything refused. A malformed one: everything refused and
-the detail appended as one more entry, so the worker is told the line. A
-parsed one: each unmerged path takes the kind declared for it
-(`Declaration::names`, a path comparison); a path declared both `resolved`
-and `deleted` is refused rather than guessed; a declaration of a path that
-is not unmerged is nothing.
+Three inputs, two governed lists and the manifest: `unmerged`, the index's
+conflicted entries, every one of which must be declared; `resolved`, the
+entries a previous capture of this generation resolved and the index still
+holds (`resolved_conflicts`), which a declaration may revise and silence
+leaves to the ordinary `add -A`. No manifest: every unmerged entry refused,
+every resolved entry left to the `add -A` — so an absent manifest in a
+retained retry with nothing unmerged is an ordinary capture. A malformed one:
+every governed path refused and the detail appended as one more entry, so
+the worker is told the line. A parsed one, per governed path: declared one
+way as the index spells it (`Declaration::names`, a path comparison), staged
+that way — a resolved path declared `deleted` is the revision the retry
+exists for; declared both ways, refused rather than guessed; declared one way
+exactly and the other in another case (`names_in_another_case`, a spelling
+that governs nothing itself), refused as a contradiction; declared only in
+another case, refused naming the index's spelling; undeclared, refused if
+unmerged and left to the `add -A` if resolved. A declaration naming a path in
+neither list is nothing. (This note described the two-argument planner —
+"no manifest: everything refused", "a declaration of a path that is not
+unmerged is nothing" — until PR #249's fifth repair round, three rounds after
+the resolved list was added; its manifest-contract review found the copy.)
 
 ## `fn captured_object_id(source: &str, value: String) -> Result<ObjectId, UpstrokeError> {`
 
@@ -888,18 +902,26 @@ fourth-round record review found this note promising that it was); one the
 manifest names again is re-staged from the working tree, or removed — the
 case `deleted` exists for, a worker whose tools cannot delete correcting
 itself in a retained generation (PR #249's third-round regression review
-found the manifest unread there and the correction lost). **The manifest is
-read once**: the capture that reads it and stages what it declares removes
-it (`ManifestDisposal::Consumed`, a `git clean` of the one untracked path
-inside the same funnel), so that a declaration is applied once — the
-fourth-round regression and manifest-contract reviews each found a settled
-`deleted c.txt` reread two attempts later, once the worker had recreated the
-file and the ordinary addition had put an index entry back beside the
-resolve-undo record, and the recreated file removed from the disk and the
-candidate. A refused manifest stays for the worker to correct. When the
-index holds nothing the manifest governs, the manifest is not read at all,
-and whatever the file says has no effect; a malformed manifest stages
-nothing *in a capture that reads it*, which is the whole of that promise.
+found the manifest unread there and the correction lost). **The manifest
+does not outlive the capture that finds it**: `candidate_stage` removes the
+worker's file after the `add -A` (a `git clean` of the one untracked path,
+by the spelling the checkout lists it under, inside the same funnel) whether
+the capture read it or not, so that a declaration is applied once, by the
+capture of the attempt that wrote it. The fourth-round regression and
+manifest-contract reviews each found a settled `deleted c.txt` reread two
+attempts later, once the worker had recreated the file and the ordinary
+addition had put an index entry back beside the resolve-undo record, and
+the recreated file removed from the disk and the candidate; that round
+removed the manifest a capture acted on, and the fifth round's adequacy and
+manifest-contract reviews found the same loss one attempt longer — the
+deletion re-declared while nothing was governed, the manifest kept unread,
+the path recreated, and the declaration read in the attempt after. A
+refused manifest is the one manifest a capture leaves, for the worker to
+correct, and a refusal stages nothing, so the next capture governs the same
+entries and reads it again. When the index holds nothing the manifest
+governs, the manifest is not read at all, and whatever the file says has no
+effect; a malformed manifest stages nothing *in a capture that reads it*,
+which is the whole of that promise.
 After staging, the index is read once more and an unmerged entry left is a
 Git error, never a passing capture. A repository that has taken the
 manifest's name — a tracked file of it, as spelt or in another case, or a

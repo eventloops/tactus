@@ -338,9 +338,13 @@ review, whose configured checks decide what is detected, since ground truth is
 the diff. A same-generation retry re-enters the worktree the previous attempt
 left, and its manifest may revise a resolution that attempt declared: the index
 records which entries a capture resolved, and the engine reads those beside the
-unmerged ones. The manifest is read once — the capture that acts on it removes
-it, so a declaration is applied once and a later attempt declares afresh what
-it revises; what it does not name is captured as any path is. For a semantic
+unmerged ones. The manifest does not outlive the capture that finds it — the
+capture that acts on it removes it, and one that finds nothing for it to
+govern removes it unread; only a manifest the capture refuses stays, for the
+worker to correct, and the next capture reads it — so a declaration is
+applied once, by the capture of the attempt that wrote it, and a later
+attempt declares afresh what it revises; what it does not name is captured as
+any path is. For a semantic
 rejection, it
 materializes the clean proposal against that current head and supplies the
 original failed evidence. The payload's rejecting head remains immutable
