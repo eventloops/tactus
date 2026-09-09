@@ -94,6 +94,35 @@ exit "$failed"
 
 pub(super) const GATE_JOB_FIELDS: [&str; 4] = ["name", "runs-on", "steps", "timeout-minutes"];
 
+/// The toolchain components the `test` job must install -- an equality, not a
+/// floor.
+///
+/// Both are TEST dependencies of that job rather than lint ones, and
+/// `dtolnay/rust-toolchain` installs the minimal profile, so neither arrives
+/// unless it is named:
+///
+/// * `clippy`, because `every_declared_effect_denial_refuses_for_the_reason_it_\
+///   declares` and the governed-lint readers' oracles drive `clippy-driver`
+///   over fixtures they create;
+/// * `rustfmt`, because `the_governed_lint_readers_separate_tokens_the_way_the_\
+///   lexer_does` runs the real `rustfmt` to establish what a `rustfmt::skip`
+///   preserves -- a claim about the `fmt` gate that may only be made by running
+///   the binary the gate runs.
+///
+/// **An equality and not a `contains`**, which is `PR74-CI-001`. The check this
+/// replaces asked only whether `clippy` was present, so the `rustfmt`-driven
+/// test had no clean-runner guarantee at all: it passed because GitHub's hosted
+/// images happen to ship a full toolchain. That is a property of the image, and
+/// a workflow oracle that cannot see a missing component cannot see the next
+/// one either.
+pub(super) const TEST_JOB_COMPONENTS: [&str; 2] = ["clippy", "rustfmt"];
+
+/// The fields a step of a *gate* job may declare. Same reasoning, and `env:` is
+/// absent for a reason of its own: a step-level environment is enough to
+/// retarget the compile the gate performs -- `CARGO_BUILD_TARGET` on the macOS
+/// leg lints a target no `#[cfg(target_os = "macos")]` body belongs to, while
+/// the `run:` scalar still matches character for character. Measured,
+/// `MUT-GATE-STEP-RETARGETED`.
 pub(super) const STEP_FIELDS: [&str; 5] = ["name", "run", "shell", "uses", "with"];
 
 pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];
