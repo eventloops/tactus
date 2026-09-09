@@ -1368,10 +1368,17 @@ on would send an operator looking for a run that did not happen.
 
 ## `impl TopologyRun` › `resumable: plan.session_resume && assessed.outcome.session_id.is_some(),`
 
-Both halves, as `LadderState::resumable` documents: the
-agent's CLI advertises `session_resume` and this attempt
-actually returned a session to resume. Either alone closes
-the generation and retries from a fresh one.
+Three conjuncts: the two `LadderState::resumable` documents —
+the agent's CLI advertises `session_resume` and this attempt
+actually returned a session to resume — and, since this slice,
+`capture.unresolved.is_empty()`: a refused capture (an unmerged
+entry undeclared, a manifest that does not parse, a path
+declared both ways or in another case) carries the base's tree
+and the attempt it fails is not resumed, so a refused manifest
+is corrected in a fresh generation, not in place (`design/26`
+§26.4). Any one false closes the generation and retries from a
+fresh one. (Until PR #249's sixth repair round this paragraph
+named the first two only.)
 
 ## `impl TopologyRun` › `let question = match next {`
 

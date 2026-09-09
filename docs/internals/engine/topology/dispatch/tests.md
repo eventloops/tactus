@@ -221,17 +221,26 @@ verified or fresh worktree".
 Both sides of the materialization, because they leave different worktrees
 and the recovery has to converge from each: killed *before* it, the worktree
 is at the base with a clean index; killed *after* it, the worktree carries
-the merged index and, in this test's after-phase kill, the funnel's
-`MERGE_MSG` and `AUTO_MERGE` not yet cleared, which `Worktree.Verify` reads
-as administrative residue and recreates from. Not `CHERRY_PICK_HEAD`:
+the merged index and no state file — this test's after-phase kill fires once
+the funnel's primitive has returned, and `repair_materialize` clears
+`MERGE_MSG` and `AUTO_MERGE` inside the primitive (`clear_pick_state`, on
+each outcome the materialization reports), so nothing is left for the after
+phase to see — which `Worktree.Verify` reads as a completed materialization
+(`Reuse::Verified`), and the re-run materialization converges from it by
+restoring the base's tree before it picks. Not `CHERRY_PICK_HEAD`:
 `cherry-pick --no-commit` never writes it (measured on git 2.43, clean and
 conflicting picks alike; the record's R5). A kill between the index's
-publish and `MERGE_MSG.lock` leaves the merged index with no state file at
-all, which verifies like a completed pick and converges through the funnel's
-restore of the base's tree (`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
+publish and `MERGE_MSG.lock` leaves the same state — the merged index with
+no state file — and converges the same way
+(`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
 This paragraph said until PR #249's fifth repair round that the after-kill
-worktree carries `CHERRY_PICK_HEAD` and is refused; its record review found
-the copy.
+worktree carries `CHERRY_PICK_HEAD` and is refused, and from the fifth round
+until the sixth that it carries `MERGE_MSG` and `AUTO_MERGE` "not yet
+cleared" and is recreated from; the fifth round's record review found the
+first copy, and the sixth round's the replacement, by adding presence
+assertions to this test's after-phase case in an isolated copy, production
+code unchanged: `MERGE_MSG`, `AUTO_MERGE` and `CHERRY_PICK_HEAD` all absent,
+the reuse `Verified`.
 
 The oracle is the recorded source, not a path list: after recovery the
 worktree's index must hold exactly what an uninterrupted materialization

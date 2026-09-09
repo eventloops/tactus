@@ -916,9 +916,16 @@ removed the manifest a capture acted on, and the fifth round's adequacy and
 manifest-contract reviews found the same loss one attempt longer — the
 deletion re-declared while nothing was governed, the manifest kept unread,
 the path recreated, and the declaration read in the attempt after. A
-refused manifest is the one manifest a capture leaves, for the worker to
-correct, and a refusal stages nothing, so the next capture governs the same
-entries and reads it again. When the index holds nothing the manifest
+refused manifest is left standing with nothing staged, and so is one whose
+capture fails before the removal — the sixth round's manifest-contract
+review executed a required clean filter failing the `add -A` after the
+declared resolution was staged, and a held `index.lock` before anything
+was; a further capture of the worktree would read either again, and the
+driver makes none: a refusal fails the attempt as the worker's and is not
+resumable, a capture error interrupts it, and either closes the generation,
+so the next attempt is a fresh generation and worktree (until PR #249's
+sixth repair round this note said a refused manifest stays for the worker
+to correct and the next capture reads it). When the index holds nothing the manifest
 governs, the manifest is not read at all, and whatever the file says has no
 effect; a malformed manifest stages nothing *in a capture that reads it*,
 which is the whole of that promise.

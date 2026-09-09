@@ -772,17 +772,25 @@ pub enum Materialized {
 /// conflict-repair protocol, and is told so rather than having its file read
 /// as declarations.
 ///
-/// **The manifest does not outlive the capture that finds it.** The capture
-/// that reads it and stages what it declares removes it, and one that finds
-/// nothing for it to govern removes it unread — `candidate_stage` removes the
-/// worker's file whatever the capture did with it — so that a declaration is
-/// applied once, by the capture of the attempt that wrote it: a
-/// same-generation retry that revises a resolution writes the manifest again,
-/// and one that revises nothing writes nothing, its edits and deletions
-/// captured by the ordinary `add -A` like any path's. A manifest the capture
-/// refuses stays for the worker to correct, and the next capture of the
-/// generation reads it, since the refusal staged nothing and what was governed
-/// still is. Nothing else leaves a manifest standing. Until PR #249's fifth
+/// **The manifest does not outlive a capture that completes with it.** The
+/// capture that reads it and stages what it declares removes it, and one that
+/// finds nothing for it to govern removes it unread — `candidate_stage`
+/// removes the worker's file whatever the capture did with it, as the last
+/// step of its staging — so that a declaration is applied once, by the
+/// capture of the attempt that wrote it: a same-generation retry that revises
+/// a resolution writes the manifest again, and one that revises nothing
+/// writes nothing, its edits and deletions captured by the ordinary `add -A`
+/// like any path's. Two captures leave a manifest standing: one that refuses
+/// it, which stages nothing, and one that does not reach the removal — a Git
+/// error at the declared staging or the `add -A`, a held `index.lock`, the
+/// process killed — which leaves whatever it had staged in the index (PR
+/// #249's sixth-round manifest-contract review executed the first two). A
+/// further capture of that worktree would read the manifest again; the driver
+/// makes none, since a refusal is not resumable and a capture error interrupts
+/// the attempt, and either closes the generation, so the next attempt is a
+/// fresh generation and worktree (`design/26` §26.4; until that round this
+/// paragraph said only a refused manifest stays and that the next capture
+/// reads it). Nothing else leaves a manifest standing. Until PR #249's fifth
 /// repair round a manifest the capture did not read was kept, on the argument
 /// that nothing could govern it later; its adequacy and manifest-contract
 /// reviews each declared a settled deletion again while nothing was governed,
@@ -2946,10 +2954,16 @@ impl WorkspaceManager {
     /// Nothing in the index distinguishes a recreated path from one a retry is
     /// revising to a deletion; what distinguishes them is whether the
     /// declaration is the current attempt's, and the manifest's presence is
-    /// that record exactly when no capture leaves one behind. The one
-    /// manifest a capture does leave is one it refused, and a refusal never
-    /// reaches this funnel: it stages nothing, so the next capture finds the
-    /// same governed set and reads the manifest again.
+    /// that record exactly when no completed capture leaves one behind. A
+    /// capture that refuses the manifest never reaches this funnel and leaves
+    /// it standing with nothing staged; one that fails inside this funnel
+    /// before the removal — the declared staging, the displaced staging or the
+    /// `add -A` returning a Git error — leaves it standing with whatever was
+    /// staged. A further capture of the worktree would read it again; the
+    /// driver makes none, because either outcome closes the generation
+    /// ([`RESOLUTION_MANIFEST`]'s doc, `design/26` §26.4). Until PR #249's
+    /// sixth repair round this paragraph said the next capture reads a refused
+    /// manifest.
     ///
     /// # Errors
     ///

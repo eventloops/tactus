@@ -460,9 +460,12 @@ impl AttemptContext<'_> {
         // — nor on a later one: the staging removes the worker's manifest
         // whether or not it was read (`candidate_stage`), so that a
         // declaration is applied once, by the capture of the attempt that
-        // wrote it. Only a refused manifest outlives its capture, and a
-        // refusal stages nothing, so the next capture governs the same
-        // entries and reads it again.
+        // wrote it. A refused manifest outlives its capture (a refusal stages
+        // nothing), as does one whose capture fails before that removal; a
+        // further capture of this worktree would read either again, and the
+        // driver makes none — a refusal is not resumable and a capture error
+        // interrupts the attempt, and either closes the generation
+        // (`RESOLUTION_MANIFEST`'s doc, `design/26` §26.4).
         let unmerged = self.manager.unresolved_conflicts(site.slot)?;
         let resolved = self.manager.resolved_conflicts(site.slot)?;
         let resolutions = if unmerged.is_empty() && resolved.is_empty() {

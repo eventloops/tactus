@@ -3173,7 +3173,7 @@ fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_re
     assert_eq!(
         plan_resolutions(&[], &resolved, &ResolutionManifest::Absent),
         ResolutionPlan::default(),
-        "a resolved path with no manifest stays as the previous capture left it"
+        "a resolved path with no manifest is left to the ordinary add -A, the plan naming nothing"
     );
     assert_eq!(
         plan_resolutions(
