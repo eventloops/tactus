@@ -28,6 +28,7 @@ that mirror a Rust module, so the record sits beside the gate reports in `review
 | H the six deferred findings left as they are | **done** — §8 |
 | I ten gates green on this box | **done** at the head the pull request body records — §9 |
 | J a draft pull request with a validated body; no review run, nothing marked ready, nothing enqueued | **done** — the body carries the ledger row `G4-LINEAGE-AGE-REUSED-AFTER-RELEASE` |
+| K after review: the row and the rollback advice corrected to both directions, the test counts to the log | **done** — §10; this file's §2 and the pull request body; no code |
 
 ## 1. The defect, as found and as executed
 
@@ -108,26 +109,54 @@ live path and on replay alike. This is the shape the fold already uses for `RunS
 `PartialEq` and the lease table is part of it, so the counter is inside every live-versus-replay
 comparison the suite makes; the fold-level test of §5 ends with one and with the replayed age.
 
-**Not Class A.** The fold's accept set changes. An integration start for a lineage member —
-`merge_verification_started`, a fast `merge_prepared`, or a conflict's `merge_rejected` — whose
-lineage was created after a release and overlaps an older live lineage was admitted at `74da2cbb`
-and is now refused `NotFirstEligible` ("it is not eligible: behind older lineage …"), live and on
-replay; `eligible_integration_candidate` changes with it. That is fold behaviour, so:
+**Not Class A.** The fold's accept set changes, and in both directions. An integration start for
+a lineage member — `merge_verification_started`, a fast `merge_prepared`, or a conflict's
+`merge_rejected` — whose lineage was created after a release and overlaps an older live lineage
+was admitted at `74da2cbb` and is now refused `NotFirstEligible` ("it is not eligible: it overlaps
+the region the older lineage … holds"), live and on replay. And an integration start for the
+*older survivor's* member, while a lineage created after a release overlaps it, was refused
+`NotFirstEligible` at `74da2cbb` and is now admitted: after one release the ages were equal and
+the frozen fold read the younger lineage's candidate, queued ahead of the survivor's, as eligible
+and first ("task 6 generation 0 is queued ahead of it and eligible" in the executed sequence of
+§10); after two or more the ages were inverted and it read the younger lineage as the older and
+held the survivor's member behind its lease. The fixed fold holds the younger member behind the
+survivor and offers the survivor's candidate. `eligible_integration_candidate` changes with both.
+Either way it is fold behaviour, so:
 
 **Class B, with this row.**
 
 | # | Change | Where | Description (verified against the code at the commit that makes it) |
 |---|---|---|---|
-| G4FIX-B1 | An age, once granted, is never reused; a lineage created after a release is younger than every survivor | `src/topology/leases.rs` (`LeaseTable::next_age`, `grant`) | `grant` gave a new lineage the table's lineage count as its age, which a release shrinks, so a lineage created after one repeated a live lineage's age and the queue's `lease.age < own_age` no longer held its member behind the older survivor it overlapped: it could widen onto that survivor's region and publish ahead of it. The age now comes from a per-table counter that rises by one at each creation and is never lowered; a release leaves it alone, a holding replaced in place keeps its age. Strictly narrows what the fold admits: an integration start for such a member is refused while the older overlapping lineage is held, and admitted once that lineage settles. Ages are sparse after a release and only their order is read. No wire form changes. |
+| G4FIX-B1 | An age, once granted, is never reused; a lineage created after a release is younger than every survivor | `src/topology/leases.rs` (`LeaseTable::next_age`, `grant`) | `grant` gave a new lineage the table's lineage count as its age, which a release shrinks, so a lineage created after one repeated a live lineage's age and the queue's `lease.age < own_age` no longer held its member behind the older survivor it overlapped: it could widen onto that survivor's region and publish ahead of it. The age now comes from a per-table counter that rises by one at each creation and is never lowered; a release leaves it alone, a holding replaced in place keeps its age. Changes what the fold admits in both directions, for lineage members only and only in a run that creates a lineage after releasing one older than a survivor. Refused now, admitted before: an integration start for such a member while the older overlapping lineage is held; it is admitted once that lineage settles. Admitted now, refused before: an integration start for the older survivor's member while the younger lineage overlaps it, which the frozen fold refused `NotFirstEligible` — after one release the ages were equal and it read the younger lineage's candidate, queued ahead, as eligible and first; after two or more the ages were inverted and it held the survivor's member behind the younger lineage's lease — and which the fixed fold admits, because the younger member is `BehindOlderLineage` and the survivor's candidate is the first eligible. Both directions hold live and on replay from one prefix; §10 has the two executed sequences and what a revert faces. Ages are sparse after a release and only their order is read. No wire form changes. |
 
 Class A changes in the frozen layer: none. Class C: none.
 
-**What the narrowing means for an existing log.** A log written by the frozen fold that recorded
-an overtake — a member's integration start admitted in the shape above — now refuses at that
-event on replay. No such log is known to exist: PR9 shipped `production_effect: none`, the
-schema-4 machinery engages only by explicit schema choice, and no `0.2.0` has been released. Where
-one did exist the refusal would be the correct reading, because the design orders overlapping
-lineages by creation (§7) and the record was written by a fold that mis-ordered them.
+**What the change means for an existing log, in both directions.** A log written by the frozen
+fold that recorded an overtake — a younger member's integration start admitted in the first shape
+above — now refuses at that event on replay. No such log is known to exist: PR9 shipped
+`production_effect: none`, the schema-4 machinery engages only by explicit schema choice, and no
+`0.2.0` has been released. Where one did exist the refusal would be the correct reading, because
+the design orders overlapping lineages by creation (§7) and the record was written by a fold that
+mis-ordered them.
+
+The other direction is what a revert faces. A log written by the fixed fold that recorded the
+survivor's integration start in the second shape — an older survivor's member integrated while a
+lineage created after a release overlapped it — replays under the fixed fold and refuses under the
+frozen one, at that event, `NotFirstEligible`. The correctness lens executed exactly this (§10): a
+42-event log that replays with the fix and fails without it, its lineage ages `0, 1, 2, 3` read
+back by the frozen fold as `0, 1, 2, 1`. Resume is replay-then-continue and there is no second
+path (`DESIGN.md` §4), so a binary without the fix cannot resume such a run: `upstroke resume`
+ends at the stable-prefix barrier's checked replay (`establish_stable_prefix` in
+`src/events/log.rs`) with the fold's refusal as its explanation and nothing done — before any
+recovery event, promotion, cleanup or admission, in the recovery order's words
+(`docs/internals/engine/topology/recover.md`), the log and the run branch as they were — and does
+so every time it is tried. Unlike the first direction this refusal is not the correct reading of
+the record; it is the defect refusing a correctly ordered event. So a revert of this change is not
+a no-op for durable state. Nothing needs migrating forward, but a run whose log was written under
+the fix and holds such an event is stranded by the revert until a binary carrying the fix resumes
+it; there is no migration tool and none is written here, and the log is ground truth and is not
+rewritten. The pull request body's rollback paragraph now says so; its earlier wording, that
+nothing durable had to be migrated either way because nothing durable changed, was wrong.
 
 **The alternatives, and why the counter.** The creating rejection's `SequenceId` is durable, unique
 and monotonic and would serve as the age; it is the same class, but it changes `grant`'s signature
@@ -256,3 +285,62 @@ The ten gates ran green on this box at the head the pull request body records, t
 through `w1-eight-iso` on a target directory private to this worktree and the tenth by hand; the
 body carries the output and the observed counts. Linux only; the Windows and macOS legs are CI's
 to report on the pull request.
+
+## 10. The review's corrections
+
+Three scoped frontier lenses reviewed `bcc17d8b`, the head that added this record, run by the
+owner's review driver and not by this branch's sessions: regression **PASS**; correctness
+**CHANGES_REQUIRED**, one P2; record **CHANGES_REQUIRED**, the same P2 and one P3. All three hold
+the fix sound and Class B justified: the counter is unserialised, the schema constants did not
+move, replay equality was established including the counter, the three mutations of §6 reproduced
+exactly, and the named tests own the properties they claim. The correctness verdict is posted on
+the pull request as its SHA-bound comment; the other two are saved on the build box
+(`~/review-pr256-record.md`, `~/review-pr256-regression.md`). What they found, and what changed:
+
+**P2 — "strictly narrows" was false, and the rollback advice that rested on it was unsafe.** Row
+`G4FIX-B1` and the body's compatibility paragraph said the change strictly narrows what the fold
+admits. It narrows in one direction and widens in the other. Two lenses executed the widening
+independently; the third reasoned it from source (survivor and newcomer ages `2/1` before, `2/3`
+after).
+
+- *The record lens' sequence*, through the fold's doors on the frozen tree and at the fix from one
+  identical prefix (`sha256 3bf6a8bf…`): create `zeta`'s and `alpha`'s lineages (ages 0, 1);
+  publish `zeta`'s repair 4 and release its lineage; create `mid`'s lineage; queue `mid`'s repair 6
+  widened onto `alpha`'s region, then `alpha`'s repair 5, so the queue is `[6, 5]`. Frozen: `alpha`
+  and `mid` are both age 1, the fold offers repair 6's candidate, and
+  `merge_verification_started(key 5, sequence 4)` for the survivor is refused `NotFirstEligible`
+  ("task 6 generation 0 is queued ahead of it and eligible"), live and on replay. Fixed: the ages
+  are 1 and 2, the fold offers repair 5's candidate, and the same event is accepted, live and on
+  replay. Evidence: `~/tactus-artifacts/pr256-record-review-jveb6_r0/frozen-narrowing-witness.log`
+  and `fixed-narrowing-witness.log` there, with the witness source beside them.
+- *The correctness lens' sequence*, which is the one a revert faces: lineages L0, L1 and L2 (ages
+  0, 1, 2); publish and release L0 and L1, leaving L2; create L3, widen its repair onto L2's region
+  and queue L3's repair before L2's. At the fix L3 takes age 3 and L2's integration start is
+  accepted. On the frozen tree L3 takes age 1 — below L2's, so that fold reads the newcomer as the
+  older and holds the survivor behind its lease — and a replay of the log written at the fix
+  refuses L2's integration start `NotFirstEligible`. The lens ran it as a 42-event JSONL log that
+  replays with the fix and fails with the frozen implementation; its logs lived in the driver's
+  scratch directory, since removed, and the verdict as posted carries the sequence.
+
+This session executed neither sequence again — this round's brief forbids any change to code, a
+temporary test included — and did not need to: the two executions agree with each other, with the
+regression lens' reasoning, and with the queue rule read at the fix (`src/topology/queue.rs`,
+`lease.age < own_age`: a survivor's member is held only behind a lineage whose age is below its
+own, and after the fix no lineage created later has one). §2's "Not Class A" paragraph, row
+`G4FIX-B1` and the paragraph on existing logs now describe both directions and what a revert
+faces; the body's compatibility and rollback paragraphs say the same. The "Not Class A" paragraph
+had also quoted a refusal detail the fold does not print; it now quotes the fold's own
+(`ineligible_detail` in `src/topology/fold/region.rs`). The class does not change: both lenses
+confirm Class B, and no wire form moves in either direction.
+
+**P3 — the baseline test counts were attributed to the wrong binaries.** The body said the library
+passed 1 test and the binary 2,435 with 43 ignored. The saved log
+(`~/tactus-artifacts/g4fix-evidence-bcc17d8b/eight-logs-bcc17d8/03-test.log`) says the library
+(`src/lib.rs`) passed 2,435 with 43 ignored (line 2501) and the binary (`src/main.rs`) passed 10
+(line 2517); the single-test line (line 100, `2477 filtered out`) belongs to a child process the
+library's tests spawn to run the isolated `native_pipe_cancellation_helper` witness. The body now
+reports the counts of the gate run at the head it records, labelled by binary.
+
+**Untouched, deliberately.** No code: `src/topology/leases.rs`, the two tests and the three module
+notes are as `f3a71c1d` left them, and the regression lens checked the notes against the code. The
+six deferred findings of §8 stay deferred.
