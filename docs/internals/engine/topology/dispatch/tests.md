@@ -329,11 +329,52 @@ at run end with `LineageHeld`, and the log replaying equal.
 ## `fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {`
 
 `command_internal_sub_effects`, synthetic half, for `Object.RepairMaterialize`:
-each of the four declared elements planted into a fresh worktree at the
-base, classified `Internal`, and recovered by `resume_open_no_attempt` —
-reused or recreated exactly as `element_breaks_quiescence` says, the
-materialization reproduced once, the tree the control's, the planted
-objects untouched.
+each of the four declared elements constructed **alone**, classified
+`Internal`, and recovered by `resume_open_no_attempt` — reused or recreated
+exactly as `element_breaks_quiescence` says, the materialization reproduced
+once, the tree the control's, what it left in the object store untouched.
+
+**A repository per element**, which is what
+`synthetic_git_add_residue_unreferenced_objects_and_index_lock_then_forced_scrub_converges`
+arrived at for `Object.CandidateStage`, for the same reason. Two of the four
+are R27 and stay until Git prunes them, so one shared store carries each
+element's residue into the next element's slot; and this site records no
+published object, so `UnreferencedObject` is observed whenever the store
+holds any unreachable object at all. Measured on the shared-store form of
+this test: the orphan constructed for the first element was still there
+supplying the `Internal` that the second element's assertion read. The class
+is now read **twice** per element — before the construction, where nothing
+the site registers may be observed and the class must be `None`, and after,
+where this element and nothing else must be observed — and the pair is what
+makes the reading between them the element's own.
+
+**And constructed where Git leaves it.** A loose object's temporary file is
+written in the fan-out directory the object's final name will live in,
+`objects/XX/tmp_obj_*`, never at the object root: measured with `strace`,
+`hash-object -w` opens `objects/01/tmp_obj_3ys3Uo` and `write-tree` opens
+`objects/bf/tmp_obj_gGtE3O`. This test's stand-in was at the root, which is
+where `temporary_object_files` looked and where no Git writes, so test and
+scan were self-consistent and blind together. A real `SIGKILL` at 1.9 s of a
+3.9 s loose-object write left `objects/b7/tmp_obj_iZMWgE`; `git prune -n`
+named it a stale temporary file; the scan answered `false`, no element was
+observed, the class was `None` and no tabled recovery was owed for it
+(`G4-TEMP-OBJECT-FANOUT-UNSCANNED`). The scan reads the fan-out directories
+now, and the element is constructed in one.
+
+## `fn synthetic_materialization_residue_element(element: ResidueElement) {`
+
+One element, in a repository of its own: the repair dispatched, a control
+materialized to hold the expected tree and bytes, the generation's worktree
+removed and re-added at the base, the element constructed alone, the class
+read either side of the construction, and the tabled recovery run.
+
+## `fn fan_out_directory(objects: &Path) -> PathBuf {`
+
+A fan-out directory the store already holds, to construct Git's temporary
+object file in. Git creates the directory when it is missing and writes the
+temporary file inside it, so any two-hexadecimal-digit name would serve; one
+that already exists puts the file beside real objects, which is the shape
+the trace records.
 
 ## `fn checkout_bytes(worktree: &Path) -> BTreeMap<String, Vec<u8>> {`
 

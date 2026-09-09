@@ -10733,3 +10733,118 @@ fn a_worktree_inspecting_read_writes_no_index() {
         before.len()
     );
 }
+
+/// [`temporary_object_files`] answers for exactly the files Git prunes as its
+/// own, in every place Git leaves one.
+///
+/// `resource_accounting[R27]` says "Git prunes temporary object files itself",
+/// so `git prune` is the authority on which files these are. Measured on
+/// git 2.43.0 by planting one candidate name in each plausible place and
+/// reading `git prune -n`
+/// (`~/tactus-artifacts/tmpobj-evidence/03-git-prune-own-set.log`): every row
+/// below marked `true` was named "Removing stale temporary file", and the two
+/// marked `false` were not — `objects/ab/tmp_other_fanout` is reported as a
+/// *bad sha1 file* and counted in `garbage`, and nothing under `objects/info`
+/// is touched at all.
+///
+/// The fan-out row is the one that matters and the one that was missed. A
+/// loose object's temporary file is written in the fan-out directory the
+/// object's final name will live in, never at the object root
+/// (`02-strace-where-git-writes.log`), so a scan of the root and `pack` alone
+/// never saw the file a killed write leaves: a real `SIGKILL` at 1.9s of a
+/// 3.9s write left `objects/b7/tmp_obj_iZMWgE` and this function answered
+/// `false` (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`, `01-real-kill-frozen.log`).
+///
+/// Each name is planted **alone** and removed again, so each row is this
+/// function's answer to that name and nothing else.
+#[test]
+fn temporary_object_files_answers_for_the_files_git_prunes_as_its_own() {
+    let fixture = Fixture::new("temp-object-scan");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    // `pack` and a fan-out directory need not exist yet; Git creates each when
+    // it first writes there, and so does this.
+    fs::create_dir_all(objects.join("pack")).expect("the pack directory");
+    fs::create_dir_all(objects.join("ab")).expect("a fan-out directory");
+    fs::create_dir_all(objects.join("info")).expect("the info directory");
+
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "a store Git has not been killed inside holds none"
+    );
+
+    for (relative, git_calls_it_its_own) in [
+        // The object root: any `tmp_` name.
+        ("tmp_obj_root", true),
+        ("tmp_other_root", true),
+        // The pack directory: any `tmp_` name, which is both the pack Git was
+        // writing and the index it writes beside it.
+        ("pack/tmp_pack_p", true),
+        ("pack/tmp_idx_p", true),
+        // A fan-out directory: `tmp_obj_` is Git's temporary loose object.
+        ("ab/tmp_obj_fanout", true),
+        // A fan-out name that is not `tmp_obj_` is Git's *garbage* — a bad
+        // sha1 file — and Git does not prune it, so it is not this element.
+        ("ab/tmp_other_fanout", false),
+        // `objects/info` holds no objects and Git prunes nothing in it.
+        ("info/tmp_info", false),
+    ] {
+        let planted = objects.join(relative);
+        fs::write(&planted, b"half an object\n").expect("plant");
+        assert_eq!(
+            temporary_object_files(&fixture.base).expect("scan"),
+            git_calls_it_its_own,
+            "{relative}: `git prune` {} call it a stale temporary file",
+            if git_calls_it_its_own {
+                "does"
+            } else {
+                "does not"
+            }
+        );
+        fs::remove_file(&planted).expect("unplant");
+        assert!(
+            !temporary_object_files(&fixture.base).expect("scan"),
+            "{relative}: and removing it leaves the store with none"
+        );
+    }
+}
+
+/// The scan reads a store's real shape without walking what is not a fan-out.
+///
+/// A loose object's own name is 38 hexadecimal characters in a two-character
+/// directory, and neither is a temporary file; `pack` holds packs and their
+/// indexes; `info` holds `alternates` and `packs`. None of them is an answer,
+/// and a directory whose name is not two hexadecimal digits is not descended
+/// into at all — including one that merely starts with two, which is what
+/// distinguishes a fan-out from a caller's own scratch directory.
+#[test]
+fn the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects() {
+    let fixture = Fixture::new("temp-object-scan-negative");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "the fixture's own objects are not temporary files"
+    );
+
+    // A directory that begins with two hex digits but is not a fan-out, and a
+    // `tmp_obj_` name inside it: not Git's, not descended into.
+    let decoy = objects.join("abc");
+    fs::create_dir_all(&decoy).expect("a decoy directory");
+    fs::write(decoy.join("tmp_obj_decoy"), b"not in a fan-out\n").expect("plant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "`objects/abc` is not a fan-out directory, so nothing in it is one of Git's"
+    );
+
+    // And a fan-out directory that holds only real loose objects.
+    let fan_out = objects.join("cd");
+    fs::create_dir_all(&fan_out).expect("a fan-out directory");
+    fs::write(
+        fan_out.join("ef0123456789abcdef0123456789abcdef0123"),
+        b"a loose object's name is not a temporary file\n",
+    )
+    .expect("plant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "a fan-out holding only objects holds no temporary object file"
+    );
+}

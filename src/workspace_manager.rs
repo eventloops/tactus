@@ -4497,40 +4497,128 @@ pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError
 
 /// Whether Git's own temporary object files are present.
 ///
-/// Git writes a loose object to `objects/tmp_obj_XXXXXX` and renames it into
-/// place, and packs to `objects/pack/tmp_pack_*`. `resource_accounting[R27]`
-/// accounts for both and says "Git prunes temporary object files itself".
+/// `resource_accounting[R27]` accounts for them and says "Git prunes temporary
+/// object files itself", so **the set this answers for is the set Git prunes**,
+/// and `git prune` is what says which that is. Measured on git 2.43.0 by
+/// planting one candidate name in each plausible place and reading
+/// `git prune -n` (`~/tactus-artifacts/tmpobj-evidence/03-git-prune-own-set.log`):
+///
+/// | planted | `git prune` calls it |
+/// |---|---|
+/// | `objects/tmp_obj_root`, `objects/tmp_other_root` | a stale temporary file |
+/// | `objects/pack/tmp_pack_p`, `objects/pack/tmp_idx_p` | a stale temporary file |
+/// | `objects/ab/tmp_obj_fanout` | a stale temporary file |
+/// | `objects/ab/tmp_other_fanout` | a bad sha1 file, left as garbage |
+/// | `objects/info/tmp_info` | nothing; left alone |
+///
+/// So: any `tmp_` name in the object root or in `pack`, and a `tmp_obj_` name
+/// in a fan-out directory. A `tmp_` name in a fan-out that is not `tmp_obj_`
+/// is Git's *garbage*, not its temporary file, and is deliberately not one of
+/// these.
+///
+/// **The fan-out is where the file actually is.** A loose object's temporary
+/// file is created in the fan-out directory the object's final name will live
+/// in. Measured with `strace -f -e trace=openat,link,unlink`
+/// (`02-strace-where-git-writes.log`): `hash-object -w` opens
+/// `objects/01/tmp_obj_3ys3Uo` and links it to `objects/01/74d67c…`;
+/// `write-tree` opens `objects/bf/tmp_obj_gGtE3O`. Neither ever writes
+/// `objects/tmp_obj_*`. Scanning the root and `pack` alone therefore never saw
+/// the file Git leaves: a real `SIGKILL` at 1.9s of a 3.9s loose-object write
+/// left `objects/b7/tmp_obj_iZMWgE`, `git prune -n` named it a stale temporary
+/// file, and this function answered `false` — so no element was observed, the
+/// interrupted materialization classified
+/// [`ObjectResidue::None`](crate::topology::effects::ObjectResidue::None)
+/// rather than `Internal`, and no tabled recovery was owed for it
+/// (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`; `01-real-kill-frozen.log`).
+///
+/// Only names of exactly two hexadecimal digits are descended into, which is
+/// what Git's fan-out is, so `pack`, `info` and anything else in the object
+/// directory cost the one `read_dir` that names them and no more. The walk is
+/// bounded by the loose objects in the store and is made on the residue
+/// classifier's path, beside the `git fsck --connectivity-only` that
+/// [`unreachable_objects`] runs for the same classification; it is not on
+/// `Worktree.Verify`'s path, which reads neither.
 ///
 /// # Errors
 ///
 /// A Git or I/O error.
 pub fn temporary_object_files(worktree: &Path) -> Result<bool, UpstrokeError> {
     let object_dir = object_directory(worktree)?;
-    for (directory, prefix) in [
-        (object_dir.clone(), "tmp_obj_"),
-        (object_dir.join("pack"), "tmp_pack_"),
-    ] {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(UpstrokeError::Io {
-                    path: directory,
-                    source,
-                });
-            }
-        };
-        for entry in entries {
-            let entry = entry.map_err(|source| UpstrokeError::Io {
-                path: directory.clone(),
-                source,
-            })?;
-            if entry.file_name().to_string_lossy().starts_with(prefix) {
-                return Ok(true);
-            }
+    if directory_holds_name_prefixed(&object_dir, "tmp_")?
+        || directory_holds_name_prefixed(&object_dir.join("pack"), "tmp_")?
+    {
+        return Ok(true);
+    }
+    for fan_out in fan_out_directories(&object_dir)? {
+        if directory_holds_name_prefixed(&fan_out, "tmp_obj_")? {
+            return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Whether `directory` holds an entry whose name starts with `prefix`.
+///
+/// A directory that is not there holds nothing: a repository that has never
+/// written a pack has no `pack`, and a fan-out directory exists only once an
+/// object with that prefix has been written.
+fn directory_holds_name_prefixed(directory: &Path, prefix: &str) -> Result<bool, UpstrokeError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: directory.to_path_buf(),
+                source,
+            });
+        }
+    };
+    for entry in entries {
+        let entry = entry.map_err(|source| UpstrokeError::Io {
+            path: directory.to_path_buf(),
+            source,
+        })?;
+        if entry.file_name().to_string_lossy().starts_with(prefix) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// The two-hexadecimal-digit fan-out directories of an object directory.
+///
+/// A name of any other shape is not Git's fan-out and is not descended into.
+/// An entry whose type cannot be read is skipped rather than failing the scan:
+/// it is a name that went away between the read and the question — which is
+/// what a store Git is pruning concurrently looks like — and a name that is
+/// gone holds no temporary object file.
+fn fan_out_directories(object_dir: &Path) -> Result<Vec<PathBuf>, UpstrokeError> {
+    let entries = match fs::read_dir(object_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: object_dir.to_path_buf(),
+                source,
+            });
+        }
+    };
+    let mut directories = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| UpstrokeError::Io {
+            path: object_dir.to_path_buf(),
+            source,
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.len() != 2 || !name.chars().all(|character| character.is_ascii_hexdigit()) {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            directories.push(entry.path());
+        }
+    }
+    Ok(directories)
 }
 
 /// The repository's object directory.
