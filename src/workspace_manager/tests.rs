@@ -10751,8 +10751,8 @@ fn a_worktree_inspecting_read_writes_no_index() {
 /// loose object's temporary file is written in the fan-out directory the
 /// object's final name will live in, never at the object root
 /// (`02-strace-where-git-writes.log`), so a scan of the root and `pack` alone
-/// never saw the file a killed write leaves: a real `SIGKILL` at 1.9s of a
-/// 3.9s write left `objects/b7/tmp_obj_iZMWgE` and this function answered
+/// never saw the file a killed write leaves: a real `SIGKILL` requested at half of a
+/// separately measured 3.878 s write left `objects/b7/tmp_obj_ybqfZf` and this function answered
 /// `false` (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`, `01-real-kill-frozen.log`).
 ///
 /// Each name is planted **alone** and removed again, so each row is this
@@ -10835,6 +10835,21 @@ fn the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects() {
         "`objects/abc` is not a fan-out directory, so nothing in it is one of Git's"
     );
 
+    // Git spells its fan-out in lower case, so an upper-case pair is a name
+    // somebody else chose and is left alone. On a case-insensitive filesystem
+    // this and a real `ab` are one directory, so the case is only constructed
+    // where it can be distinguished.
+    let upper = objects.join("AB");
+    if fs::create_dir(&upper).is_ok() && !objects.join("ab").exists() {
+        fs::write(upper.join("tmp_obj_upper"), b"not Git's fan-out\n").expect("plant");
+        assert!(
+            !temporary_object_files(&fixture.base).expect("scan"),
+            "`objects/AB` is not Git's fan-out, which is lower case, so nothing in it is one \
+             of Git's"
+        );
+        fs::remove_dir_all(&upper).expect("unplant");
+    }
+
     // And a fan-out directory that holds only real loose objects.
     let fan_out = objects.join("cd");
     fs::create_dir_all(&fan_out).expect("a fan-out directory");
@@ -10846,5 +10861,56 @@ fn the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects() {
     assert!(
         !temporary_object_files(&fixture.base).expect("scan"),
         "a fan-out holding only objects holds no temporary object file"
+    );
+}
+
+/// A symlinked fan-out directory is one Git writes into and prunes from, so
+/// the scan follows it.
+///
+/// `DirEntry::file_type` reports the **link**, not its target, so a scan that
+/// read it walked straight past `objects/93 -> elsewhere` and answered `false`
+/// for a file Git had just left inside. Found by #258's class review with a
+/// real `SIGKILL` inside a `hash-object -w`: the kill left
+/// `objects/93/tmp_obj_HuHQtZ`, `git prune -n` named it a stale temporary
+/// file, `unreachable_objects` was empty, and the classifier answered `None`
+/// with no element observed — this scan's original defect surviving its own
+/// repair. [`fan_out_directories`] resolves the target with `fs::metadata`.
+///
+/// Unix only, because creating a directory symlink on Windows needs a
+/// privilege the CI runner does not hold. The resolution itself is
+/// `fs::metadata` on every platform.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_fan_out_directory_is_followed_as_git_follows_it() {
+    let fixture = Fixture::new("temp-object-symlink");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    let elsewhere = fixture.root.join("fan-out-elsewhere");
+    fs::create_dir_all(&elsewhere).expect("the directory the fan-out points at");
+    std::os::unix::fs::symlink(&elsewhere, objects.join("93")).expect("the fan-out symlink");
+
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "a symlinked fan-out holding nothing holds no temporary object file"
+    );
+
+    fs::write(elsewhere.join("tmp_obj_HuHQtZ"), b"half an object\n").expect("plant");
+    assert!(
+        temporary_object_files(&fixture.base).expect("scan"),
+        "Git writes objects/93/tmp_obj_* through the link and prunes it through the link, \
+         so the scan reads through the link"
+    );
+
+    fs::remove_file(elsewhere.join("tmp_obj_HuHQtZ")).expect("unplant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan"),
+        "and removing it leaves the store with none"
+    );
+
+    // A dangling link is a name that is gone, which holds nothing and is not
+    // an inspection failure.
+    fs::remove_dir_all(&elsewhere).expect("drop the target");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("a dangling fan-out link is not an error"),
+        "a fan-out link with no target holds no temporary object file"
     );
 }

@@ -4520,11 +4520,11 @@ pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError
 /// file is created in the fan-out directory the object's final name will live
 /// in. Measured with `strace -f -e trace=openat,link,unlink`
 /// (`02-strace-where-git-writes.log`): `hash-object -w` opens
-/// `objects/01/tmp_obj_3ys3Uo` and links it to `objects/01/74d67c…`;
-/// `write-tree` opens `objects/bf/tmp_obj_gGtE3O`. Neither ever writes
+/// `objects/01/tmp_obj_z86GbB` and links it to `objects/01/74d67c…`;
+/// `write-tree` opens `objects/bf/tmp_obj_GgXRvX`. Neither ever writes
 /// `objects/tmp_obj_*`. Scanning the root and `pack` alone therefore never saw
-/// the file Git leaves: a real `SIGKILL` at 1.9s of a 3.9s loose-object write
-/// left `objects/b7/tmp_obj_iZMWgE`, `git prune -n` named it a stale temporary
+/// the file Git leaves: a real `SIGKILL` requested at half of a separately measured 3.878 s loose-object write
+/// left `objects/b7/tmp_obj_ybqfZf`, `git prune -n` named it a stale temporary
 /// file, and this function answered `false` — so no element was observed, the
 /// interrupted materialization classified
 /// [`ObjectResidue::None`](crate::topology::effects::ObjectResidue::None)
@@ -4588,10 +4588,23 @@ fn directory_holds_name_prefixed(directory: &Path, prefix: &str) -> Result<bool,
 /// The two-hexadecimal-digit fan-out directories of an object directory.
 ///
 /// A name of any other shape is not Git's fan-out and is not descended into.
-/// An entry whose type cannot be read is skipped rather than failing the scan:
-/// it is a name that went away between the read and the question — which is
-/// what a store Git is pruning concurrently looks like — and a name that is
-/// gone holds no temporary object file.
+/// Git writes the fan-out in **lower-case** hexadecimal, so `AB` is a name
+/// somebody else chose and is left alone.
+///
+/// **Directory targets are followed, because Git follows them.** The type is
+/// read with [`fs::metadata`], which resolves symbolic links, and not with
+/// `DirEntry::file_type`, which reports the link itself: a store whose
+/// `objects/93` is a symlink to a directory is one Git writes
+/// `objects/93/tmp_obj_*` into and prunes from, and reading the link's own
+/// type answered "not a directory" and walked past it. That was this scan's
+/// original defect surviving its own repair, found by the class review of
+/// #258 with a real `SIGKILL` inside a `hash-object -w` — `git prune -n`
+/// named the file and this function still answered `false`.
+///
+/// A name that is gone by the time it is asked about is skipped: that is what
+/// a store Git is pruning concurrently looks like, and a name that is gone
+/// holds no temporary object file. Every other inspection failure is the
+/// caller's to see (§7) rather than a silent `false`.
 fn fan_out_directories(object_dir: &Path) -> Result<Vec<PathBuf>, UpstrokeError> {
     let entries = match fs::read_dir(object_dir) {
         Ok(entries) => entries,
@@ -4611,11 +4624,24 @@ fn fan_out_directories(object_dir: &Path) -> Result<Vec<PathBuf>, UpstrokeError>
         })?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.len() != 2 || !name.chars().all(|character| character.is_ascii_hexdigit()) {
+        if name.len() != 2
+            || !name
+                .chars()
+                .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character))
+        {
             continue;
         }
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            directories.push(entry.path());
+        let candidate = entry.path();
+        match fs::metadata(&candidate) {
+            Ok(metadata) if metadata.is_dir() => directories.push(candidate),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(UpstrokeError::Io {
+                    path: candidate,
+                    source,
+                });
+            }
         }
     }
     Ok(directories)

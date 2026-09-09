@@ -30,6 +30,7 @@ reports in `reviews/`, dated.
 | H the deferred findings left as they are | **done** — §8 |
 | I ten gates green on this box | **done** at the head the pull request body records — §9 |
 | J a draft pull request with a validated body | **done** — the body carries the ledger row `G4-TEMP-OBJECT-FANOUT-UNSCANNED` |
+| K three scoped `gpt-6-astra` max reviews, and their repairs | **done** — §10; two blocking P1s fixed, three prose corrections made |
 
 ## 1. The defect, as found and as executed
 
@@ -45,29 +46,29 @@ without executing it, and said so. The first task was to execute it.
 (`~/tactus-artifacts/tmpobj-evidence/02-strace-where-git-writes.log`):
 
 ```
-openat(AT_FDCWD, ".git/objects/01/tmp_obj_3ys3Uo", O_RDWR|O_CREAT|O_EXCL, 0444) = 4
-link(".git/objects/01/tmp_obj_3ys3Uo", ".git/objects/01/74d67c349a9f9c9fc9b225c3897ebad6cf374b") = 0
-unlink(".git/objects/01/tmp_obj_3ys3Uo") = 0
+openat(AT_FDCWD, ".git/objects/01/tmp_obj_z86GbB", O_RDWR|O_CREAT|O_EXCL, 0444) = 4
+link(".git/objects/01/tmp_obj_z86GbB", ".git/objects/01/74d67c349a9f9c9fc9b225c3897ebad6cf374b") = 0
+unlink(".git/objects/01/tmp_obj_z86GbB") = 0
 ```
 
-and for `write-tree`, `objects/bf/tmp_obj_gGtE3O`. The temporary file is created in **the fan-out
+and for `write-tree`, `objects/bf/tmp_obj_GgXRvX`. The temporary file is created in **the fan-out
 directory the object's final name will live in** — Git creates that directory first when it is
 missing, which is the `ENOENT` retry the trace also shows — and never at the object root. The scan
 read a place Git does not write.
 
 ### 1.2 The counterexample, executed, with Git's real artefact
 
-A real `SIGKILL` at 1.949 s of a 3.898 s loose-object write, through the engine's own fixture and
+A real `SIGKILL` at 1.939 s of a 3.878 s loose-object write, through the engine's own fixture and
 its own classifier, in a repair worktree that was quiescent and whose store held no unreachable
 object (`01-real-kill-frozen.log`; the temporary test is
 `04-temporary-reproduction-test.patch`, deleted once observed):
 
 ```
-REPRODUCED on the frozen tree (attempt 1: SIGKILL at 1.949044863s of a 3.898089726s write,
+REPRODUCED on the frozen tree (attempt 1: SIGKILL at 1.93908743s of a 3.878174861s write,
 git signal: 9 (SIGKILL)):
-  on disk under objects/: ["b7/tmp_obj_iZMWgE (123412480 bytes, mode 444)"]
+  on disk under objects/: ["b7/tmp_obj_ybqfZf (122179584 bytes, mode 444)"]
   `count-objects -v`: garbage: 1
-  `prune -n`: "Removing stale temporary file .git/objects/b7/tmp_obj_iZMWgE"
+  `prune -n`: "Removing stale temporary file .git/objects/b7/tmp_obj_ybqfZf"
   unreachable objects: 0
   temporary_object_files = false
   observed_residue_elements(Object.RepairMaterialize) = []
@@ -193,11 +194,22 @@ if residue != ObjectResidue::After {
 }
 ```
 
-Its outcome cannot move. `After` for that site is `object_exists(published)`, which this change does
-not touch, and `after_reference_present` is consulted **before** any residue element; so when the
-object exists the answer is `After` either way, and when it does not the answer is `Internal` or
-`None` — both of which take the same `!= After` branch to the same refusal. Whatever this change
-does to the second case, `verify_object` returns the same thing.
+Its outcome cannot move **for any inspection that succeeds**. `After` for that site is
+`object_exists(published)`, which this change does not touch, and `after_reference_present` is
+consulted **before** any residue element; so when the object exists the answer is `After` either
+way, and when it does not the answer is `Internal` or `None` — both of which take the same
+`!= After` branch to the same refusal.
+
+**One case is not the same, and an earlier draft of this section said it was.** The scan now opens
+directories the old one did not, so it can fail where the old one could not: with an unreadable
+two-hex directory in the object store, `verify_object` returns `UpstrokeError::Io`
+(`PermissionDenied`) through its `?` instead of reaching the `Refusal::ObjectMissing` branch. Two of
+#258's three review lenses executed exactly that. Both versions refuse the promotion and neither
+admits a candidate the other would reject, so nothing is admitted that was not admitted before — but
+the *error* a caller sees differs, and the equivalence claim holds only for successful inspections.
+This is why `fan_out_directories` propagates an inspection failure rather than swallowing it: a
+store this cannot read is a fact the caller is entitled to, and a silent `false` would be the same
+blindness this change exists to remove.
 
 The recovery path does not read it at all. `resume_open_no_attempt`
 (`src/engine/topology/dispatch.rs:297`, called in production from
@@ -244,19 +256,26 @@ own — an assertion that the element *caused* the reading, not that the reading
 
 ## 6. The mutations
 
-`~/tactus-artifacts/tmpobj-evidence/05-mutations.log`. Every branch of the fix has a test that dies
-without it, and the last two are about the tests rather than the code.
+`05-mutations.log` (M1–M5, the first round) and `06-review-repair-mutations.log` (M6–M8, the
+review's repairs). Every branch of the fix has a test that dies without it.
 
-| # | Mutation | What died |
+An earlier draft of this table overstated three rows; the review of #258 compared it against the
+saved logs and was right. What follows is read off those logs line by line.
+
+| # | Mutation | What the log records |
 |---|---|---|
-| M1 | the whole fix reverted, the tests kept | both new tests, and the synthetic test at its `observed_residue_elements == vec![element]` assertion |
-| M2 | only the fan-out loop removed | the same three, the unit test naming `ab/tmp_obj_fanout` |
-| M3 | the root and `pack` prefixes narrowed back to `tmp_obj_`/`tmp_pack_` | the unit test, naming `tmp_other_root`; the synthetic test survives, correctly — it constructs in the fan-out |
-| M4 | the element constructed at the object root again *and* the fix reverted | **nothing.** The old test is green against the old code: the executed proof that the construction could not have caught this |
+| M1 | the whole fix reverted, the tests kept | **two** die: `temporary_object_files_answers_for_the_files_git_prunes_as_its_own` at `tmp_other_root`, and the synthetic test — at its direct `temporary_object_files` assertion, not at the singleton assertion an earlier draft named. The negative test **passes**, which is what a negative test does under a narrowing |
+| M2 | only the fan-out loop removed | the same two; the unit test names `ab/tmp_obj_fanout` |
+| M3 | the root and `pack` prefixes narrowed back to `tmp_obj_`/`tmp_pack_` | the unit test, naming `tmp_other_root`. The synthetic test survives, correctly — it constructs in the fan-out |
+| M4 | the element constructed at the object root again *and* the fix reverted | **the synthetic test passes.** The positive unit test still fails, on `tmp_other_root`, because it tests the whole prune set rather than this one placement. The load-bearing half is the synthetic test: the old construction against the old scan is green, which is why the suite could be green while the defect was live. An earlier draft said "nothing died", which the log does not support |
 | M5 | the fan-out name test loosened from "exactly two hex" to "two or more hex" | the negative test, on the `objects/abc` decoy |
+| M6 | the symlink repair reverted to `DirEntry::file_type` | `a_symlinked_fan_out_directory_is_followed_as_git_follows_it` |
+| M7 | the lower-case fan-out rule loosened back to any hex digit | the negative test, on the `objects/AB` case. **This row was added because the first attempt at M7 killed nothing**: the tightening had no test until one was written for it |
+| M8 | `git prune --expire=now` injected into the forced recreation | `a_forced_recreation_preserves_the_object_store_residue_it_recovers_over`, at its R27 assertion. This is the review's own mutation, which the shared-store test used to catch and the isolated one did not |
 
-M4 is the one that matters for the gate. It is why "the synthetic test passes" was never evidence
-that the element classifies.
+M4 is the row that matters for the gate: it is why "the synthetic test passes" was never evidence
+that the element classifies. M8 is the row that matters for R27: it is why isolating the elements
+needed a second test rather than none.
 
 ## 7. The notes
 
@@ -288,3 +307,80 @@ make the corrected row's other requirement — that every element constructed al
 
 G4 must therefore re-run on the range this merge creates: the code sha moves, so the range moves,
 and the packet forbids amending a failed gate's report.
+
+
+## 10. The review round, and what it changed
+
+Three scoped `gpt-6-astra` max lenses on `da2298fc` — closure, regression, and evidence. **All three
+returned `CHANGES_REQUIRED`, and all three were right.** Two carried executed reproductions, which
+`MAINTAINING.md` fixes whatever the label.
+
+### 10.1 The fix did not close its own defect — a symlinked fan-out (P1, closure lens)
+
+`DirEntry::file_type` reports the **link**, not its target, so `objects/93 -> elsewhere` was walked
+past. Git's loose-object writer and its prune traversal both follow it. The lens executed a real
+`SIGKILL` inside a `hash-object -w` in such a store and read back:
+
+```
+residue: objects/93/tmp_obj_HuHQtZ (32768 bytes)
+git prune -n: Removing stale temporary file .git/objects/93/tmp_obj_HuHQtZ
+unreachable_objects: []
+temporary_object_files: false
+observed_residue_elements: []
+classify_object_residue: None
+```
+
+— the original defect, surviving its own repair. It then changed only the fan-out layout in this
+change's own fixture to a symlink and watched the temporary-object assertion fail with the
+implementation untouched.
+
+Repaired: `fan_out_directories` resolves each candidate with `fs::metadata`, which follows the link,
+and the new test `a_symlinked_fan_out_directory_is_followed_as_git_follows_it` constructs the
+layout, plants, unplants, and leaves a dangling link behind to show that a name that is gone is not
+an inspection failure. Mutation M6 kills it.
+
+### 10.2 Isolating the elements lost the R27 guard on recreation (P1, regression lens)
+
+The per-element isolation this change introduced put the two object-store elements in exactly the
+runs whose recovery **reuses** the worktree, so nothing exercised preservation across a **forced
+recreation**. The shared-store form covered it by accident: its undeleted orphan survived into the
+`IndexLock` and `CherryPickHead` iterations, which do recreate.
+
+The lens proved the gap by mutation — `git prune --expire=now` injected into the forced-recreation
+branch killed the old test at its R27 assertion and the new one accepted it.
+
+Repaired by a second test rather than by weakening the first:
+`a_forced_recreation_preserves_the_object_store_residue_it_recovers_over` constructs both
+object-store elements **and** `index.lock`, asserts the recovery really recreated, and asserts both
+survive. It deliberately asserts nothing about classification — mixing the two is what made the
+per-element evidence vacuous to begin with. Mutation M8, the lens's own, kills it.
+
+### 10.3 Three prose corrections
+
+- **The mutation table contradicted its own saved log** (closure and evidence lenses). §6 is rewritten
+  from the logs line by line; the "both new tests" and "nothing died" rows were wrong.
+- **"No production outcome moves" omitted a newly reachable error** (regression and evidence lenses).
+  §4 now says the equivalence holds for successful inspections, and names the `PermissionDenied`
+  case.
+- **The quoted reproduction figures came from an unsaved run** (evidence lens). The reproductions
+  were run twice — once interactively and once to write the evidence files — and the record quoted
+  the first. Every figure now matches the saved log, and the timing is described as what the harness
+  actually does: a kill requested at half of a separately measured uninterrupted write, not a
+  measured elapsed time.
+
+Also corrected without a finding: the lower-case fan-out rule had **no test** until mutation M7 was
+first run and killed nothing. The negative test now carries an `objects/AB` case.
+
+### 10.4 What the lenses did not fault
+
+Worth recording, because it is the part of the argument that held. The closure lens executed
+alternates, `GIT_OBJECT_DIRECTORY`, linked worktrees and separate git directories, bare and
+SHA-256 repositories, packed-only stores, pack and maintenance temporaries including `tmp_rev_*`,
+and loose-object naming across git 2.30, 2.50.1, 2.55 and Git for Windows 2.43 — no further closure
+failure. The regression lens found `src/topology/**` byte-identical and no changed census row,
+frozen count, golden inventory or durable residue-class consumer. The evidence lens re-executed all
+seven prune-table cases, confirmed the four repositories really are distinct, confirmed that
+omitting an element fails its singleton assertion and that adding an orphan beside `IndexLock`
+yields `[UnreferencedObject, IndexLock]`, checked both first-bad commits and the `82de0767` /
+`81ee09ef` code-identity claim, and stated: **"The per-element evidence is now real."** That is the
+sentence the third G4 verification's finding 1 asked for.

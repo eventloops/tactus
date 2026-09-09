@@ -1124,11 +1124,11 @@ fn synthetic_materialization_residue_element(element: ResidueElement) {
             // **Where Git actually leaves it.** A loose object's temporary
             // file is created in the fan-out directory the object's final name
             // will live in: measured with `strace -f -e trace=openat,link`,
-            // `hash-object -w` opens `objects/01/tmp_obj_3ys3Uo` and links it
+            // `hash-object -w` opens `objects/01/tmp_obj_z86GbB` and links it
             // to `objects/01/74d67c…`, and `write-tree` opens
-            // `objects/bf/tmp_obj_gGtE3O`. Neither writes `objects/tmp_obj_*`,
-            // and a real `SIGKILL` at 1.9s of a 3.9s loose-object write left
-            // `objects/b7/tmp_obj_iZMWgE`.
+            // `objects/bf/tmp_obj_GgXRvX`. Neither writes `objects/tmp_obj_*`,
+            // and a real `SIGKILL` requested at half of a separately measured 3.878 s loose-object write left
+            // `objects/b7/tmp_obj_ybqfZf`.
             //
             // This test used to construct its stand-in at the object root
             // instead — which is exactly where the scan looked and where no
@@ -1245,6 +1245,109 @@ fn fan_out_directory(objects: &Path) -> PathBuf {
         .into_iter()
         .next()
         .expect("a store with objects in it has a fan-out directory")
+}
+
+/// R27 across a **forced recreation**: what an interrupted materialization
+/// left in the shared object store is Git's, and removing and re-adding the
+/// worktree does not delete it.
+///
+/// **Why this is its own test.** [`synthetic_materialization_residue_element`]
+/// constructs each element alone, which is what `command_internal_sub_effects`
+/// requires — and that isolation puts the two object-store elements in exactly
+/// the runs whose recovery *reuses* the worktree, so none of them exercises
+/// preservation across a recreation. The shared-store form of that test used
+/// to cover this by accident: the orphan it planted for `UnreferencedObject`
+/// survived into the `IndexLock` and `CherryPickHead` iterations, which do
+/// recreate, and its closing assertion read it there. Isolating the elements
+/// removed that cover along with the contamination.
+///
+/// Found by #258's regression review, which injected `git prune --expire=now`
+/// into the forced-recreation branch and watched the shared-store test die at
+/// its R27 assertion while the isolated one accepted the mutation.
+///
+/// So this constructs the object-store residue **and** the administrative
+/// residue that makes `Worktree.Verify` fail, asserts the recovery really did
+/// recreate, and asserts both object-store elements are still there
+/// afterwards. It asserts nothing about which element classified the worktree
+/// — that is the isolated test's job, and mixing the two is what made the
+/// per-element evidence vacuous in the first place.
+#[test]
+fn a_forced_recreation_preserves_the_object_store_residue_it_recovers_over() {
+    use crate::workspace_manager::{object_directory, temporary_object_files, unreachable_objects};
+
+    let mut run = Run::started("recreation-preserves-r27");
+    let source = protected_candidate(&mut run);
+    let repair = run.spawn_repair(ALPHA);
+    let head = run.fixture.head.clone();
+    let dispatched = dispatch_repair(&mut run, repair, 0, &head, &source);
+    let open = dispatched.open_generation();
+    let worktree = dispatched.worktree.clone();
+
+    run.fixture
+        .manager
+        .remove_worktree(run.hooks.effects(), &open.slot)
+        .expect("forced removal");
+    run.fixture
+        .manager
+        .add_worktree(run.hooks.effects(), &open.slot, &open.base.0)
+        .expect("a fresh worktree at the base");
+
+    // R27's two, both in the shared object store.
+    let orphan = run.fixture.root.join("orphan-across-recreation");
+    write_file(
+        &orphan,
+        b"an object a killed pick wrote and never published\n",
+    );
+    let planted_object = git(
+        &worktree,
+        &["hash-object", "-w", orphan.to_str().expect("utf-8")],
+    );
+    assert!(
+        unreachable_objects(&run.fixture.base)
+            .expect("fsck")
+            .contains(&planted_object),
+        "the planted object must really be unreachable"
+    );
+    let objects = object_directory(&worktree).expect("the object directory");
+    let planted_temporary = fan_out_directory(&objects).join("tmp_obj_repair");
+    write_file(&planted_temporary, b"half an object\n");
+    assert!(
+        temporary_object_files(&worktree).expect("temp files"),
+        "Git's temporary object file, where Git leaves it"
+    );
+
+    // And the administrative residue that makes `Worktree.Verify` fail, so the
+    // tabled recovery is a forced removal and re-add rather than a reuse.
+    write_file(&git_dir(&worktree).join("index.lock"), b"");
+
+    let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+        .expect("the tabled recovery converges");
+    assert!(
+        matches!(resumed.reuse, Reuse::Recreated { .. }),
+        "the administrative residue must have forced a recreation, or this test proves nothing \
+         about one: {:?}",
+        resumed.reuse
+    );
+    assert_eq!(
+        resumed.materialized,
+        Some(crate::topology::events::Materialization::Clean),
+        "the materialization is reproduced deterministically"
+    );
+
+    assert!(
+        crate::workspace_manager::fixture::git_out(
+            &run.fixture.base,
+            &["cat-file", "-e", &planted_object]
+        )
+        .status
+        .success(),
+        "R27: an object an interrupted materialization wrote is Git's; a forced recreation of \
+         the worktree does not delete it"
+    );
+    assert!(
+        planted_temporary.exists(),
+        "R27: Git prunes its own temporary object files; a forced recreation does not"
+    );
 }
 
 /// N real `cherry-pick --no-commit` children killed at spread points, every
