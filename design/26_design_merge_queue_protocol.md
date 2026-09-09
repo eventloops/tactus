@@ -329,8 +329,12 @@ canonical form under `conflict-marker-size` or `-merge` — and for each it
 stages on the worker's behalf the resolution the manifest declares (`git add`,
 or `git rm` for a resolution by deletion). The engine refuses a result with any
 unmerged index entry the manifest did not declare resolved, before any gate or
-review runs; a declared resolution that is wrong is caught by the ordinary
-gates and review, since ground truth is the diff. For a semantic rejection, it
+review runs; a declared resolution that is wrong reaches the ordinary gates and
+review, whose configured checks decide what is detected, since ground truth is
+the diff. A same-generation retry re-enters the worktree the previous attempt
+left, and its manifest may revise a resolution that attempt declared: the index
+records which entries a capture resolved, and the engine reads those beside the
+unmerged ones. For a semantic rejection, it
 materializes the clean proposal against that current head and supplies the
 original failed evidence. The payload's rejecting head remains immutable
 lineage evidence, not a promise to start later work from a stale tree.

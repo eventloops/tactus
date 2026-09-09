@@ -1174,10 +1174,13 @@ materialized.
 
 **For a repair the continuation is where the materialization happens
 again (`R6`).** Recovery (g) verifies or recreates the worktree at its
-base and materializes nothing, so a recreated repair worktree is at its
-base when the loop reaches it and `resume_open_no_attempt` re-runs the
-pick once — afresh, or as a no-op onto an index a completed pick already
-left — and its observation is what `attempt_started` records.
+base and materializes nothing, so a repair worktree is at its base when
+the loop reaches it — recreated there, or verified there still holding
+the index a completed pick left — and `resume_open_no_attempt` runs the
+pick once, afresh in either case: the materialization funnel restores the
+base's tree before it picks, because a second pick onto the merged index
+is not a no-op and applies the hunk again (the record's §12, finding 3,
+measured it). Its observation is what `attempt_started` records.
 
 ## `impl TopologyRun` › `fn retry_ready(`
 

@@ -6710,6 +6710,144 @@ fn a_worktree_of_another_repository_at_the_recorded_path_is_not_this_ones() {
     );
 }
 
+/// The root-level name the resolution manifest reserves, in every state a
+/// task worktree can hold it in, and what the two readers of that state do.
+///
+/// `resolution_manifest` is the read a conflict repair makes, and
+/// `candidate_stage` decides from the same reading whether to exclude the
+/// name from its `add -A`; the index afterwards says what it decided. The
+/// attempt-level tests drive each state through a capture; this one pins
+/// the classification itself, the symbolic link included.
+#[test]
+fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_workers() {
+    let fixture = Fixture::created("manifest-name");
+    let slot = fixture.add_task(&mut NoHooks, "alpha", 1);
+    let path = fixture.manager.slot_path(&slot);
+    let manifest = path.join(RESOLUTION_MANIFEST);
+    let staged = || {
+        git(&path, &["ls-files", "--", RESOLUTION_MANIFEST])
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let stage = || {
+        fixture
+            .manager
+            .candidate_stage(&mut NoHooks, &slot, &[])
+            .expect("stage")
+    };
+
+    // Absent.
+    assert_eq!(
+        fixture.manager.resolution_manifest(&slot).expect("read"),
+        ResolutionManifest::Absent
+    );
+    stage();
+    assert!(staged().is_empty());
+
+    // The worker's manifest: read, and kept out of the index by the exclusion.
+    fs::write(&manifest, "resolved c.txt\n").expect("write");
+    assert_eq!(
+        fixture.manager.resolution_manifest(&slot).expect("read"),
+        ResolutionManifest::Declared(vec![Declaration {
+            path: "c.txt".to_owned(),
+            kind: ResolutionKind::Resolved,
+        }])
+    );
+    stage();
+    assert!(
+        staged().is_empty(),
+        "an untracked manifest is excluded from the `add -A`"
+    );
+
+    // The same, ignored: read all the same, and kept out by the ignore rules.
+    fs::write(path.join(".gitignore"), format!("{RESOLUTION_MANIFEST}\n")).expect("ignore");
+    assert!(matches!(
+        fixture.manager.resolution_manifest(&slot).expect("read"),
+        ResolutionManifest::Declared(_)
+    ));
+    stage();
+    assert!(staged().is_empty());
+    assert_eq!(
+        git(&path, &["ls-files", "--", ".gitignore"]),
+        ".gitignore",
+        "the `add -A` ran: the ignore file itself is staged"
+    );
+    fs::remove_file(path.join(".gitignore")).expect("unignore");
+    git(&path, &["rm", "--quiet", "--cached", "--", ".gitignore"]);
+
+    // A symbolic link: not a regular file, so not the worker's manifest;
+    // refused by the read, and staged as the link it is by the `add -A`.
+    #[cfg(unix)]
+    {
+        fs::remove_file(&manifest).expect("remove");
+        fs::write(path.join("elsewhere.txt"), "resolved c.txt\n").expect("target");
+        std::os::unix::fs::symlink("elsewhere.txt", &manifest).expect("link");
+        let refused = fixture
+            .manager
+            .resolution_manifest(&slot)
+            .expect_err("a link is not the manifest");
+        assert!(
+            matches!(&refused, UpstrokeError::Refused { message }
+                if message.contains("is a symbolic link")),
+            "{refused}"
+        );
+        stage();
+        assert_eq!(staged(), vec![RESOLUTION_MANIFEST.to_owned()]);
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", RESOLUTION_MANIFEST],
+        );
+        fs::remove_file(&manifest).expect("unlink");
+    }
+
+    // A directory: the same refusal, its contents ordinary paths.
+    #[cfg(not(unix))]
+    fs::remove_file(&manifest).expect("remove");
+    fs::create_dir(&manifest).expect("directory");
+    fs::write(manifest.join("data.txt"), "data\n").expect("data");
+    let refused = fixture
+        .manager
+        .resolution_manifest(&slot)
+        .expect_err("a directory is not the manifest");
+    assert!(
+        matches!(&refused, UpstrokeError::Refused { message } if message.contains("is a directory")),
+        "{refused}"
+    );
+    stage();
+    assert_eq!(
+        staged(),
+        vec![format!("{RESOLUTION_MANIFEST}/data.txt")],
+        "a directory of the name holds ordinary paths, and they are staged"
+    );
+    git(
+        &path,
+        &["rm", "-r", "--quiet", "--cached", "--", RESOLUTION_MANIFEST],
+    );
+    fs::remove_dir_all(&manifest).expect("remove the directory");
+
+    // Tracked: the repository's file, whatever the working tree holds there;
+    // refused by the read, and its edit staged by the `add -A`.
+    fs::write(&manifest, "application data\n").expect("write");
+    git(&path, &["add", "--", RESOLUTION_MANIFEST]);
+    fs::write(&manifest, "resolved c.txt\n").expect("the worker overwrites it");
+    let refused = fixture
+        .manager
+        .resolution_manifest(&slot)
+        .expect_err("a tracked file is not the manifest");
+    assert!(
+        matches!(&refused, UpstrokeError::Refused { message }
+            if message.contains("tracks `.upstroke-resolved`")),
+        "{refused}"
+    );
+    stage();
+    assert_eq!(
+        git(&path, &["show", &format!(":{RESOLUTION_MANIFEST}")]),
+        "resolved c.txt",
+        "the edit to the repository's file is staged like any other"
+    );
+}
+
 /// The recorded base is honoured **after the worktree's HEAD has moved off
 /// it** (`PR5-WORKSPACE-038`).
 ///
@@ -8961,12 +9099,15 @@ fn no_sampled_funnel_builds_its_argv_from_a_literal() {
         ),
         (
             "pub fn candidate_stage(",
+            1,
             0,
-            0,
-            "none of either: the declared-resolution children it runs before the sampled \
-             `add -A` take their argv from `DeclaredResolution::argv`, whose fixed words are \
-             `RESOLUTION_ADD_ARGV` and `RESOLUTION_RM_ARGV`, and the shared list carries the \
-             manifest exclusion",
+            "one dynamic argument and no literal: `CANDIDATE_STAGE_MANIFEST_EXCLUSION`, \
+             appended to the shared list only when an untracked, unignored regular file holds \
+             the manifest's name (`manifest_name`), which the sampler's populated worktree \
+             never does, so its child runs the list bare as the funnel does there; the \
+             declared-resolution children it runs before the sampled `add -A` take their argv \
+             from `DeclaredResolution::argv`, whose fixed words are `RESOLUTION_ADD_ARGV` and \
+             `RESOLUTION_RM_ARGV`",
         ),
         ("pub fn candidate_write_tree(", 0, 0, "none of either"),
         (

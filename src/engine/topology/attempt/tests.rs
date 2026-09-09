@@ -2875,7 +2875,7 @@ fn a_declared_path_is_staged_literally_whatever_characters_it_holds() {
 #[test]
 fn a_resolution_manifest_written_where_nothing_conflicted_is_ignored_and_stays_out_of_the_candidate()
  {
-    use crate::workspace_manager::RESOLUTION_MANIFEST;
+    use crate::workspace_manager::{RESOLUTION_MANIFEST, ResolutionManifest};
 
     let mut run = Run::started("manifest-without-conflict");
     let dispatched = run.dispatch(ALPHA, 0);
@@ -2895,6 +2895,33 @@ fn a_resolution_manifest_written_where_nothing_conflicted_is_ignored_and_stays_o
         names.iter().any(|name| name == WORKED_PATH)
             && !names.iter().any(|name| name == RESOLUTION_MANIFEST),
         "the work is captured and the manifest is not: {names:?}"
+    );
+
+    // The same with a manifest the grammar refuses: the index holds nothing
+    // the manifest governs, so it is not read, and what it says — well-formed
+    // or not — has no effect. "A malformed manifest stages nothing" is a
+    // promise about a capture that reads it (PR #249's third-round
+    // manifest-contract review, finding 6).
+    declare(&dispatched.worktree, "fixed worked.txt\n");
+    assert!(
+        matches!(
+            run.fixture
+                .manager
+                .resolution_manifest(&dispatched.slot)
+                .expect("the manifest reads"),
+            ResolutionManifest::Malformed { .. }
+        ),
+        "read on its own, the file is malformed"
+    );
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("an ordinary capture does not read the manifest");
+    assert!(capture.unresolved.is_empty());
+    let names = tree_names(&dispatched.worktree, &capture.tree);
+    assert!(
+        names.iter().any(|name| name == WORKED_PATH)
+            && !names.iter().any(|name| name == RESOLUTION_MANIFEST),
+        "{names:?}"
     );
     assert!(process.balances());
 }
@@ -2935,6 +2962,15 @@ fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_re
         "bullets, a colon, quotes, `./` and surrounding whitespace"
     );
     assert_eq!(
+        declared("resolved \" c.txt \"\ndeleted `\t d.txt`\nresolved \"./e.txt\"\n"),
+        vec![
+            entry(" c.txt ", ResolutionKind::Resolved),
+            entry("\t d.txt", ResolutionKind::Deleted),
+            entry("e.txt", ResolutionKind::Resolved),
+        ],
+        "what is inside the quotes is the path, whitespace included; `./` still comes off"
+    );
+    assert_eq!(
         declared(""),
         Vec::<Declaration>::new(),
         "an empty file declares nothing"
@@ -2944,6 +2980,9 @@ fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_re
         ("resolved c.txt\nresolved\n", 2),
         ("resolved c.txt\n\nc.txt\n", 3),
         ("resolved ``\n", 1),
+        ("resolved::: c.txt\n", 1),
+        ("resolved:: c.txt\n", 1),
+        ("resolved c.txt\ndeleted:  \n", 2),
     ] {
         let ResolutionManifest::Malformed { detail } = ResolutionManifest::parse(text) else {
             panic!("{text:?} parsed");
@@ -2964,10 +3003,24 @@ fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_re
         cfg!(windows),
         "a backslash is a separator exactly where the platform's Git reads it as one"
     );
+    let another_case = |declared: &str, index: &str| {
+        entry(declared, ResolutionKind::Resolved).names_in_another_case(index)
+    };
+    assert!(another_case("dir/c.txt", "Dir/C.txt"));
+    assert!(another_case("DIR/C.TXT", "Dir/C.txt"));
+    assert!(
+        !another_case("Dir/C.txt", "Dir/C.txt") && !another_case("./Dir/C.txt/", "Dir/C.txt"),
+        "the index's own spelling, however decorated, is not another case of itself"
+    );
+    assert!(!another_case("dir/d.txt", "Dir/C.txt"));
+    assert!(
+        !another_case("cafe\u{301}.txt", "caf\u{e9}.txt"),
+        "a normalization form is not a case: the boundary `PR249-MANIFEST-NORMALIZATION-ALIAS` records"
+    );
 
     let unmerged = ["c.txt".to_owned(), "d.txt".to_owned()];
     assert_eq!(
-        plan_resolutions(&unmerged, &ResolutionManifest::Absent),
+        plan_resolutions(&unmerged, &[], &ResolutionManifest::Absent),
         ResolutionPlan {
             staged: Vec::new(),
             refused: unmerged.to_vec(),
@@ -2977,6 +3030,7 @@ fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_re
     assert_eq!(
         plan_resolutions(
             &unmerged,
+            &[],
             &ResolutionManifest::Declared(vec![
                 entry("c.txt", ResolutionKind::Resolved),
                 entry("d.txt", ResolutionKind::Deleted),
@@ -3001,6 +3055,7 @@ fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_re
     );
     let plan = plan_resolutions(
         &unmerged,
+        &[],
         &ResolutionManifest::Declared(vec![
             entry("c.txt", ResolutionKind::Resolved),
             entry("c.txt", ResolutionKind::Deleted),
@@ -3016,6 +3071,7 @@ fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_re
     assert_eq!(plan.refused[1], "d.txt");
     let plan = plan_resolutions(
         &unmerged,
+        &[],
         &ResolutionManifest::Malformed {
             detail: "line 1 is odd".to_owned(),
         },
@@ -3029,6 +3085,121 @@ fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_re
             "(line 1 is odd)".to_owned()
         ],
         "a malformed manifest refuses everything and says why"
+    );
+
+    // Another case of a governed path: refused, never matched.
+    let upper = ["Dir/C.txt".to_owned()];
+    let plan = plan_resolutions(
+        &upper,
+        &[],
+        &ResolutionManifest::Declared(vec![
+            entry("Dir/C.txt", ResolutionKind::Resolved),
+            entry("dir/c.txt", ResolutionKind::Deleted),
+        ]),
+    );
+    assert!(plan.staged.is_empty());
+    assert_eq!(
+        plan.refused,
+        vec![
+            "Dir/C.txt (declared `resolved`, and `deleted` as `dir/c.txt`, a spelling that \
+             differs only by case)"
+                .to_owned()
+        ],
+        "a contradiction in two cases is refused on every platform"
+    );
+    let plan = plan_resolutions(
+        &upper,
+        &[],
+        &ResolutionManifest::Declared(vec![entry("dir/c.txt", ResolutionKind::Deleted)]),
+    );
+    assert_eq!(
+        plan.refused,
+        vec![
+            "Dir/C.txt (declared `deleted` only as `dir/c.txt`, which differs from the \
+             index's spelling by case alone; spell the path as the index does)"
+                .to_owned()
+        ],
+        "a lone declaration in another case is refused naming the index's spelling"
+    );
+    let both_spellings = ["Dir/C.txt".to_owned(), "dir/c.txt".to_owned()];
+    let plan = plan_resolutions(
+        &both_spellings,
+        &[],
+        &ResolutionManifest::Declared(vec![
+            entry("Dir/C.txt", ResolutionKind::Resolved),
+            entry("dir/c.txt", ResolutionKind::Deleted),
+        ]),
+    );
+    assert!(
+        plan.refused.is_empty() && plan.staged.len() == 2,
+        "two index entries that differ only by case are two files, and each takes its own \
+         declaration: {plan:?}"
+    );
+    let plan = plan_resolutions(
+        &["caf\u{e9}.txt".to_owned()],
+        &[],
+        &ResolutionManifest::Declared(vec![
+            entry("caf\u{e9}.txt", ResolutionKind::Resolved),
+            entry("cafe\u{301}.txt", ResolutionKind::Deleted),
+        ]),
+    );
+    assert!(
+        plan.refused.is_empty() && plan.staged.len() == 1,
+        "a pair that differs only in normalization form is not read as a contradiction — \
+         the recorded boundary, `PR249-MANIFEST-NORMALIZATION-ALIAS`: {plan:?}"
+    );
+
+    // What a previous capture of the generation resolved: governed while the
+    // index holds it, revisable, and left alone when undeclared.
+    let resolved = ["c.txt".to_owned()];
+    assert_eq!(
+        plan_resolutions(&[], &resolved, &ResolutionManifest::Absent),
+        ResolutionPlan::default(),
+        "a resolved path with no manifest stays as the previous capture left it"
+    );
+    assert_eq!(
+        plan_resolutions(
+            &[],
+            &resolved,
+            &ResolutionManifest::Declared(vec![entry("c.txt", ResolutionKind::Deleted)])
+        ),
+        ResolutionPlan {
+            staged: vec![DeclaredResolution {
+                path: "c.txt".to_owned(),
+                kind: ResolutionKind::Deleted,
+            }],
+            refused: Vec::new(),
+        },
+        "a retained retry revises the resolution to a deletion"
+    );
+    let plan = plan_resolutions(
+        &[],
+        &resolved,
+        &ResolutionManifest::Declared(vec![
+            entry("c.txt", ResolutionKind::Resolved),
+            entry("c.txt", ResolutionKind::Deleted),
+        ]),
+    );
+    assert!(
+        plan.staged.is_empty() && plan.refused[0].starts_with("c.txt (declared both"),
+        "{plan:?}"
+    );
+    let plan = plan_resolutions(
+        &[],
+        &resolved,
+        &ResolutionManifest::Malformed {
+            detail: "line 1 is odd".to_owned(),
+        },
+    );
+    assert_eq!(
+        plan.refused,
+        vec!["c.txt".to_owned(), "(line 1 is odd)".to_owned()],
+        "a malformed manifest refuses what it governs, resolved paths included"
+    );
+    assert_eq!(
+        plan_resolutions(&resolved, &resolved, &ResolutionManifest::Absent).refused,
+        vec!["c.txt".to_owned()],
+        "a path in both lists is governed once, as unmerged"
     );
 }
 
@@ -3079,6 +3250,770 @@ fn an_already_present_source_proceeds_as_an_ordinary_attempt_whose_empty_diff_fa
         Some(FailureKind::EmptyDiff),
         "an empty diff fails under the existing rule; no special no-candidate settlement exists \
          (it is a deferred decision)"
+    );
+    assert!(process.balances());
+}
+
+/// A retained retry of a repair generation, reserved, verified against
+/// `retained` and started as attempt `attempt`, the way `run::retry_ready`
+/// does it; the reservation is returned so the caller can keep it alive.
+fn retry_in_place(
+    run: &mut Run,
+    process: &mut Process,
+    dispatched: &Dispatched,
+    retained: &str,
+    attempt: u32,
+) -> Reservations {
+    use crate::topology::events::Materialization;
+
+    run.retain(dispatched.key, GENERATION, attempt - 1);
+    let mut reservations = Reservations::new();
+    let mut plan = run.attempt_plan(dispatched.key, attempt);
+    let outcome = settle::retry(
+        run.emitter.fold(),
+        &mut reservations,
+        &ManagedWorktrees::new(&run.fixture.manager),
+        run.hooks.effects(),
+        &RetryRequest {
+            key: dispatched.key,
+            slot: dispatched.slot.clone(),
+            retained_tree: retained.to_owned(),
+            binding: plan.binding.clone(),
+            rung: plan.rung,
+            pool: plan.pool.clone(),
+            materialization: Some(Materialization::Retained),
+        },
+    )
+    .expect("the retry decision reads");
+    let RetryOutcome::Start(authorized) = outcome else {
+        panic!("a retained repair generation retries in place");
+    };
+    plan.attempt = authorized.attempt;
+    plan.resume_session = authorized.resume_session.clone();
+    plan.materialization_observed = authorized.materialization_observed;
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the retained retry starts");
+    reservations
+        .convert(dispatched.key, ReservationKind::Retry)
+        .expect("the retry's reservation converts");
+    reservations
+}
+
+/// The bytes of `path` in `tree`.
+fn blob_in(worktree: &Path, tree: &str, path: &str) -> Vec<u8> {
+    crate::workspace_manager::fixture::git_out(
+        worktree,
+        &["cat-file", "-p", &format!("{tree}:{path}")],
+    )
+    .stdout
+}
+
+#[test]
+fn a_retained_retry_revises_a_declared_resolution_to_a_deletion_and_a_settled_deletion_is_not_reapplied()
+ {
+    use crate::workspace_manager::RESOLUTION_MANIFEST;
+
+    let mut run = Run::started("retained-revision");
+    let head = run.fixture.head.clone();
+    let conflicting = run.commit_with(&head, "c.txt", "other side\n", "revision-other");
+    let (dispatched, plan) = repair_at(&mut run, &conflicting);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's first attempt starts");
+    assert_eq!(
+        run.fixture
+            .manager
+            .resolved_conflicts(&dispatched.slot)
+            .expect("the resolve-undo read"),
+        Vec::<String>::new(),
+        "a fresh materialization has resolved nothing"
+    );
+    write_file(&dispatched.worktree.join("c.txt"), b"first resolution\n");
+    declare(&dispatched.worktree, "resolved c.txt\n");
+    let first = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the first capture stages the declared resolution");
+    assert!(first.unresolved.is_empty());
+    assert_eq!(
+        run.fixture
+            .manager
+            .resolved_conflicts(&dispatched.slot)
+            .expect("the resolve-undo read"),
+        vec!["c.txt".to_owned()],
+        "the index records what the capture resolved from unmerged stages \
+         (`git ls-files --resolve-undo`), and the read finds it"
+    );
+
+    // Attempt 2, in the retained worktree: nothing is unmerged any more, and
+    // the worker corrects itself to a deletion its tools cannot perform.
+    // PR #249's third-round regression review found this declaration went
+    // unread, the tree kept `c.txt` and the capture reported success.
+    let _second_attempt = retry_in_place(&mut run, &mut process, &dispatched, &first.tree, 2);
+    declare(&dispatched.worktree, "deleted c.txt\n");
+    let mark = run.mark();
+    let second = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the retry's capture");
+    assert!(second.unresolved.is_empty(), "{:?}", second.unresolved);
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::After), 1);
+    let names = tree_names(&dispatched.worktree, &second.tree);
+    assert!(
+        !names.iter().any(|name| name == "c.txt")
+            && !names.iter().any(|name| name == RESOLUTION_MANIFEST)
+            && names.iter().any(|name| name == "a.txt"),
+        "the revised resolution is a deletion, applied by the engine: {names:?}"
+    );
+    assert!(
+        !dispatched.worktree.join("c.txt").exists(),
+        "the engine's `git rm --force` removed the file whose staged content `rm` would \
+         otherwise have refused to touch"
+    );
+    assert_ne!(first.tree, second.tree);
+    assert_eq!(
+        run.fixture
+            .manager
+            .resolved_conflicts(&dispatched.slot)
+            .expect("the resolve-undo read"),
+        Vec::<String>::new(),
+        "a path resolved by deletion has no index entry left for a declaration to govern"
+    );
+
+    // Attempt 3, the manifest left as it was: the deletion stands, the
+    // declaration governs nothing, and no `git rm` runs against a pathspec
+    // that matches nothing. The worker's other edit is captured as usual.
+    let _third_attempt = retry_in_place(&mut run, &mut process, &dispatched, &second.tree, 3);
+    agent_edits(&dispatched.worktree);
+    let third = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a settled deletion is not re-applied");
+    assert!(third.unresolved.is_empty());
+    let names = tree_names(&dispatched.worktree, &third.tree);
+    assert!(
+        names.iter().any(|name| name == WORKED_PATH) && !names.iter().any(|name| name == "c.txt"),
+        "{names:?}"
+    );
+    assert!(process.balances());
+    run.replay_twice_equal();
+}
+
+#[test]
+fn a_retained_retry_reads_the_manifest_while_the_index_holds_what_a_capture_resolved() {
+    let mut run = Run::started("retained-governed");
+    let head = run.fixture.head.clone();
+    let conflicting = run.commit_with(&head, "c.txt", "other side\n", "governed-other");
+    let (dispatched, plan) = repair_at(&mut run, &conflicting);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's first attempt starts");
+    write_file(&dispatched.worktree.join("c.txt"), b"first resolution\n");
+    declare(&dispatched.worktree, "resolved c.txt\n");
+    let first = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the first capture");
+    assert!(first.unresolved.is_empty());
+
+    // A manifest the grammar refuses, in the retry: the index still holds the
+    // resolved entry, so the manifest is read and the capture refuses,
+    // staging nothing — the malformed-manifest promise, in the one further
+    // state it holds in (PR #249's third-round manifest-contract review,
+    // finding 6, asked for the condition to be stated).
+    let _second_attempt = retry_in_place(&mut run, &mut process, &dispatched, &first.tree, 2);
+    write_file(&dispatched.worktree.join("c.txt"), b"second resolution\n");
+    declare(&dispatched.worktree, "fixed c.txt\n");
+    let mark = run.mark();
+    let refused = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a refusal is a capture, not an error");
+    assert_eq!(refused.unresolved.len(), 2, "{:?}", refused.unresolved);
+    assert_eq!(refused.unresolved[0], "c.txt");
+    assert!(
+        refused.unresolved[1].contains("line 1 of"),
+        "{:?}",
+        refused.unresolved
+    );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::After), 0);
+    assert_eq!(refused.tree, tree_of(&run, &conflicting));
+    assert_eq!(
+        git(&dispatched.worktree, &["show", ":c.txt"]),
+        "first resolution",
+        "nothing was staged"
+    );
+
+    // The worker corrects the manifest: the resolution is re-staged with the
+    // content the file now holds.
+    declare(&dispatched.worktree, "resolved c.txt\n");
+    let revised = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the corrected manifest captures");
+    assert!(revised.unresolved.is_empty());
+    assert_eq!(
+        git(&dispatched.worktree, &["show", ":c.txt"]),
+        "second resolution"
+    );
+
+    // The manifest removed: nothing governs the entry any differently, and
+    // an ordinary capture stages what the tree holds.
+    remove_file(
+        &dispatched
+            .worktree
+            .join(crate::workspace_manager::RESOLUTION_MANIFEST),
+    );
+    write_file(&dispatched.worktree.join("c.txt"), b"third resolution\n");
+    let plain = context!(run, process)
+        .capture(dispatched.site())
+        .expect("no manifest, nothing unmerged: an ordinary capture");
+    assert!(plain.unresolved.is_empty());
+    assert_eq!(
+        blob_in(&dispatched.worktree, &plain.tree, "c.txt"),
+        b"third resolution\n"
+    );
+    assert!(process.balances());
+    run.replay_twice_equal();
+}
+
+#[test]
+fn a_tracked_file_of_the_manifests_name_is_the_repositorys_and_a_conflict_repair_there_is_refused()
+{
+    use crate::workspace_manager::RESOLUTION_MANIFEST;
+
+    // An ordinary attempt in a repository that tracks the name: the worker's
+    // edit to that file is captured like any other. The second round's
+    // unconditional exclusion kept the file's old content in the tree with no
+    // refusal (PR #249's third-round regression review, finding 1).
+    let mut run = Run::started("tracked-name-ordinary");
+    let head = run.fixture.head.clone();
+    let tracking = run.commit_with(
+        &head,
+        RESOLUTION_MANIFEST,
+        "old application data\n",
+        "tracks-the-name",
+    );
+    run.fixture.head = tracking;
+    let dispatched = run.dispatch(ALPHA, 0);
+    let plan = run.attempt_plan(ALPHA, 1);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the attempt starts");
+    write_file(
+        &dispatched.worktree.join(RESOLUTION_MANIFEST),
+        b"new application data\n",
+    );
+    agent_edits(&dispatched.worktree);
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("an ordinary capture");
+    assert!(capture.unresolved.is_empty());
+    assert_eq!(
+        blob_in(&dispatched.worktree, &capture.tree, RESOLUTION_MANIFEST),
+        b"new application data\n",
+        "the repository's file is captured with the worker's edit"
+    );
+    assert!(
+        tree_names(&dispatched.worktree, &capture.tree)
+            .iter()
+            .any(|name| name == WORKED_PATH)
+    );
+    assert!(process.balances());
+
+    // A conflict repair materialized from a candidate that carries a file of
+    // the name (the third-round record review's witness): the pick puts it in
+    // the index, and the capture that needs the manifest refuses before it
+    // stages anything, naming the collision — the repository's bytes are not
+    // declarations, and a repository that has taken the name cannot run the
+    // protocol.
+    let mut run = Run::started("tracked-name-repair");
+    let head = run.fixture.head.clone();
+    let conflicting = run.commit_with(&head, "c.txt", "published\n", "tracked-published");
+    let source = run.commit_changing(
+        &head,
+        &[
+            ("c.txt", Some("candidate\n")),
+            (RESOLUTION_MANIFEST, Some("the candidate's own file\n")),
+        ],
+        "tracked-candidate",
+    );
+    let (dispatched, plan) = repair_from(&mut run, &conflicting, &source);
+    assert_eq!(unmerged_paths(&dispatched.worktree), ["c.txt"]);
+    assert_eq!(
+        git(
+            &dispatched.worktree,
+            &["ls-files", "--", RESOLUTION_MANIFEST]
+        ),
+        RESOLUTION_MANIFEST,
+        "the pick placed the candidate's file in the index"
+    );
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    write_file(&dispatched.worktree.join("c.txt"), b"resolved\n");
+    declare(&dispatched.worktree, "resolved c.txt\n");
+    let mark = run.mark();
+    let refusal = context!(run, process)
+        .capture(dispatched.site())
+        .expect_err("a conflict repair cannot be declared where the name is tracked");
+    assert!(
+        matches!(&refusal, UpstrokeError::Refused { message }
+            if message.contains("tracks `.upstroke-resolved`")
+                && message.contains("cannot be declared")),
+        "{refusal}"
+    );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::After), 0);
+    assert_eq!(
+        unmerged_paths(&dispatched.worktree),
+        ["c.txt"],
+        "nothing was staged"
+    );
+    assert!(process.balances());
+
+    // The same candidate picked cleanly: no entry for the manifest to govern,
+    // so it is not read, and the candidate's file is captured as the data it
+    // is — "the manifest is never part of a candidate" is a statement about
+    // the worker's file, not about the name.
+    let mut run = Run::started("tracked-name-clean");
+    let head = run.fixture.head.clone();
+    let source = run.commit_changing(
+        &head,
+        &[
+            ("c.txt", Some("candidate\n")),
+            (RESOLUTION_MANIFEST, Some("the candidate's own file\n")),
+        ],
+        "tracked-clean-candidate",
+    );
+    let (dispatched, plan) = repair_from(&mut run, &head, &source);
+    assert_eq!(unmerged_paths(&dispatched.worktree), Vec::<String>::new());
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a clean pick captures like an ordinary attempt");
+    assert!(capture.unresolved.is_empty());
+    assert_eq!(
+        blob_in(&dispatched.worktree, &capture.tree, RESOLUTION_MANIFEST),
+        b"the candidate's own file\n"
+    );
+    assert!(process.balances());
+}
+
+#[test]
+fn an_ignored_manifest_is_read_and_kept_out_of_the_candidate_by_the_ignore_rules_alone() {
+    use crate::workspace_manager::RESOLUTION_MANIFEST;
+
+    // The repository ignores the engine's bookkeeping file — a reasonable
+    // thing to do — and a required clean filter is declared for it too, so
+    // that any `add` reaching the file fails loudly. The second round's
+    // exclusion, exactly naming an ignored path, made `git add -A` exit 1
+    // (PR #249's third-round manifest-contract review, finding 1).
+    let mut run = Run::started("ignored-manifest");
+    let head = run.fixture.head.clone();
+    let ignoring = run.commit_with(
+        &head,
+        ".gitignore",
+        &format!("{RESOLUTION_MANIFEST}\n"),
+        "ignores-the-name",
+    );
+    let conflicting = run.commit_with(&ignoring, "c.txt", "published\n", "ignored-published");
+    let (dispatched, plan) = repair_at(&mut run, &conflicting);
+    assert_eq!(unmerged_paths(&dispatched.worktree), ["c.txt"]);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    write_file(
+        &dispatched.worktree.join(".gitattributes"),
+        format!("{RESOLUTION_MANIFEST} filter=manifest_probe\n").as_bytes(),
+    );
+    git(
+        &dispatched.worktree,
+        &["config", "filter.manifest_probe.clean", "false"],
+    );
+    git(
+        &dispatched.worktree,
+        &["config", "filter.manifest_probe.required", "true"],
+    );
+    write_file(&dispatched.worktree.join("c.txt"), b"resolved\n");
+    declare(&dispatched.worktree, "resolved c.txt\n");
+    assert_eq!(
+        git(
+            &dispatched.worktree,
+            &["check-ignore", "--", RESOLUTION_MANIFEST]
+        ),
+        RESOLUTION_MANIFEST,
+        "the manifest is ignored"
+    );
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("an ignored manifest is read, and nothing tries to add it");
+    assert!(capture.unresolved.is_empty(), "{:?}", capture.unresolved);
+    let names = tree_names(&dispatched.worktree, &capture.tree);
+    assert!(
+        names.iter().any(|name| name == "c.txt")
+            && names.iter().any(|name| name == ".gitattributes")
+            && !names.iter().any(|name| name == RESOLUTION_MANIFEST),
+        "{names:?}"
+    );
+    assert!(dispatched.worktree.join(RESOLUTION_MANIFEST).is_file());
+    assert!(process.balances());
+}
+
+#[test]
+fn a_directory_of_the_manifests_name_is_the_repositorys_and_its_contents_are_captured() {
+    use crate::workspace_manager::RESOLUTION_MANIFEST;
+
+    let data = format!("{RESOLUTION_MANIFEST}/data.txt");
+
+    // Untracked: the directory's contents are new files of the candidate.
+    let mut run = Run::started("directory-untracked");
+    let dispatched = run.dispatch(ALPHA, 0);
+    let plan = run.attempt_plan(ALPHA, 1);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the attempt starts");
+    agent_edits(&dispatched.worktree);
+    write_file(
+        &dispatched
+            .worktree
+            .join(RESOLUTION_MANIFEST)
+            .join("data.txt"),
+        b"ordinary project data\n",
+    );
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("an ordinary capture");
+    let names = tree_names(&dispatched.worktree, &capture.tree);
+    assert!(
+        names.iter().any(|name| name == WORKED_PATH) && names.contains(&data),
+        "a directory is not the root-level protocol file, and its contents are captured: \
+         {names:?}"
+    );
+    assert!(process.balances());
+
+    // Tracked: an edit under it is captured. The second round's pathspec
+    // excluded every descendant of the name and kept the old content
+    // (PR #249's third-round manifest-contract review, finding 2).
+    let mut run = Run::started("directory-tracked");
+    let head = run.fixture.head.clone();
+    let tracking = run.commit_with(&head, &data, "old project data\n", "tracks-a-directory");
+    run.fixture.head = tracking;
+    let dispatched = run.dispatch(ALPHA, 0);
+    let plan = run.attempt_plan(ALPHA, 1);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the attempt starts");
+    write_file(
+        &dispatched
+            .worktree
+            .join(RESOLUTION_MANIFEST)
+            .join("data.txt"),
+        b"new project data\n",
+    );
+    agent_edits(&dispatched.worktree);
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("an ordinary capture");
+    assert_eq!(
+        blob_in(&dispatched.worktree, &capture.tree, &data),
+        b"new project data\n"
+    );
+    assert!(process.balances());
+
+    // With a conflict to declare: the name is taken by a directory, the
+    // worker cannot write the manifest there, and the capture refuses naming
+    // what holds the name rather than failing on an I/O error.
+    let mut run = Run::started("directory-conflict");
+    let head = run.fixture.head.clone();
+    let tracking = run.commit_with(&head, &data, "project data\n", "tracks-a-directory-too");
+    let conflicting = run.commit_with(&tracking, "c.txt", "published\n", "directory-published");
+    let (dispatched, plan) = repair_at(&mut run, &conflicting);
+    assert_eq!(unmerged_paths(&dispatched.worktree), ["c.txt"]);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    write_file(&dispatched.worktree.join("c.txt"), b"resolved\n");
+    let mark = run.mark();
+    let refusal = context!(run, process)
+        .capture(dispatched.site())
+        .expect_err("the name is taken");
+    assert!(
+        matches!(&refusal, UpstrokeError::Refused { message }
+            if message.contains("is a directory") && message.contains("cannot be declared")),
+        "{refusal}"
+    );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::After), 0);
+    assert!(process.balances());
+}
+
+#[test]
+fn a_declaration_in_another_case_is_refused_and_the_checkout_says_whether_it_named_the_file() {
+    // `Dir/C.txt` conflicted. On a case-insensitive filesystem `dir/c.txt`
+    // is that file; on a case-sensitive one it is nothing. The rule is the
+    // same on both: the pair is a contradiction, the lone respelling names
+    // nothing the index spells that way, and each is refused with the
+    // index's spelling (PR #249's third-round manifest-contract review,
+    // finding 3, whose filesystem half was reasoned; this test establishes it
+    // on each platform the suite runs on).
+    let mut run = Run::started("case-alias");
+    let head = run.fixture.head.clone();
+    let ancestor = run.commit_with(&head, "Dir/C.txt", "shared\n", "case-shared");
+    let base = run.commit_with(&ancestor, "Dir/C.txt", "published\n", "case-published");
+    let source = run.commit_with(&ancestor, "Dir/C.txt", "candidate\n", "case-candidate");
+    let (dispatched, plan) = repair_from(&mut run, &base, &source);
+    assert_eq!(unmerged_paths(&dispatched.worktree), ["Dir/C.txt"]);
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    let folds_case = dispatched.worktree.join("dir").join("c.txt").is_file();
+    assert_eq!(
+        folds_case,
+        cfg!(any(windows, target_os = "macos")),
+        "whether `dir/c.txt` names the conflicted `Dir/C.txt` is the checkout's filesystem's \
+         answer, and this records it for the platform the suite runs on: Windows and macOS \
+         fold case, Linux does not; a checkout on a volume that answers otherwise is not one \
+         CI runs on"
+    );
+    write_file(
+        &dispatched.worktree.join("Dir").join("C.txt"),
+        b"resolved\n",
+    );
+
+    declare(
+        &dispatched.worktree,
+        "resolved Dir/C.txt\ndeleted dir/c.txt\n",
+    );
+    let mark = run.mark();
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a refusal is a capture");
+    assert_eq!(
+        capture.unresolved,
+        vec![
+            "Dir/C.txt (declared `resolved`, and `deleted` as `dir/c.txt`, a spelling that \
+             differs only by case)"
+                .to_owned()
+        ],
+        "the pair is refused whether or not the filesystem reads it as one file (here it {})",
+        if folds_case { "does" } else { "does not" }
+    );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::After), 0);
+    assert_eq!(unmerged_paths(&dispatched.worktree), ["Dir/C.txt"]);
+
+    declare(&dispatched.worktree, "resolved dir/c.txt\n");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a refusal is a capture");
+    assert_eq!(
+        capture.unresolved,
+        vec![
+            "Dir/C.txt (declared `resolved` only as `dir/c.txt`, which differs from the \
+             index's spelling by case alone; spell the path as the index does)"
+                .to_owned()
+        ]
+    );
+    assert_eq!(run.count_after(mark, STAGE, HookPhase::After), 0);
+
+    declare(&dispatched.worktree, "resolved Dir/C.txt\n");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the index's spelling captures");
+    assert!(capture.unresolved.is_empty());
+    assert_eq!(
+        blob_in(&dispatched.worktree, &capture.tree, "Dir/C.txt"),
+        b"resolved\n"
+    );
+    assert!(process.balances());
+
+    // Unicode normalization forms are not folded: the boundary
+    // `PR249-MANIFEST-NORMALIZATION-ALIAS` records. `café.txt` (composed)
+    // conflicted; the decomposed spelling names that file on a
+    // normalization-insensitive volume (macOS) and nothing elsewhere, and the
+    // engine reads it as nothing everywhere: the pair is not refused and the
+    // composed declaration is staged. This pins the boundary so that folding
+    // it moves this test with it.
+    let mut run = Run::started("normalization-alias");
+    let head = run.fixture.head.clone();
+    let composed = "caf\u{e9}.txt";
+    let decomposed = "cafe\u{301}.txt";
+    let ancestor = run.commit_with(&head, composed, "shared\n", "nfc-shared");
+    let base = run.commit_with(&ancestor, composed, "published\n", "nfc-published");
+    let source = run.commit_with(&ancestor, composed, "candidate\n", "nfc-candidate");
+    let (dispatched, plan) = repair_from(&mut run, &base, &source);
+    assert_eq!(
+        run.fixture
+            .manager
+            .unresolved_conflicts(&dispatched.slot)
+            .expect("the unmerged read"),
+        [composed]
+    );
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    let folds_normalization = dispatched.worktree.join(decomposed).is_file();
+    assert_eq!(
+        folds_normalization,
+        cfg!(target_os = "macos"),
+        "whether the decomposed spelling names the composed file is the checkout's \
+         filesystem's answer, recorded for the platform the suite runs on"
+    );
+    write_file(&dispatched.worktree.join(composed), b"resolved\n");
+    declare(
+        &dispatched.worktree,
+        &format!("resolved {composed}\ndeleted {decomposed}\n"),
+    );
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("capture");
+    assert!(
+        capture.unresolved.is_empty(),
+        "the boundary: a normalization-form respelling is not read as an alias, so the \
+         pair is not refused (the filesystem here {} read the two as one file): {:?}",
+        if folds_normalization {
+            "did"
+        } else {
+            "did not"
+        },
+        capture.unresolved
+    );
+    assert_eq!(
+        blob_in(&dispatched.worktree, &capture.tree, composed),
+        b"resolved\n"
+    );
+    assert!(process.balances());
+}
+
+/// A file whose name begins and ends with a space, which Windows cannot hold
+/// under its usual rules; the quoted form of the grammar exists for such names.
+#[cfg(unix)]
+#[test]
+fn a_quoted_declaration_names_an_entry_exactly_whitespace_included() {
+    let mut run = Run::started("quoted-whitespace");
+    let head = run.fixture.head.clone();
+    let spaced = " c.txt ";
+    let ancestor = run.commit_with(&head, spaced, "shared\n", "space-shared");
+    let base = run.commit_with(&ancestor, spaced, "published\n", "space-published");
+    let source = run.commit_with(&ancestor, spaced, "candidate\n", "space-candidate");
+    let (dispatched, plan) = repair_from(&mut run, &base, &source);
+    assert_eq!(
+        run.fixture
+            .manager
+            .unresolved_conflicts(&dispatched.slot)
+            .expect("the unmerged read"),
+        [spaced]
+    );
+    let mut process = Process::new();
+    context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    write_file(&dispatched.worktree.join(spaced), b"resolved\n");
+
+    // Unquoted, the whitespace is trimmed away and the entry stays undeclared.
+    declare(&dispatched.worktree, "resolved  c.txt \n");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("a refusal is a capture");
+    assert_eq!(capture.unresolved, [spaced]);
+
+    // Quoted, the path is what the quotes hold. The second round's parser
+    // trimmed inside the quotes as well, and PR #249's third-round
+    // manifest-contract review (finding 4) found the real entry refused.
+    declare(&dispatched.worktree, "resolved \" c.txt \"\n");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the quoted spelling captures");
+    assert!(capture.unresolved.is_empty(), "{:?}", capture.unresolved);
+    assert_eq!(
+        blob_in(&dispatched.worktree, &capture.tree, spaced),
+        b"resolved\n"
+    );
+    assert!(process.balances());
+}
+
+#[test]
+fn a_declared_resolution_reaches_the_configured_checks_which_decide_what_they_detect() {
+    // The worker declares a file resolved and leaves the markers in it. The
+    // capture stages what is declared — the declaration is the worker's
+    // signal, and no content read stands in for it — and what happens next
+    // is the configured validation's: with no gate and no reviewer, nothing
+    // detects the markers and the judgment accepts. `design/26` §26.4 says a
+    // wrong declaration *reaches* the ordinary gates and review; it once said
+    // it was *caught* by them, and PR #249's third-round record and
+    // manifest-contract reviews both executed this shape against that word.
+    let mut run = Run::started("wrong-declaration-reaches-judgment");
+    let head = run.fixture.head.clone();
+    let conflicting = run.commit_with(&head, "c.txt", "published\n", "wrong-published");
+    let (dispatched, mut plan) = repair_at(&mut run, &conflicting);
+    plan.gates.clear();
+    plan.reviewers.clear();
+    let mut process = Process::new();
+    let started = context!(run, process)
+        .start(dispatched.site(), &plan)
+        .expect("the repair's attempt starts");
+    let bytes = std::fs::read_to_string(dispatched.worktree.join("c.txt")).expect("c.txt");
+    assert!(
+        bytes.contains("<<<<<<<"),
+        "the markers are in place:\n{bytes}"
+    );
+    declare(&dispatched.worktree, "resolved c.txt\n");
+    let capture = context!(run, process)
+        .capture(dispatched.site())
+        .expect("the declaration is staged, markers and all");
+    assert!(capture.unresolved.is_empty());
+    assert!(
+        String::from_utf8_lossy(&blob_in(&dispatched.worktree, &capture.tree, "c.txt"))
+            .contains("<<<<<<<")
+    );
+    let diff = run
+        .fixture
+        .manager
+        .candidate_diff(&dispatched.slot, &capture.parent, &capture.tree)
+        .expect("diff");
+    let assessed = context!(run, process)
+        .assess(
+            dispatched.site(),
+            &plan,
+            &started,
+            &capture,
+            &diff,
+            crate::ir::TaskKind::Fix,
+        )
+        .expect("assessed");
+    assert!(
+        assessed.failure.is_none(),
+        "no cheap rung reads the markers: {:?}",
+        assessed.failure
+    );
+    let inputs = run.review_inputs();
+    let judgement = context!(run, process)
+        .judge(
+            dispatched.site(),
+            &plan,
+            Judging {
+                run: &started,
+                capture: &capture,
+                assessed: &assessed,
+            },
+            &inputs,
+            &|pass| crate::review::ReviewInvocations {
+                pass: started.identities.review_pass(pass, 0),
+                reask: started.identities.review_reask(pass, 0),
+            },
+        )
+        .expect("judged");
+    assert!(
+        judgement.accepted(),
+        "with no gate and no reviewer configured, the declared resolution is accepted: what \
+         a wrong declaration reaches is the configured validation, which decides what it \
+         detects"
     );
     assert!(process.balances());
 }

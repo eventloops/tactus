@@ -1088,22 +1088,36 @@ the grammar's tolerances — both are staged as themselves through
 
 ## `fn a_resolution_manifest_written_where_nothing_conflicted_is_ignored_and_stays_out_of_the_candidate() {`
 
-An ordinary attempt's worker that writes a manifest anyway: the capture has
-no unmerged entry to reconcile it against, the work is captured, and the
-manifest is not — `CANDIDATE_STAGE_ARGV`'s exclusion holds for every
-capture.
+An ordinary attempt's worker that writes a manifest anyway: the index holds
+nothing the manifest governs, so it is not read, the work is captured, and
+the manifest — an untracked regular file the ignore rules do not cover — is
+kept out by the exclusion `candidate_stage` appends for exactly that state.
+Then the same with a manifest the grammar refuses: read on its own it is
+malformed, and the capture, which does not read it, stages the work as
+before. "A malformed manifest stages nothing" is a promise about a capture
+that reads one (the third round's manifest-contract review, finding 6).
 
 ## `fn the_resolution_manifest_grammar_reads_what_a_worker_writes_and_refuses_the_rest() {`
 
 `ResolutionManifest::parse` against what a worker is likely to write —
-CRLF, comments, blank lines, a list bullet, a colon after the keyword,
+CRLF, comments, blank lines, a list bullet, one colon after the keyword,
 backticks and quotes around the path, `./`, surrounding whitespace — and
-what it refuses, each with the line named; `Declaration::names` as a path
-comparison, a backslash a separator exactly where the platform's Git reads
-it as one; and `plan_resolutions`: no manifest refuses everything, a
-declaration of a path that is not unmerged is nothing, a path declared both
-ways is refused rather than guessed, a malformed manifest refuses everything
-and says why.
+what it refuses, each with the line named: a second colon among them, and
+a quoted path is what the quotes hold, whitespace included (the third
+round's manifest-contract review, findings 4 and 5). `Declaration::names`
+as a path comparison, a backslash a separator exactly where the platform's
+Git reads it as one; `names_in_another_case` as the one alias that is
+read, for refusing — a normalization form is not a case. And
+`plan_resolutions` over both governed lists: no manifest refuses every
+unmerged entry, a declaration of a path in neither list is nothing, a path
+declared both ways is refused rather than guessed, a contradiction in two
+cases and a lone respelling in another case are refused naming the index's
+spelling while two index entries that differ only by case are two files and
+a normalization-form pair is not read as a contradiction (the recorded
+boundary), a malformed manifest refuses everything it governs and says why;
+a resolved path stays as it was when undeclared, is revised to a deletion
+when declared so, and is governed once when the index holds it unmerged
+too.
 
 ## `fn an_already_present_source_proceeds_as_an_ordinary_attempt_whose_empty_diff_fails_honestly() {`
 
@@ -1111,3 +1125,105 @@ and says why.
 attempt; a worker that then changes nothing fails under the existing
 empty-diff rule rather than through a no-candidate settlement that does
 not exist (a deferred decision).
+
+## `fn retry_in_place(`
+
+`run::retry_ready` in the fixture's hands: the previous attempt retained
+with a gate failure, `settle::retry` reserving and verifying the worktree
+against the retained tree, the authorized attempt started with what the
+fold recorded for it, the reservation converted. Returned rather than
+dropped because a retry's reservation is the caller's to keep alive while
+its attempt runs.
+
+## `fn blob_in(worktree: &Path, tree: &str, path: &str) -> Vec<u8> {`
+
+The bytes a captured tree holds at a path, read from the object rather
+than the working tree: what the queue would publish.
+
+## `fn a_retained_retry_revises_a_declared_resolution_to_a_deletion_and_a_settled_deletion_is_not_reapplied() {`
+
+PR #249's third-round regression review, finding 2. Attempt 1 resolves
+`c.txt` and declares it; the capture stages it, and the index's
+resolve-undo record now names it (`resolved_conflicts`, empty before).
+Attempt 2 in the retained worktree declares `deleted c.txt`: nothing is
+unmerged, the manifest is read all the same because the index still holds
+what a capture resolved, the engine's `git rm --force` removes the file the
+worker's tools could not, and the tree no longer carries it — at
+`698777b0` the manifest went unread and the capture reported success with
+`c.txt` in the tree and on disk. Attempt 3 with the manifest untouched:
+the deleted path has no entry left to govern, so the stale declaration
+runs no `git rm` against a pathspec that matches nothing, and the worker's
+other edit is captured as usual. The log replays.
+
+## `fn a_retained_retry_reads_the_manifest_while_the_index_holds_what_a_capture_resolved() {`
+
+The other half of the retained rule: a manifest the grammar refuses, in
+the retry, refuses the capture and stages nothing — the entry is still
+governed, so the malformed-manifest promise holds here — while the
+corrected manifest re-stages the resolution from the file's new content,
+and the manifest removed leaves an ordinary capture that stages what the
+tree holds.
+
+## `fn a_tracked_file_of_the_manifests_name_is_the_repositorys_and_a_conflict_repair_there_is_refused() {`
+
+The name, taken. An ordinary attempt in a repository that tracks
+`.upstroke-resolved`: the worker's edit to that file is in the captured
+tree — the third round's regression review found the old content there,
+silently, under the unconditional exclusion. A conflict repair materialized
+from a candidate that carries the file (the record review's witness): the
+pick places it in the index, and the capture that needs the manifest refuses
+`UpstrokeError::Refused` naming the tracked name, before anything is staged.
+The same candidate picked cleanly: nothing to govern, the manifest unread,
+and the candidate's file captured as the data it is.
+
+## `fn an_ignored_manifest_is_read_and_kept_out_of_the_candidate_by_the_ignore_rules_alone() {`
+
+The manifest-contract review's finding 1: a committed `.gitignore` naming
+the manifest, and a required clean filter that would fail on it, so that
+any `add` reaching the file is loud. The declaration is read, `c.txt` and
+the untracked `.gitattributes` are staged, the manifest is not, and no
+exclusion is appended — the one that exactly named an ignored path made
+`git add -A` exit 1 at `698777b0`.
+
+## `fn a_directory_of_the_manifests_name_is_the_repositorys_and_its_contents_are_captured() {`
+
+The manifest-contract review's finding 2: a pathspec exclusion is a
+directory prefix too. An untracked `.upstroke-resolved/data.txt` beside an
+ordinary edit, both captured; a tracked one edited, the edit captured (the
+old content stayed in the tree at `698777b0`); and with a conflict to
+declare, the worker cannot write the manifest where a directory stands, and
+the capture refuses naming "a directory" rather than failing on the I/O
+error the read would otherwise raise.
+
+## `fn a_declaration_in_another_case_is_refused_and_the_checkout_says_whether_it_named_the_file() {`
+
+The manifest-contract review's finding 3, whose filesystem half was
+reasoned; this establishes it on each platform CI runs. `Dir/C.txt`
+conflicted, and the checkout is asked whether `dir/c.txt` is that file —
+yes on Windows and macOS, no on Linux, asserted so that the record's
+platform statement is measured rather than assumed. The rule is the same on
+all three: the pair `resolved Dir/C.txt` / `deleted dir/c.txt` is refused
+as a contradiction, the lone `resolved dir/c.txt` is refused naming the
+index's spelling, and `resolved Dir/C.txt` captures. Then the boundary the
+exact rule leaves: `café.txt` composed, its decomposed respelling names the
+file on macOS alone, and the engine reads it as nothing everywhere — the
+pair is not refused and the composed declaration is staged. Pinned so that
+folding normalization (`PR249-MANIFEST-NORMALIZATION-ALIAS`) moves this
+test with it.
+
+## `fn a_quoted_declaration_names_an_entry_exactly_whitespace_included() {`
+
+The manifest-contract review's finding 4. An index entry ` c.txt `, spaces
+and all: unquoted, the trim leaves `c.txt` and the entry stays undeclared;
+quoted, the path is what the quotes hold and the resolution is staged. Unix
+only, because Windows does not hold such a name.
+
+## `fn a_declared_resolution_reaches_the_configured_checks_which_decide_what_they_detect() {`
+
+The record and manifest-contract reviews' shared witness against
+`design/26` §26.4's old word "caught": markers left in `c.txt`, the file
+declared resolved, no gate and no reviewer in the plan. The capture stages
+the declaration, no cheap rung reads the markers, and the judgment accepts.
+What a wrong declaration reaches is the configured validation; the design
+now says so.
+

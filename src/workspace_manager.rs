@@ -729,17 +729,41 @@ pub enum Materialized {
 /// One line per path: `resolved <path>` for a path whose working-tree content
 /// (or absence) is the resolution, `deleted <path>` for a path resolved by
 /// deleting it. Blank lines and `#` comments are skipped. A leading list
-/// bullet, a colon after the keyword, and backticks or double quotes around
+/// bullet, one colon after the keyword, and backticks or double quotes around
 /// the path are tolerated; `./` in front of the path is dropped; a Windows
-/// worker's `\r\n` and backslashes read as their Unix spellings. Anything
-/// else is a malformed manifest, from which nothing is staged
-/// ([`ResolutionManifest::parse`]).
+/// worker's `\r\n` and backslashes read as their Unix spellings. A quoted
+/// path is taken exactly, so a name that begins or ends with whitespace is
+/// written in quotes (`resolved " c.txt "`); an unquoted one is trimmed.
+/// Anything else — a second colon, a keyword that is neither word, a line
+/// with no path — is a malformed manifest ([`ResolutionManifest::parse`]),
+/// and a capture that reads one stages nothing.
+///
+/// A path is spelt as the index spells it ([`Declaration::names`]): the same
+/// characters, in the same case and the same Unicode form. A spelling that
+/// differs only by case matches nothing and, declared beside the index's
+/// spelling with the other keyword, is refused as a contradiction on every
+/// platform, because on a case-insensitive filesystem the two name one file
+/// (`plan_resolutions` in `engine::topology::attempt`). A spelling in another
+/// Unicode normalization form is not read as an alias: it matches nothing,
+/// and a pair that differs only in normalization form is not refused — the
+/// boundary `PR249-MANIFEST-NORMALIZATION-ALIAS` records, since the standard
+/// library carries no normalization tables.
 ///
 /// A root-level file, deliberately: the Claude adapter denies the worker
 /// every write under `.upstroke/`, `.git/` and `.claude/`, and the run
-/// directory is not in a task worktree at all. It never becomes part of a
-/// candidate: [`WorkspaceManager::CANDIDATE_STAGE_ARGV`] excludes it from the
-/// capture, so it stays an untracked file of the worktree it was written in.
+/// directory is not in a task worktree at all. The name is reserved for the
+/// protocol, and what the reservation means is stated exactly by
+/// [`ManifestName`]: the worker's manifest — an untracked regular file of
+/// this name — is never part of a candidate, because
+/// [`WorkspaceManager::candidate_stage`] excludes it from the `add -A`
+/// whenever the ignore rules would not already keep it out; a file of this
+/// name the repository *tracks*, or a directory of this name, is the
+/// repository's own and not a manifest at all, so an ordinary capture stages
+/// it like any other path and a conflict repair — which has to read the
+/// manifest — is refused before it stages anything
+/// ([`WorkspaceManager::resolution_manifest`]). A repository that tracks a
+/// file of this name therefore cannot run the conflict-repair protocol, and
+/// is told so rather than having its file read as declarations.
 pub const RESOLUTION_MANIFEST: &str = ".upstroke-resolved";
 
 /// The manifest word for a path whose working-tree content is the resolution.
@@ -782,6 +806,62 @@ impl Declaration {
             .components()
             .eq(Path::new(index_path).components())
     }
+
+    /// Whether this declaration spells `index_path` in another case: the same
+    /// components under Unicode lowercase folding, and not the same
+    /// components as written.
+    ///
+    /// The alias is read for one purpose, refusing: a case-insensitive
+    /// filesystem reads `dir/c.txt` and `Dir/C.txt` as one file, so a manifest
+    /// that declares one `resolved` and the other `deleted` contradicts itself
+    /// there, and a manifest whose only declaration of an entry is in the
+    /// wrong case names that file on such a filesystem and nothing on a
+    /// case-sensitive one. Both are refused on every platform, so that a
+    /// manifest means the same thing wherever it is read; neither is ever
+    /// matched, so staging keeps the index's spelling. Only case is folded:
+    /// `str::to_lowercase` needs no tables the standard library lacks, and
+    /// Unicode normalization forms are not compared ([`RESOLUTION_MANIFEST`]).
+    #[must_use]
+    pub fn names_in_another_case(&self, index_path: &str) -> bool {
+        let fold = |path: &str| -> Vec<String> {
+            Path::new(path)
+                .components()
+                .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
+                .collect()
+        };
+        !self.names(index_path) && fold(&self.path) == fold(index_path)
+    }
+}
+
+/// What holds the root-level name the resolution manifest reserves
+/// ([`RESOLUTION_MANIFEST`]) in a task worktree, read by
+/// [`WorkspaceManager::manifest_name`].
+///
+/// The reservation is a name, and a name can be taken. This is the whole
+/// statement of what the engine treats as its own and what it does not: the
+/// worker's manifest is an **untracked regular file**; everything else that can
+/// hold the name is the repository's. `candidate_stage` and
+/// `resolution_manifest` both decide from this one reading, so the exclusion
+/// and the read cannot disagree about which file is the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManifestName {
+    /// Nothing is at the path.
+    Absent,
+    /// An untracked regular file: the worker's manifest. `ignored` is whether
+    /// the repository's ignore rules keep it out of `add -A` by themselves —
+    /// when they do, no exclusion is needed, and one exactly naming an ignored
+    /// path makes `git add` fail (measured on git 2.43: the exclusion item is
+    /// matched against the ignored paths it collects, and `add` exits 1
+    /// "The following paths are ignored").
+    Manifest { ignored: bool },
+    /// The index holds an entry at the path, at any stage: a file the
+    /// repository tracks, so application data, whatever the working tree holds
+    /// there now.
+    Tracked,
+    /// Untracked and not a regular file — a directory (`.upstroke-resolved/`
+    /// with contents of the repository's own), a symbolic link, or something
+    /// else. `what` names it for the refusal.
+    Other { what: &'static str },
 }
 
 /// One conflicted path's declared resolution, reconciled against the index
@@ -848,7 +928,9 @@ impl ResolutionManifest {
             let Some((keyword, rest)) = line.split_once(char::is_whitespace) else {
                 return Self::malformed(index, raw);
             };
-            let kind = match keyword.trim_end_matches(':') {
+            // One colon after the keyword is tolerated; `resolved:::` is not the
+            // grammar, and `trim_end_matches` read it as if it were.
+            let kind = match keyword.strip_suffix(':').unwrap_or(keyword) {
                 RESOLVED_KEYWORD => ResolutionKind::Resolved,
                 DELETED_KEYWORD => ResolutionKind::Deleted,
                 _ => return Self::malformed(index, raw),
@@ -879,12 +961,17 @@ impl ResolutionManifest {
 
 /// A manifest path without the quoting and the `./` a worker may have put
 /// around it.
+///
+/// What is inside the quotes is the path, exactly: a quoted `" c.txt "` names
+/// the index entry ` c.txt `, spaces and all, which is what quoting is for. An
+/// earlier version trimmed inside the quotes as well, so the quoted form could
+/// not name an entry whose name begins or ends with whitespace, and PR #249's
+/// manifest-contract review refused the real conflicted entry that way.
 fn unquoted(path: &str) -> &str {
     let path = ['`', '"']
         .into_iter()
         .find_map(|quote| path.strip_prefix(quote)?.strip_suffix(quote))
-        .unwrap_or(path)
-        .trim();
+        .unwrap_or(path);
     let path = path.strip_prefix("./").unwrap_or(path);
     if cfg!(windows) {
         path.strip_prefix(".\\").unwrap_or(path)
@@ -1811,20 +1898,41 @@ impl WorkspaceManager {
     /// PR6/PR7 with `src/runner/**` frozen — and this comment does not claim it
     /// does.
     ///
-    /// The last element keeps the worker's resolution manifest
-    /// ([`RESOLUTION_MANIFEST`]) out of every candidate: `:(exclude,top)`
-    /// names it from the worktree root whatever the working directory, and
-    /// an exclusion that matches nothing excludes nothing, so an ordinary
-    /// capture is unchanged by it.
-    pub(crate) const CANDIDATE_STAGE_ARGV: [&str; 5] =
-        ["add", "-A", "--", ".", ":(exclude,top).upstroke-resolved"];
+    /// This list is the whole argv of an ordinary capture. [`Self::candidate_stage`]
+    /// appends [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] beside it in one
+    /// case only — an untracked, unignored regular file holds the manifest's
+    /// name — and that is the one dynamic argument the tripwire declares for
+    /// it. The sampler's populated worktree holds no such file, so the child
+    /// it runs is the child the funnel runs there.
+    pub(crate) const CANDIDATE_STAGE_ARGV: [&str; 4] = ["add", "-A", "--", "."];
+    /// The pathspec [`Self::candidate_stage`] appends to
+    /// [`Self::CANDIDATE_STAGE_ARGV`] to keep the worker's resolution manifest
+    /// ([`RESOLUTION_MANIFEST`]) out of the candidate: `:(exclude,top)` names
+    /// the root-level path whatever the working directory. Appended only when
+    /// [`ManifestName::Manifest`] holds the name and the ignore rules do not
+    /// already keep it out. The second repair round's version was
+    /// unconditional, in the shared list, under a comment claiming "an
+    /// exclusion that matches nothing excludes nothing": it also matched a
+    /// tracked file of that name (whose edit an ordinary capture then dropped
+    /// from the tree with no refusal), every descendant of a directory of that
+    /// name (a pathspec is a directory prefix too), and, exactly naming an
+    /// ignored path, made `add` fail — PR #249's third-round regression and
+    /// manifest-contract reviews, one witness each. `CANDIDATE_STAGE_ARGV`'s
+    /// doc records why the exclusion is not in the list.
+    pub(crate) const CANDIDATE_STAGE_MANIFEST_EXCLUSION: &str = ":(exclude,top).upstroke-resolved";
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes the `:(literal)` pathspec of
     /// one declared resolution ([`DeclaredResolution::argv`]); run inside the
     /// same `Object.CandidateStage` funnel, before the list above, and not
     /// sampled — the sampled child of that site is the `add -A`.
     pub(crate) const RESOLUTION_ADD_ARGV: [&str; 2] = ["add", "--"];
     /// See [`Self::RESOLUTION_ADD_ARGV`]: the resolution by deletion.
-    pub(crate) const RESOLUTION_RM_ARGV: [&str; 3] = ["rm", "--quiet", "--"];
+    /// `--force` overrides `rm`'s up-to-date check, which refuses a path with
+    /// changes staged in the index — the state a retained retry revising an
+    /// earlier attempt's `resolved` to `deleted` finds the path in (measured
+    /// on git 2.43: "the following file has changes staged in the index",
+    /// exit 1). An unmerged path needed no override; the flag changes nothing
+    /// there.
+    pub(crate) const RESOLUTION_RM_ARGV: [&str; 4] = ["rm", "--quiet", "--force", "--"];
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes no dynamic argument.
     pub(crate) const CANDIDATE_WRITE_TREE_ARGV: [&str; 1] = ["write-tree"];
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes the commit to pick.
@@ -2608,10 +2716,10 @@ impl WorkspaceManager {
     /// # The engine stages the worker's resolutions
     ///
     /// `resolutions` is what the capture reconciled between the index's
-    /// unmerged entries and the worker's manifest ([`RESOLUTION_MANIFEST`]):
+    /// conflicted entries and the worker's manifest ([`RESOLUTION_MANIFEST`]):
     /// each is staged by its own `git add -- :(literal)<path>` or `git rm
-    /// --quiet -- :(literal)<path>` ([`DeclaredResolution::argv`]) before the
-    /// `add -A`, because `add -A` collapses every unmerged entry
+    /// --quiet --force -- :(literal)<path>` ([`DeclaredResolution::argv`])
+    /// before the `add -A`, because `add -A` collapses every unmerged entry
     /// unconditionally — an untouched conflicted file is staged with its
     /// markers inside — and so destroys the very record of what was still
     /// conflicted. The engine runs these and the worker never does: §4, "the
@@ -2619,6 +2727,21 @@ impl WorkspaceManager {
     /// while any unmerged entry is undeclared (`AttemptContext::capture`
     /// refuses first), so an ordinary capture passes an empty list and runs
     /// the one `add -A` it always ran.
+    ///
+    /// # The manifest stays out of the candidate
+    ///
+    /// The `add -A` gets [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] appended
+    /// exactly when [`Self::manifest_name`] reads the worker's manifest at the
+    /// root — an untracked regular file the ignore rules do not already keep
+    /// out ([`ManifestName::Manifest`] with `ignored: false`). In every other
+    /// state of that name the list runs bare, which is what an ordinary
+    /// capture always ran: an absent name needs no exclusion; an ignored
+    /// manifest is kept out by the ignore rules, and an exclusion exactly
+    /// naming it would make `add` fail; a tracked file of that name is the
+    /// repository's data and its edit is staged like any other; a directory of
+    /// that name holds ordinary paths and a pathspec exclusion would have
+    /// excluded every one of them. So the candidate never carries the worker's
+    /// manifest, and never silently omits a path of the repository's own.
     ///
     /// # Errors
     ///
@@ -2639,13 +2762,14 @@ impl WorkspaceManager {
                 for resolution in resolutions {
                     self.git_ok(&path, &resolution.argv())?;
                 }
-                self.git_ok(
-                    &path,
-                    &Self::CANDIDATE_STAGE_ARGV
-                        .iter()
-                        .map(OsString::from)
-                        .collect::<Vec<_>>(),
-                )?;
+                let mut argv: Vec<OsString> = Self::CANDIDATE_STAGE_ARGV
+                    .iter()
+                    .map(OsString::from)
+                    .collect();
+                if self.manifest_name(&path)? == (ManifestName::Manifest { ignored: false }) {
+                    argv.push(OsString::from(Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION));
+                }
+                self.git_ok(&path, &argv)?;
                 Ok(())
             },
         )
@@ -3163,18 +3287,57 @@ impl WorkspaceManager {
     /// worktree ([`RESOLUTION_MANIFEST`]).
     ///
     /// **A read, so it takes no hooks and names no effect site**, like
-    /// [`Self::unresolved_conflicts`]. An absent file is
+    /// [`Self::unresolved_conflicts`]. An absent name is
     /// [`ResolutionManifest::Absent`]; a file that is not UTF-8 is
     /// [`ResolutionManifest::Malformed`], the worker's failure rather than
     /// this process's; any other failure to read it is the I/O error it is.
     ///
+    /// **A name the repository has taken is refused, not read.** The capture
+    /// calls this only when the index holds a conflicted entry for the
+    /// manifest to govern, and then the manifest must be the worker's:
+    /// [`Self::manifest_name`] reading [`ManifestName::Tracked`] — the
+    /// repository tracks a file of this name — or [`ManifestName::Other`] — a
+    /// directory or a link holds it — is a refusal naming what holds the name,
+    /// before anything is staged, because the repository's own bytes are not
+    /// declarations and a conflict repair cannot be declared in a repository
+    /// that has taken the name (`RESOLUTION_MANIFEST`'s boundary; PR #249's
+    /// third-round record review materialized a source candidate that tracked
+    /// the name and found the file in the captured tree).
+    ///
     /// # Errors
     ///
-    /// The containment refusals, or an I/O error other than the file's
-    /// absence.
+    /// The containment refusals, the taken-name refusal, a Git error from the
+    /// index read, or an I/O error other than the file's absence.
     pub fn resolution_manifest(&self, slot: &Slot) -> Result<ResolutionManifest, UpstrokeError> {
         self.revalidate()?;
-        let path = self.slot_target(slot)?.join(RESOLUTION_MANIFEST);
+        let worktree = self.slot_target(slot)?;
+        match self.manifest_name(&worktree)? {
+            ManifestName::Absent => return Ok(ResolutionManifest::Absent),
+            ManifestName::Manifest { .. } => {}
+            ManifestName::Tracked => {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "the repository tracks `{RESOLUTION_MANIFEST}` at the root of {}, the \
+                         name the resolution manifest reserves, so the worker's declarations \
+                         cannot be read from it: a conflict repair cannot be declared in this \
+                         repository while a tracked file holds that name",
+                        worktree.display()
+                    ),
+                });
+            }
+            ManifestName::Other { what } => {
+                return Err(UpstrokeError::Refused {
+                    message: format!(
+                        "`{RESOLUTION_MANIFEST}` at the root of {} is {what}, not the worker's \
+                         resolution manifest, so the worker's declarations cannot be read: a \
+                         conflict repair cannot be declared in this repository while {what} \
+                         holds that name",
+                        worktree.display()
+                    ),
+                });
+            }
+        }
+        let path = worktree.join(RESOLUTION_MANIFEST);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -3187,6 +3350,157 @@ impl WorkspaceManager {
             Err(_) => ResolutionManifest::Malformed {
                 detail: format!("`{RESOLUTION_MANIFEST}` is not UTF-8"),
             },
+        })
+    }
+
+    /// The conflicted paths of a repair worktree a previous capture of the
+    /// same generation already resolved: every path the index records as
+    /// resolved from unmerged stages and still holds.
+    ///
+    /// **A read, so it takes no hooks and names no effect site**, like
+    /// [`Self::unresolved_conflicts`], and its companion: together they are
+    /// the set of paths the worker's manifest governs. A same-generation
+    /// retry re-enters the worktree the previous attempt left, index
+    /// included, and that attempt's capture staged the resolutions it
+    /// declared, so nothing is unmerged any more — yet the retry may need to
+    /// revise one, and `deleted <path>` exists for a worker whose file tools
+    /// cannot delete. PR #249's third-round regression review declared
+    /// `resolved c.txt`, retained the generation on a gate failure, declared
+    /// `deleted c.txt` and captured: nothing was unmerged, the manifest went
+    /// unread and `c.txt` survived. What records that `c.txt` was conflicted
+    /// is Git's own index: staging a resolution over unmerged stages writes
+    /// the resolve-undo extension (`REUC`; `git ls-files --resolve-undo`),
+    /// the record `git checkout -m <path>` recreates a conflict from. It is
+    /// written by both `git add` and `git rm` over unmerged stages, survives
+    /// `add -A` and `write-tree`, and is cleared by the `read-tree --reset`
+    /// every fresh materialization runs first, so it holds exactly the
+    /// entries a capture of this generation resolved (measured on git 2.43;
+    /// the extension has been written since git 1.7.0).
+    ///
+    /// **And still holds**: a path resolved by deletion has no index entry to
+    /// re-stage or remove, so a declaration naming it again would make `git
+    /// add` or `git rm` fail on a pathspec that matches nothing. Such a path
+    /// is an ordinary path from then on: the deletion stands, and a file the
+    /// worker recreates there is an ordinary addition the `add -A` stages.
+    ///
+    /// A record this process cannot decode is a Git error — these are paths
+    /// the engine itself staged from a list it decoded — rather than an entry
+    /// the worker is told about.
+    ///
+    /// # Errors
+    ///
+    /// The containment refusals or a Git error.
+    pub fn resolved_conflicts(&self, slot: &Slot) -> Result<Vec<String>, UpstrokeError> {
+        self.revalidate()?;
+        let path = self.slot_target(slot)?;
+        let recorded = self.git_ok(
+            &path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--resolve-undo"),
+                OsString::from("-z"),
+            ],
+        )?;
+        let mut resolved: Vec<String> = parsers::stage_record_paths(&recorded)
+            .into_iter()
+            .map(|record| {
+                parsers::decode_index_path(record).map_err(|reason| UpstrokeError::Git {
+                    message: format!(
+                        "a resolve-undo record of the index of {} cannot be read: {reason}",
+                        path.display()
+                    ),
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        resolved.sort();
+        resolved.dedup();
+        if resolved.is_empty() {
+            return Ok(resolved);
+        }
+        let mut argv = vec![
+            OsString::from("ls-files"),
+            OsString::from("--stage"),
+            OsString::from("-z"),
+            OsString::from("--"),
+        ];
+        argv.extend(
+            resolved
+                .iter()
+                .map(|entry| OsString::from(format!(":(top,literal){entry}"))),
+        );
+        let held = self.git_ok(&path, &argv)?;
+        let held: Vec<&[u8]> = parsers::stage_record_paths(&held);
+        resolved.retain(|entry| held.contains(&entry.as_bytes()));
+        Ok(resolved)
+    }
+
+    /// What holds the root-level name the resolution manifest reserves in the
+    /// worktree at `path` ([`ManifestName`]).
+    ///
+    /// Three reads, in the order the answer depends on them: the index by
+    /// exact name (`ls-files --stage -- :(top,literal)<name>`; an entry at any
+    /// stage is [`ManifestName::Tracked`], whatever the working tree holds);
+    /// then the working tree without following a link
+    /// (`symlink_metadata`: absent, a regular file, or something else); then,
+    /// for a regular file, whether `add -A` would stage it
+    /// (`ls-files --others --exclude-standard -- :(top,literal)<name>` lists
+    /// it exactly when it is untracked and not ignored). The name is compared
+    /// as the index spells it; a case variant of it on a case-insensitive
+    /// filesystem is not read as the same name.
+    fn manifest_name(&self, path: &Path) -> Result<ManifestName, UpstrokeError> {
+        let pathspec = OsString::from(format!(":(top,literal){RESOLUTION_MANIFEST}"));
+        let names_it = |records: &[u8]| {
+            parsers::stage_record_paths(records)
+                .into_iter()
+                .any(|record| record == RESOLUTION_MANIFEST.as_bytes())
+        };
+        let tracked = self.git_ok(
+            path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--stage"),
+                OsString::from("-z"),
+                OsString::from("--"),
+                pathspec.clone(),
+            ],
+        )?;
+        if names_it(&tracked) {
+            return Ok(ManifestName::Tracked);
+        }
+        let file = path.join(RESOLUTION_MANIFEST);
+        let kind = match fs::symlink_metadata(&file) {
+            Ok(metadata) => metadata.file_type(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ManifestName::Absent);
+            }
+            Err(source) => return Err(UpstrokeError::Io { path: file, source }),
+        };
+        if !kind.is_file() {
+            return Ok(ManifestName::Other {
+                what: if kind.is_dir() {
+                    "a directory"
+                } else if kind.is_symlink() {
+                    "a symbolic link"
+                } else {
+                    "neither a regular file nor a directory"
+                },
+            });
+        }
+        let stageable = self.git_ok(
+            path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--others"),
+                OsString::from("--exclude-standard"),
+                OsString::from("-z"),
+                OsString::from("--"),
+                pathspec,
+            ],
+        )?;
+        Ok(ManifestName::Manifest {
+            ignored: !parsers::plain_record_paths(&stageable)
+                .into_iter()
+                .any(|record| record == RESOLUTION_MANIFEST.as_bytes()),
         })
     }
 

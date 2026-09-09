@@ -370,6 +370,44 @@ pub(super) fn changed_path_records(bytes: &[u8]) -> Result<Vec<GitPath>, NameSta
     Ok(paths)
 }
 
+/// The path field of every record in `git ls-files --stage -z` or
+/// `--resolve-undo -z` bytes: `<mode> <object> <stage>\t<path>\0`, the path
+/// taken as the bytes after the record's first tab.
+///
+/// A record without a tab is not a stage record and yields nothing; a path
+/// is returned as bytes because two of the three readers only compare it with
+/// a name, and the one that decodes it says how ([`decode_index_path`]).
+pub(super) fn stage_record_paths(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .filter_map(|record| {
+            let tab = record.iter().position(|byte| *byte == b'\t')?;
+            record.get(tab + 1..)
+        })
+        .collect()
+}
+
+/// Every record of `git ls-files --others -z` bytes: a path per record and
+/// nothing else, so each record is the path.
+pub(super) fn plain_record_paths(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+        .collect()
+}
+
+/// An index path as [`stage_record_paths`] returned it, decoded under the
+/// rule [`changed_path_records`] applies to a diff's: UTF-8 and one normalised
+/// repository path, or the reason it is neither.
+pub(super) fn decode_index_path(record: &[u8]) -> Result<String, String> {
+    match std::str::from_utf8(record) {
+        Ok(decoded) if is_normalised_repository_path(decoded) => Ok(decoded.to_owned()),
+        Ok(_) => Err("not a normalised repository path".to_owned()),
+        Err(error) => Err(format!("not UTF-8 from byte {}", error.valid_up_to())),
+    }
+}
+
 /// Turn `git diff --name-status -M -z` bytes into a [`PathSet`].
 ///
 /// A separate function from
@@ -775,6 +813,43 @@ mod tests {
         let decoded = registration_checkout(&admin(), b"/tmp/non-utf8-\xff/.git\n")
             .expect("every byte string is a Unix path");
         assert_eq!(decoded.as_os_str().as_bytes(), b"/tmp/non-utf8-\xff");
+    }
+
+    #[test]
+    fn stage_records_yield_the_path_after_the_tab_and_plain_records_yield_themselves() {
+        let stage = b"100644 8a205e8dc3e7c7914d69c3e900f2e944d77bb100 1\tc.txt\0\
+100644 7a85ea4df37734c24dc10ccd171c24e536735fa4 2\tc.txt\0\
+100644 02e8acdcc44da4d68465994d590e44bcab3296b2 0\tdir/a\tb.txt\0";
+        assert_eq!(
+            stage_record_paths(stage),
+            vec![&b"c.txt"[..], b"c.txt", b"dir/a\tb.txt"],
+            "the path is everything after the record's first tab, a tab of its own included"
+        );
+        assert_eq!(
+            stage_record_paths(b"not a stage record\0\0"),
+            Vec::<&[u8]>::new(),
+            "a record without a tab is not a stage record, and an empty one is nothing"
+        );
+        assert_eq!(stage_record_paths(b""), Vec::<&[u8]>::new());
+        assert_eq!(
+            plain_record_paths(b".upstroke-resolved\0.upstroke-resolved/data.txt\0"),
+            vec![&b".upstroke-resolved"[..], b".upstroke-resolved/data.txt"]
+        );
+        assert_eq!(plain_record_paths(b"\0"), Vec::<&[u8]>::new());
+
+        assert_eq!(decode_index_path(b"dir/c.txt").as_deref(), Ok("dir/c.txt"));
+        assert_eq!(
+            decode_index_path(b"dir/../c.txt"),
+            Err("not a normalised repository path".to_owned())
+        );
+        assert_eq!(
+            decode_index_path(b"caf\xc3\xa9.txt").as_deref(),
+            Ok("caf\u{e9}.txt")
+        );
+        assert_eq!(
+            decode_index_path(b"caf\xe9.txt"),
+            Err("not UTF-8 from byte 3".to_owned())
+        );
     }
 
     #[test]

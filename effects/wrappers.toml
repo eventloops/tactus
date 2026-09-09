@@ -79,6 +79,7 @@ effect_free = [
     "intent_path",
     "intents",
     "names",
+    "names_in_another_case",
     "object_directory",
     "object_exists",
     "parse",
@@ -94,6 +95,7 @@ effect_free = [
     "repo_key",
     "repo_key_v1",
     "resolution_manifest",
+    "resolved_conflicts",
     "revalidate",
     "row",
     "slot_path",
@@ -319,8 +321,11 @@ effectful_unnameable = []
 effect_free = [
     "changed_path_records",
     "decode_changed_paths",
+    "decode_index_path",
     "parse_worktree_records",
+    "plain_record_paths",
     "registration_checkout",
+    "stage_record_paths",
 ]
 
 # The read-only residue classifier. `residue_classified_sites` keeps the `funnel` class the parent's row gave it -- it derives its answer from the frozen site enums and is reached as part of that surface -- and every other name here observes: no object is written, no ref moved, no index touched. The Git inspections it reads through are the parent's helpers, and so is every process start.

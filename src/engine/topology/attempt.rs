@@ -161,12 +161,44 @@ struct ResolutionPlan {
     refused: Vec<String>,
 }
 
-fn plan_resolutions(unmerged: &[String], manifest: &ResolutionManifest) -> ResolutionPlan {
+/// The worker's manifest reconciled with the paths it governs: `unmerged`,
+/// the index's conflicted entries, every one of which must be declared, and
+/// `resolved`, the entries a previous capture of this generation resolved and
+/// the index still holds, which a declaration may revise and silence leaves as
+/// they are. A declaration naming a path in neither list does nothing.
+///
+/// Per governed path: declared one way as the index spells it, staged that
+/// way; declared both ways, refused; declared one way exactly and the other
+/// way in another case (`Declaration::names_in_another_case`, a spelling that
+/// governs nothing itself), refused as a contradiction, since a
+/// case-insensitive filesystem reads the two as one file; declared only in
+/// another case, refused naming the index's spelling; undeclared, refused if
+/// unmerged and left alone if already resolved. A malformed manifest refuses
+/// every governed path and quotes the line. The refusal list is what the
+/// worker is told (`classify::unresolved_conflict_failure`).
+fn plan_resolutions(
+    unmerged: &[String],
+    resolved: &[String],
+    manifest: &ResolutionManifest,
+) -> ResolutionPlan {
+    use crate::workspace_manager::{DELETED_KEYWORD, RESOLVED_KEYWORD};
+
+    let governed: Vec<(&String, bool)> = unmerged
+        .iter()
+        .map(|path| (path, true))
+        .chain(
+            resolved
+                .iter()
+                .filter(|path| !unmerged.contains(path))
+                .map(|path| (path, false)),
+        )
+        .collect();
     let declarations = match manifest {
         ResolutionManifest::Absent => &[][..],
         ResolutionManifest::Declared(declarations) => declarations.as_slice(),
         ResolutionManifest::Malformed { detail } => {
-            let mut refused = unmerged.to_vec();
+            let mut refused: Vec<String> =
+                governed.iter().map(|(path, _)| (*path).clone()).collect();
             refused.push(format!("({detail})"));
             return ResolutionPlan {
                 staged: Vec::new(),
@@ -174,31 +206,76 @@ fn plan_resolutions(unmerged: &[String], manifest: &ResolutionManifest) -> Resol
             };
         }
     };
+    let keyword = |kind: ResolutionKind| match kind {
+        ResolutionKind::Resolved => RESOLVED_KEYWORD,
+        ResolutionKind::Deleted => DELETED_KEYWORD,
+    };
     let mut plan = ResolutionPlan::default();
-    for path in unmerged {
-        let declared = |kind: ResolutionKind| {
+    for &(path, unmerged_now) in &governed {
+        let exact = |kind: ResolutionKind| {
             declarations
                 .iter()
                 .any(|declaration| declaration.kind == kind && declaration.names(path))
         };
-        match (
-            declared(ResolutionKind::Resolved),
-            declared(ResolutionKind::Deleted),
-        ) {
-            (false, false) => plan.refused.push(path.clone()),
-            (true, true) => plan.refused.push(format!(
-                "{path} (declared both `{}` and `{}`)",
-                crate::workspace_manager::RESOLVED_KEYWORD,
-                crate::workspace_manager::DELETED_KEYWORD
+        // A declaration in another case whose own spelling governs no path is
+        // an alias of this one on a case-insensitive filesystem, and nothing on
+        // a case-sensitive one; either way it is refused, never matched.
+        let alias = |kind: ResolutionKind| {
+            declarations
+                .iter()
+                .find(|declaration| {
+                    declaration.kind == kind
+                        && declaration.names_in_another_case(path)
+                        && !governed.iter().any(|(other, _)| declaration.names(other))
+                })
+                .map(|declaration| declaration.path.clone())
+        };
+        let resolved_exactly = exact(ResolutionKind::Resolved);
+        let deleted_exactly = exact(ResolutionKind::Deleted);
+        let contradiction = match (resolved_exactly, deleted_exactly) {
+            (true, true) => Some(format!(
+                "{path} (declared both `{RESOLVED_KEYWORD}` and `{DELETED_KEYWORD}`)"
             )),
-            (resolved, _) => plan.staged.push(DeclaredResolution {
+            (true, false) => alias(ResolutionKind::Deleted).map(|spelling| {
+                format!(
+                    "{path} (declared `{RESOLVED_KEYWORD}`, and `{DELETED_KEYWORD}` as \
+                     `{spelling}`, a spelling that differs only by case)"
+                )
+            }),
+            (false, true) => alias(ResolutionKind::Resolved).map(|spelling| {
+                format!(
+                    "{path} (declared `{DELETED_KEYWORD}`, and `{RESOLVED_KEYWORD}` as \
+                     `{spelling}`, a spelling that differs only by case)"
+                )
+            }),
+            (false, false) => None,
+        };
+        if let Some(refusal) = contradiction {
+            plan.refused.push(refusal);
+            continue;
+        }
+        if resolved_exactly || deleted_exactly {
+            plan.staged.push(DeclaredResolution {
                 path: path.clone(),
-                kind: if resolved {
+                kind: if resolved_exactly {
                     ResolutionKind::Resolved
                 } else {
                     ResolutionKind::Deleted
                 },
-            }),
+            });
+            continue;
+        }
+        let only_in_another_case = [ResolutionKind::Resolved, ResolutionKind::Deleted]
+            .into_iter()
+            .find_map(|kind| alias(kind).map(|spelling| (kind, spelling)));
+        if let Some((kind, spelling)) = only_in_another_case {
+            plan.refused.push(format!(
+                "{path} (declared `{}` only as `{spelling}`, which differs from the index's \
+                 spelling by case alone; spell the path as the index does)",
+                keyword(kind)
+            ));
+        } else if unmerged_now {
+            plan.refused.push(path.clone());
         }
     }
     plan
@@ -375,12 +452,17 @@ impl AttemptContext<'_> {
     }
 
     pub fn capture(&mut self, site: AttemptSite<'_>) -> Result<Capture, UpstrokeError> {
+        // What the manifest governs: the index's unmerged entries, and the
+        // entries a previous capture of this generation resolved (a retained
+        // retry revising one). When the index holds neither, the manifest is
+        // not read, and whatever the file says has no effect on the capture.
         let unmerged = self.manager.unresolved_conflicts(site.slot)?;
-        let resolutions = if unmerged.is_empty() {
+        let resolved = self.manager.resolved_conflicts(site.slot)?;
+        let resolutions = if unmerged.is_empty() && resolved.is_empty() {
             Vec::new()
         } else {
             let manifest = self.manager.resolution_manifest(site.slot)?;
-            let plan = plan_resolutions(&unmerged, &manifest);
+            let plan = plan_resolutions(&unmerged, &resolved, &manifest);
             if !plan.refused.is_empty() {
                 let tree = self
                     .manager

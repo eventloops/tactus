@@ -862,30 +862,52 @@ publishing the index or cache-tree". The staged objects are behind the
 **task index** afterwards (R9), which is what makes them recoverable by
 scrubbing the worktree rather than by anything cleverer.
 
-**A repair's unresolved conflicts are read first, and the worker's
-resolutions are staged for it.** `unresolved_conflicts` is a read of the
-index's unmerged entries, whatever their working-tree files look like. When
-it names any, the capture reads the worker's resolution manifest
-(`workspace_manager::RESOLUTION_MANIFEST`, a root-level file the worker
-writes with its file tools) and reconciles the two (`plan_resolutions`):
-every unmerged path the manifest declares `resolved` or `deleted` is staged
-by the engine's own `git add -- :(literal)<path>` or `git rm` inside
-`Object.CandidateStage`, before the `add -A`; any unmerged path it does not
-declare — or a manifest that does not parse, or a path declared both ways —
-refuses the whole capture, which returns the base's tree with those entries
-and stages nothing, so an unresolved conflict cannot be captured as the
-worker's work and a declared subset is never staged beside a refused one.
+**A repair's conflicted paths are read first, and the worker's
+resolutions are staged for it.** Two reads name what the manifest governs:
+`unresolved_conflicts`, the index's unmerged entries, whatever their
+working-tree files look like; and `resolved_conflicts`, the entries a
+previous capture of this generation resolved and the index still holds —
+Git's resolve-undo record, which staging a resolution over unmerged stages
+writes and the funnel's `read-tree --reset` clears before every fresh
+materialization. When either names anything, the capture reads the worker's
+resolution manifest (`workspace_manager::RESOLUTION_MANIFEST`, a root-level
+file the worker writes with its file tools) and reconciles the three
+(`plan_resolutions`): every governed path the manifest declares `resolved`
+or `deleted`, as the index spells it, is staged by the engine's own
+`git add -- :(literal)<path>` or `git rm --quiet --force -- :(literal)<path>`
+inside `Object.CandidateStage`, before the `add -A`; an unmerged path it does
+not declare, a manifest that does not parse, a path declared both ways, and
+a path declared in another case — beside the index's spelling with the other
+keyword, or alone — each refuse the whole capture, which returns the base's
+tree with those entries and stages nothing, so an unresolved conflict cannot
+be captured as the worker's work and a declared subset is never staged
+beside a refused one. A resolved path the manifest does not name stays as
+the previous capture left it, which is what a retained retry that changes
+nothing wants; one it names again is re-staged from the working tree, or
+removed — the case `deleted` exists for, a worker whose tools cannot delete
+correcting itself in a retained generation (PR #249's third-round regression
+review found the manifest unread there and the correction lost). When the
+index holds nothing the manifest governs, the manifest is not read at all,
+and whatever the file says has no effect; a malformed manifest stages
+nothing *in a capture that reads it*, which is the whole of that promise.
 After staging, the index is read once more and an unmerged entry left is a
-Git error, never a passing capture. The worker runs no git command (DESIGN
-§26.4): PR #249's regression review assembled the production Claude Code and
-Copilot permissions and found file tools and gate commands only, so a rule
-that needed the worker's `git add` — the first repair round's — could be
-met by no supported adapter, and the design-staging decision measured that
-Codex's `workspace-write` sandbox cannot admit staging without admitting
-`commit`. Before that the capture read the files for `<<<<<<< ` markers;
-the conformance review materialized conflicts under
-`conflict-marker-size=8` and `-merge`, both of which the scan read as
-resolved and the capture staged.
+Git error, never a passing capture. A repository that has taken the
+manifest's name — a tracked file of it, or a directory — cannot have a
+conflict repair declared in it: `resolution_manifest` refuses before
+anything is staged, naming what holds the name, while an ordinary capture
+there stages that path like any other (`WorkspaceManager::manifest_name`).
+The worker runs no git command (DESIGN §26.4): PR #249's regression review
+assembled the production Claude Code and Copilot permissions and found file
+tools and gate commands only, so a rule that needed the worker's `git add`
+— the first repair round's — could be met by no supported adapter, and the
+design-staging decision measured that Codex's `workspace-write` sandbox
+cannot admit staging without admitting `commit`. Before that the capture
+read the files for `<<<<<<< ` markers; the conformance review materialized
+conflicts under `conflict-marker-size=8` and `-merge`, both of which the
+scan read as resolved and the capture staged. What a declared resolution's
+correctness meets is the configured validation: with no gate and no
+reviewer, a file declared resolved with its markers still in it is accepted
+(`a_declared_resolution_reaches_the_configured_checks_which_decide_what_they_detect`).
 
 ### Errors
 
