@@ -2515,9 +2515,7 @@ impl SubstitutionCase {
                 .verify_worktree(hooks, slot_of(), &Quiescence::AtBase(head.clone()))
                 .map(drop),
             P::RemoveWorktree => manager.remove_worktree(hooks, slot_of()),
-            P::CandidateStage => {
-                manager.candidate_stage(hooks, slot_of(), &[], ManifestDisposal::Kept)
-            }
+            P::CandidateStage => manager.candidate_stage(hooks, slot_of(), &[]),
             P::CandidateWriteTree => manager.candidate_write_tree(hooks, slot_of()).map(drop),
             P::ProposalCherryPick => manager
                 .proposal_cherry_pick(hooks, slot_of(), side)
@@ -3443,9 +3441,7 @@ fn every_slot_taking_primitive_refuses_a_hostile_slot_name() {
         ),
         (
             "candidate_stage",
-            Box::new(|slot| {
-                manager.candidate_stage(&mut NoHooks, slot, &[], ManifestDisposal::Kept)
-            }),
+            Box::new(|slot| manager.candidate_stage(&mut NoHooks, slot, &[])),
         ),
         (
             "candidate_write_tree",
@@ -6727,7 +6723,10 @@ fn a_worktree_of_another_repository_at_the_recorded_path_is_not_this_ones() {
 /// first, and whether to consume it afterwards; the index and the disk
 /// afterwards say what it decided. The attempt-level tests drive each state
 /// through a capture; this one pins the classification itself, the symbolic
-/// link and the case variant included.
+/// link, the tracked and the untracked case variants, and the ignored
+/// manifest standing where a tracked directory was included — and that the
+/// worker's manifest, by whichever spelling the checkout lists it, never
+/// outlives a staging.
 #[test]
 fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_workers() {
     let fixture = Fixture::created("manifest-name");
@@ -6735,16 +6734,29 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
     let path = fixture.manager.slot_path(&slot);
     let manifest = path.join(RESOLUTION_MANIFEST);
     let staged = || {
-        git(&path, &["ls-files", "--", RESOLUTION_MANIFEST])
-            .lines()
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
+        git(
+            &path,
+            &[
+                "ls-files",
+                "--",
+                &format!(":(top,literal,icase){RESOLUTION_MANIFEST}"),
+            ],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>()
     };
-    let stage = |disposal: ManifestDisposal| {
+    let stage = || {
         fixture
             .manager
-            .candidate_stage(&mut NoHooks, &slot, &[], disposal)
+            .candidate_stage(&mut NoHooks, &slot, &[])
             .expect("stage")
+    };
+    let declared = |path: &str| {
+        ResolutionManifest::Declared(vec![Declaration {
+            path: path.to_owned(),
+            kind: ResolutionKind::Resolved,
+        }])
     };
 
     // Absent.
@@ -6752,59 +6764,71 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
         fixture.manager.resolution_manifest(&slot).expect("read"),
         ResolutionManifest::Absent
     );
-    stage(ManifestDisposal::Kept);
+    stage();
     assert!(staged().is_empty());
 
     // The worker's manifest: read; kept out of the index by the exclusion;
-    // left in place by a capture that did not act on it, and removed by one
-    // that did.
-    fs::write(&manifest, "resolved c.txt\n").expect("write");
-    assert_eq!(
-        fixture.manager.resolution_manifest(&slot).expect("read"),
-        ResolutionManifest::Declared(vec![Declaration {
-            path: "c.txt".to_owned(),
-            kind: ResolutionKind::Resolved,
-        }])
-    );
-    stage(ManifestDisposal::Kept);
-    assert!(
-        staged().is_empty(),
-        "an untracked manifest is excluded from the `add -A`"
-    );
-    assert!(
-        manifest.is_file(),
-        "and a capture that did not act on it leaves it"
-    );
-    stage(ManifestDisposal::Consumed);
-    assert!(staged().is_empty());
-    assert!(
-        !manifest.exists(),
-        "a capture that acted on it consumed it: a declaration is applied once"
-    );
+    // and removed by the staging, which does not know — and does not ask —
+    // whether the capture read it. Twice, because the second write is the
+    // shape PR #249's fifth-round reviews found kept: a manifest a capture
+    // had no use for, standing until a later capture had.
+    for _ in 0..2 {
+        fs::write(&manifest, "resolved c.txt\n").expect("write");
+        assert_eq!(
+            fixture.manager.manifest_name(&path).expect("classify"),
+            ManifestName::Manifest {
+                spelling: RESOLUTION_MANIFEST.to_owned(),
+                ignored: false,
+                displaces_directory: false,
+            }
+        );
+        assert_eq!(
+            fixture.manager.resolution_manifest(&slot).expect("read"),
+            declared("c.txt")
+        );
+        stage();
+        assert!(
+            staged().is_empty(),
+            "an untracked manifest is excluded from the `add -A`"
+        );
+        assert!(
+            !manifest.exists(),
+            "and no staging leaves the worker's manifest behind: a declaration is applied once, \
+             by the capture of the attempt that wrote it, and a manifest nothing governed is \
+             removed unread"
+        );
+    }
 
     // The same, ignored: read all the same, kept out by the ignore rules, and
-    // consumed the same way (`clean -x`).
+    // removed the same way (`clean -x`).
     fs::write(&manifest, "resolved c.txt\n").expect("write");
     fs::write(path.join(".gitignore"), format!("{RESOLUTION_MANIFEST}\n")).expect("ignore");
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: RESOLUTION_MANIFEST.to_owned(),
+            ignored: true,
+            displaces_directory: false,
+        }
+    );
     assert!(matches!(
         fixture.manager.resolution_manifest(&slot).expect("read"),
         ResolutionManifest::Declared(_)
     ));
-    stage(ManifestDisposal::Kept);
+    stage();
     assert!(staged().is_empty());
     assert_eq!(
         git(&path, &["ls-files", "--", ".gitignore"]),
         ".gitignore",
         "the `add -A` ran: the ignore file itself is staged"
     );
-    assert!(manifest.is_file());
-    stage(ManifestDisposal::Consumed);
     assert!(!manifest.exists(), "`clean -x` reaches an ignored manifest");
     fs::remove_file(path.join(".gitignore")).expect("unignore");
     git(&path, &["rm", "--quiet", "--cached", "--", ".gitignore"]);
 
     // A symbolic link: not a regular file, so not the worker's manifest;
-    // refused by the read, and staged as the link it is by the `add -A`.
+    // refused by the read, staged as the link it is by the `add -A`, and
+    // left where it is — the removal is of the worker's manifest only.
     #[cfg(unix)]
     {
         fs::write(path.join("elsewhere.txt"), "resolved c.txt\n").expect("target");
@@ -6818,16 +6842,20 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
                 if message.contains("is a symbolic link")),
             "{refused}"
         );
-        stage(ManifestDisposal::Kept);
+        stage();
         assert_eq!(staged(), vec![RESOLUTION_MANIFEST.to_owned()]);
+        assert!(manifest.symlink_metadata().is_ok(), "the link stays");
         git(
             &path,
             &["rm", "--quiet", "--cached", "--", RESOLUTION_MANIFEST],
         );
         fs::remove_file(&manifest).expect("unlink");
+        fs::remove_file(path.join("elsewhere.txt")).expect("target removed");
+        git(&path, &["rm", "--quiet", "--cached", "--", "elsewhere.txt"]);
     }
 
-    // A directory: the same refusal, its contents ordinary paths.
+    // A directory: the same refusal, its contents ordinary paths, and the
+    // directory left where it is.
     fs::create_dir(&manifest).expect("directory");
     fs::write(manifest.join("data.txt"), "data\n").expect("data");
     let refused = fixture
@@ -6838,20 +6866,29 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
         matches!(&refused, UpstrokeError::Refused { message } if message.contains("is a directory")),
         "{refused}"
     );
-    stage(ManifestDisposal::Kept);
+    stage();
     assert_eq!(
         staged(),
         vec![format!("{RESOLUTION_MANIFEST}/data.txt")],
         "a directory of the name holds ordinary paths, and they are staged"
     );
+    assert!(manifest.is_dir());
 
     // A regular file standing where that directory was: the index still holds
     // the directory's file, the working tree holds the worker's manifest. The
-    // read is the worker's; the `add -A` stages the directory's deletion —
+    // read is the worker's; the staging stages the directory's deletion —
     // which the exclusion, a directory prefix too, would have kept out — and
-    // the worker's file stays out and, consumed, goes.
+    // the worker's file stays out and goes.
     fs::remove_dir_all(&manifest).expect("the worker removes the directory");
     fs::write(&manifest, "resolved c.txt\n").expect("and writes its manifest at the name");
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: RESOLUTION_MANIFEST.to_owned(),
+            ignored: false,
+            displaces_directory: true,
+        }
+    );
     assert!(
         matches!(
             fixture.manager.resolution_manifest(&slot).expect("read"),
@@ -6859,21 +6896,62 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
         ),
         "a regular file at the name is the worker's, whatever the index held under the name"
     );
-    stage(ManifestDisposal::Kept);
+    stage();
     assert!(
         staged().is_empty(),
         "the directory's file is gone from the index and the worker's file is not in it: {:?}",
         staged()
     );
-    assert!(manifest.is_file());
-    stage(ManifestDisposal::Consumed);
     assert!(!manifest.exists());
 
+    // The same transition with the manifest ignored (PR #249's fifth-round
+    // regression review): the fourth round's `add -A` of what the index held
+    // under the name collected the ignored file at the name as a path its
+    // pathspec named, and exited 1 after staging the deletion, which aborted
+    // the capture. `add -u` walks the index alone.
+    fs::create_dir(&manifest).expect("the directory again");
+    fs::write(manifest.join("data.txt"), "data\n").expect("data");
+    git(
+        &path,
+        &["add", "--", &format!("{RESOLUTION_MANIFEST}/data.txt")],
+    );
+    fs::remove_dir_all(&manifest).expect("the worker removes the directory");
+    fs::write(&manifest, "resolved c.txt\n").expect("and writes its manifest at the name");
+    fs::write(path.join(".gitignore"), format!("{RESOLUTION_MANIFEST}\n")).expect("ignore");
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: RESOLUTION_MANIFEST.to_owned(),
+            ignored: true,
+            displaces_directory: true,
+        }
+    );
+    fixture
+        .manager
+        .candidate_stage(&mut NoHooks, &slot, &[])
+        .expect("an ignored manifest standing where a tracked directory was stages");
+    assert!(
+        staged().is_empty(),
+        "the directory's deletion is staged and the ignored file is not: {:?}",
+        staged()
+    );
+    assert_eq!(git(&path, &["ls-files", "--", ".gitignore"]), ".gitignore");
+    assert!(!manifest.exists(), "and the ignored manifest is removed");
+    fs::remove_file(path.join(".gitignore")).expect("unignore");
+    git(&path, &["rm", "--quiet", "--cached", "--", ".gitignore"]);
+
     // Tracked, as spelt: the repository's file, whatever the working tree
-    // holds there; refused by the read, and its edit staged by the `add -A`.
+    // holds there; refused by the read, its edit staged by the `add -A`, and
+    // the file left where it is.
     fs::write(&manifest, "application data\n").expect("write");
     git(&path, &["add", "--", RESOLUTION_MANIFEST]);
     fs::write(&manifest, "resolved c.txt\n").expect("the worker overwrites it");
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Tracked {
+            spelling: RESOLUTION_MANIFEST.to_owned(),
+        }
+    );
     let refused = fixture
         .manager
         .resolution_manifest(&slot)
@@ -6883,12 +6961,13 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
             if message.contains("tracks `.upstroke-resolved`")),
         "{refused}"
     );
-    stage(ManifestDisposal::Kept);
+    stage();
     assert_eq!(
         git(&path, &["show", &format!(":{RESOLUTION_MANIFEST}")]),
         "resolved c.txt",
         "the edit to the repository's file is staged like any other"
     );
+    assert!(manifest.is_file(), "the repository's file is not removed");
     git(
         &path,
         &["rm", "--quiet", "--cached", "--", RESOLUTION_MANIFEST],
@@ -6926,7 +7005,7 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
             if message.contains("tracks `.UPSTROKE-RESOLVED`")),
         "{refused}"
     );
-    stage(ManifestDisposal::Kept);
+    stage();
     let folds_case = fs::read(&upper).expect("the tracked file") == b"resolved c.txt\n";
     assert_eq!(
         folds_case,
@@ -6940,13 +7019,176 @@ fn the_manifests_name_is_read_by_what_holds_it_and_excluded_only_when_it_is_the_
             "resolved c.txt",
             "the worker's write was to the tracked file, staged like any other edit"
         );
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", ".UPSTROKE-RESOLVED"],
+        );
     } else {
         assert_eq!(
             staged(),
-            vec![RESOLUTION_MANIFEST.to_owned()],
+            vec![
+                ".UPSTROKE-RESOLVED".to_owned(),
+                RESOLUTION_MANIFEST.to_owned()
+            ],
             "a second file, staged as one"
         );
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", ".UPSTROKE-RESOLVED"],
+        );
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", RESOLUTION_MANIFEST],
+        );
+        fs::remove_file(&manifest).expect("remove the second file");
     }
+    fs::remove_file(&upper).expect("remove the tracked variant");
+    assert!(staged().is_empty() && !manifest.exists() && !upper.exists());
+
+    // Untracked in another case (PR #249's fifth-round manifest-contract
+    // review, natively on the Windows guest): the directory already holds an
+    // untracked `.Upstroke-Resolved` when the worker writes its declaration
+    // through the lowercase name. On a checkout that folds case the two names
+    // are one file, listed by the directory's spelling, which the
+    // exact-spelling reads at `6448262e` did not find: the worker's manifest
+    // was classified ignored, staged into the candidate under that spelling
+    // by the bare `add -A`, and left on disk. The spelling the checkout lists
+    // is now the spelling the exclusion and the removal use; on a checkout
+    // that does not fold case the variant is a second file, staged as one,
+    // and the file spelt as written is the manifest.
+    let variant = path.join(".Upstroke-Resolved");
+    fs::write(&variant, "resolved c.txt\n").expect("the variant first");
+    fs::write(&manifest, "resolved d.txt\n").expect("then the lowercase name");
+    let folds_case = fs::read(&variant).expect("the variant") == b"resolved d.txt\n";
+    assert_eq!(folds_case, cfg!(any(windows, target_os = "macos")));
+    let spelling = if folds_case {
+        ".Upstroke-Resolved"
+    } else {
+        RESOLUTION_MANIFEST
+    };
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: spelling.to_owned(),
+            ignored: false,
+            displaces_directory: false,
+        },
+        "the worker's manifest is the file the checkout lists, by its spelling"
+    );
+    assert_eq!(
+        fixture.manager.resolution_manifest(&slot).expect("read"),
+        declared("d.txt"),
+        "read by that spelling: the lowercase write's bytes"
+    );
+    stage();
+    if folds_case {
+        assert!(
+            staged().is_empty(),
+            "one file, excluded under the spelling the checkout lists: {:?}",
+            staged()
+        );
+        assert!(
+            !manifest.exists() && !variant.exists(),
+            "and removed under that spelling"
+        );
+    } else {
+        assert_eq!(
+            staged(),
+            vec![".Upstroke-Resolved".to_owned()],
+            "the variant is a second file, staged as one; the manifest is excluded"
+        );
+        assert!(
+            !manifest.exists() && variant.is_file(),
+            "the manifest is removed and the second file is not"
+        );
+        git(
+            &path,
+            &["rm", "--quiet", "--cached", "--", ".Upstroke-Resolved"],
+        );
+        fs::remove_file(&variant).expect("remove the second file");
+    }
+    assert!(staged().is_empty());
+
+    // The same variant, ignored: the ignore rules keep it out, no exclusion is
+    // appended for it, and the removal reaches it under its spelling.
+    fs::write(path.join(".gitignore"), format!("{RESOLUTION_MANIFEST}\n")).expect("ignore");
+    fs::write(&variant, "resolved c.txt\n").expect("the variant first");
+    fs::write(&manifest, "resolved d.txt\n").expect("then the lowercase name");
+    // `check-ignore` exits 1 for a path the rules do not reach, so not the
+    // panicking helper: whether `.upstroke-resolved` in `.gitignore` reaches
+    // `.Upstroke-Resolved` is the checkout's answer (`core.ignorecase`).
+    let ignored_variant = git_out(
+        &path,
+        &[
+            "check-ignore",
+            "--no-index",
+            "-q",
+            "--",
+            ".Upstroke-Resolved",
+        ],
+    )
+    .status
+    .success();
+    assert_eq!(
+        fixture.manager.manifest_name(&path).expect("classify"),
+        ManifestName::Manifest {
+            spelling: spelling.to_owned(),
+            ignored: if folds_case { ignored_variant } else { true },
+            displaces_directory: false,
+        },
+        "whether the ignore rules reach the variant's spelling is the checkout's answer"
+    );
+    stage();
+    assert!(
+        staged().is_empty() || staged() == vec![".Upstroke-Resolved".to_owned()],
+        "{:?}",
+        staged()
+    );
+    assert!(
+        !manifest.exists(),
+        "removed under its spelling, `-x` reaching an ignored file"
+    );
+    if !folds_case {
+        assert!(variant.is_file());
+        if staged() == vec![".Upstroke-Resolved".to_owned()] {
+            git(
+                &path,
+                &["rm", "--quiet", "--cached", "--", ".Upstroke-Resolved"],
+            );
+        }
+        fs::remove_file(&variant).expect("remove the second file");
+    }
+    fs::remove_file(path.join(".gitignore")).expect("unignore");
+    git(&path, &["rm", "--quiet", "--cached", "--", ".gitignore"]);
+}
+
+/// The one rule that picks the manifest's entry out of the index's records
+/// and out of the directory's ([`name_spelling`]): the exact spelling when it
+/// is listed, else the one that differs by ASCII case alone, else nothing —
+/// and never an entry under the name. Pinned on every platform, because only a
+/// checkout that folds case exercises the variant arm through a capture.
+#[test]
+fn the_manifests_spelling_is_the_exact_one_when_listed_and_the_case_variant_otherwise() {
+    let name = RESOLUTION_MANIFEST.as_bytes();
+    let exact: &[u8] = b".upstroke-resolved";
+    let variant: &[u8] = b".Upstroke-Resolved";
+    let upper: &[u8] = b".UPSTROKE-RESOLVED";
+    let under: &[u8] = b".upstroke-resolved/data.txt";
+    let under_variant: &[u8] = b".UPSTROKE-RESOLVED/data.txt";
+    assert_eq!(name_spelling(&[], name), None);
+    assert_eq!(name_spelling(&[under, under_variant], name), None);
+    assert_eq!(name_spelling(&[variant], name), Some(variant));
+    assert_eq!(name_spelling(&[under_variant, upper], name), Some(upper));
+    assert_eq!(
+        name_spelling(&[variant, exact], name),
+        Some(exact),
+        "exact first, whatever the order"
+    );
+    assert_eq!(name_spelling(&[exact, variant], name), Some(exact));
+    assert_eq!(
+        name_spelling(&[b".upstroke-resolved.bak", b".upstroke-resolve"], name),
+        None
+    );
 }
 
 /// PR #249's fourth-round regression review, finding 2: the read of the
@@ -7063,7 +7305,7 @@ fn changed_paths_honour_the_recorded_base_after_head_has_moved_off_it() {
     fs::write(path.join("staged.rs"), "fn main() {}\n").expect("add");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot, &[], ManifestDisposal::Kept)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     // Move the worktree's HEAD to the seed, keeping the index. `head` is
@@ -7218,7 +7460,7 @@ fn changed_paths_come_from_the_index_of_the_recorded_worktree() {
     fs::write(path.join("nested/new.rs"), "fn main() {}\n").expect("add");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot, &[], ManifestDisposal::Kept)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     let captured = fixture
@@ -7273,7 +7515,7 @@ fn every_change_kind_reaches_the_region_including_both_rename_endpoints() {
 
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot, &[], ManifestDisposal::Kept)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
 
     // Git really did detect a rename here, rather than reporting a delete
@@ -7360,7 +7602,7 @@ fn the_candidate_diff_is_of_the_recorded_objects_and_survives_operator_diff_conf
     fs::write(path.join("bin.dat"), [0_u8, 1, 2, 0xff]).expect("a binary file");
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot, &[], ManifestDisposal::Kept)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
     let tree = fixture
         .manager
@@ -7453,7 +7695,7 @@ fn a_repository_path_a_string_cannot_carry_makes_the_region_repo_wide() {
     }
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &slot, &[], ManifestDisposal::Kept)
+        .candidate_stage(&mut NoHooks, &slot, &[])
         .expect("stage");
     assert!(
         fixture
@@ -7489,7 +7731,7 @@ fn after_each_object_primitive_the_object_is_referenced_by_the_row_row_names() {
     let blob = git(&task_path, &["hash-object", "staged.txt"]);
     fixture
         .manager
-        .candidate_stage(&mut NoHooks, &task, &[], ManifestDisposal::Kept)
+        .candidate_stage(&mut NoHooks, &task, &[])
         .expect("stage");
     assert_eq!(ObjectSite::CandidateStage.row(), ResourceRow::R9);
     assert!(
@@ -8351,7 +8593,7 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
             // `after_reference_present`.
             fixture
                 .manager
-                .candidate_stage(&mut NoHooks, &slot, &[], ManifestDisposal::Kept)
+                .candidate_stage(&mut NoHooks, &slot, &[])
                 .expect("stage, so the index already reflects the tree");
             fs::write(git_dir.join("index.lock"), "").expect("plant the lock");
             let internal = classify(site, &ResidueTarget::new(&base).at(&path));
@@ -8359,7 +8601,7 @@ fn observed_three_classes(site: EffectSiteId) -> [ObjectResidue; 3] {
             fs::write(path.join("a.txt"), "edited again\n").expect("a second unstaged change");
             fixture
                 .manager
-                .candidate_stage(&mut NoHooks, &slot, &[], ManifestDisposal::Kept)
+                .candidate_stage(&mut NoHooks, &slot, &[])
                 .expect("stage");
             let after = classify(site, &ResidueTarget::new(&base).at(&path));
             [none, internal, after]
@@ -9295,15 +9537,17 @@ fn no_sampled_funnel_builds_its_argv_from_a_literal() {
         ),
         (
             "pub fn candidate_stage(",
-            1,
+            2,
             0,
-            "one dynamic argument and no literal: `CANDIDATE_STAGE_MANIFEST_EXCLUSION`, \
-             appended to the shared list only when an untracked, unignored regular file holds \
-             the manifest's name (`manifest_name`), which the sampler's populated worktree \
-             never does, so its child runs the list bare as the funnel does there; the \
-             declared-resolution children it runs before the sampled `add -A` take their argv \
-             from `DeclaredResolution::argv`, whose fixed words are `RESOLUTION_ADD_ARGV` and \
-             `RESOLUTION_RM_ARGV`",
+            "two dynamic arguments and no literal: `CANDIDATE_STAGE_MANIFEST_EXCLUSION` \
+             completed by the manifest's spelling, appended to the shared list only when an \
+             untracked, unignored regular file holds the manifest's name (`manifest_name`), \
+             which the sampler's populated worktree never does, so its child runs the list \
+             bare as the funnel does there; and `CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC` \
+             completed the same way, the argument of the separate `clean` child that removes \
+             the worker's manifest; the declared-resolution children it runs before the \
+             sampled `add -A` take their argv from `DeclaredResolution::argv`, whose fixed \
+             words are `RESOLUTION_ADD_ARGV` and `RESOLUTION_RM_ARGV`",
         ),
         ("pub fn candidate_write_tree(", 0, 0, "none of either"),
         (
@@ -10144,7 +10388,7 @@ fn every_site_this_lane_owns_executes_both_hook_phases() {
         .expect("quiescent");
     fs::write(task_path.join("worker.txt"), "worker\n").expect("worker edit");
     manager
-        .candidate_stage(&mut hooks, &task, &[], ManifestDisposal::Kept)
+        .candidate_stage(&mut hooks, &task, &[])
         .expect("Object.CandidateStage");
     let tree = manager
         .candidate_write_tree(&mut hooks, &task)
@@ -10251,7 +10495,7 @@ fn every_site_this_lane_owns_executes_both_hook_phases() {
         .expect("worktree");
     fs::write(fast_path.join("fast.txt"), "fast\n").expect("edit");
     manager
-        .candidate_stage(&mut hooks, &fast_task, &[], ManifestDisposal::Kept)
+        .candidate_stage(&mut hooks, &fast_task, &[])
         .expect("stage");
     let fast_tree = manager
         .candidate_write_tree(&mut hooks, &fast_task)

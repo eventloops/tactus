@@ -755,11 +755,14 @@ pub enum Materialized {
 /// directory is not in a task worktree at all. The name is reserved for the
 /// protocol, and what the reservation means is stated exactly by
 /// [`ManifestName`]: the worker's manifest — an untracked regular file of
-/// this name — is never part of a candidate, because
-/// [`WorkspaceManager::candidate_stage`] excludes it from the `add -A`
-/// whenever the ignore rules would not already keep it out, and stages
-/// whatever the index still held under the name when the file stands where a
-/// directory was; a file of this name the repository *tracks* — as spelt, or
+/// this name, under whatever spelling the checkout lists it by, since a
+/// checkout that folds case may hold the worker's write under a case variant
+/// of the name ([`ManifestName::Manifest`]'s `spelling`) — is never part of a
+/// candidate, because [`WorkspaceManager::candidate_stage`] excludes it, by
+/// that spelling, from the `add -A` whenever the ignore rules would not
+/// already keep it out, and stages whatever the index still held under the
+/// name when the file stands where a directory was; a file of this name the
+/// repository *tracks* — as spelt, or
 /// in another case, which on a checkout that folds case is the same file —
 /// or a directory of this name, is the repository's own and not a manifest at
 /// all, so an ordinary capture stages it like any other path and a conflict
@@ -769,12 +772,25 @@ pub enum Materialized {
 /// conflict-repair protocol, and is told so rather than having its file read
 /// as declarations.
 ///
-/// **The manifest is read once.** The capture that reads it and stages what
-/// it declares removes it ([`ManifestDisposal`]), so that a declaration is
-/// applied once: a same-generation retry that revises a resolution writes the
-/// manifest again, and one that revises nothing writes nothing, its edits and
-/// deletions captured by the ordinary `add -A` like any path's. A manifest
-/// the capture refuses stays for the worker to correct.
+/// **The manifest does not outlive the capture that finds it.** The capture
+/// that reads it and stages what it declares removes it, and one that finds
+/// nothing for it to govern removes it unread — `candidate_stage` removes the
+/// worker's file whatever the capture did with it — so that a declaration is
+/// applied once, by the capture of the attempt that wrote it: a
+/// same-generation retry that revises a resolution writes the manifest again,
+/// and one that revises nothing writes nothing, its edits and deletions
+/// captured by the ordinary `add -A` like any path's. A manifest the capture
+/// refuses stays for the worker to correct, and the next capture of the
+/// generation reads it, since the refusal staged nothing and what was governed
+/// still is. Nothing else leaves a manifest standing. Until PR #249's fifth
+/// repair round a manifest the capture did not read was kept, on the argument
+/// that nothing could govern it later; its adequacy and manifest-contract
+/// reviews each declared a settled deletion again while nothing was governed,
+/// recreated the path in the next attempt, and had the attempt after that
+/// read the standing declaration and delete the replacement — the index's
+/// resolve-undo record survives a deletion, and an ordinary addition puts the
+/// path back under it, so an empty governed set says nothing about the next
+/// capture's.
 pub const RESOLUTION_MANIFEST: &str = ".upstroke-resolved";
 
 /// The manifest word for a path whose working-tree content is the resolution.
@@ -874,22 +890,41 @@ impl Declaration {
 pub enum ManifestName {
     /// Nothing is at the path, and the index holds no entry at the name.
     Absent,
-    /// An untracked regular file: the worker's manifest. `ignored` is whether
-    /// the repository's ignore rules keep it out of `add -A` by themselves —
-    /// when they do, no exclusion is needed, and one exactly naming an ignored
-    /// path makes `git add` fail (measured on git 2.43: the exclusion item is
-    /// matched against the ignored paths it collects, and `add` exits 1
-    /// "The following paths are ignored"). `displaces_directory` is whether
-    /// the index still holds entries *under* the name — a directory of the
-    /// repository's whose files the working tree no longer holds, since a
-    /// regular file stands where it was. The exclusion is a directory prefix
-    /// as well as a name, and would keep the deletion of every one of them
-    /// out of the candidate (PR #249's fourth-round manifest-contract review:
-    /// `.upstroke-resolved/data.txt` deleted with its directory, a manifest
-    /// written at the name, and the captured tree still holding the file), so
-    /// `candidate_stage` stages what the index held under the name by its own
-    /// pathspec first.
+    /// An untracked regular file: the worker's manifest. `spelling` is the
+    /// name as the checkout lists the file — `git ls-files --others` walks
+    /// the directory and reports the entry it finds — which is the name as
+    /// written except on a checkout that folds case, where the worker's write
+    /// to `.upstroke-resolved` may have landed in an entry the directory
+    /// already held under another case (PR #249's fifth-round
+    /// manifest-contract review, natively on the Windows guest: the worker
+    /// created `.Upstroke-Resolved`, wrote its declaration through the
+    /// lowercase name, and the exact-spelling reads listed nothing, so the
+    /// file was classified ignored, staged into the candidate by the bare
+    /// `add -A` with its declaration text, and left on disk). The exclusion
+    /// and the removal name the file by this spelling, and the read opens it
+    /// by this spelling, so the three cannot identify different files; on a
+    /// checkout that does not fold case an untracked case variant beside the
+    /// worker's file is a second file, staged as one. `ignored` is whether
+    /// the repository's ignore rules keep the file out of `add -A` by
+    /// themselves — when they do, no exclusion is needed, and one exactly
+    /// naming an ignored path makes `git add` fail (measured on git 2.43: the
+    /// exclusion item is matched against the ignored paths it collects, and
+    /// `add` exits 1 "The following paths are ignored"). `displaces_directory`
+    /// is whether the index still holds entries *under* the name — a
+    /// directory of the repository's whose files the working tree no longer
+    /// holds, since a regular file stands where it was. The exclusion is a
+    /// directory prefix as well as a name, and would keep the deletion of
+    /// every one of them out of the candidate (PR #249's fourth-round
+    /// manifest-contract review: `.upstroke-resolved/data.txt` deleted with
+    /// its directory, a manifest written at the name, and the captured tree
+    /// still holding the file), so `candidate_stage` stages what the index
+    /// held under the name by its own pathspec first — with `add -u`, which
+    /// walks the index and never the directory, because the `add -A` the
+    /// fourth round used collected the ignored regular file at the name as a
+    /// path its pathspec named and exited 1 after staging the deletion (PR
+    /// #249's fifth-round regression review).
     Manifest {
+        spelling: String,
         ignored: bool,
         displaces_directory: bool,
     },
@@ -912,36 +947,33 @@ pub enum ManifestName {
     Other { what: &'static str },
 }
 
-/// What [`WorkspaceManager::candidate_stage`] does with the worker's manifest
-/// once the candidate is staged: the capture that read it consumes it.
+/// The one entry among `records` that is `name`: the record spelt as `name`
+/// is when there is one, and otherwise the record that differs from it by
+/// ASCII case alone.
 ///
-/// A declaration is applied once. The manifest is the worker's message to
-/// the capture that reads it, and a message left standing after delivery was
-/// reread by every later capture of a retained generation as if freshly
-/// written: PR #249's fourth-round regression and manifest-contract reviews
-/// each declared `deleted c.txt` in attempt 1, recreated `c.txt` with a file
-/// write in attempt 2 (an ordinary addition — a settled deletion governs
-/// nothing) and edited another file in attempt 3, and the third capture,
-/// finding the recreated path governed again (the index's resolve-undo record
-/// survives the deletion, and the addition put an entry back beside it),
-/// reread the standing declaration and removed the file from the disk and the
-/// candidate, reporting success. Nothing in the index distinguishes that path
-/// from one a retry is revising to a deletion; what distinguishes them is
-/// whether the declaration has been acted on, and the manifest's presence is
-/// now exactly that record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ManifestDisposal {
-    /// The capture did not act on the manifest — the index holds nothing it
-    /// governs, so it was not read, or it was read and refused — and the file,
-    /// if any, stays where the worker put it: unread, it governs nothing in
-    /// any later capture of the generation either; refused, the worker
-    /// corrects it.
-    Kept,
-    /// The capture read the manifest and is staging what it declared: the
-    /// file is removed after the `add -A` (`git clean`, so that the engine
-    /// still speaks only git in the worktree it owns), and a later attempt of
-    /// the same generation declares afresh whatever it revises.
-    Consumed,
+/// The rule [`WorkspaceManager::manifest_name`] applies to the index's
+/// records and to the directory's alike, so that a tracked name and an
+/// untracked one are found the same way. Exact first: on a checkout that does
+/// not fold case an entry at the name and one at a variant are two files and
+/// the one spelt as written is the manifest's; on one that does, the two
+/// cannot both exist, and whichever spelling the checkout holds is where the
+/// worker's write went (PR #249's fourth- and fifth-round manifest-contract
+/// reviews, natively on the Windows guest: a tracked `.UPSTROKE-RESOLVED`,
+/// then an untracked `.Upstroke-Resolved`, each the lowercase name's file).
+/// `name` has only ASCII to fold, which is why `eq_ignore_ascii_case` is the
+/// whole comparison; entries under the name (`<name>/…`) are neither equal
+/// nor a case of it.
+fn name_spelling<'a>(records: &[&'a [u8]], name: &[u8]) -> Option<&'a [u8]> {
+    records
+        .iter()
+        .copied()
+        .find(|record| *record == name)
+        .or_else(|| {
+            records
+                .iter()
+                .copied()
+                .find(|record| record.eq_ignore_ascii_case(name))
+        })
 }
 
 /// One conflicted path's declared resolution, reconciled against the index
@@ -1979,20 +2011,26 @@ impl WorkspaceManager {
     /// does.
     ///
     /// This list is the whole argv of an ordinary capture. [`Self::candidate_stage`]
-    /// appends [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] beside it in one
-    /// case only — an untracked, unignored regular file holds the manifest's
-    /// name — and that is the one dynamic argument the tripwire declares for
-    /// it; the two whole lists it runs beside this one in the manifest's
-    /// states ([`Self::CANDIDATE_STAGE_DISPLACED_DIRECTORY_ARGV`],
-    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV`]) are separate children
-    /// of the same funnel, not arguments of this one. The sampler's populated
-    /// worktree holds no such file, so the child it runs is the child the
-    /// funnel runs there.
+    /// appends one pathspec beside it in one case only — an untracked,
+    /// unignored regular file holds the manifest's name —
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] followed by the spelling
+    /// the checkout lists that file by; the two whole lists it runs beside
+    /// this one in the manifest's states
+    /// ([`Self::CANDIDATE_STAGE_DISPLACED_DIRECTORY_ARGV`], and
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV`] with
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC`] and the same
+    /// spelling) are separate children of the same funnel, not arguments of
+    /// this one. Those two spelled pathspecs are the two dynamic arguments the
+    /// argv tripwire declares for the funnel. The sampler's populated worktree
+    /// holds no such file, so the child it runs is the child the funnel runs
+    /// there.
     pub(crate) const CANDIDATE_STAGE_ARGV: [&str; 4] = ["add", "-A", "--", "."];
-    /// The pathspec [`Self::candidate_stage`] appends to
+    /// The magic of the pathspec [`Self::candidate_stage`] appends to
     /// [`Self::CANDIDATE_STAGE_ARGV`] to keep the worker's resolution manifest
-    /// ([`RESOLUTION_MANIFEST`]) out of the candidate: `:(exclude,top)` names
-    /// the root-level path whatever the working directory. Appended only when
+    /// ([`RESOLUTION_MANIFEST`]) out of the candidate, completed by the
+    /// spelling the checkout lists the file by ([`ManifestName::Manifest`]):
+    /// `:(exclude,top)` names the root-level path whatever the working
+    /// directory, `literal` takes the spelling as itself. Appended only when
     /// [`ManifestName::Manifest`] holds the name and the ignore rules do not
     /// already keep it out. The second repair round's version was
     /// unconditional, in the shared list, under a comment claiming "an
@@ -2001,10 +2039,13 @@ impl WorkspaceManager {
     /// from the tree with no refusal), every descendant of a directory of that
     /// name (a pathspec is a directory prefix too), and, exactly naming an
     /// ignored path, made `add` fail — PR #249's third-round regression and
-    /// manifest-contract reviews, one witness each. `CANDIDATE_STAGE_ARGV`'s
-    /// doc records why the exclusion is not in the list.
-    pub(crate) const CANDIDATE_STAGE_MANIFEST_EXCLUSION: &str = ":(exclude,top).upstroke-resolved";
-    /// The `add -A` [`Self::candidate_stage`] runs first when the worker's
+    /// manifest-contract reviews, one witness each. Until the fifth round it
+    /// spelt the name as written, and on the Windows guest excluded nothing
+    /// when the directory held the worker's file as `.Upstroke-Resolved`.
+    /// `CANDIDATE_STAGE_ARGV`'s doc records why the exclusion is not in the
+    /// list.
+    pub(crate) const CANDIDATE_STAGE_MANIFEST_EXCLUSION: &str = ":(exclude,top,literal)";
+    /// The `add -u` [`Self::candidate_stage`] runs first when the worker's
     /// manifest displaces a directory of the repository's
     /// ([`ManifestName::Manifest`] with `displaces_directory`): the index
     /// still holds entries under the manifest's name, the working tree holds a
@@ -2013,31 +2054,44 @@ impl WorkspaceManager {
     /// deletions out of the candidate (PR #249's fourth-round manifest-contract
     /// review: `.upstroke-resolved/data.txt` deleted with its directory, a
     /// manifest written at the name, the captured tree still holding the
-    /// file). The trailing slash matches the index's entries under the name
-    /// and never the regular file at it — a pathspec longer than a name cannot
-    /// match that name — and `icase` matches the directory in another case
-    /// on a checkout that folds case, while on one that does not it restages
-    /// a directory the `add -A -- .` stages anyway. Measured on git 2.43: with
-    /// nothing under the name in the index or on disk the pathspec matches
-    /// nothing and `add` exits 128, which is why the command runs only in that
-    /// state.
+    /// file). `-u` and not `-A`: what this command stages is what the index
+    /// held under the name — deletions and modifications of tracked entries —
+    /// and `-u` walks the index alone, while `-A` also walks the directory
+    /// collecting untracked paths its pathspec names, and a pathspec
+    /// `<name>/` names an ignored regular file at `<name>` as a path under
+    /// it (git's `exclude_matches_pathspec`: an item longer than an ignored
+    /// path with `/` at the path's length collects it), so the fourth
+    /// round's `add -A` staged the deletion and then exited 1 "The following
+    /// paths are ignored", and `git_ok` aborted the capture with the declared
+    /// resolution already staged (PR #249's fifth-round regression review;
+    /// measured on git 2.43, `-u` exits 0 in the same state). The trailing
+    /// slash matches the index's entries under the name and never the regular
+    /// file at it — a pathspec longer than a name cannot match that name —
+    /// and `icase` matches the directory in another case on a checkout that
+    /// folds case, while on one that does not it restages a directory the
+    /// `add -A -- .` stages anyway. Measured on git 2.43: with nothing under
+    /// the name in the index the pathspec matches nothing and `add -u` exits
+    /// 128, which is why the command runs only in that state.
     pub(crate) const CANDIDATE_STAGE_DISPLACED_DIRECTORY_ARGV: [&str; 4] =
-        ["add", "-A", "--", ":(top,literal,icase).upstroke-resolved/"];
+        ["add", "-u", "--", ":(top,literal,icase).upstroke-resolved/"];
     /// The removal of the worker's manifest [`Self::candidate_stage`] runs
-    /// after the `add -A` when the capture consumed it
-    /// ([`ManifestDisposal::Consumed`]): `git clean` of the one untracked path,
-    /// `-x` so that an ignored manifest goes the same way, `--force` because
-    /// `clean.requireForce` defaults on. It runs only when the name holds the
-    /// worker's manifest; a tracked file of the name never reaches it (the
-    /// capture refused before staging), and `clean` would not touch one.
-    pub(crate) const CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV: [&str; 6] = [
-        "clean",
-        "--quiet",
-        "--force",
-        "-x",
-        "--",
-        ":(top,literal).upstroke-resolved",
-    ];
+    /// after the `add -A` whenever the name holds the worker's manifest
+    /// ([`ManifestName::Manifest`]), read or not: `git clean` of the one
+    /// untracked path, `-x` so that an ignored manifest goes the same way,
+    /// `--force` because `clean.requireForce` defaults on, and the pathspec
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC`] completed by the
+    /// spelling the checkout lists the file by. A tracked file of the name
+    /// never reaches it (a conflict repair refused before staging; an ordinary
+    /// capture's `manifest_name` reads `Tracked`), and `clean` would not touch
+    /// one.
+    pub(crate) const CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV: [&str; 5] =
+        ["clean", "--quiet", "--force", "-x", "--"];
+    /// The magic of the pathspec that completes
+    /// [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV`]: the root-level path,
+    /// taken as itself, spelt as the checkout lists it. Until PR #249's fifth
+    /// round the pathspec spelt the name as written, and on the Windows guest
+    /// left a manifest the directory held as `.Upstroke-Resolved` in place.
+    pub(crate) const CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC: &str = ":(top,literal)";
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes the `:(literal)` pathspec of
     /// one declared resolution ([`DeclaredResolution::argv`]); run inside the
     /// same `Object.CandidateStage` funnel, before the list above, and not
@@ -2827,7 +2881,7 @@ impl WorkspaceManager {
 
     /// `Object.CandidateStage` — the worker's declared conflict resolutions
     /// staged one by one, then `git add -A` in the task worktree, then the
-    /// worker's manifest removed when the capture consumed it.
+    /// worker's manifest removed.
     ///
     /// The blob objects it writes are referenced by that worktree's index: R9,
     /// which is exactly what `ObjectSite::CandidateStage.row()` answers.
@@ -2849,10 +2903,11 @@ impl WorkspaceManager {
     ///
     /// # The manifest stays out of the candidate
     ///
-    /// The `add -A` gets [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] appended
-    /// exactly when [`Self::manifest_name`] reads the worker's manifest at the
-    /// root — an untracked regular file the ignore rules do not already keep
-    /// out ([`ManifestName::Manifest`] with `ignored: false`). In every other
+    /// The `add -A` gets [`Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION`] appended,
+    /// completed by the spelling the checkout lists the file by, exactly when
+    /// [`Self::manifest_name`] reads the worker's manifest at the root — an
+    /// untracked regular file the ignore rules do not already keep out
+    /// ([`ManifestName::Manifest`] with `ignored: false`). In every other
     /// state of that name the list runs bare, which is what an ordinary
     /// capture always ran: an absent name needs no exclusion; an ignored
     /// manifest is kept out by the ignore rules, and an exclusion exactly
@@ -2867,14 +2922,34 @@ impl WorkspaceManager {
     /// their deletions included. So the candidate never carries the worker's
     /// manifest, and never silently omits a path of the repository's own.
     ///
-    /// # The manifest is consumed
+    /// # The manifest does not outlive the capture
     ///
-    /// When the caller read the manifest and is staging what it declared
-    /// (`manifest` is [`ManifestDisposal::Consumed`]), the file is removed
-    /// after the `add -A` by [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV`], so
-    /// that a declaration is applied once — [`ManifestDisposal`] says what a
-    /// standing one did to a recreated file. A capture that did not act on
-    /// the manifest leaves it.
+    /// When the name holds the worker's manifest, the file is removed after
+    /// the `add -A` by [`Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV`] — whether
+    /// the caller read it and is staging what it declared, or found nothing
+    /// for it to govern and did not read it. A declaration is applied once, by
+    /// the capture of the attempt that wrote it. The manifest is the worker's
+    /// message to that capture, and a message left standing after it was
+    /// reread by a later capture of a retained generation as if freshly
+    /// written: PR #249's fourth-round regression and manifest-contract
+    /// reviews each declared `deleted c.txt` in attempt 1, recreated `c.txt`
+    /// with a file write in attempt 2 (an ordinary addition — a settled
+    /// deletion governs nothing) and edited another file in attempt 3, and the
+    /// third capture, finding the recreated path governed again (the index's
+    /// resolve-undo record survives the deletion, and the addition put an
+    /// entry back beside it), reread the standing declaration and removed the
+    /// file from the disk and the candidate, reporting success. The fourth
+    /// round removed the manifest a capture *acted on*, and its adequacy and
+    /// manifest-contract reviews then declared the settled deletion again in
+    /// attempt 2 — nothing governed, the manifest not read and kept —
+    /// recreated the file in attempt 3 and lost it in attempt 4 the same way.
+    /// Nothing in the index distinguishes a recreated path from one a retry is
+    /// revising to a deletion; what distinguishes them is whether the
+    /// declaration is the current attempt's, and the manifest's presence is
+    /// that record exactly when no capture leaves one behind. The one
+    /// manifest a capture does leave is one it refused, and a refusal never
+    /// reaches this funnel: it stages nothing, so the next capture finds the
+    /// same governed set and reads the manifest again.
     ///
     /// # Errors
     ///
@@ -2884,7 +2959,6 @@ impl WorkspaceManager {
         hooks: &mut dyn EffectHooks,
         slot: &Slot,
         resolutions: &[DeclaredResolution],
-        manifest: ManifestDisposal,
     ) -> Result<(), UpstrokeError> {
         self.revalidate()?;
         let path = self.slot_target(slot)?;
@@ -2914,17 +2988,26 @@ impl WorkspaceManager {
                     .iter()
                     .map(OsString::from)
                     .collect();
-                if matches!(&name, ManifestName::Manifest { ignored: false, .. }) {
-                    argv.push(OsString::from(Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION));
+                if let ManifestName::Manifest {
+                    spelling,
+                    ignored: false,
+                    ..
+                } = &name
+                {
+                    let mut exclusion = OsString::from(Self::CANDIDATE_STAGE_MANIFEST_EXCLUSION);
+                    exclusion.push(spelling);
+                    argv.push(exclusion);
                 }
                 self.git_ok(&path, &argv)?;
-                if manifest == ManifestDisposal::Consumed
-                    && matches!(&name, ManifestName::Manifest { .. })
-                {
-                    let clean: Vec<OsString> = Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV
+                if let ManifestName::Manifest { spelling, .. } = &name {
+                    let mut clean: Vec<OsString> = Self::CANDIDATE_STAGE_MANIFEST_CLEAN_ARGV
                         .iter()
                         .map(OsString::from)
                         .collect();
+                    let mut pathspec =
+                        OsString::from(Self::CANDIDATE_STAGE_MANIFEST_CLEAN_PATHSPEC);
+                    pathspec.push(spelling);
+                    clean.push(pathspec);
                     self.git_ok(&path, &clean)?;
                 }
                 Ok(())
@@ -3479,9 +3562,9 @@ impl WorkspaceManager {
     pub fn resolution_manifest(&self, slot: &Slot) -> Result<ResolutionManifest, UpstrokeError> {
         self.revalidate()?;
         let worktree = self.slot_target(slot)?;
-        match self.manifest_name(&worktree)? {
+        let spelling = match self.manifest_name(&worktree)? {
             ManifestName::Absent => return Ok(ResolutionManifest::Absent),
-            ManifestName::Manifest { .. } => {}
+            ManifestName::Manifest { spelling, .. } => spelling,
             ManifestName::Tracked { spelling } if spelling == RESOLUTION_MANIFEST => {
                 return Err(UpstrokeError::Refused {
                     message: format!(
@@ -3517,8 +3600,8 @@ impl WorkspaceManager {
                     ),
                 });
             }
-        }
-        let path = worktree.join(RESOLUTION_MANIFEST);
+        };
+        let path = worktree.join(spelling);
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -3565,11 +3648,15 @@ impl WorkspaceManager {
     /// nothing, and a file the worker recreates there is an ordinary addition
     /// the `add -A` stages — after which the index holds the path again
     /// beside the resolve-undo record that still names it, and the path is
-    /// governed once more, by whatever the *next* manifest says. The manifest
-    /// that declared the deletion is not there to be reread by then: the
-    /// capture that acted on it consumed it ([`ManifestDisposal`]), which is
-    /// what keeps a settled deletion from being applied to the recreated
-    /// file (PR #249's fourth-round regression and manifest-contract reviews).
+    /// governed once more, by whatever the *next* manifest says. No earlier
+    /// manifest is there to be reread by then: the capture that acted on one
+    /// removed it, and a capture that found nothing for one to govern removed
+    /// it unread ([`Self::candidate_stage`]), which is what keeps a settled
+    /// deletion from being applied to the recreated file — PR #249's
+    /// fourth-round regression and manifest-contract reviews found the
+    /// acted-on declaration reread, and its fifth-round adequacy and
+    /// manifest-contract reviews the unread one, re-declared while the path
+    /// had no entry and read two attempts later once it had one again.
     ///
     /// The paths still held are read from the whole index (`ls-files --stage
     /// -z`, unfiltered) and intersected here, rather than passed to Git as
@@ -3631,7 +3718,7 @@ impl WorkspaceManager {
     /// What holds the root-level name the resolution manifest reserves in the
     /// worktree at `path` ([`ManifestName`]).
     ///
-    /// Three reads, in the order the answer depends on them: the index by
+    /// Four reads, in the order the answer depends on them: the index by
     /// name in any case (`ls-files --stage -- :(top,literal,icase)<name>`,
     /// which lists an entry at the name, one at a case variant of it, and the
     /// entries under either — a pathspec is a directory prefix too; an entry
@@ -3640,14 +3727,27 @@ impl WorkspaceManager {
     /// entries under the name are remembered for the regular-file answer);
     /// then the working tree without following a link (`symlink_metadata`:
     /// absent, a regular file, or something else); then, for a regular file,
-    /// whether `add -A` would stage it (`ls-files --others --exclude-standard
-    /// -- :(top,literal)<name>` lists it exactly when it is untracked and not
-    /// ignored). `icase` folds ASCII case, which is all the name has. The
+    /// the spelling the checkout lists it by (`ls-files --others --
+    /// :(top,literal,icase)<name>`, every untracked entry at the name in any
+    /// case, ignored or not, of which the one spelt as written is the file
+    /// when it is listed and the one case variant is otherwise — a checkout
+    /// that folds case holds one entry for the name, and the worker's write
+    /// landed in it); then whether `add -A` would stage that entry (`ls-files
+    /// --others --exclude-standard` with the same pathspec lists it exactly
+    /// when it is untracked and not ignored). `icase` folds ASCII case, which
+    /// is all the name has, and [`name_spelling`] is the one rule that picks
+    /// the entry, for the index and for the directory alike. The
     /// exact-spelling reads answered nothing for a tracked
     /// `.UPSTROKE-RESOLVED` while the lowercase name, on Windows, was that
     /// very file (PR #249's fourth-round manifest-contract review, natively on
     /// the guest), which read the repository's file as the worker's manifest
-    /// and staged it.
+    /// and staged it; and nothing for an untracked `.Upstroke-Resolved` the
+    /// worker had written its declaration into through the lowercase name
+    /// (the fifth round's, the same way), which classified the worker's
+    /// manifest as ignored, staged it into the candidate under that spelling
+    /// and left it on disk. A regular file at the name that the directory
+    /// walk lists under no spelling of it is Git and the filesystem
+    /// disagreeing, and is reported as a Git error rather than guessed at.
     fn manifest_name(&self, path: &Path) -> Result<ManifestName, UpstrokeError> {
         let name = RESOLUTION_MANIFEST.as_bytes();
         let tracked = self.git_ok(
@@ -3661,17 +3761,7 @@ impl WorkspaceManager {
             ],
         )?;
         let records = parsers::stage_record_paths(&tracked);
-        let spelling = records
-            .iter()
-            .copied()
-            .find(|record| *record == name)
-            .or_else(|| {
-                records
-                    .iter()
-                    .copied()
-                    .find(|record| record.eq_ignore_ascii_case(name))
-            });
-        if let Some(spelling) = spelling {
+        if let Some(spelling) = name_spelling(&records, name) {
             return Ok(ManifestName::Tracked {
                 spelling: String::from_utf8_lossy(spelling).into_owned(),
             });
@@ -3701,6 +3791,28 @@ impl WorkspaceManager {
                 },
             });
         }
+        let listed = self.git_ok(
+            path,
+            &[
+                OsString::from("ls-files"),
+                OsString::from("--others"),
+                OsString::from("-z"),
+                OsString::from("--"),
+                OsString::from(format!(":(top,literal,icase){RESOLUTION_MANIFEST}")),
+            ],
+        )?;
+        let listed = parsers::plain_record_paths(&listed);
+        let Some(spelling) = name_spelling(&listed, name) else {
+            return Err(UpstrokeError::Git {
+                message: format!(
+                    "`{RESOLUTION_MANIFEST}` at the root of {} is a regular file the working \
+                     tree holds and `git ls-files --others` lists under no spelling of the \
+                     name, so the worker's manifest cannot be told from the repository's \
+                     files",
+                    path.display()
+                ),
+            });
+        };
         let stageable = self.git_ok(
             path,
             &[
@@ -3709,13 +3821,14 @@ impl WorkspaceManager {
                 OsString::from("--exclude-standard"),
                 OsString::from("-z"),
                 OsString::from("--"),
-                OsString::from(format!(":(top,literal){RESOLUTION_MANIFEST}")),
+                OsString::from(format!(":(top,literal,icase){RESOLUTION_MANIFEST}")),
             ],
         )?;
         Ok(ManifestName::Manifest {
+            spelling: String::from_utf8_lossy(spelling).into_owned(),
             ignored: !parsers::plain_record_paths(&stageable)
                 .into_iter()
-                .any(|record| record == name),
+                .any(|record| record == spelling),
             displaces_directory,
         })
     }

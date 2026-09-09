@@ -21,8 +21,8 @@ use crate::topology::events::{
     TopologyEventBody,
 };
 use crate::workspace_manager::{
-    DeclaredResolution, ManifestDisposal, ObjectId, ResolutionKind, ResolutionManifest, Slot,
-    Snapshot, SnapshotInput, SnapshotName, WorkspaceManager,
+    DeclaredResolution, ObjectId, ResolutionKind, ResolutionManifest, Slot, Snapshot,
+    SnapshotInput, SnapshotName, WorkspaceManager,
 };
 
 use super::dispatch::{self, Dispatched, EventEmitter};
@@ -456,13 +456,17 @@ impl AttemptContext<'_> {
         // What the manifest governs: the index's unmerged entries, and the
         // entries a previous capture of this generation resolved (a retained
         // retry revising one). When the index holds neither, the manifest is
-        // not read, and whatever the file says has no effect on the capture;
-        // when it is read and acted on, the staging consumes it, so that a
-        // declaration is applied once (`ManifestDisposal`).
+        // not read, and whatever the file says has no effect on this capture
+        // — nor on a later one: the staging removes the worker's manifest
+        // whether or not it was read (`candidate_stage`), so that a
+        // declaration is applied once, by the capture of the attempt that
+        // wrote it. Only a refused manifest outlives its capture, and a
+        // refusal stages nothing, so the next capture governs the same
+        // entries and reads it again.
         let unmerged = self.manager.unresolved_conflicts(site.slot)?;
         let resolved = self.manager.resolved_conflicts(site.slot)?;
-        let (resolutions, manifest) = if unmerged.is_empty() && resolved.is_empty() {
-            (Vec::new(), ManifestDisposal::Kept)
+        let resolutions = if unmerged.is_empty() && resolved.is_empty() {
+            Vec::new()
         } else {
             let manifest = self.manager.resolution_manifest(site.slot)?;
             let plan = plan_resolutions(&unmerged, &resolved, &manifest);
@@ -483,10 +487,10 @@ impl AttemptContext<'_> {
                     unresolved: plan.refused,
                 });
             }
-            (plan.staged, ManifestDisposal::Consumed)
+            plan.staged
         };
         self.manager
-            .candidate_stage(self.hooks.effects(), site.slot, &resolutions, manifest)?;
+            .candidate_stage(self.hooks.effects(), site.slot, &resolutions)?;
         if !resolutions.is_empty() {
             let left = self.manager.unresolved_conflicts(site.slot)?;
             if !left.is_empty() {
