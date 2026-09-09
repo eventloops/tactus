@@ -10835,21 +10835,6 @@ fn the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects() {
         "`objects/abc` is not a fan-out directory, so nothing in it is one of Git's"
     );
 
-    // Git spells its fan-out in lower case, so an upper-case pair is a name
-    // somebody else chose and is left alone. On a case-insensitive filesystem
-    // this and a real `ab` are one directory, so the case is only constructed
-    // where it can be distinguished.
-    let upper = objects.join("AB");
-    if fs::create_dir(&upper).is_ok() && !objects.join("ab").exists() {
-        fs::write(upper.join("tmp_obj_upper"), b"not Git's fan-out\n").expect("plant");
-        assert!(
-            !temporary_object_files(&fixture.base).expect("scan"),
-            "`objects/AB` is not Git's fan-out, which is lower case, so nothing in it is one \
-             of Git's"
-        );
-        fs::remove_dir_all(&upper).expect("unplant");
-    }
-
     // And a fan-out directory that holds only real loose objects.
     let fan_out = objects.join("cd");
     fs::create_dir_all(&fan_out).expect("a fan-out directory");
@@ -10861,6 +10846,112 @@ fn the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects() {
     assert!(
         !temporary_object_files(&fixture.base).expect("scan"),
         "a fan-out holding only objects holds no temporary object file"
+    );
+}
+
+/// Reserve an absent pair, independently of the fixture's timestamp-dependent
+/// object names. Checking both spellings also works on case-sensitive stores.
+fn unused_alphabetic_fan_out_pair(objects: &Path) -> (PathBuf, PathBuf) {
+    for prefix in 0_u8..=255 {
+        let name = format!("{prefix:02x}");
+        let upper_name = name.to_ascii_uppercase();
+        if name == upper_name {
+            continue;
+        }
+        let lower = objects.join(name);
+        let upper = objects.join(upper_name);
+        let absent = [&lower, &upper]
+            .into_iter()
+            .all(|path| match fs::symlink_metadata(path) {
+                Ok(_) => false,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(error) => panic!("inspect unused fan-out {}: {error}", path.display()),
+            });
+        if absent {
+            return (lower, upper);
+        }
+    }
+    panic!("the small fixture must leave an unused alphabetic fan-out pair");
+}
+
+/// Every platform constructs the upper-case witness and asserts its native
+/// lookup result. An occupied `ab` cannot suppress it. Unix additionally supplies
+/// a lower-case symlink alias when the filesystem distinguishes the spellings,
+/// so ordinary case-sensitive CI also executes positive alias detection.
+#[test]
+fn the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does() {
+    let fixture = Fixture::new("temp-object-case-alias");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    fs::create_dir_all(objects.join("ab")).expect("an occupied ordinary fan-out");
+    let (lower, upper) = unused_alphabetic_fan_out_pair(&objects);
+    fs::create_dir(&upper).expect("the upper-case fan-out");
+    fs::write(upper.join("tmp_obj_case_alias"), b"half an object\n").expect("plant");
+    let native_alias = match fs::metadata(&lower) {
+        Ok(metadata) => {
+            assert!(
+                metadata.is_dir(),
+                "the native alias resolves to a directory"
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("inspect the lower-case lookup {}: {error}", lower.display()),
+    };
+    assert_eq!(
+        temporary_object_files(&fixture.base).expect("scan stored upper-case fan-out"),
+        native_alias,
+        "Git reaches the stored upper-case directory exactly when its lower-case path resolves"
+    );
+
+    #[cfg(unix)]
+    {
+        if !native_alias {
+            std::os::unix::fs::symlink(&upper, &lower).expect("provide the lower-case alias");
+        }
+        assert!(
+            temporary_object_files(&fixture.base).expect("scan through the lower-case alias"),
+            "the lower-case alias reaches the temporary object on every Unix test filesystem"
+        );
+    }
+
+    fs::remove_file(upper.join("tmp_obj_case_alias")).expect("unplant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan after removing residue"),
+        "removing the temporary object leaves neither spelling with residue"
+    );
+}
+
+/// Execute with TMPDIR (Unix) or the system temporary directory (Windows) on a
+/// case-insensitive filesystem. This fails its prerequisite instead of silently
+/// passing on a case-sensitive volume. The default alias test above also runs on
+/// ordinary CI; this integration witness specifically rejects a read_dir filter
+/// that discards stored upper-case names before resolving Git's lower-case path.
+#[test]
+#[ignore = "requires a case-insensitive temporary filesystem; run explicitly with --ignored"]
+fn a_native_case_insensitive_fan_out_alias_is_detected() {
+    let fixture = Fixture::new("temp-object-native-case-alias");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    let (lower, upper) = unused_alphabetic_fan_out_pair(&objects);
+    fs::create_dir(&upper).expect("the stored upper-case fan-out");
+    assert!(
+        fs::metadata(&lower)
+            .expect("this integration test requires native case-insensitive path lookup")
+            .is_dir(),
+        "Git's lower-case path resolves to the stored upper-case directory"
+    );
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan the empty alias"),
+        "an empty alias is not temporary residue"
+    );
+    fs::write(upper.join("tmp_obj_native_alias"), b"half an object\n").expect("plant");
+    assert!(
+        temporary_object_files(&fixture.base).expect("scan the native case alias"),
+        "a temporary object reachable through Git's canonical path must be detected"
+    );
+    fs::remove_file(upper.join("tmp_obj_native_alias")).expect("unplant");
+    assert!(
+        !temporary_object_files(&fixture.base).expect("scan after removing residue"),
+        "removing the temporary object leaves the native alias empty"
     );
 }
 
@@ -10886,7 +10977,8 @@ fn a_symlinked_fan_out_directory_is_followed_as_git_follows_it() {
     let objects = object_directory(&fixture.base).expect("object directory");
     let elsewhere = fixture.root.join("fan-out-elsewhere");
     fs::create_dir_all(&elsewhere).expect("the directory the fan-out points at");
-    std::os::unix::fs::symlink(&elsewhere, objects.join("93")).expect("the fan-out symlink");
+    let (fan_out, _) = unused_alphabetic_fan_out_pair(&objects);
+    std::os::unix::fs::symlink(&elsewhere, &fan_out).expect("the unused fan-out symlink");
 
     assert!(
         !temporary_object_files(&fixture.base).expect("scan"),
@@ -10896,7 +10988,7 @@ fn a_symlinked_fan_out_directory_is_followed_as_git_follows_it() {
     fs::write(elsewhere.join("tmp_obj_HuHQtZ"), b"half an object\n").expect("plant");
     assert!(
         temporary_object_files(&fixture.base).expect("scan"),
-        "Git writes objects/93/tmp_obj_* through the link and prunes it through the link, \
+        "Git writes tmp_obj_* through the fan-out link and prunes it through the link, \
          so the scan reads through the link"
     );
 

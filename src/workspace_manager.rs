@@ -4585,11 +4585,13 @@ fn directory_holds_name_prefixed(directory: &Path, prefix: &str) -> Result<bool,
     Ok(false)
 }
 
-/// The two-hexadecimal-digit fan-out directories of an object directory.
+/// Resolve Git's canonical `00` through `ff` fan-out paths.
 ///
-/// A name of any other shape is not Git's fan-out and is not descended into.
-/// Git writes the fan-out in **lower-case** hexadecimal, so `AB` is a name
-/// somebody else chose and is left alone.
+/// Git opens these lower-case paths regardless of their stored spelling. On
+/// a case-insensitive filesystem `ab` can resolve to a directory stored as
+/// `AB`; filtering `read_dir` names would miss a temporary object Git writes
+/// there. On a case-sensitive filesystem a distinct `AB` is not traversed.
+/// The lookup is bounded at 256 metadata calls, independent of store size.
 ///
 /// **Directory targets are followed, because Git follows them.** The type is
 /// read with [`fs::metadata`], which resolves symbolic links, and not with
@@ -4606,32 +4608,9 @@ fn directory_holds_name_prefixed(directory: &Path, prefix: &str) -> Result<bool,
 /// holds no temporary object file. Every other inspection failure is the
 /// caller's to see (§7) rather than a silent `false`.
 fn fan_out_directories(object_dir: &Path) -> Result<Vec<PathBuf>, UpstrokeError> {
-    let entries = match fs::read_dir(object_dir) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(source) => {
-            return Err(UpstrokeError::Io {
-                path: object_dir.to_path_buf(),
-                source,
-            });
-        }
-    };
     let mut directories = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|source| UpstrokeError::Io {
-            path: object_dir.to_path_buf(),
-            source,
-        })?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.len() != 2
-            || !name
-                .chars()
-                .all(|character| character.is_ascii_digit() || ('a'..='f').contains(&character))
-        {
-            continue;
-        }
-        let candidate = entry.path();
+    for prefix in 0_u8..=255 {
+        let candidate = object_dir.join(format!("{prefix:02x}"));
         match fs::metadata(&candidate) {
             Ok(metadata) if metadata.is_dir() => directories.push(candidate),
             Ok(_) => {}
