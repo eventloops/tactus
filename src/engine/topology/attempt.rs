@@ -21,8 +21,8 @@ use crate::topology::events::{
     TopologyEventBody,
 };
 use crate::workspace_manager::{
-    DeclaredResolution, ObjectId, ResolutionKind, ResolutionManifest, Slot, Snapshot,
-    SnapshotInput, SnapshotName, WorkspaceManager,
+    DeclaredResolution, ManifestDisposal, ObjectId, ResolutionKind, ResolutionManifest, Slot,
+    Snapshot, SnapshotInput, SnapshotName, WorkspaceManager,
 };
 
 use super::dispatch::{self, Dispatched, EventEmitter};
@@ -164,8 +164,9 @@ struct ResolutionPlan {
 /// The worker's manifest reconciled with the paths it governs: `unmerged`,
 /// the index's conflicted entries, every one of which must be declared, and
 /// `resolved`, the entries a previous capture of this generation resolved and
-/// the index still holds, which a declaration may revise and silence leaves as
-/// they are. A declaration naming a path in neither list does nothing.
+/// the index still holds, which a declaration may revise and silence leaves to
+/// the ordinary `add -A`, which stages the path's edits or deletion like any
+/// other's. A declaration naming a path in neither list does nothing.
 ///
 /// Per governed path: declared one way as the index spells it, staged that
 /// way; declared both ways, refused; declared one way exactly and the other
@@ -173,7 +174,7 @@ struct ResolutionPlan {
 /// governs nothing itself), refused as a contradiction, since a
 /// case-insensitive filesystem reads the two as one file; declared only in
 /// another case, refused naming the index's spelling; undeclared, refused if
-/// unmerged and left alone if already resolved. A malformed manifest refuses
+/// unmerged and left to the `add -A` if already resolved. A malformed manifest refuses
 /// every governed path and quotes the line. The refusal list is what the
 /// worker is told (`classify::unresolved_conflict_failure`).
 fn plan_resolutions(
@@ -455,11 +456,13 @@ impl AttemptContext<'_> {
         // What the manifest governs: the index's unmerged entries, and the
         // entries a previous capture of this generation resolved (a retained
         // retry revising one). When the index holds neither, the manifest is
-        // not read, and whatever the file says has no effect on the capture.
+        // not read, and whatever the file says has no effect on the capture;
+        // when it is read and acted on, the staging consumes it, so that a
+        // declaration is applied once (`ManifestDisposal`).
         let unmerged = self.manager.unresolved_conflicts(site.slot)?;
         let resolved = self.manager.resolved_conflicts(site.slot)?;
-        let resolutions = if unmerged.is_empty() && resolved.is_empty() {
-            Vec::new()
+        let (resolutions, manifest) = if unmerged.is_empty() && resolved.is_empty() {
+            (Vec::new(), ManifestDisposal::Kept)
         } else {
             let manifest = self.manager.resolution_manifest(site.slot)?;
             let plan = plan_resolutions(&unmerged, &resolved, &manifest);
@@ -480,10 +483,10 @@ impl AttemptContext<'_> {
                     unresolved: plan.refused,
                 });
             }
-            plan.staged
+            (plan.staged, ManifestDisposal::Consumed)
         };
         self.manager
-            .candidate_stage(self.hooks.effects(), site.slot, &resolutions)?;
+            .candidate_stage(self.hooks.effects(), site.slot, &resolutions, manifest)?;
         if !resolutions.is_empty() {
             let left = self.manager.unresolved_conflicts(site.slot)?;
             if !left.is_empty() {

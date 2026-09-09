@@ -1293,7 +1293,12 @@ impl Run {
         write_file(&dispatched.worktree.join(path), content.as_bytes());
         let manager = self.fixture.manager.clone();
         manager
-            .candidate_stage(self.hooks.effects(), &dispatched.slot, &[])
+            .candidate_stage(
+                self.hooks.effects(),
+                &dispatched.slot,
+                &[],
+                crate::workspace_manager::ManifestDisposal::Kept,
+            )
             .expect("stage");
         let tree = manager
             .candidate_write_tree(self.hooks.effects(), &dispatched.slot)

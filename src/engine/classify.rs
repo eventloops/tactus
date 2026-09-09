@@ -157,7 +157,9 @@ pub(crate) fn unresolved_conflict_failure(entries: &[String]) -> AttemptFailure 
          `{RESOLVED_KEYWORD} <path>` for a path whose working-tree content is the resolution, \
          `{DELETED_KEYWORD} <path>` for a path resolved by deleting it. The engine stages what \
          the manifest declares; a path left unmerged and undeclared is refused before any gate \
-         runs. Run no git command.",
+         runs. Run no git command. The manifest is read at capture and removed once acted on; \
+         in a later attempt of this repair, write it again only for a path whose resolution \
+         you are changing.",
         entries.join(", ")
     ))
 }

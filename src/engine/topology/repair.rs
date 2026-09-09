@@ -145,7 +145,9 @@ fn repair_body(
                  the worktree, one line per path: `{} <path>` when the file's working-tree \
                  content is the resolution, `{} <path>` to resolve it by deleting the file. The \
                  engine stages what you declare; run no git command. A result with an unmerged \
-                 entry you did not declare is refused before any gate runs.\n",
+                 entry you did not declare is refused before any gate runs. The manifest is read \
+                 at capture and removed once acted on; in a later attempt of this repair, write \
+                 it again only for a path whose resolution you are changing.\n",
                 crate::workspace_manager::RESOLUTION_MANIFEST,
                 crate::workspace_manager::RESOLVED_KEYWORD,
                 crate::workspace_manager::DELETED_KEYWORD,

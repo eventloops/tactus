@@ -351,6 +351,13 @@ pub(crate) fn remove_file(path: &Path) {
     }
 }
 
+/// Remove the empty directory at `path`: a worker's file operation, standing
+/// for a tool that removes a directory it has emptied.
+pub(crate) fn remove_dir(path: &Path) {
+    fs::remove_dir(path)
+        .unwrap_or_else(|error| panic!("removing the directory {}: {error}", path.display()));
+}
+
 /// Run this test binary again, `--exact --ignored`, with `env` set, and
 /// return its exit status.
 ///

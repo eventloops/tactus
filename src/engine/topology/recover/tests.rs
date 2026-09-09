@@ -10874,9 +10874,11 @@ enum InterruptedRepairPrefix {
 /// and its first attempt, recovery (g) verifies the worktree at its recorded
 /// base, recreates it when the verification fails, and materializes nothing
 /// (`R6`); the resumed loop continues the same generation and materializes
-/// exactly once — onto a fresh worktree, or as a no-op onto the index a
-/// completed pick already left — so the observation recorded before the spawn
-/// is the one the attempt ran on.
+/// exactly once — onto a fresh worktree, or onto the one a completed pick
+/// left, whose index the funnel restores to the base's tree before it picks
+/// again (a second pick onto the merged index is not a no-op: it applies the
+/// hunk again) — so the observation recorded before the spawn is the one the
+/// attempt ran on.
 #[test]
 fn a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once()
 {
