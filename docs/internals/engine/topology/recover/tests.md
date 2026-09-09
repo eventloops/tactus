@@ -3486,13 +3486,15 @@ removed (M4) or made blocking (M5) still passed.
 
 ## `fn a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once() {`
 
-`T-REPAIR-DISPATCH` across the process boundary, for each of the three
-states a kill leaves between `task_dispatched` and `attempt_started`: no
-worktree, a worktree with the pick's held `MERGE_MSG.lock`, a completed
-pick. Recovery (g) recreates the first two at the base and reuses the
-third, materializing nothing (`R6`); the continuation materializes exactly
-once, in the same generation, and the observation `attempt_started`
-records is the continuation's.
+`T-REPAIR-DISPATCH` across the process boundary, for three of the states a
+kill leaves between `task_dispatched` and `attempt_started`: no worktree, a
+worktree with the pick's held `MERGE_MSG.lock`, a completed pick (which is
+also the shape of a kill after the index publish and before the message
+lock, the K2 state). Recovery (g) recreates the first two at the base and
+reuses the third, materializing nothing (`R6`); the continuation
+materializes exactly once, in the same generation — onto the restored base
+tree, not as a no-op onto the merged index — and the observation
+`attempt_started` records is the continuation's.
 
 ## `fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again() {`
 

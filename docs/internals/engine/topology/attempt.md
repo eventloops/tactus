@@ -881,21 +881,34 @@ a path declared in another case — beside the index's spelling with the other
 keyword, or alone — each refuse the whole capture, which returns the base's
 tree with those entries and stages nothing, so an unresolved conflict cannot
 be captured as the worker's work and a declared subset is never staged
-beside a refused one. A resolved path the manifest does not name stays as
-the previous capture left it, which is what a retained retry that changes
-nothing wants; one it names again is re-staged from the working tree, or
-removed — the case `deleted` exists for, a worker whose tools cannot delete
-correcting itself in a retained generation (PR #249's third-round regression
-review found the manifest unread there and the correction lost). When the
+beside a refused one. A resolved path the manifest does not name is left to
+the ordinary `add -A`, which stages its edits or its deletion like any
+path's — nothing is preserved from the previous capture (PR #249's
+fourth-round record review found this note promising that it was); one the
+manifest names again is re-staged from the working tree, or removed — the
+case `deleted` exists for, a worker whose tools cannot delete correcting
+itself in a retained generation (PR #249's third-round regression review
+found the manifest unread there and the correction lost). **The manifest is
+read once**: the capture that reads it and stages what it declares removes
+it (`ManifestDisposal::Consumed`, a `git clean` of the one untracked path
+inside the same funnel), so that a declaration is applied once — the
+fourth-round regression and manifest-contract reviews each found a settled
+`deleted c.txt` reread two attempts later, once the worker had recreated the
+file and the ordinary addition had put an index entry back beside the
+resolve-undo record, and the recreated file removed from the disk and the
+candidate. A refused manifest stays for the worker to correct. When the
 index holds nothing the manifest governs, the manifest is not read at all,
 and whatever the file says has no effect; a malformed manifest stages
 nothing *in a capture that reads it*, which is the whole of that promise.
 After staging, the index is read once more and an unmerged entry left is a
 Git error, never a passing capture. A repository that has taken the
-manifest's name — a tracked file of it, or a directory — cannot have a
-conflict repair declared in it: `resolution_manifest` refuses before
-anything is staged, naming what holds the name, while an ordinary capture
-there stages that path like any other (`WorkspaceManager::manifest_name`).
+manifest's name — a tracked file of it, as spelt or in another case, or a
+directory — cannot have a conflict repair declared in it:
+`resolution_manifest` refuses before anything is staged, naming what holds
+the name, while an ordinary capture there stages that path like any other
+(`WorkspaceManager::manifest_name`); a worker's file standing where a
+tracked directory of the name was is the worker's, and what the index still
+held under the name is staged first, deletions included.
 The worker runs no git command (DESIGN §26.4): PR #249's regression review
 assembled the production Claude Code and Copilot permissions and found file
 tools and gate commands only, so a rule that needed the worker's `git add`

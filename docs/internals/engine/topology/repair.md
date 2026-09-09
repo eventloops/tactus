@@ -84,8 +84,10 @@ verdict, gate outcome, review passes and detail. For a conflict it also
 states the resolution protocol: resolve each path with file tools, declare
 it in the resolution manifest (`workspace_manager::RESOLUTION_MANIFEST`, as
 `resolved <path>` or `deleted <path>`), run no git command; the engine
-stages what is declared and refuses what is not (DESIGN §26.4). It once told
-the worker to `git add`/`git rm` the path, which no edit profile can. The
+stages what is declared and refuses what is not (DESIGN §26.4), and reads
+the manifest once — removed when acted on, written again by a later attempt
+only for a resolution it changes. It once told the worker to `git add`/`git
+rm` the path, which no edit profile can. The
 other facts of the rejection (the lease effect, the admission) are the
 event's and the fold's, not the worker's.
 

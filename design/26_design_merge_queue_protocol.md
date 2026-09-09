@@ -300,13 +300,17 @@ Unrelated transactions and holdings survive. `decline_halts_run` additionally
 records a run halt; it does not decide whether the lineage fails. New repairs
 must name a coherent root and parent and cannot revive a failed ancestor.
 
-These are durable fold and replay rules. The current topology checkpoint
-driver still refuses human answer ingestion before append. It does not yet
-cancel running agent processes on a decline. A concurrent driver that ingests
-answers must stop the affected work and discard late results before appending
-their completion. Event shapes are unchanged; schema-4 replay now refuses the
-unsafe event orders excluded above, including bare questions during active
-lineage work and questions on terminal tasks.
+These are durable fold and replay rules. The topology driver ingests human
+answers: before each step it polls every open question without blocking, and
+at the hard block — nothing runnable, a question open — it waits on the
+answer source; an answer is appended as `question_answered` and its fold
+applied before any further work is selected. The driver runs one attempt at
+a time, so no agent process is running when an answer is ingested and none
+has to be cancelled on a decline. A concurrent driver that ingests answers
+must stop the affected work and discard late results before appending their
+completion. Event shapes are unchanged; schema-4 replay refuses the unsafe
+event orders excluded above, including bare questions during active lineage
+work and questions on terminal tasks.
 
 The live writer checks one event, appends that exact event successfully once,
 and applies its delta once to the same fold with no intervening transition.
@@ -334,7 +338,10 @@ review, whose configured checks decide what is detected, since ground truth is
 the diff. A same-generation retry re-enters the worktree the previous attempt
 left, and its manifest may revise a resolution that attempt declared: the index
 records which entries a capture resolved, and the engine reads those beside the
-unmerged ones. For a semantic rejection, it
+unmerged ones. The manifest is read once — the capture that acts on it removes
+it, so a declaration is applied once and a later attempt declares afresh what
+it revises; what it does not name is captured as any path is. For a semantic
+rejection, it
 materializes the clean proposal against that current head and supplies the
 original failed evidence. The payload's rejecting head remains immutable
 lineage evidence, not a promise to start later work from a stale tree.

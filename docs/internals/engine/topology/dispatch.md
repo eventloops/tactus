@@ -600,16 +600,23 @@ The whole of `T-DISPATCH`'s resume action for a live process, in order.
 Verify-or-recreate first, then — for a repair — the materialization, because
 the materialization is what has to land in a worktree that is already known
 good. Measured on git 2.43 (`--no-commit` leaves no `CHERRY_PICK_HEAD`): a
-kill inside the pick leaves `index.lock`, or the merged index with
-`MERGE_MSG` or its held `MERGE_MSG.lock`, all of which `Worktree.Verify`
-reads and recreates from; a pick that completed left its index holding the
-merge and — the funnel having cleared the state files — nothing the verify
-reads, so the worktree is reused as it stands and the funnel restores the
-base's tree before it picks again, reporting the same observation
-(`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`).
-Either way the result is one pick onto the base's tree in a worktree at the
-recorded base, and [`Resumed`] carries both what the verify decided and
-what the materialization observed.
+kill inside the pick leaves one of five states — nothing, `index.lock`, the
+merged index with no state file, the merged index with `MERGE_MSG.lock`
+held, the merged index with `MERGE_MSG`. The two lock forms and `MERGE_MSG`
+are what `Worktree.Verify` reads and recreates from. The merged index with
+no state file — the index published and unlocked, the process dead before
+`MERGE_MSG.lock` — is indistinguishable from a pick that completed, whose
+state files the funnel cleared: neither leaves anything the verify reads,
+so the worktree is reused as it stands (`Reuse::Verified`) and the funnel
+restores the base's tree before it picks again, reporting the same
+observation
+(`a_materialization_killed_after_its_index_write_converges_from_both_of_its_states`,
+for the clean and the conflicting source). Either way the result is one
+pick onto the base's tree in a worktree at the recorded base, and
+[`Resumed`] carries both what the verify decided and what the
+materialization observed. (This note once listed only the residue-bearing
+states for a kill inside the pick; PR #249's fourth-round record review
+found the copy.)
 
 ### Errors
 
@@ -652,8 +659,13 @@ worktree outlives the worktree rather than the other way round.
 
 ## `const fn observed_kind(observed: Materialized) -> Materialization {`
 
-The funnel's observation as the wire records it: three variants each way,
-matched exhaustively so a fourth on either side is a compile error here.
+The funnel's observation as the wire records it. The funnel's three
+variants are matched exhaustively, so a fourth funnel outcome is a compile
+error here; the wire's `Materialization` already has a fourth, `Retained`,
+which a same-generation retry records and no materialization ever observes,
+and a fifth on that side would not fail this match — the record's Class A
+inventory is what says the two enums correspond. (This note once claimed the
+guard both ways; PR #249's fourth-round record review read the enums.)
 
 ## `pub struct Resumed {`
 

@@ -2014,10 +2014,11 @@ recreated at its base exactly like an ordinary one; its source is read from
 its own `task_dispatched` (`dispatched_source`) so the loop's continuation
 can re-materialize it once. Materializing here too would run the pick twice
 when the continuation runs, or leave a worktree whose materialization the
-loop could not tell from the kill's. The three states a kill leaves between
-`task_dispatched` and `attempt_started` — no worktree, a worktree with the
-pick's residue, a completed pick — are each driven through this step and
-the continuation by
+loop could not tell from the kill's. Three of the states a kill leaves
+between `task_dispatched` and `attempt_started` — no worktree, a worktree
+with the pick's residue, a completed pick (the shape a kill after the index
+publish leaves too) — are each driven through this step and the
+continuation by
 `a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once`.
 
 ### Errors

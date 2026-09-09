@@ -8,7 +8,7 @@ reviewed_sha: 698777b0929b895480735fbca75eb23e76420524
 location: src/workspace_manager.rs:780
 provenance: introduced_by_feature
 first_bad: PR #249's second repair round (`19a464bb`), which introduced the resolution manifest and `Declaration::names`, a lexical component comparison
-guard: `Declaration::names_in_another_case` refuses the case half of the class on every platform; the normalization half is pinned as the boundary by `a_declaration_in_another_case_is_refused_and_the_checkout_says_whether_it_named_the_file`, which asserts on each CI platform whether the checkout reads the decomposed spelling as the composed file and that the engine does not, so folding it moves that test
+guard: `Declaration::names_in_another_case` refuses the case half of the class on every platform, folding case one character at a time (`char::to_lowercase`; the string fold it first used was contextual and read `ΟΣ` beside `οσ` as different names, closed in PR #249's fourth repair round with `a_case_alias_is_read_per_character_so_a_final_sigma_hides_no_contradiction`); the normalization half is pinned as the boundary by `a_declaration_in_another_case_is_refused_and_the_checkout_says_whether_it_named_the_file`, which asserts on each CI platform whether the checkout reads the decomposed spelling as the composed file and that the engine does not, so folding it moves that test
 ---
 
 ## Failure sequence
@@ -28,7 +28,9 @@ either alone or beside the composed spelling with the other keyword.
 PR #249's third-round manifest-contract review, finding 3, executed the planner half and reasoned
 the filesystem half. The third repair round fixed the case half of the class —
 `names_in_another_case` refuses a contradiction in two cases and a lone respelling in another
-case, on every platform — and measured the normalization half on each CI platform through
+case, on every platform — with a string fold that turned out contextual (a final capital sigma
+became `ς`, so the Greek pair `ΟΣ`/`οσ`, one file on the Windows guest, escaped it; the fourth
+round folds per character), and measured the normalization half on each CI platform through
 `a_declaration_in_another_case_is_refused_and_the_checkout_says_whether_it_named_the_file`,
 which asserts that the decomposed spelling names the composed file on macOS and nowhere else,
 and that the engine reads it as nothing everywhere.
