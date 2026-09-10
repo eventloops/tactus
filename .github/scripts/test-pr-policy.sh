@@ -89,18 +89,20 @@ P2_correctness_202609101200_filed-and-repaired-in-one-range.md
 P2_correctness_202609101200_filed-and-repaired-in-one-range.md
 EOF
 
+# The migration list is `<pull-request number> <head branch>`, and an entry is
+# the pull request rather than the name.
 cat > "$fixture_dir/legacy.txt" <<'EOF'
 # a comment, and a blank line, are not branches
 
-codex/findings-p3-1a57a2730a12
-sweep/workspace-manager-fixture
+222 codex/findings-p3-1a57a2730a12
+135 sweep/workspace-manager-fixture
 EOF
 
 # branch_pass / branch_fail resolve against the BASE listing alone, which is
 # what a caller that passes one listing gets.
 branch_pass() {
   local name="$1" branch="$2"
-  if ! LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" >/dev/null 2>&1; then
     echo "expected branch to pass: $name ($branch)" >&2
     exit 1
@@ -109,7 +111,7 @@ branch_pass() {
 
 branch_fail() {
   local name="$1" branch="$2"
-  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" >/dev/null 2>&1; then
     echo "expected branch to fail: $name ($branch)" >&2
     exit 1
@@ -120,7 +122,7 @@ branch_fail() {
 # passes and what a real pull request is judged by.
 pair_pass() {
   local name="$1" branch="$2"
-  if ! LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" "$branch" \
     "$fixture_dir/findings.txt" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to pass against base and head: $name ($branch)" >&2
@@ -130,7 +132,7 @@ pair_pass() {
 
 pair_fail() {
   local name="$1" branch="$2"
-  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" "$branch" \
     "$fixture_dir/findings.txt" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to fail against base and head: $name ($branch)" >&2
@@ -142,7 +144,7 @@ pair_fail() {
 # which is what the workflow passes and what a real pull request is judged by.
 triple_pass() {
   local name="$1" branch="$2"
-  if ! LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" \
     "$fixture_dir/head-findings.txt" "$fixture_dir/range-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to pass over the range: $name ($branch)" >&2
@@ -152,7 +154,7 @@ triple_pass() {
 
 triple_fail() {
   local name="$1" branch="$2"
-  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" \
     "$fixture_dir/head-findings.txt" "$fixture_dir/range-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to fail over the range: $name ($branch)" >&2
@@ -262,17 +264,6 @@ triple_fail 'in no tree and no commit'    'fix-P2/correctness_never-filed-at-all
 triple_fail 'wrong severity in the range' 'fix-P3/correctness_filed-and-repaired-in-one-range'
 triple_fail 'wrong category in the range' 'fix-P2/liveness_filed-and-repaired-in-one-range'
 
-# ---- the legacy list is an exact line and never an option ---------------------------------
-#
-# The lookup passes the branch name to grep. Without `--`, a name that begins
-# with a dash is read as grep's own options: `-e<listed branch>` becomes `-e`
-# plus a LISTED pattern, so a name that is not in the file is granted the
-# exemption -- and the validator returns before the grammar is ever checked. The
-# list is an escape hatch the owner intends to delete; inheriting an entry
-# without being on it makes its contents meaningless.
-branch_fail 'legacy short option injection' '-ecodex/findings-p3-1a57a2730a12'
-branch_fail 'legacy long option injection'  '--regexp=codex/findings-p3-1a57a2730a12'
-
 # ---- a listing that cannot be read is a refusal, never an empty set -----------------------
 #
 # An unreadable listing read as "nothing here" NARROWS the candidate set, and a
@@ -285,7 +276,7 @@ cp "$fixture_dir/head-findings.txt" "$unreadable"
 if [[ "$(id -u)" -ne 0 ]] && chmod 000 "$unreadable" 2>/dev/null && [[ ! -r "$unreadable" ]]; then
   # The review's own reproduction: both listings readable is an ambiguous
   # refusal, and making one unreadable must not leave a single match behind.
-  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
     "$fixture_dir/findings.txt" "$unreadable" >/dev/null 2>&1; then
     echo 'expected an unreadable second listing to refuse, not to conform' >&2
@@ -293,7 +284,7 @@ if [[ "$(id -u)" -ne 0 ]] && chmod 000 "$unreadable" 2>/dev/null && [[ ! -r "$un
   fi
   # And a failure on the FIRST listing must not be masked by a good second one
   # that resolves the name on its own.
-  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it' \
     "$unreadable" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
     echo 'expected an unreadable first listing to refuse, not to be masked' >&2
@@ -309,7 +300,7 @@ fi
 # existence-and-permission checks cannot see: the refusal has to come from the
 # read itself.
 if [[ -c /dev/null ]]; then
-  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
     "$BASH" "$branch_validator" 'fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter' \
     "$fixture_dir/findings.txt" /dev/null >/dev/null 2>&1; then
     echo 'expected a listing that is neither a file nor a directory to refuse' >&2
@@ -328,7 +319,7 @@ branch_fail 'bulk upper case' 'bulk-fix-P3/Docs-Fixes'
 
 # The grammar holds with no findings listing, which is how a caller with no
 # repository checks a name.
-if ! LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
   "$BASH" "$branch_validator" 'fix-P1/correctness_never-filed' >/dev/null 2>&1; then
   echo 'expected the grammar alone to pass without a findings listing' >&2
   exit 1
@@ -337,20 +328,209 @@ fi
 # A listing that does not exist is a caller error, and it must be refused before
 # the resolution runs rather than read as a finding that was never filed. The
 # branch here needs no resolution at all, so only an eager check fails it.
-if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
   "$BASH" "$branch_validator" 'feature/pr9-repair-execution' \
   "$fixture_dir/no-such-listing" >/dev/null 2>&1; then
   echo 'expected a findings listing that does not exist to fail' >&2
   exit 1
 fi
 
-# The legacy list is an exact-line match, so a branch that merely contains a
-# listed one is still refused and the exemption cannot be widened by accident.
-branch_pass 'listed legacy branch'  'codex/findings-p3-1a57a2730a12'
-branch_pass 'second legacy branch'  'sweep/workspace-manager-fixture'
-branch_fail 'legacy as a substring' 'codex/findings-p3-1a57a2730a12-extra'
-branch_fail 'legacy comment line'   '# a comment, and a blank line, are not branches'
-branch_fail 'unlisted codex branch' 'codex/findings-p3-deadbeefcafe'
+# ---- an exemption is a pull request, not a name -------------------------------------------
+#
+# Keyed on the branch name alone, the list exempted anybody who typed it: nothing
+# stops a fork creating `codex/findings-p3-1a57a2730a12` today and opening a NEW
+# pull request, and a lookup handed only that name cannot tell it from the pull
+# request the entry was written for. The list's contents would then no longer
+# decide who is exempt, and the population would no longer be the migration it
+# claims to describe. Both fields must match the same line.
+legacy_pass() {  # legacy_pass <name> <pr-number> <branch>
+  local name="$1" pr="$2" branch="$3"
+  if ! PR_NUMBER="$pr" LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" "$branch" >/dev/null 2>&1; then
+    echo "expected the exemption to apply: $name (#$pr $branch)" >&2
+    exit 1
+  fi
+}
+
+legacy_fail() {  # legacy_fail <name> <pr-number> <branch>
+  local name="$1" pr="$2" branch="$3"
+  if PR_NUMBER="$pr" LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" "$branch" >/dev/null 2>&1; then
+    echo "expected the exemption NOT to apply: $name (#$pr $branch)" >&2
+    exit 1
+  fi
+}
+
+legacy_pass 'the pull request the entry was written for' 222 'codex/findings-p3-1a57a2730a12'
+legacy_pass 'the second listed pull request'             135 'sweep/workspace-manager-fixture'
+# The one that matters: the same branch name, a different pull request. This is
+# every future pull request, fork or not, that reuses a listed name.
+legacy_fail 'the same name, a new pull request'          999 'codex/findings-p3-1a57a2730a12'
+legacy_fail 'a listed number, a different branch'        222 'codex/findings-p3-deadbeefcafe'
+legacy_fail 'the numbers crossed over'                   135 'codex/findings-p3-1a57a2730a12'
+# No identity is no exemption. A caller checking a name by hand is not judging a
+# pull request, and the safe answer for one is the rule itself.
+legacy_fail 'no pull-request identity'                   ''  'codex/findings-p3-1a57a2730a12'
+legacy_fail 'a non-numeric identity'                     'abc' 'codex/findings-p3-1a57a2730a12'
+# The fields are compared and never handed to a pattern matcher, so a name that
+# begins with a dash is a name and not a set of grep options.
+legacy_fail 'short option injection'  222 '-ecodex/findings-p3-1a57a2730a12'
+legacy_fail 'long option injection'   222 '--regexp=codex/findings-p3-1a57a2730a12'
+# Still an exact match on the branch field, and comments are still not entries.
+legacy_fail 'legacy as a substring'   222 'codex/findings-p3-1a57a2730a12-extra'
+legacy_fail 'legacy comment line'     222 '# a comment, and a blank line, are not branches'
+legacy_fail 'unlisted codex branch'   222 'codex/findings-p3-deadbeefcafe'
+
+# ---- the listings themselves, built from real repositories ---------------------------------
+#
+# Everything above tests what the validator does with a listing. NOTHING above
+# tests whether the listing is right, and that is where two frontier reviews
+# found defects: the range was built with `git log -- reviews/findings/`, which
+# answers which commits CHANGED the path after simplification rather than which
+# findings EXISTED, and it missed them two ways. So these build real
+# repositories and call .github/scripts/findings-in-range.sh, the script the
+# workflow calls.
+#
+# A missed finding is not only a false red on a valid branch. It is a false
+# GREEN on an ambiguous one, which is the failure this gate exists to prevent.
+
+range_script="$root/.github/scripts/findings-in-range.sh"
+
+new_repo() {  # new_repo <dir>
+  mkdir -p "$1"
+  git -C "$1" init -q .
+  git -C "$1" config user.email fixture@example.invalid
+  git -C "$1" config user.name 'fixture'
+  git -C "$1" config commit.gpgsign false
+  git -C "$1" config gc.auto 0
+}
+
+commit_finding() {  # commit_finding <dir> <filename> <message>
+  mkdir -p "$1/reviews/findings"
+  echo fixture > "$1/reviews/findings/$2"
+  git -C "$1" add -A
+  git -C "$1" commit -q -m "$3"
+}
+
+range_listing() {  # range_listing <dir> <base> <head> -> the range-findings lines
+  ( cd "$1" && "$BASH" "$range_script" "$2" "$3" "$1/out" >/dev/null 2>&1 ) || return 1
+  cat "$1/out/range-findings"
+}
+
+# A completed repair: commit A files the finding, commit B repairs it and
+# DELETES the file as reviews/findings/README.md requires, and the whole thing
+# is merged into the pull request's branch after an unrelated commit. The
+# finding is in neither endpoint tree, and history simplification prunes the
+# side branch entirely because its net effect on the path is nothing.
+repo_a="$fixture_dir/repo-merged-repair"
+new_repo "$repo_a"
+echo seed > "$repo_a/seed.txt"
+git -C "$repo_a" add -A && git -C "$repo_a" commit -q -m base
+a_base="$(git -C "$repo_a" rev-parse HEAD)"
+git -C "$repo_a" checkout -q -b side "$a_base"
+commit_finding "$repo_a" 'P2_correctness_202609101200_a-new-bug.md' 'A: file the finding'
+git -C "$repo_a" rm -q "reviews/findings/P2_correctness_202609101200_a-new-bug.md"
+git -C "$repo_a" commit -q -m 'B: repair it and delete the finding'
+git -C "$repo_a" checkout -q -b trunk "$a_base"
+echo unrelated > "$repo_a/other.txt"
+git -C "$repo_a" add -A && git -C "$repo_a" commit -q -m unrelated
+git -C "$repo_a" merge -q --no-ff side -m 'merge the completed repair'
+a_head="$(git -C "$repo_a" rev-parse HEAD)"
+
+got="$(range_listing "$repo_a" "$a_base" "$a_head")" \
+  || { echo 'findings-in-range.sh failed on the merged-repair repository' >&2; exit 1; }
+if [[ "$got" != 'P2_correctness_202609101200_a-new-bug.md' ]]; then
+  echo "the range must hold a finding filed and repaired on a merged side branch; got [$got]" >&2
+  exit 1
+fi
+
+# The same shape, with a SECOND finding of the same description on the receiving
+# branch. Miss the side branch's one and the name resolves to a single match and
+# conforms; see both and it is ambiguous, which is what it is.
+repo_b="$fixture_dir/repo-hidden-twin"
+new_repo "$repo_b"
+echo seed > "$repo_b/seed.txt"
+git -C "$repo_b" add -A && git -C "$repo_b" commit -q -m base
+b_base="$(git -C "$repo_b" rev-parse HEAD)"
+git -C "$repo_b" checkout -q -b side "$b_base"
+commit_finding "$repo_b" 'P2_correctness_202609101200_a-new-bug.md' 'A: file the finding'
+git -C "$repo_b" rm -q "reviews/findings/P2_correctness_202609101200_a-new-bug.md"
+git -C "$repo_b" commit -q -m 'B: repair it and delete the finding'
+git -C "$repo_b" checkout -q -b trunk "$b_base"
+commit_finding "$repo_b" 'P2_correctness_202609111500_a-new-bug.md' 'the receiving branch files its own'
+git -C "$repo_b" merge -q --no-ff side -m 'merge the completed repair'
+b_head="$(git -C "$repo_b" rev-parse HEAD)"
+
+( cd "$repo_b" && "$BASH" "$range_script" "$b_base" "$b_head" "$repo_b/out" >/dev/null 2>&1 ) \
+  || { echo 'findings-in-range.sh failed on the hidden-twin repository' >&2; exit 1; }
+if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_a-new-bug' \
+  "$repo_b/out/base-findings" "$repo_b/out/head-findings" "$repo_b/out/range-findings" \
+  >/dev/null 2>&1; then
+  echo 'a finding hidden on a merged side branch made an ambiguous name conform' >&2
+  exit 1
+fi
+
+# A finding created and deleted ONLY inside merge commits. `git log` reports no
+# paths for a merge unless per-parent diffs are asked for, so this one is
+# invisible to it even under --full-history. Listing trees does not care.
+repo_c="$fixture_dir/repo-merge-only"
+new_repo "$repo_c"
+echo seed > "$repo_c/seed.txt"
+git -C "$repo_c" add -A && git -C "$repo_c" commit -q -m base
+c_base="$(git -C "$repo_c" rev-parse HEAD)"
+git -C "$repo_c" checkout -q -b p1 "$c_base"
+echo a > "$repo_c/a.txt"; git -C "$repo_c" add -A; git -C "$repo_c" commit -q -m c1
+git -C "$repo_c" checkout -q -b trunk "$c_base"
+echo b > "$repo_c/b.txt"; git -C "$repo_c" add -A; git -C "$repo_c" commit -q -m c2
+git -C "$repo_c" merge -q --no-commit --no-ff p1 >/dev/null 2>&1 || true
+mkdir -p "$repo_c/reviews/findings"
+echo fixture > "$repo_c/reviews/findings/P2_correctness_202609101200_only-in-merges.md"
+git -C "$repo_c" add -A
+git -C "$repo_c" commit -q -m 'M1: a merge that files the finding in the merge itself'
+git -C "$repo_c" checkout -q -b q
+echo c > "$repo_c/c.txt"; git -C "$repo_c" add -A; git -C "$repo_c" commit -q -m c3
+git -C "$repo_c" checkout -q trunk
+echo d > "$repo_c/d.txt"; git -C "$repo_c" add -A; git -C "$repo_c" commit -q -m c4
+git -C "$repo_c" merge -q --no-commit --no-ff q >/dev/null 2>&1 || true
+git -C "$repo_c" rm -q "reviews/findings/P2_correctness_202609101200_only-in-merges.md"
+git -C "$repo_c" commit -q -m 'M2: a merge that removes it in the merge itself'
+c_head="$(git -C "$repo_c" rev-parse HEAD)"
+
+got="$(range_listing "$repo_c" "$c_base" "$c_head")" \
+  || { echo 'findings-in-range.sh failed on the merge-only repository' >&2; exit 1; }
+if [[ "$got" != 'P2_correctness_202609101200_only-in-merges.md' ]]; then
+  echo "the range must hold a finding that lived only inside merge commits; got [$got]" >&2
+  exit 1
+fi
+
+# The base tree is listed separately: `<base>..<head>` excludes the base, so a
+# finding this pull request never touched lives only there.
+repo_d="$fixture_dir/repo-untouched"
+new_repo "$repo_d"
+commit_finding "$repo_d" 'P1_liveness_202609010900_untouched-by-this-branch.md' 'base files a finding'
+d_base="$(git -C "$repo_d" rev-parse HEAD)"
+echo unrelated > "$repo_d/other.txt"
+git -C "$repo_d" add -A && git -C "$repo_d" commit -q -m 'the branch changes something else'
+d_head="$(git -C "$repo_d" rev-parse HEAD)"
+( cd "$repo_d" && "$BASH" "$range_script" "$d_base" "$d_head" "$repo_d/out" >/dev/null 2>&1 ) \
+  || { echo 'findings-in-range.sh failed on the untouched-finding repository' >&2; exit 1; }
+if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P1/liveness_untouched-by-this-branch' \
+  "$repo_d/out/base-findings" "$repo_d/out/head-findings" "$repo_d/out/range-findings" \
+  >/dev/null 2>&1; then
+  echo 'a finding the branch never touched must still resolve, from the base tree' >&2
+  exit 1
+fi
+
+# And an unresolvable end fails closed rather than being dropped.
+if ( cd "$repo_d" && "$BASH" "$range_script" \
+  '0000000000000000000000000000000000000000' "$d_head" "$repo_d/out2" ) >/dev/null 2>&1; then
+  echo 'expected a base commit that is not in the checkout to fail' >&2
+  exit 1
+fi
+
+echo 'listing-construction fixtures passed'
 
 echo 'branch vocabulary fixtures passed'
 

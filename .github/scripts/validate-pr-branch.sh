@@ -113,11 +113,23 @@
 # is left and the name "conforms". Read failures are propagated, separately from
 # grep's ordinary no-match status.
 #
-# GRANDFATHERING. .github/legacy-branches.txt lists the branches that predate
-# this rule, one per line. It is a to-do list that shrinks: a listed branch is
-# accepted with a warning, and the file reaching zero entries is the signal the
-# migration finished. It is not an escape hatch for new work, and adding to it
-# is a diff the review and the owner see like any other.
+# GRANDFATHERING, AND WHY AN EXEMPTION IS A PULL REQUEST AND NOT A NAME.
+# .github/legacy-branches.txt lists the pull requests that predate this rule,
+# `<number> <head branch>`, and BOTH fields must match. A listed pull request is
+# accepted with a warning; the file reaching zero entries is the signal the
+# migration finished.
+#
+# Keying on the branch name alone exempted anybody who typed it. Nothing stops a
+# fork creating `codex/findings-p3-1a57a2730a12` today and opening a new pull
+# request, and a lookup that is handed only that name cannot tell it from the
+# pull request the entry was written for. A migration list whose CONTENTS no
+# longer decide who is exempt is not a migration list, and the population would
+# no longer be the 24 pull requests it claims to describe. The number bounds it.
+#
+# PR_NUMBER carries that identity. With no PR_NUMBER there is nothing to match
+# and no exemption is granted -- deliberately: a caller checking a name by hand
+# is not judging a pull request, and the safe answer to an unidentified caller
+# is the rule itself.
 
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
@@ -186,19 +198,32 @@ fail() {
 
 [[ -n "$branch" ]] || fail 'no branch name was given'
 
-# A listed legacy branch is accepted, loudly, so the exemption is visible in the
+# legacy_exempt: is THIS pull request one the migration list names? Both the
+# number and the branch must match the same line. The fields are compared with
+# `==` and never handed to a pattern matcher, so a name beginning with a dash is
+# a name and not a set of options.
+legacy_exempt() {
+  local pr="${PR_NUMBER:-}" listed_pr listed_branch
+  [[ -f "$legacy_file" ]] || return 1
+  [[ "$pr" =~ ^[0-9]+$ ]] || return 1
+  while read -r listed_pr listed_branch _; do
+    listed_branch="${listed_branch%$'\r'}"
+    if [[ -z "$listed_pr" || "$listed_pr" == \#* ]]; then
+      continue
+    fi
+    if [[ "$listed_pr" == "$pr" && "$listed_branch" == "$branch" ]]; then
+      return 0
+    fi
+  done < "$legacy_file"
+  return 1
+}
+
+# A listed pull request is accepted, loudly, so the exemption is visible in the
 # check's log rather than silent.
-#
-# `--` IS LOAD-BEARING. Without it a branch name beginning with a dash is read by
-# grep as its own options: `-ecodex/findings-p3-1a57a2730a12` becomes `-e` plus a
-# LISTED pattern, so a name that is not in the file is granted the exemption and
-# returns before the grammar is ever checked. The list is an escape hatch the
-# owner intends to delete; a way to inherit an entry without being on it makes
-# its contents meaningless.
-if [[ -f "$legacy_file" ]] \
-  && grep -v '^[[:space:]]*#' "$legacy_file" | grep -qxF -- "$branch"; then
-  echo "branch-name-policy: '$branch' predates the branch vocabulary and is" >&2
-  echo "  listed in ${legacy_file##*/}. Rename it when it next comes up for merge." >&2
+if legacy_exempt; then
+  echo "branch-name-policy: pull request #${PR_NUMBER} predates the branch" >&2
+  echo "  vocabulary and is listed in ${legacy_file##*/} as '$branch'." >&2
+  echo "  Rename it when it next comes up for merge." >&2
   exit 0
 fi
 

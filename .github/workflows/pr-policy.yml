@@ -84,8 +84,13 @@ jobs:
             printf '%s' "$PR_HEAD" > "$RUNNER_TEMP/pr-head"
             printf '%s' "$PR_BRANCH" > "$RUNNER_TEMP/pr-branch"
           fi
+          # The number is the identity a legacy exemption is bound to, so it
+          # is carried to the branch step like the head and the branch name.
+          # On merge_group it is the one parsed out of the queue ref above.
+          printf '%s' "$PR_NUMBER" > "$RUNNER_TEMP/pr-number"
           [[ -s "$RUNNER_TEMP/pr-head" ]] || { echo "no head SHA for pull request $PR_NUMBER" >&2; exit 1; }
           [[ -s "$RUNNER_TEMP/pr-branch" ]] || { echo "no head branch for pull request $PR_NUMBER" >&2; exit 1; }
+          [[ -s "$RUNNER_TEMP/pr-number" ]] || { echo "no number for the pull request under review" >&2; exit 1; }
 
       - name: Validate title, evidence sections, and finding ledger
         shell: bash
@@ -109,29 +114,23 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
-          head_sha="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
           # The base and head commits, not remote-tracking refs: `actions/checkout`
           # only promises the fetched history, and the event carries both SHAs on
-          # both triggers. An end that will not resolve fails closed rather than
-          # being dropped, because dropping one is the looser rule of the two and
-          # nothing in the log would say it had happened.
-          git rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null \
-            || { echo "base commit $BASE_SHA is not in this checkout" >&2; exit 1; }
-          git rev-parse --verify --quiet "$head_sha^{commit}" >/dev/null \
-            || { echo "head commit $head_sha is not in this checkout" >&2; exit 1; }
-          git ls-tree --name-only "$BASE_SHA" reviews/findings/ \
-            | sed "s|.*/||" > "$RUNNER_TEMP/base-findings"
-          git ls-tree --name-only "$head_sha" reviews/findings/ \
-            | sed "s|.*/||" > "$RUNNER_TEMP/head-findings"
-          # The range. This is the only one of the three that holds a finding
-          # filed in one commit and deleted by its repair in the next, which is
-          # the whole point of resolving over the range. Blank lines are dropped
-          # with sed and not `grep -v`, because grep exits 1 when it filters
-          # everything out and this pipeline must fail only when git does.
-          git log --pretty=format: --name-only --no-renames \
-            "$BASE_SHA..$head_sha" -- reviews/findings/ \
-            | sed -e "s|.*/||" -e '/^$/d' > "$RUNNER_TEMP/range-findings"
+          # both triggers. findings-in-range.sh fails closed on an end that will
+          # not resolve, rather than dropping it.
+          head_sha="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
+          # The three listings, built by .github/scripts/findings-in-range.sh
+          # so that .github/scripts/test-pr-policy.sh can build real repositories
+          # and check them. It was four lines here, and the fixtures could not
+          # reach it: two wrong ways of building the range each survived a
+          # frontier review because the suite only ever tested what the validator
+          # does with a listing, never whether the listing was right.
+          bash .github/scripts/findings-in-range.sh \
+            "$BASE_SHA" "$head_sha" "$RUNNER_TEMP/findings"
+          export PR_NUMBER
+          PR_NUMBER="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-number")"
           bash .github/scripts/validate-pr-branch.sh \
             "$(cat "$RUNNER_TEMP/pr-branch")" \
-            "$RUNNER_TEMP/base-findings" "$RUNNER_TEMP/head-findings" \
-            "$RUNNER_TEMP/range-findings"
+            "$RUNNER_TEMP/findings/base-findings" \
+            "$RUNNER_TEMP/findings/head-findings" \
+            "$RUNNER_TEMP/findings/range-findings"
