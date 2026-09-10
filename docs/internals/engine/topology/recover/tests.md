@@ -3355,6 +3355,17 @@ nothing. The refusal counts kills only, over every spawn, and the retry does
 not weaken it: sixteen clean exits are still a run in which nothing was
 killed.
 
+The second batch is a whole batch. The loop plans `SAMPLING_N` spawns and,
+when the eighth is in and nothing has died, plans `MAX_SPAWNS`; until
+2026-09-10 it went on only while no kill had landed, so the second batch
+ended at its first kill — reproduced: eight controls, run 8 killed at
+117 µs and classified `None`, `spawns=9`, a pass — and one earliest-rung,
+pre-write kill stood as the evidence of a batch (the ultra review of
+`f837f4ca`, finding 1). Reproduced again at `62f55943` with the first
+batch's aims fifty times too long: the old loop stops at `spawns=9,
+killed=1`; this one runs `spawns=16, killed=8`, every kill in the second
+batch, the ladder having followed the first batch's eight completions.
+
 ## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let two_tasks = || Damage {`
 
 How long the same pick takes when nothing kills it, measured in a probe
@@ -3370,14 +3381,16 @@ such completions.
 Until 2026-09-10 the budget was one pick, the first cherry-pick in a fresh
 staging worktree, and every kill was `sleep(fraction)` then `kill`.
 `RECOVER-CHERRY-PICK-SAMPLER-COLD-PROBE`: on the hosted `test (macos-latest)`
-leg that one measurement was, four times in three days, more than nine
+leg that one measurement was, five times in two days, more than nine
 times the picks it scheduled — all eight children exited 0 before the
-lowest rung — and the refusal fired on a pull request whose diff was
-Markdown (run 34304029954 at `828da6cd`), on two pushes to master
-(34328230257 at `9a6897ea`, 34356671343 at `74da2cbb`) and on a merge-queue
-entry for #258 (34433061085), a leg that was red on 4 of the 147 hosted
-macOS runs between 2026-09-07 and 2026-09-10 for this test alone. The
-refusal was right each time: nothing had been sampled. Measured on the
+lowest rung — and the refusal fired, with this text, on two pull requests
+(run 34304029954 at `828da6cd`, whose diff was Markdown, and 34353183264
+at `fbf3e50b`), on two pushes to master (34328230257 at `9a6897ea`,
+34356671343 at `74da2cbb`) and on a merge-queue entry for #258
+(34433061085): 5 of the 155 hosted macOS runs that completed between
+2026-09-07 and 2026-09-10, in a census that names every run and matches
+this message rather than the test's name (#259's body). The refusal was
+right each time: nothing had been sampled. Measured on the
 build box at `81ee09ef`: the first pick in a fresh staging worktree takes
 1.1 ms against 0.94 ms warm, a pick's first write lands about 0.6 ms in
 and the eight rungs land five `None` and three `Internal`, so an aim even
@@ -3388,14 +3401,34 @@ is CI's.
 ## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let aim = budget.aim(run % SAMPLING_N, SAMPLING_N);`
 
 The rung's aim, `(rung + 1) / (SAMPLING_N + 1)` of the current budget, and
-`KillableGitChild::run_until` in place of a sleep: the child is polled to
-the aim — once a millisecond while it is far, continuously through its last
-four — so the kill fires within a poll of where it was aimed rather than
-after a scheduler's wake-up, and a child that exits first reports its own
-duration, which is the number the budget follows. Every spawn's aim and
-outcome goes into the refusal's message, with the probe and the number of
-completions the ladder followed, so a red leg carries the timing evidence
-the finding said it lacked.
+`KillableGitChild::run_until` in place of a sleep then a kill: the child is
+polled to the aim — once a millisecond while it is far, continuously
+through its last four — and the poll that reaches the aim with the child
+still running sends the kill itself, so the kill is at most a poll late
+rather than a scheduler's wake-up late, and nothing runs between the
+observation and the kill. A child that exits first is observed at the poll
+that finds it gone, and that observation is the number the budget follows:
+the parent's clock, an upper bound on the pick, tight by one poll while the
+parent holds a core and late by the scheduler's wake-up when it does not —
+not the child's own time, which no wait reports to a parent (`wait4`
+carries CPU times; Windows' `GetProcessTimes` carries an exit time and the
+fixture does not bind it). What remains is the window between that last
+poll and the kill's system call: a parent descheduled there lets the child
+finish, the kill misses, and the child's status is a completion; such a
+pick is fed back too, bounded by the time the kill fired, where until
+2026-09-10 it was thrown away (the ultra review of `f837f4ca`, finding 2 —
+reproduced at `62f55943` with a 2 ms sleep planted in that window: the old
+loop refuses having "followed 0 completion(s)", this one refuses having
+followed all sixteen). Neither the window nor a late observation is closed
+by this; both are damped by the median of the last three completions and
+corrected by the next pick a rung is aimed past. On the build box the kill
+fires within half a microsecond of its aim, and a completion is observed within
+70 µs of a blocking wait's clock through the spun last four milliseconds
+and within 0.8 ms through the slept phase before them; macOS and Windows
+are reasoned, not measured. Every spawn's aim and outcome — the kill's own
+time, or the completion's — goes into the refusal's message, with the probe
+and the number of completions the ladder followed, so a red leg carries the
+timing evidence the finding said it lacked.
 
 ## `const SAMPLING_N: u32 = 8;` › `let mut child = KillableGitChild::spawn(`
 

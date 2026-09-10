@@ -418,17 +418,30 @@ completions, so an inflated probe is corrected by the first child that
 outruns it and a drifting host is tracked rung by rung. The kill itself is
 `KillableGitChild::run_until` rather than `sleep` then `kill`: the child is
 polled to the aim, once a millisecond while it is far and continuously
-through its last four, so the kill fires within a poll of the aim rather
-than after a loaded host's wake-up, and a child that exits first reports its
-own duration. The floors are unchanged; each one's message now carries the
-probe, the number of completions the ladder followed and every spawn's aim
-and outcome. Measured on the build box at `81ee09ef`: the pick takes about
+through its last four, and the poll that reaches the aim with the child
+still running sends the kill, so the kill is at most a poll late and nothing
+runs between the observation and it. A child that exits first is observed
+at the poll that finds it gone — the parent's clock, an upper bound on the
+pick, not the child's own — and a child that finishes in the window between
+that last poll and the kill's system call, the parent descheduled there,
+ends with a completion's status and is fed back bounded by the time the
+kill fired, where until 2026-09-10 it was thrown away (the ultra review of
+`f837f4ca`, finding 2). The window and a late observation remain, damped by
+the median of the last three completions and corrected by the next pick a
+rung is aimed past; the recover notes carry the build-box measurement, and
+macOS and Windows are reasoned, not measured. The floors are unchanged;
+each one's message now carries the probe, the number of completions the
+ladder followed and every spawn's aim and outcome, the kill's own time or
+the completion's. Measured on the build box at `81ee09ef`: the pick takes about
 0.77 ms in a fresh worktree and warm alike, its first write lands about
 0.58 ms in and `MERGE_MSG` at its end, so one cycle of the ladder lands six
 `None`, one `Internal` and one `After` without `MERGE_MSG` and the floors are
 met in eight spawns; 25 runs alone never failed here before the change and 25
-never failed after it. Of the 147 hosted macOS runs between 2026-09-07 and
-2026-09-10, this floor was red on 3; the leg's own evidence is CI's.
+never failed after it. Of the 155 hosted macOS runs that completed between 2026-09-07 and
+2026-09-10, this floor was red on 3, by this message: 34293462480 at
+`56ea88c9` (6 kills in 32 spawns), 34385164329 at `c00c8638` (7 in 64) and
+the merge-queue entry for #258, 34432439820 (5 in 64); the census names
+every run (#259's body). The leg's own evidence is CI's.
 
 ## `fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {`
 
