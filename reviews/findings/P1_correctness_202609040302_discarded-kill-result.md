@@ -21,3 +21,15 @@ deferred: the end of a helper reports what `kill` returned (0, ESRCH, EPERM) and
 
 Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
 was written in.
+
+## Adjacency, recorded 2026-09-10 by the findings-sweep Phase 0 triage
+
+**Not a duplicate of `PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`,
+and not schedulable beside it.** That row carries the same `location:` —
+`src/agent/proc.rs:2320` — and is a different defect at the same place: it is
+about the *pid* these calls name, this one about the *result* they discard. The
+five `let _ = libc::kill(…, SIGKILL)` sites are what both rows sit on. Both were
+recorded against `0bff83df` and the line has drifted since, so re-derive it from
+the failure sequence rather than trusting `:2320`. Whichever is repaired first
+moves the other's line number, and the two may not share a batch: they edit the
+same lines.

@@ -21,3 +21,16 @@ deferred: this is a design decision for the owner, not a repair round; the durab
 
 Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
 was written in.
+
+## Adjacency, recorded 2026-09-10 by the findings-sweep Phase 0 triage
+
+**Not a duplicate of `PR125-CLOSE-DISCARDED-KILL-RESULT`, and not schedulable
+beside it.** That row carries the same `location:` — `src/agent/proc.rs:2320` —
+and is a different defect at the same place: it is about the *result* of
+`kill` being discarded, this one about the *pid* the call names. Both were
+recorded against `0bff83df` and the line has drifted since; the sites are the
+`libc::kill(…, SIGKILL)` calls on the helper's end path, and the host
+wildcard-waiter reasoning is now beside `install_reaper_dispositions`
+(`:2411`). Whichever is repaired first moves the other's line number, so
+re-derive it from the failure sequence rather than trusting `:2320`, and the
+two may not share a batch: they edit the same lines.
