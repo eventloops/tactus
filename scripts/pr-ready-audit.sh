@@ -80,12 +80,22 @@
 #     between the opening --- and the next) carries `id: <the finding id>`; a rejected or
 #     accepted-risk row is the owner's call and sends the pull request to MANUAL
 #
-# A lookup this audit could not complete is not an answer, and the two are never merged. An
-# unreadable comment page blocks as `review-lookup-failed`, an unreadable timeline as
-# `timeline-lookup-failed`, and an unreadable ruleset list refuses the whole run before the first
-# pull request is read. Reading "I could not look" as "there is nothing there" is precisely how a
-# blocked pull request enqueues: a page whose failure was swallowed dropped the newest review from
-# the comparison and let an older PASS win, on a pull request its own reviewer had blocked.
+# This script decides whether to merge, so every uncertainty resolves to NOT-READY. A read that
+# failed, a read that may be short, and a field the review did not record are each an uncertainty,
+# and none of them is an empty result: an unreadable comment page blocks as `review-lookup-failed`,
+# an unreadable timeline as `timeline-lookup-failed`, an unreadable pull request as
+# `pr-lookup-failed`, a review the parser did not finish reading as `review-parse-incomplete`, a
+# review that records no reviewed commit as `review-records-no-reviewed-sha`, a finding-file
+# listing that errored as `finding-file-lookup-failed`, and a gate-edit check that could not run as
+# `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
+# run before the first pull request is judged. Every list request is paginated, because a first
+# page is not a list and 30 rows of nothing hid an active ruleset on page two.
+#
+# Reading "I could not look" as "there is nothing there" is precisely how a blocked pull request
+# enqueues, and it has happened here more than once: a comment page whose failure was swallowed
+# dropped the newest review and let an older PASS win; an unpaginated ruleset list dropped the
+# BEHIND blocker; an empty `--reviewer` moved trust to the repository's owner. Each was one line,
+# and each called merge.
 #
 # Other states: NEEDS-ATTEST (the head moved past the reviewed commit by more than clean merges
 # and ledger pushes: a repair-only push the owner reads and attests under step 5, a merge commit
@@ -146,15 +156,24 @@ review_kind() {
 }
 
 # parse_verdict_json FILE: the workflow form. Prints tab-separated lines:
-#   META <reviewed_sha> <verdict> <base_sha>     identity of the one object the findings come from
+#   META <reviewed_sha or -> <verdict or -> <base_sha or ->  the one object the findings come from
 #   STRAY <tokens> 0                            severity or MUST tokens found outside that object
 #   <severity> <id or -> <bits>                 one per finding; bits: 1 = witness field, 2 = MUST
 #   ERR <reason> 0                              an object or finding the parser cannot judge
+#   END - 0                                     the parser reached the end of the findings
+#
+# END is the whole point of the contract. Every other line is something the parser found, and a
+# parser that dies partway prints fewer of them -- not an error the caller can see, just a shorter
+# findings list, which is a weaker verdict. `PYTHONIOENCODING=ascii` in the environment and one
+# non-ASCII character in a finding id is enough: META prints, the finding does not, and a PASS
+# carrying a deferred finding audits as a PASS carrying none, which is READY and a merge call.
+# No field is ever empty either: `read` with IFS=tab folds runs of tabs together, so an empty
+# reviewed_sha shifted the verdict into its column and the base into the verdict's.
 parse_verdict_json() {
   local py
   py="$(command -v python3 || command -v python || true)"
   if [[ -z "$py" ]]; then
-    printf 'ERR\tno-python\t0\n'
+    printf 'ERR\tno-python\t0\nEND\t-\t0\n'
     return 0
   fi
   "$py" - "$1" <<'PY'
@@ -172,7 +191,7 @@ if not isinstance(verdict, dict) or not isinstance(verdict.get("findings"), list
     sys.exit(0)
 # Identity, verdict, base and findings from this one object. Anything in the comment outside the
 # object that looks like a finding is for a person, not for the parser.
-print("META\t" + str(verdict.get("reviewed_sha", "")).strip() + "\t" + str(verdict.get("verdict", "")).strip() + "\t" + (str(verdict.get("base_sha", "")).strip() or "-"))
+print("META\t" + (str(verdict.get("reviewed_sha", "")).strip() or "-") + "\t" + (str(verdict.get("verdict", "")).strip() or "-") + "\t" + (str(verdict.get("base_sha", "")).strip() or "-"))
 outside = text.replace(found[-1], "")
 stray = sorted(set(re.findall(r"\b(?:P[0-3]|MUST)\b", outside)))
 if stray:
@@ -198,21 +217,25 @@ for f in verdict["findings"]:
         print("ERR\tbad-severity:" + fid + "\t0")
         continue
     print(sev + "\t" + fid + "\t" + str(wit + 2 * must))
+print("END\t-\t0")
 PY
 }
 
-# parse_prose_review FILE: the frontier form, read conservatively. Prints the same shape:
-#   META <head from the marker or Reviewed-head line> <last VERDICT> -
+# parse_prose_review FILE: the frontier form, read conservatively. Prints the same shape, with the
+# same END contract and the same rule that no field is ever empty:
+#   META <head from the marker or Reviewed-head line, or -> <last VERDICT or -> -
 #   <severity> - 0     one per numbered "N. **P<n>" finding
 #   STRAY <tokens> 0   any P0-P3 or MUST token outside the numbered findings, PASS included
+#   END - 0            the parser reached the end
 parse_prose_review() {
   local f="$1" head verdict stray
   head="$(grep -oE '(head=|Reviewed head: )[0-9a-f]{40}' "$f" | head -1 | grep -oE '[0-9a-f]{40}' || true)"
   verdict="$(grep -oE 'VERDICT:\**:? *[A-Z_]+' "$f" | tail -1 | grep -oE '[A-Z_]+$' || true)"
-  printf 'META\t%s\t%s\t-\n' "$head" "$verdict"
+  printf 'META\t%s\t%s\t-\n' "${head:-"-"}" "${verdict:-"-"}"
   grep -oE '^[0-9]+\. \*\*P[0-3]' "$f" | grep -oE 'P[0-3]' | sed 's/$/\t-\t0/' || true
   stray="$(grep -vE '^[0-9]+\. \*\*P[0-3]' "$f" | grep -oE '\bP[0-3]\b|\bMUST\b' | sort -u | tr '\n' '/' | sed 's#/$##' || true)"
   [[ -n "$stray" ]] && printf 'STRAY\t%s\t0\n' "$stray"
+  printf 'END\t-\t0\n'
   return 0
 }
 
@@ -222,6 +245,36 @@ parse_prose_review() {
 # or a code block further down is not a frontmatter id. The id is a fixed string, whole line.
 frontmatter_has_id() {
   awk 'NR == 1 { if ($0 != "---") exit; next } $0 == "---" { exit } { print }' | grep -qxF "id: $1"
+}
+
+# finding_file_count ID TREEISH: how many files under reviews/findings/ in TREEISH carry `id: ID`
+# in their YAML frontmatter. A non-zero status means the listing, or one of the files it named,
+# could not be read -- which is not a count of zero. This rule wants exactly one file, so a read
+# that quietly does not count can turn two files into one as easily as one into none, and `git
+# grep` exits 1 for "nothing matched" and above 1 for an error, which `|| true` read as one answer.
+#
+# The names arrive NUL-separated through a file rather than a command substitution: `$(...)` drops
+# NUL bytes, so the separators would vanish and the loop would read nothing at all -- a count of
+# zero for every finding, on a tree that holds the file. The gate builds a small repository and
+# counts in it, because that is the mistake a shape rule does not catch.
+finding_file_count() {
+  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 cand
+  cand_file="$(mktemp)"
+  blob_file="$(mktemp)"
+  git grep -l -z -F -e "id: $id" "$treeish" -- 'reviews/findings/*.md' > "$cand_file" 2>/dev/null \
+    || status=$?
+  if ((status > 1)); then rm -f "$cand_file" "$blob_file"; return 1; fi
+  # NUL-separated names, so a path with whitespace stays one candidate.
+  while IFS= read -r -d '' cand; do
+    cand="${cand#*:}"   # git grep prefixes each name with "<treeish>:"
+    if ! git show "$treeish:$cand" > "$blob_file" 2>/dev/null; then
+      rm -f "$cand_file" "$blob_file"
+      return 1
+    fi
+    if frontmatter_has_id "$id" < "$blob_file"; then n=$((n + 1)); fi
+  done < "$cand_file"
+  rm -f "$cand_file" "$blob_file"
+  printf '%s' "$n"
 }
 
 # newest_per_name: reads "name<TAB>id<TAB>conclusion-or-status" lines, one per check run across
@@ -267,9 +320,16 @@ ensure_labels() {
 # none": `for id in $(gh api ...)` runs zero times either way, and zero active rulesets reads as
 # "nothing requires an up-to-date branch", which drops the BEHIND blocker. The list is fetched
 # first and its status checked before the loop, so a failure refuses instead of relaxing.
+#
+# `--paginate`, and it is not decoration. This endpoint defaults to 30 per page, so 30 rulesets in
+# any state hid an active strict one on page two: the audit read "no ruleset requires an up-to-date
+# branch", a BEHIND pull request with a clean review went READY, and merge was called. A page-two
+# HTTP 500 gave the identical answer, because a list the request never asked for and a list the
+# request failed to get are the same missing rows. A first page is not a list.
 ruleset_state() {
   local strict=0 queue=0 id ids rules
-  ids="$(gh api "repos/$repo/rulesets?targets=branch" --jq '.[] | select(.enforcement == "active") | .id')" || return 1
+  ids="$(gh api "repos/$repo/rulesets?targets=branch&per_page=100" --paginate \
+    --jq '.[] | select(.enforcement == "active") | .id')" || return 1
   for id in $ids; do
     rules="$(gh api "repos/$repo/rulesets/$id" --jq '.rules[] | "\(.type)=\(.parameters.strict_required_status_checks_policy // "")"')" || return 1
     grep -q '^merge_queue=' <<< "$rules" && queue=1
@@ -295,20 +355,33 @@ valid_login() {
   [[ "$1" =~ ^$ascii_alnum($ascii_alnum|-$ascii_alnum)*$ ]] && ((${#1} <= 39))
 }
 
-# reviewer_login OVERRIDE OWNER_LOGIN OWNER_TYPE: the account whose reviews count, or nothing and
-# a non-zero status when it cannot be settled. An explicit override always wins. Otherwise the
-# repository's owner stands in, but only when that owner is a User: an Organization owns no voice
-# and cannot have written a review, so inheriting it produces a filter that matches nothing.
-# Refusing here turns a fleet-wide silent `no-review` into one loud message at startup.
-# Whichever side supplies it, the answer must be a login: this is the last gate before the value
-# becomes the audit's notion of who may say PASS, and it holds even where main checked first.
+# reviewer_login STATE OVERRIDE OWNER_LOGIN OWNER_TYPE: the account whose reviews count, or
+# nothing and a non-zero status when it cannot be settled. STATE is the word `given` or `absent`
+# and nothing else. Otherwise the repository's owner stands in, but only when that owner is a
+# User: an Organization owns no voice and cannot have written a review, so inheriting it produces
+# a filter that matches nothing. Refusing here turns a fleet-wide silent `no-review` into one loud
+# message at startup. Whichever side supplies it, the answer must be a login: this is the last
+# gate before the value becomes the audit's notion of who may say PASS, and it holds even where
+# main checked first.
+#
+# STATE exists because an empty override is not an absent one and only the caller knows which it
+# is. This used to fall back to the owner whenever the override was empty, so `--reviewer ""` --
+# an unset shell variable expanded into the flag -- silently moved trust to the repository's owner:
+# on a User-owned repository whose owner had posted PASS and whose named reviewer had posted a
+# newer block, adding that one empty flag turned NOT-READY into READY and called merge. A supplied
+# value is validated whatever it holds; the owner stands in only when nothing was supplied at all.
+# A STATE that is neither word is a caller that cannot say, and that refuses too: there is no
+# default here, because every default here is a decision about whose approval counts.
 reviewer_login() {
-  local override="$1" owner_login="$2" owner_type="$3"
-  if [[ -n "$override" ]]; then
-    valid_login "$override" || return 1
-    printf '%s' "$override"
-    return 0
-  fi
+  local state="$1" override="$2" owner_login="$3" owner_type="$4"
+  case "$state" in
+    given)
+      valid_login "$override" || return 1
+      printf '%s' "$override"
+      return 0 ;;
+    absent) ;;
+    *) return 1 ;;
+  esac
   if [[ "$owner_type" == "User" ]] && valid_login "$owner_login"; then
     printf '%s' "$owner_login"
     return 0
@@ -392,15 +465,17 @@ bad_login_why="Naming an account that cannot exist reads as no-review on every p
 # `--*` was such a list, it had already drifted from the parser, and `--ready-label -h` consumed
 # `-h` and ran a whole audit. Nothing this script takes as an option's value begins with a hyphen
 # -- a GitHub login cannot, and a label name that does is refused rather than swallowed, which is
-# the safe direction for a guard whose only job is to not eat the next flag.
-option_like() { [[ "$1" == -?* ]]; }
+# the safe direction for a guard whose only job is to not eat the next flag. `-*`, not `-?*`: the
+# shorter pattern required a character after the hyphen, so a lone `-` was not an option to it and
+# `--ready-label -` labelled a pull request `-` and enqueued it.
+option_like() { [[ "$1" == -* ]]; }
 
 main() {
   apply=0
   enqueue=0
   ready_label="ready-to-merge"
   prs=()
-  local reviewer_flag="" reviewer_given=0 reviewer_override reviewer_said
+  local reviewer_flag="" reviewer_given=0 reviewer_state reviewer_override reviewer_said
   while (($#)); do
     case "$1" in
       --apply) apply=1 ;;
@@ -427,15 +502,25 @@ main() {
     shift
   done
 
-  # Source precedence first, then validation of the one value this run will trust.
+  # Source precedence first, then validation of the one value this run will trust -- and the
+  # validation is not conditional on the value being non-empty. `--reviewer ""` used to skip it for
+  # being falsy and fall through to the owner. `${VAR+given}` rather than `${VAR:-}` for the same
+  # reason: a variable that is set and empty was supplied, by a wrapper whose own variable was
+  # unset, and reading it as "nothing was supplied" hands the run to the repository's owner.
   if ((reviewer_given)); then
+    reviewer_state=given
     reviewer_override="$reviewer_flag"
     reviewer_said="--reviewer [$reviewer_override]"
-  else
-    reviewer_override="${UPSTROKE_REVIEW_AUTHOR:-}"
+  elif [[ -n "${UPSTROKE_REVIEW_AUTHOR+given}" ]]; then
+    reviewer_state=given
+    reviewer_override="$UPSTROKE_REVIEW_AUTHOR"
     reviewer_said="UPSTROKE_REVIEW_AUTHOR=[$reviewer_override]"
+  else
+    reviewer_state=absent
+    reviewer_override=""
+    reviewer_said="no reviewer"
   fi
-  if [[ -n "$reviewer_override" ]] && ! valid_login "$reviewer_override"; then
+  if [[ "$reviewer_state" == given ]] && ! valid_login "$reviewer_override"; then
     echo "refusing: $reviewer_said is not a GitHub login." >&2
     echo "  A login is 1-39 letters, digits and single interior hyphens. $bad_login_why" >&2
     exit 2
@@ -445,8 +530,8 @@ main() {
   local owner_login owner_type
   owner_login="$(gh api "repos/$repo" --jq .owner.login)"
   owner_type="$(gh api "repos/$repo" --jq .owner.type)"
-  if ! reviewer="$(reviewer_login "$reviewer_override" "$owner_login" "$owner_type")"; then
-    if [[ -n "$reviewer_override" ]]; then
+  if ! reviewer="$(reviewer_login "$reviewer_state" "$reviewer_override" "$owner_login" "$owner_type")"; then
+    if [[ "$reviewer_state" == given ]]; then
       echo "refusing: [$reviewer_override] is not a GitHub login. $bad_login_why" >&2
     else
       echo "refusing: $repo is owned by $owner_login (type $owner_type), which authors no review comments." >&2
@@ -468,7 +553,18 @@ main() {
   read -r strict_up_to_date has_queue <<< "$rulesets"
 
   if ((${#prs[@]} == 0)); then
-    mapfile -t prs < <(gh api "repos/$repo/pulls?state=open&per_page=100" --paginate --jq '.[].number')
+    # Captured and checked rather than read through `< <(...)`, whose status nothing can see. An
+    # unread list becomes an empty one, and an empty one is a run that prints a header, audits
+    # nothing and exits 0 -- which is exactly what "there is nothing to do" looks like. This audit
+    # exists because that pair was indistinguishable once already.
+    local open_prs
+    if ! open_prs="$(gh api "repos/$repo/pulls?state=open&per_page=100" --paginate --jq '.[].number')"; then
+      echo "refusing: could not list $repo's open pull requests." >&2
+      echo "  An unread list is not an empty one. Continuing would print a table with nothing in" >&2
+      echo "  it and exit 0, which reads as: every pull request was audited and none was ready." >&2
+      exit 2
+    fi
+    [[ -n "$open_prs" ]] && mapfile -t prs <<< "$open_prs"
   fi
   if ((apply)); then ensure_labels; fi
 
@@ -481,20 +577,33 @@ main() {
 
 audit_one() {
   local pr="$1"
-  local meta branch head draft merge_state labels base base_oid attempt
+  local meta meta_raw meta_status branch head draft merge_state labels base base_oid attempt
   # GitHub computes mergeability lazily and answers UNKNOWN until it has; asking again after a
-  # pause usually settles it, and an UNKNOWN that survives three asks fails closed below.
+  # pause usually settles it, and an UNKNOWN that survives three asks fails closed below. A read
+  # that fails outright gets the same three attempts and then says so: read through `< <(...)` its
+  # status was invisible, the fields came back empty, and the run died further down on an empty
+  # head with no line printed and no reason given -- safe, but neither complete nor legible.
   for attempt in 1 2 3; do
+    meta=()
+    meta_status=0
     # One field per line, read with mapfile: a tab-separated read would collapse an empty field
     # (no labels) and shift every field after it.
-    mapfile -t meta < <(gh pr view "$pr" --repo "$repo" \
+    meta_raw="$(gh pr view "$pr" --repo "$repo" \
       --json headRefName,headRefOid,isDraft,mergeStateStatus,labels,baseRefName,baseRefOid \
-      --jq '.headRefName, .headRefOid, (.isDraft|tostring), .mergeStateStatus, ([.labels[].name]|join(" ")), .baseRefName, .baseRefOid')
+      --jq '.headRefName, .headRefOid, (.isDraft|tostring), .mergeStateStatus, ([.labels[].name]|join(" ")), .baseRefName, .baseRefOid')" \
+      || meta_status=$?
+    ((meta_status == 0)) && mapfile -t meta <<< "$meta_raw"
     branch="${meta[0]:-}"; head="${meta[1]:-}"; draft="${meta[2]:-}"; merge_state="${meta[3]:-}"
     labels="${meta[4]:-}"; base="${meta[5]:-}"; base_oid="${meta[6]:-}"
-    [[ "$merge_state" == UNKNOWN && $attempt -lt 3 ]] || break
+    [[ ( "$merge_state" == UNKNOWN || $meta_status -ne 0 ) && $attempt -lt 3 ]] || break
     sleep 3
   done
+  if ((meta_status != 0)); then
+    # Nothing below can be judged without the head, the base and the draft flag, so nothing below
+    # is attempted: this pull request is reported unaudited rather than audited on empty fields.
+    printf '%-5s %-14s %-8s %-13s %s\n' "#$pr" "-" "-" NOT-READY "blockers=pr-lookup-failed"
+    return 0
+  fi
   local lane must_fix state
   lane="$(lane_for "$branch")"
   must_fix="$(must_fix_for "$lane")"
@@ -539,16 +648,29 @@ audit_one() {
     review_file="$(mktemp)"
     gh api "repos/$repo/issues/comments/$review_id" --jq '.body' > "$review_file"
     kind="$(review_kind "$review_file")"
-    local sev id wit
+    local sev id wit parse_complete=0
     while IFS=$'\t' read -r sev id wit extra; do
       case "$sev" in
-        META) reviewed="$id"; verdict="$wit"; review_base="${extra:-"-"}" ;;
+        END) parse_complete=1 ;;
+        META) reviewed="$id"; verdict="$wit"; review_base="${extra:-"-"}"
+              # `-` is how the parsers say "the object did not record this"; it is not a value.
+              [[ "$reviewed" == "-" ]] && reviewed=""
+              [[ "$verdict" == "-" ]] && verdict="" ;;
         STRAY) blockers+=("manual:$id-outside-the-$([[ "$kind" == json ]] && echo verdict-object || echo numbered-findings)") ;;
         "") ;;
         *) findings+=("$sev"$'\t'"$id"$'\t'"$wit") ;;
       esac
     done < <(if [[ "$kind" == json ]]; then parse_verdict_json "$review_file"; else parse_prose_review "$review_file"; fi)
     rm -f "$review_file"
+
+    # The parser's own END. Without it the stream is whatever the parser managed to print before it
+    # died, which is a findings list that is short by an unknown amount -- and every finding it
+    # failed to print is a blocker this audit will not raise. A short list is not a clean review.
+    ((parse_complete)) || blockers+=("review-parse-incomplete")
+    # A review that does not say which commit it reviewed cannot be checked against the head. This
+    # used to land on a blocker only because `read` with IFS=tab folded the empty field and shifted
+    # a later column into `verdict`; it is stated now rather than inherited from a quirk.
+    [[ -z "$reviewed" ]] && blockers+=("review-records-no-reviewed-sha")
 
     case "$verdict" in
       PASS|CHANGES_REQUIRED) ;;
@@ -602,7 +724,9 @@ audit_one() {
       local merge_edits="" merges m expected before after touched
       merges="$(git rev-list --merges "$reviewed..$head" --not "origin/$base")"
       for m in $merges; do
-        if (($(git rev-list --parents -n 1 "$m" | wc -w) != 3)); then merge_edits="$m"; break; fi
+        local parents
+        if ! parents="$(git rev-list --parents -n 1 "$m")"; then merge_edits="$m"; break; fi
+        if (($(wc -w <<< "$parents") != 3)); then merge_edits="$m"; break; fi
         if ! expected="$(git merge-tree --write-tree "$m^1" "$m^2" 2>/dev/null)"; then
           merge_edits="$m"; break   # a conflict, or a git too old for --write-tree: fail closed
         fi
@@ -613,9 +737,16 @@ audit_one() {
         after="$(git diff "$m^2" "$m" | git hash-object --stdin)"
         [[ "$before" == "$after" ]] || { merge_edits="$m"; break; }
       done
-      if [[ -n "$merges" && -z "$merge_edits" ]] \
-        && git diff --name-only "origin/$base...$head" -- .github/workflows .github/scripts | grep -q .; then
-        blockers+=("review-stale:gate-edit-with-merge-in")   # step 5: no exemption for a gate-editing pull request
+      if [[ -n "$merges" && -z "$merge_edits" ]]; then
+        # Read into a variable first: as a pipeline inside the condition, a `git diff` that failed
+        # made the condition false, which is the same as "this pull request edits no gate" -- the
+        # exemption granted by a read that did not happen.
+        local gate_edits
+        if ! gate_edits="$(git diff --name-only "origin/$base...$head" -- .github/workflows .github/scripts)"; then
+          blockers+=("gate-edit-check-failed")
+        elif [[ -n "$gate_edits" ]]; then
+          blockers+=("review-stale:gate-edit-with-merge-in")   # step 5: no exemption for a gate-editing pull request
+        fi
       fi
       # Commits the base already has arrived through a merge-in; only the branch's own count.
       touched="$(git log --no-merges --name-only --format= "$reviewed..$head" --not "origin/$base" | sort -u)"
@@ -631,7 +762,7 @@ audit_one() {
     fi
   fi
 
-  local rows f disposition nfiles cand
+  local rows f disposition nfiles
   rows="$(gh pr view "$pr" --repo "$repo" --json body --jq .body | ledger_rows_from_body)"
   for f in "${findings[@]}"; do
     IFS=$'\t' read -r sev id wit <<< "$f"
@@ -660,12 +791,10 @@ audit_one() {
     disposition="$(awk -F'\t' -v id="$id" '$1 == id { print $4; exit }' <<< "$rows")"
     case "$disposition" in
       deferred)   # the lane rule: an allowed finding is filed and deferred, one file per finding
-        nfiles=0
-        # NUL-separated names, so a path with whitespace stays one candidate.
-        while IFS= read -r -d '' cand; do
-          cand="${cand#*:}"   # git grep prefixes each name with "<sha>:"
-          if git show "$head:$cand" 2>/dev/null | frontmatter_has_id "$id"; then nfiles=$((nfiles + 1)); fi
-        done < <(git grep -l -z -F -e "id: $id" "$head" -- 'reviews/findings/*.md' 2>/dev/null || true)
+        if ! nfiles="$(finding_file_count "$id" "$head")"; then
+          blockers+=("finding-file-lookup-failed:$id")
+          continue
+        fi
         case "$nfiles" in
           1) ;;
           0) blockers+=("no-file:$id") ;;

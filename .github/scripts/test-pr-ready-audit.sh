@@ -2,9 +2,11 @@
 # The pure parts of scripts/pr-ready-audit.sh, exercised against fixtures: the lane and its
 # severity set, the two review parsers (the workflow's fenced JSON verdict and the frontier
 # prose form), the frontmatter id match, the newest-check-run choice and the ledger-row parse.
-# Everything that talks to GitHub or git is out of scope here, with one exception: the argument
-# parser is exercised by running the script as a process against a stub `gh`, because the defects
-# it has had live in `main` and no call on the helpers can see them. The stub answers every call
+# Everything that talks to GitHub is out of scope here, with one exception: the argument parser and
+# the audit's own refusals are exercised by running the script as a process against a stub `gh`,
+# because the defects they have had live in `main` and no call on the helpers can see them. git is
+# in scope in one place, `finding_file_count`, which is run against a small repository this file
+# builds: reading a list of names is where a shape rule stops helping and only a count will do. The stub answers every call
 # with a marker and a failure, so an argument that should have been refused and instead reached
 # GitHub shows up as a failed case rather than a live request. The audit's behaviour on a real
 # pull request is still observed on the pull request.
@@ -53,6 +55,24 @@
 #                                ASCII letter came from the locale and `evéntloops` was a login
 #   MUT-REVIEWER-ENV-BEFORE-FLAG an inherited environment value was validated before the flag that
 #                                replaces it, so a stale setting refused a run that never used it
+#   MUT-REVIEWER-EMPTY-OVERRIDE  an empty --reviewer counted as no --reviewer, so an unset shell
+#                                variable expanded into the flag moved trust to the repository owner
+#   MUT-LIST-UNPAGINATED         a collection was read without --paginate, so page one was taken
+#                                for the whole list and an active ruleset on page two was invisible
+#   MUT-OPTION-LONE-HYPHEN       the option guard required a character after the hyphen, so a lone
+#                                `-` was taken as a label name
+#   MUT-REVIEW-PARSE-TRUNCATED   a parser that died partway printed a shorter findings list, and a
+#                                shorter findings list is a weaker verdict, not an error
+#   MUT-META-FIELD-COLLAPSE      an empty META field let `read` with IFS=tab shift every column
+#                                after it, so a review recording no commit read as one that did
+#   MUT-PR-LOOKUP-SUPPRESSED     a failed pull-request read left empty fields to be audited
+#   MUT-PR-LIST-SUPPRESSED       a failed open-pull-request listing read as "nothing is open"
+#   MUT-FAIL-OPEN-SHAPE          a read whose failure cannot be seen: `for x in $(gh ...)`,
+#                                `< <(gh ...)`, `|| true` on a gh or git command, or a gh or git
+#                                command piped where the pipeline's status is read as an answer
+#   MUT-FINDING-FILE-COUNT       the filed-finding count read a listing wrongly -- an error taken
+#                                for "no files", or NUL-separated names put through `$(...)`,
+#                                which drops NUL and leaves nothing to read
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -83,32 +103,46 @@ expect MUT-P3-LANE-DEFERS "$(must_fix_for feature)" "P0 P1"
 
 # --- whose review counts ------------------------------------------------------------------------
 # A User owner stands in for the reviewer; that is the pre-organization behaviour and it stays.
-expect MUT-REVIEWER-FROM-ORG "$(reviewer_login "" eventloops User)" eventloops
+expect MUT-REVIEWER-FROM-ORG "$(reviewer_login absent "" eventloops User)" eventloops
 # An Organization owner authors no comments. Inheriting it yields a filter that matches nothing,
 # which is not a stricter audit but a blind one, so it must fail rather than return a login.
-if reviewer_login "" sourcemaps Organization > "$tmp/org.out" 2>&1; then
+if reviewer_login absent "" sourcemaps Organization > "$tmp/org.out" 2>&1; then
   error "MUT-REVIEWER-FROM-ORG: an Organization owner was accepted as the reviewer, got [$(cat "$tmp/org.out")]"
 fi
 expect MUT-REVIEWER-FROM-ORG "$(cat "$tmp/org.out")" ""
 # An explicit override wins over either, and is the only way to audit an organization-owned repo.
-expect MUT-REVIEWER-OVERRIDE-IGNORED "$(reviewer_login eventloops sourcemaps Organization)" eventloops
-expect MUT-REVIEWER-OVERRIDE-IGNORED "$(reviewer_login someone-else eventloops User)" someone-else
+expect MUT-REVIEWER-OVERRIDE-IGNORED "$(reviewer_login given eventloops sourcemaps Organization)" eventloops
+expect MUT-REVIEWER-OVERRIDE-IGNORED "$(reviewer_login given someone-else eventloops User)" someone-else
 # A missing login is not a reviewer either, whatever the type claims.
-if reviewer_login "" "" User > "$tmp/empty.out" 2>&1; then
+if reviewer_login absent "" "" User > "$tmp/empty.out" 2>&1; then
   error "MUT-REVIEWER-FROM-ORG: an empty owner login was accepted as the reviewer"
 fi
+# An override that was supplied and is empty is not an override that was not supplied. Reading the
+# two as one is how `--reviewer ""` -- an unset shell variable expanded into the flag -- handed a
+# User-owned repository's audit to its owner, over the reviewer the caller had named, and enqueued
+# a pull request that reviewer had blocked. `given` is checked whatever it carries.
+if reviewer_login given "" eventloops User > "$tmp/given-empty.out" 2>&1; then
+  error "MUT-REVIEWER-EMPTY-OVERRIDE: an empty --reviewer fell back to the owner, got [$(cat "$tmp/given-empty.out")]"
+fi
+for bad_state in "" absent-ish 0 1 yes; do
+  if reviewer_login "$bad_state" "" eventloops User > "$tmp/state.out" 2>&1; then
+    error "MUT-REVIEWER-EMPTY-OVERRIDE: state [$bad_state] was treated as an answer, got [$(cat "$tmp/state.out")]"
+  fi
+done
+# and `absent` still means absent: the owner stands in exactly where it did before.
+expect MUT-REVIEWER-EMPTY-OVERRIDE "$(reviewer_login absent "" eventloops User)" eventloops
 # The helper is the last gate before a string becomes the audit's notion of who may say PASS, and
 # what it returns is put to a jq program, so it takes GitHub's login shape and nothing wider. Each
 # of these is a typo, another option read by mistake, or an injection attempt; none is an account.
 for bad in 'eventloops" or true or .user.login == "eventloops' '--enqueue' '-abc' 'abc-' 'a--b' \
            'github-actions[bot]' 'two words' 'a.b' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; do
-  if reviewer_login "$bad" eventloops User > "$tmp/bad.out" 2>&1; then
+  if reviewer_login given "$bad" eventloops User > "$tmp/bad.out" 2>&1; then
     error "MUT-REVIEWER-JQ-INJECTION: [$bad] was accepted as a login, got [$(cat "$tmp/bad.out")]"
   fi
 done
 # and nothing narrower: a real login, in any case, of any allowed length, is not refused.
 for good in eventloops EventLoops a-b-c x 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
-  expect MUT-REVIEWER-JQ-INJECTION "$(reviewer_login "$good" sourcemaps Organization)" "$good"
+  expect MUT-REVIEWER-JQ-INJECTION "$(reviewer_login given "$good" sourcemaps Organization)" "$good"
 done
 
 # --- the login shape means the same thing in every locale ---------------------------------------
@@ -249,6 +283,65 @@ if (PATH="$failing:$PATH"; repo=o/r; ruleset_state) > "$tmp/rs.out" 2>&1; then
 fi
 expect MUT-RULESET-LOOKUP-SUPPRESSED "$( (PATH="$silent:$PATH"; repo=o/r; ruleset_state) )" "0 0"
 
+# --- a list is not complete until the API says it is --------------------------------------------
+# GitHub pages every collection and defaults this endpoint to 30. Thirty rulesets in any state hid
+# an active strict one on page two: the audit read "nothing requires an up-to-date branch", a
+# BEHIND pull request with a clean review went READY, and merge was called. A page-two HTTP 500
+# gave the identical answer, because rows never asked for and rows that failed to arrive are the
+# same missing rows. The stub records what was asked.
+recording="$tmp/recording-gh"
+mkdir -p "$recording"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$GH_RECORD"\nexit 0\n' > "$recording/gh"
+chmod +x "$recording/gh"
+( export GH_RECORD="$tmp/asked.txt"; export PATH="$recording:$PATH"; repo=o/r; ruleset_state ) > /dev/null
+contains MUT-LIST-UNPAGINATED "$(cat "$tmp/asked.txt")" "--paginate"
+
+# The class, not the instance. Every `gh api` call in the script reads a collection unless it is
+# one of the three that read a single object by id, and a collection read without --paginate is
+# page one mistaken for the whole. This is the guard that catches the next endpoint rather than
+# this one; the three exceptions are named so adding a fourth is a decision, not an omission.
+join_continuations() {
+  awk '{
+    if (buf != "") { sub(/^[[:space:]]+/, ""); buf = buf " " $0 } else { buf = $0 }
+    if (buf ~ /\\$/) { sub(/\\$/, "", buf); next }
+    print buf; buf = ""
+  } END { if (buf != "") print buf }'
+}
+code_lines() { grep -vE '^[[:space:]]*#' scripts/pr-ready-audit.sh; }
+while IFS= read -r call; do
+  [[ "$call" == *"gh api "* ]] || continue
+  [[ "$call" == *"--paginate"* ]] && continue
+  case "$call" in
+    *'gh api "repos/$repo" '*) continue ;;                              # the repository object
+    *'gh api "repos/$repo/rulesets/$id" '*) continue ;;                 # one ruleset by id
+    *'gh api "repos/$repo/issues/comments/$review_id" '*) continue ;;   # one comment by id
+  esac
+  error "MUT-LIST-UNPAGINATED: a collection is read without --paginate: [$call]"
+done < <(code_lines | join_continuations)
+
+# --- reads whose failure nothing can see --------------------------------------------------------
+# Three shapes swallow the status of the command that produced the data, and each has cost this
+# script a false READY: `for x in $(gh ...)` and `< <(gh ...)` iterate zero times whether the
+# request failed or the answer was empty, and `|| true` turns any error into a successful empty
+# read. The one survivor is the fetch, whose failure is checked immediately afterwards by asking
+# git whether the objects arrived; it is named here so it stays the only one.
+expect MUT-FAIL-OPEN-SHAPE "$(code_lines | grep -cE 'for [A-Za-z_]+ in \$\((gh|git)\b' || true)" 0
+expect MUT-FAIL-OPEN-SHAPE "$(code_lines | grep -cE '< <\((gh|git)\b' || true)" 0
+expect MUT-FAIL-OPEN-SHAPE \
+  "$(code_lines | grep -E '\b(gh|git) .*\|\| true' | sed 's/^[[:space:]]*//' | tr '\n' ';')" \
+  'git fetch -q origin "refs/pull/$pr/head" "$base" master 2>/dev/null || true;'
+# A fourth shape, and the one that survived the first draft of this guard: a gh or git command
+# piped into another and the pipeline's status read as an answer. `git diff ... | grep -q .` is
+# false both when the diff is empty and when the diff failed, and the first means "edits no gate".
+# Piping is fine where the result is captured and the status checked; it is not fine as a
+# condition, because there the two outcomes are the same branch.
+while IFS= read -r line; do
+  [[ "$line" =~ (^|[^|])\|([^|]|$) ]] || continue
+  [[ "$line" =~ (^|[[:space:]]|\()(gh|git)[[:space:]] ]] || continue
+  [[ "$line" == *'="$('* ]] && continue
+  error "MUT-FAIL-OPEN-SHAPE: a gh or git command is piped where its failure cannot be told from the pipeline's answer: [$line]"
+done < <(code_lines | join_continuations)
+
 # --- the option parser, through main -------------------------------------------------------------
 # `main` is what these exercise: the defect was in its argument loop and no call on a helper can
 # reach it. The stub gh answers with a marker and a failure, so an argument that should have been
@@ -338,9 +431,15 @@ case "$*" in
   *"--jq .owner.type")        echo User ;;
   *rulesets*)                 ;;                                 # no branch ruleset
   *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
-  *"/comments?per_page=100"*) exit "${STUB_COMMENTS_STATUS:-1}" ;;
+  *"/pulls?state=open"*)      exit "${STUB_PULLS_STATUS:-0}" ;;
+  *timeline*)                 ;;                                 # no base change
+  *"/comments?per_page=100"*) [[ -n "${STUB_REVIEW_BODY:-}" ]] && echo "2026-09-01T00:00:00Z 5001"
+                              exit "${STUB_COMMENTS_STATUS:-1}" ;;
+  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
+  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
   *"--json body"*)            echo "no ledger" ;;
-  "pr view"*)                 printf 'feature/x\n%s\nfalse\nCLEAN\n\nmaster\n%s\n' "$head" "$head" ;;
+  "pr view"*)                 (( ${STUB_PRVIEW_STATUS:-0} )) && exit "$STUB_PRVIEW_STATUS"
+                              printf 'feature/x\n%s\nfalse\nCLEAN\n\nmaster\n%s\n' "$head" "$head" ;;
   *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
 esac
 GH
@@ -358,6 +457,78 @@ contains MUT-REVIEW-LOOKUP-SUPPRESSED "$got" "blockers=review-lookup-failed"
 got="$(run_lookup 0)"
 contains MUT-REVIEW-LOOKUP-SUPPRESSED "$got" "blockers=no-review"
 [[ "$got" == *review-lookup-failed* ]] && error "MUT-REVIEW-LOOKUP-SUPPRESSED: a completed lookup was reported as failed"
+
+run_stub() {  # run_stub ARG...: "<exit status>|<output, on one line>", against the stub above
+  local out status=0
+  out="$(PATH="$lookup:$PATH" bash scripts/pr-ready-audit.sh "$@" 2>&1)" || status=$?
+  printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
+}
+# A pull request whose own metadata could not be read is reported unaudited, not audited on the
+# empty fields the failed read left behind. Read through `< <(...)` the status was invisible: the
+# fields came back empty and the run died further down on an empty head, with no line for this
+# pull request and no reason given.
+got="$(STUB_PRVIEW_STATUS=1 run_stub 999)"
+contains MUT-PR-LOOKUP-SUPPRESSED "$got" "blockers=pr-lookup-failed"
+contains MUT-PR-LOOKUP-SUPPRESSED "$got" "NOT-READY"
+[[ "$got" == *GH-UNSTUBBED* ]] && error "MUT-PR-LOOKUP-SUPPRESSED: the audit kept calling after the read failed: [$got]"
+# and a readable pull request still reaches the review lookup, so the case above is about the
+# failure and not about the stub.
+got="$(run_stub 999)"
+[[ "$got" == *pr-lookup-failed* ]] && error "MUT-PR-LOOKUP-SUPPRESSED: a readable pull request was reported unreadable"
+
+# With no arguments the audit walks the open pull requests. An unread list became an empty one: a
+# header, no rows, exit 0 -- which is what "every pull request was audited and none was ready"
+# looks like. It must refuse instead.
+got="$(STUB_PULLS_STATUS=1 run_stub)"
+contains MUT-PR-LIST-SUPPRESSED "$got" "refusing: could not list"
+[[ "$got" == *"#999"* ]] && error "MUT-PR-LIST-SUPPRESSED: the audit carried on past a failed listing"
+# The stub's readable listing is empty, which is a real answer and must not refuse.
+got="$(run_stub)"
+[[ "$got" == *"refusing: could not list"* ]] && error "MUT-PR-LIST-SUPPRESSED: an empty listing was reported as a failed one"
+
+# An empty --reviewer is a supplied value, not an absent one, and it is checked like any other.
+got="$(run_stub --reviewer "" 999)"
+contains MUT-REVIEWER-EMPTY-OVERRIDE "$got" "2|refusing: --reviewer [] is not a GitHub login."
+[[ "$got" == *GH-REACHED* || "$got" == *"#999"* ]] && error "MUT-REVIEWER-EMPTY-OVERRIDE: an empty --reviewer reached the audit"
+# So is an environment variable that is set and empty: a wrapper whose own variable was unset
+# exports one, and reading it as "nothing was supplied" hands the run to the repository's owner.
+got="$(UPSTROKE_REVIEW_AUTHOR= run_stub 999)"
+contains MUT-REVIEWER-EMPTY-OVERRIDE "$got" "refusing: UPSTROKE_REVIEW_AUTHOR=[] is not a GitHub login."
+# Unset is still unset, and the User owner still stands in: this narrows nothing that worked.
+got="$(run_stub 999)"
+[[ "$got" == *refusing* ]] && error "MUT-REVIEWER-EMPTY-OVERRIDE: an unset UPSTROKE_REVIEW_AUTHOR was read as supplied"
+
+# A lone hyphen is an option too. `-?*` required a character after it, so `--ready-label -`
+# labelled a pull request `-` and enqueued it.
+for lone in - -h --help; do
+  got="$(run_stub --ready-label "$lone" 999)"
+  contains MUT-OPTION-LONE-HYPHEN "$got" "2|refusing: --ready-label needs a label name, got the option [$lone]"
+  got="$(run_stub --reviewer "$lone" 999)"
+  contains MUT-OPTION-LONE-HYPHEN "$got" "2|refusing: --reviewer needs a login, got the option [$lone]"
+done
+expect MUT-OPTION-LONE-HYPHEN "$(option_like - && echo yes || echo no)" yes
+expect MUT-OPTION-LONE-HYPHEN "$(option_like queue-me && echo yes || echo no)" no
+
+# A parser that died partway, through main, on the real trigger rather than a stand-in: the review
+# carries a finding whose id holds one non-ASCII character, and PYTHONIOENCODING=ascii is in the
+# environment. META prints, the finding raises, the findings list comes back empty -- and a PASS
+# carrying a deferred finding then audits as a PASS carrying none. Without the completeness check
+# there is no blocker left and this is READY with a merge call. The object records no reviewed
+# commit, which keeps the case away from git.
+printf '```json\n{"verdict":"PASS","findings":[{"id":"A-DEFERRABL\xc3\x89","severity":"P3"}]}\n```\n' \
+  > "$tmp/truncating-review.md"
+got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 PYTHONIOENCODING=ascii run_stub 999)"
+contains MUT-REVIEW-PARSE-TRUNCATED "$got" "blockers="
+contains MUT-REVIEW-PARSE-TRUNCATED "$got" "review-parse-incomplete"
+contains MUT-REVIEW-PARSE-TRUNCATED "$got" "NOT-READY"
+# The same review, parsed whole, keeps its finding and blocks for having one -- so the case above
+# is about the death, not about the review.
+got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-REVIEW-PARSE-TRUNCATED "$got" "pass-with-findings"
+[[ "$got" == *review-parse-incomplete* ]] && error "MUT-REVIEW-PARSE-TRUNCATED: a whole parse was reported as truncated"
+# and a review that records no reviewed commit says so, rather than blocking on a column that the
+# tab-folding `read` shifted into place.
+contains MUT-META-FIELD-COLLAPSE "$got" "review-records-no-reviewed-sha"
 
 # --- the workflow form: a fenced JSON verdict ---------------------------------------------------
 cat > "$tmp/json.md" <<'EOF'
@@ -382,7 +553,8 @@ P3|A-DEFERRABLE|0
 P2|B-WITNESSED|1
 P2|C-MUST|2
 ERR|bad-severity:D-BAD|0
-P3|E.DOTTED|0'
+P3|E.DOTTED|0
+END|-|0'
 expect "MUT-JSON-SPLIT-BY-REGEX/MUT-NULL-WITNESS/MUT-MUST-UNSEEN/MUT-BAD-SEVERITY-PASSES/MUT-STRAY-TOKEN-UNSEEN/MUT-VERDICT-FROM-PROSE" "$got" "$want"
 
 # A pretty-printed object with "}, {" between findings is the same object to a parser.
@@ -402,7 +574,8 @@ EOF
 got="$(parse_verdict_json "$tmp/pretty.md" | tr '\t' '|')"
 want='META|4ad962f000000000000000000000000000000001|CHANGES_REQUIRED|-
 P3|FIRST|0
-P1|SECOND|0'
+P1|SECOND|0
+END|-|0'
 expect MUT-JSON-SPLIT-BY-REGEX "$got" "$want"
 
 # --- the frontier form: prose ------------------------------------------------------------------
@@ -429,8 +602,43 @@ got="$(parse_prose_review "$tmp/prose.md" | tr '\t' '|')"
 want='META|c3a6665000000000000000000000000000000003|CHANGES_REQUIRED|-
 P2|-|0
 P3|-|0
-STRAY|MUST/P1|0'
+STRAY|MUST/P1|0
+END|-|0'
 expect "MUT-PROSE-HEADING-FINDING/MUT-PROSE-LAST-VERDICT" "$got" "$want"
+
+# Both parsers end with END, and nothing else does. END is what tells the audit the findings list
+# it just read is the whole list: a parser that dies partway prints a shorter one, which is not an
+# error the caller can see, only a weaker verdict. `PYTHONIOENCODING=ascii` in the environment and
+# one non-ASCII character in a finding id is enough to do it -- META prints, the finding raises --
+# and a PASS carrying a deferred finding then audits as a PASS carrying none, which is READY.
+expect MUT-REVIEW-PARSE-TRUNCATED "$(parse_verdict_json "$tmp/json.md" | tail -1)" "$(printf 'END\t-\t0')"
+expect MUT-REVIEW-PARSE-TRUNCATED "$(parse_prose_review "$tmp/prose.md" | tail -1)" "$(printf 'END\t-\t0')"
+printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[{"id":"A-DEFERRABL\xc3\x89","severity":"P3"}]}\n```\n' \
+  4ad962f000000000000000000000000000000001 4ad962f000000000000000000000000000000001 \
+  5157509000000000000000000000000000000002 > "$tmp/nonascii.md"
+# The parser exits non-zero here, which is exactly the point: nothing downstream of it looks.
+got="$(PYTHONIOENCODING=ascii parse_verdict_json "$tmp/nonascii.md" 2>/dev/null | tr '\t' '|')" || true
+contains MUT-REVIEW-PARSE-TRUNCATED "$got" "META|4ad962f000000000000000000000000000000001|PASS"
+[[ "$got" == *"END|-|0"* ]] && error "MUT-REVIEW-PARSE-TRUNCATED: a parser that died partway still claimed to have finished"
+# and with a working encoding the same review parses whole, so the case above is about the death
+# and not about the character.
+got="$(parse_verdict_json "$tmp/nonascii.md" | tr '\t' '|')"
+contains MUT-REVIEW-PARSE-TRUNCATED "$got" "END|-|0"
+contains MUT-REVIEW-PARSE-TRUNCATED "$got" "P3|A-DEFERRABL"
+
+# No META field is ever empty. `read` with IFS=tab folds runs of tabs into one, so an empty
+# reviewed_sha shifted the verdict into its column and the base into the verdict's -- the audit
+# then reported a verdict of `-` and a reviewed commit of `PASS`, blocked for the wrong reason,
+# and would have gone whichever way the shifted columns happened to fall.
+printf 'Reviewed head: %s\n\n```json\n{"verdict":"PASS","findings":[]}\n```\n' \
+  4ad962f000000000000000000000000000000001 > "$tmp/no-sha.md"
+expect MUT-META-FIELD-COLLAPSE "$(parse_verdict_json "$tmp/no-sha.md" | head -1 | tr '\t' '|')" 'META|-|PASS|-'
+printf '<!-- upstroke-frontier-review pr=1 -->\nno reviewed head anywhere\n' > "$tmp/no-head.md"
+expect MUT-META-FIELD-COLLAPSE "$(parse_prose_review "$tmp/no-head.md" | head -1 | tr '\t' '|')" 'META|-|-|-'
+# The reader must see four fields on every META line whatever they hold.
+while IFS=$'\t' read -r f1 f2 f3 f4; do
+  expect MUT-META-FIELD-COLLAPSE "$f1/$f2/$f3/$f4" 'META/-/PASS/-'
+done < <(parse_verdict_json "$tmp/no-sha.md" | head -1)
 
 # A prose review that quotes a JSON object stays prose.
 printf 'Reviewed head: %s\nThe object {"verdict":"PASS","findings":[]} is an example.\nVERDICT: CHANGES_REQUIRED\n' \
@@ -446,6 +654,33 @@ frontmatter_has_id TARGET-ID < "$tmp/prose-id.md" && error "MUT-FRONTMATTER-BY-S
 frontmatter_has_id TARGET-ID < "$tmp/front-id.md" || error "MUT-FRONTMATTER-BY-SUBSTRING: the frontmatter id did not match"
 frontmatter_has_id TARGET.ID < "$tmp/x-id.md" && error "MUT-FRONTMATTER-PATTERN: a dot matched as a regex"
 frontmatter_has_id TARGET-ID < "$tmp/no-front.md" && error "MUT-FRONTMATTER-BY-SUBSTRING: a file without a frontmatter block matched"
+
+# --- counting the files that file a finding ------------------------------------------------------
+# The one place git is exercised here, in a repository built for it. This count decides whether a
+# deferred finding is properly filed, and the shape rules above cannot see any of the ways it goes
+# wrong: `git grep` exits 1 for "nothing matched" and above 1 for an error, and the names come back
+# NUL-separated, which a command substitution silently drops -- leaving a loop with no separators,
+# no iterations, and a count of zero for every finding in a tree that holds the file.
+findings_repo="$tmp/findings-repo"
+mkdir -p "$findings_repo/reviews/findings"
+git init -q "$findings_repo"
+printf -- '---\nid: A-DEFERRABLE\nseverity: P3\n---\n\nBody.\n' > "$findings_repo/reviews/findings/a.md"
+printf -- '---\nid: B-OTHER\nseverity: P3\n---\n\nBody.\n' > "$findings_repo/reviews/findings/b with space.md"
+printf -- '---\nid: C-TWICE\n---\n\nBody.\n' > "$findings_repo/reviews/findings/c1.md"
+printf -- '---\nid: C-TWICE\n---\n\nBody.\n' > "$findings_repo/reviews/findings/c2.md"
+printf -- 'id: D-PROSE-ONLY\nnot frontmatter\n' > "$findings_repo/reviews/findings/d.md"
+git -C "$findings_repo" add -A
+git -C "$findings_repo" -c user.email=t@example -c user.name=t commit -qm "file the findings"
+count_in_fixture() { (cd "$findings_repo" && finding_file_count "$1" HEAD); }
+expect MUT-FINDING-FILE-COUNT "$(count_in_fixture A-DEFERRABLE)" 1
+expect MUT-FINDING-FILE-COUNT "$(count_in_fixture B-OTHER)" 1          # the name has a space in it
+expect MUT-FINDING-FILE-COUNT "$(count_in_fixture C-TWICE)" 2          # two files is not one
+expect MUT-FINDING-FILE-COUNT "$(count_in_fixture D-PROSE-ONLY)" 0     # the id is not in frontmatter
+expect MUT-FINDING-FILE-COUNT "$(count_in_fixture NOT-FILED-ANYWHERE)" 0
+# A tree it cannot read is not a tree with no files in it.
+if (cd "$findings_repo" && finding_file_count A-DEFERRABLE deadbeefdeadbeefdeadbeefdeadbeefdeadbeef) > "$tmp/tree.out" 2>&1; then
+  error "MUT-FINDING-FILE-COUNT: an unreadable tree was counted, got [$(cat "$tmp/tree.out")]"
+fi
 
 # --- the newest check run per name -------------------------------------------------------------
 got="$(printf 'upstroke-ci\t100\tsuccess\nupstroke-ci\t250\tfailure\nupstroke-pr-policy\t120\tsuccess\nupstroke-ci\t90\tsuccess\n' | newest_per_name | tr ' ' '\n' | grep . | sort | tr '\n' ' ')"
