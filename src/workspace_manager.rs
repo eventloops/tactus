@@ -4540,8 +4540,13 @@ pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError
 ///   whose oid, and so whose fan-out, is unknown until the stream ends —
 ///   goes to the **object root**: `unpack-objects` with the threshold at 512
 ///   opened `objects/tmp_obj_KSwW4k` and linked it to `objects/88/fb3fef…`.
-///   Any `unpack-objects`, `index-pack`, fetch or clone over the threshold
-///   reaches it, in the store the engine shares with the user's own git;
+///   `unpack-objects` is the producer traced to the root; `index-pack --stdin`
+///   fed the same 200 000-byte object at the same threshold opened only
+///   `pack/tmp_pack_*`, `pack/tmp_idx_*` and `pack/tmp_rev_*`
+///   (`33-r6-strace-index-pack-vs-unpack-objects.log`), so exceeding the
+///   threshold does not by itself send a producer to the root, and fetch and
+///   clone were not traced. The store is the one the engine shares with the
+///   user's own git;
 /// - bulk checkin above the threshold goes to **`pack`**: `hash-object -w`
 ///   and `git add` of a 100 000-byte file at the same threshold opened
 ///   `objects/pack/tmp_pack_2bgAj0` and `objects/pack/tmp_idx_HebZJG` and
@@ -4600,10 +4605,15 @@ pub fn temporary_object_files(worktree: &Path) -> Result<bool, UpstrokeError> {
 
 /// Whether `directory` holds an entry whose name starts with `prefix`.
 ///
-/// A directory that is not there holds nothing: a repository that has never
-/// written a pack has no `pack`, and a fan-out directory exists only once an
-/// object with that prefix has been written. Every other failure — opening
-/// the directory, or listing it part-way through — is the caller's to see.
+/// A directory that is not there holds nothing: a fan-out directory exists
+/// only once Git has first written an object with that prefix — it creates
+/// the directory on the `ENOENT` its first write meets
+/// (`02-strace-where-git-writes.log`) — and a missing `pack` is read the
+/// same way, not because a store without packs lacks one (`git init` on
+/// git 2.43.0 creates `pack` and `info` empty,
+/// `32-r6-git-init-directories.log`) but because absence is not an
+/// inspection failure. Every other failure — opening the directory, or
+/// listing it part-way through — is the caller's to see.
 fn directory_holds_name_prefixed(directory: &Path, prefix: &str) -> Result<bool, UpstrokeError> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,

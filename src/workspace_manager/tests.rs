@@ -10789,9 +10789,13 @@ fn prune_names(repository: &Path) -> Vec<String> {
 /// in `garbage`, nothing under `objects/info` is touched at all, and
 /// `repack`'s `.tmp-<pid>-pack-*` is `repack`'s to clean, not `prune`'s. The
 /// same `git prune -n` is run here after each planting: a row the predicate
-/// and this git disagree on fails, so a git that renames a temporary file
-/// moves this test rather than silently returning the predicate to `false`
-/// (`PR258-PRUNE-SET-IS-A-SELF-ORACLE`).
+/// and this git disagree on fails, so for the thirteen names planted below
+/// the table is this git's and not this test's
+/// (`PR258-PRUNE-SET-IS-A-SELF-ORACLE`). That is the whole of what the
+/// cross-check establishes. It plants fixed names and discovers none from a
+/// producer, so a git that adopts a new temporary spelling while `prune`
+/// keeps naming the old ones passes every row here with the scan blind to
+/// the new name (`PR258-PRUNE-ORACLE-FUTURE-COVERAGE-OVERSTATED`).
 ///
 /// The fan-out rows are the ones that were missed. A loose object's
 /// temporary file is written in the fan-out directory the object's final
@@ -10814,8 +10818,11 @@ fn prune_names(repository: &Path) -> Vec<String> {
 fn temporary_object_files_answers_for_the_files_git_prunes_as_its_own() {
     let fixture = Fixture::new("temp-object-scan");
     let objects = object_directory(&fixture.base).expect("object directory");
-    // `pack`, `info` and a fan-out directory need not exist yet; Git creates
-    // each when it first writes there, and so does this.
+    // A fan-out directory exists only once Git first writes an object with
+    // that prefix; `pack` and `info` are created empty by `git init` itself
+    // (git 2.43.0, `32-r6-git-init-directories.log`). Every planting place
+    // is made to exist here whatever the fixture's history, and
+    // `create_dir_all` is a no-op for the ones already there.
     for directory in ["pack", "info", "00", "ab", "ff"] {
         fs::create_dir_all(objects.join(directory)).expect("a store directory");
     }
@@ -10992,20 +10999,41 @@ fn unused_alphabetic_fan_out_pair(objects: &Path) -> (PathBuf, PathBuf) {
     panic!("the small fixture must leave an unused alphabetic fan-out pair");
 }
 
-/// Every platform constructs the upper-case witness and asserts its native
-/// lookup result. An occupied `ab` cannot suppress it. Unix additionally supplies
-/// a lower-case symlink alias when the filesystem distinguishes the spellings,
-/// so ordinary case-sensitive CI also executes positive alias detection.
+/// The declaration under which
+/// `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
+/// *requires* its native casefold branch rather than observing it. Set to
+/// `1`, it says that the temporary directory this suite runs under folds
+/// case: `ci.yml` sets it on the `macos-latest` test step and on the
+/// `winguest` step, and nowhere else. Unset, empty, or anything but `1`, the
+/// test asserts the scan against whatever the filesystem does.
+const TEMP_FOLDS_CASE: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";
+
+/// Every platform constructs the upper-case witness and asserts the scan
+/// against its native lookup result. An occupied `ab` cannot suppress it.
+/// Unix additionally supplies a lower-case symlink alias when the filesystem
+/// distinguishes the spellings, so ordinary case-sensitive CI also executes
+/// positive alias detection.
 ///
-/// **Which branch guards what.** On macOS and Windows, whose temporary
-/// directories fold case, the native branch is asserted rather than
-/// observed, so a green there records that the guard of
-/// `PR258-CASEFOLD-FANOUT-INVISIBLE` ran. On a case-sensitive volume — the
-/// ubuntu leg, and the build box the ten gates run on — the native assertion
-/// is `false == false`, which any implementation that answers `false` there
-/// satisfies, the round-2 name filter included; the symlink half then
-/// guards the link-following repair and nothing about case. The casefold
-/// P1 is guarded on two of the three CI legs and on neither of those two
+/// **Which branch guards what.** The native branch — Git's lower-case path
+/// resolving to the stored upper-case fan-out — is the one that guards
+/// `PR258-CASEFOLD-FANOUT-INVISIBLE`, and it is *required* only where the
+/// leg declares it: `ci.yml` sets `TEMP_FOLDS_CASE` to `1` on the
+/// `macos-latest` test step and on the `winguest` step, whose temporary
+/// directories fold case (both legs passed the round-5 assertion of that
+/// branch at `f4a351be`), so a green there records that this branch ran.
+/// Anywhere the variable is not `1` the branch is observed, not required:
+/// on a case-sensitive volume — the ubuntu leg, the build box the ten gates
+/// run on, a developer whose `TMPDIR` is a case-sensitive APFS volume — the
+/// native assertion is `false == false`, which any implementation that
+/// answers `false` there satisfies, the round-2 name filter included, and
+/// the symlink half then guards the link-following repair and nothing about
+/// case. Round 5 keyed the requirement on the target OS instead,
+/// `cfg!(any(target_os = "macos", windows))`, which fails this test on a
+/// supported case-sensitive volume before the scan is checked; the round-5
+/// regression lens executed the equivalent `cfg!(unix)` branch on Linux
+/// (`PR258-CASEFOLD-EXPECTATION-KEYED-ON-TARGET-OS`). So the casefold P1 is
+/// guarded by a gate on the two legs that declare the variable, and by no
+/// gate on the ubuntu leg or on this box
 /// (`PR258-CASEFOLD-GUARD-PLATFORM-SHAPED`).
 #[test]
 fn the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does() {
@@ -11026,14 +11054,20 @@ fn the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does() {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => panic!("inspect the lower-case lookup {}: {error}", lower.display()),
     };
-    // Recorded, not observed: the macOS and Windows legs run on
-    // case-insensitive temporary directories, and this is the branch that
-    // guards the casefold P1 in CI.
-    if cfg!(any(target_os = "macos", windows)) {
+    // Required only where the leg declares it: `ci.yml` sets
+    // `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` on the macOS and winguest test steps,
+    // and a green there records that the native branch of this guard ran.
+    // Everywhere else the branch is observed, so a case-sensitive volume —
+    // a developer's `TMPDIR` on case-sensitive APFS — takes the negative
+    // branch below instead of failing here.
+    if std::env::var_os(TEMP_FOLDS_CASE).is_some_and(|value| value == "1") {
         assert!(
             native_alias,
-            "on macOS and Windows the stored upper-case fan-out resolves through Git's lower-case \
-             path, so the native branch of this guard must be the one taken"
+            "{TEMP_FOLDS_CASE}=1 declares that the temporary directory {} folds case, but Git's \
+             lower-case path {} did not resolve to the stored upper-case fan-out: the leg's \
+             declaration and its filesystem disagree",
+            std::env::temp_dir().display(),
+            lower.display()
         );
     }
     assert_eq!(

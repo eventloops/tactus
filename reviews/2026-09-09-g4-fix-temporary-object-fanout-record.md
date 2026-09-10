@@ -32,9 +32,9 @@ they are not claims that this repair session repeated those executions.
 | F mutate the fix and watch the tests die | **done** — §6 separates the historical surviving M7 from the saved current M7, M9 and M6 failures; §6 and §12 add round 5's eleven mutants, all dead, and the restored controls |
 | G the module notes brought into agreement with the code | **done** — §7 |
 | H the deferred findings left as they are | **done** — §8 |
-| I ten gates green on this box | **done** — §11.4 for round 3, §12.7 for round 5; each run describes the tree it names by source hash |
+| I ten gates green on this box | **done** — §11.4 for round 3, §12.7 for round 5, §13.5 for round 6; each run describes the tree it names by source hash |
 | J a draft pull request with a validated body | PR #258 exists; this implementation session prepares a corrected local body for the driving session, which owns git and publication |
-| K scoped reviews and their repairs | **implemented** — §10 records the first round; §11 the second; §12 the third, three `claude-opus-5` max lenses on `2b048a67`, all `CHANGES_REQUIRED`, and the repairs of every finding they carried |
+| K scoped reviews and their repairs | **implemented** — §10 records the first round; §11 the second; §12 the third, three `claude-opus-5` max lenses on `2b048a67`, all `CHANGES_REQUIRED`, and the repairs of every finding they carried; §13 the fourth, three `gpt-6-astra` max lenses on `f4a351be` — closure `PASS`, regression and record `CHANGES_REQUIRED`, no P1 — and the repair of every finding they carried, each a sentence that generalised a sample |
 
 ## 1. The defect, as found and as executed
 
@@ -71,8 +71,16 @@ in round 5 with the same `strace` on the same git
   whose fan-out is unknown until the stream ends — goes to the object root:
   `git unpack-objects` with the threshold at 512 opened `.git/objects/tmp_obj_KSwW4k` and
   linked it to `.git/objects/88/fb3fef…`, while the three small objects in the same pack
-  went to `8b/`, `ff/` and `ac/`. Any `unpack-objects`, `index-pack`, fetch or clone over the
-  threshold reaches it, in the store the engine shares with the user's own git;
+  went to `8b/`, `ff/` and `ac/`. `unpack-objects` is the producer this record traced to the
+  root. `index-pack --stdin` fed the same 200 000-byte object at the same threshold opened only
+  `pack/tmp_pack_*`, `pack/tmp_idx_*` and `pack/tmp_rev_*`
+  (`33-r6-strace-index-pack-vs-unpack-objects.log`; the round-5 record lens measured the same
+  pair first, `31-r6-record-lens-git-results.json`), so exceeding the threshold does not by
+  itself send a producer to the root, and fetch and clone were not traced by this record. An
+  earlier draft of this sentence extended the trace to "any `unpack-objects`, `index-pack`,
+  fetch or clone over the threshold", which the lens executed and falsified
+  (`PR258-ROOT-WRITE-UNIVERSAL-OVERSTATES-PRODUCERS`). The store is the one the engine shares
+  with the user's own git;
 - bulk checkin above the threshold goes to `pack`: `hash-object -w` and `git add` of a
   100 000-byte file at the same threshold opened `.git/objects/pack/tmp_pack_2bgAj0` and
   `.git/objects/pack/tmp_idx_HebZJG` and renamed them to `pack-156f22….pack` and `.idx`;
@@ -150,12 +158,20 @@ round 5 with the same `git prune -n`):
 | `objects/00/tmp_obj_first`, `objects/ff/tmp_obj_last` — the two ends of the fan-out range | a stale temporary file | `true` (§12.4) |
 | `objects/pack/tmp_rev_p` — the reverse index | a stale temporary file | `true` |
 
-The quarantine directory is the one directory the predicate answers for. upstroke never
-creates one — it runs no `push`, `fetch`, `clone` or `receive-pack` — so it appears only if
-a person or another tool pushes into the repository while a run is in flight; it is a row in
-the test's table now (§5), read against `git prune -n` in the test itself, and it is recorded
-as `PR258-ROOT-ARM-MATCHES-QUARANTINE-DIRECTORY`. The `.tmp-` files are two negative rows of
-the same table.
+The predicate follows name prefixes and never reads an entry's type, so a *directory* whose
+name carries the prefix answers `true` exactly as a file does: the quarantine directory is
+the one such directory that Git itself creates and this record traced, not the only directory
+the predicate answers for. The round-5 record lens executed four others against the current
+library — `tmp_foreign_directory`, `tmp_obj_custom_directory`, `pack/tmp_foreign_directory`
+and `ab/tmp_obj_directory` — and each returned `Ok(true)` while `git prune -n` named each a
+stale temporary directory (`31-r6-record-lens-library-results.json`,
+`31-r6-record-lens-git-results.json`; an earlier draft called the quarantine "the one
+directory the predicate answers for", `PR258-QUARANTINE-NOT-THE-ONLY-DIRECTORY`). upstroke
+never creates a quarantine — it runs no `push`, `fetch`, `clone` or `receive-pack` — so one
+appears only if a person or another tool pushes into the repository while a run is in flight;
+it is a row in the test's table (§5), read against `git prune -n` in the test itself, and it
+is recorded as `PR258-ROOT-ARM-MATCHES-QUARANTINE-DIRECTORY`. The `.tmp-` files are two
+negative rows of the same table.
 
 ## 2. What the change can reach
 
@@ -290,7 +306,14 @@ way, and when it does not the answer is `Internal` or `None` — both of which t
 prefixes were *also* widened, from `tmp_obj_` and `tmp_pack_` to `tmp_`, so
 `objects/tmp_other_root` and `objects/pack/tmp_idx_p` answer `true` where they answered
 `false` (§1.4). The same both-branches-refuse argument covers it, and the prune-set test pins
-both rows: the round-4 regression lens's M4 and round 5's MA and MB (§12) each die on them.
+both rows against `git prune -n`. The saved deaths on a widened row are the mutations that
+narrow the prefixes back: round 1's M3 dies in the prune-set test naming `tmp_other_root`
+(`05-mutations.log`), and the round-4 regression lens's M4, the same narrowing, dies in the
+same test (`~/opus-review-258-regression.md` §6, which does not name the row). No saved
+mutation dies on `pack/tmp_idx_p` by name, because the test stops at its first failing row.
+Round 5's MA and MB (§12) witness the *arms*, not the widened rows: MA dies on `tmp_obj_root`
+and MB on `pack/tmp_pack_p`, the old prefixes' own names — an earlier draft said they died on
+the widened rows (`PR258-PROBE-READING-AND-ARM-DEATHS-MISATTRIBUTED`).
 
 **One case is not the same, and an earlier draft of this section said it was.** The scan now
 opens directories the old one did not, so it can fail where the old one could not: with an
@@ -315,10 +338,18 @@ to remove.
 **What the predicate now reads.** `object_directory` resolves a linked worktree to the *main*
 repository's object store — the store v0.2's worktree-per-task execution shares across every
 task. A sibling task's healthy `hash-object -w`, `write-tree` or `cherry-pick` holds
-`objects/xx/tmp_obj_*` there for the length of its write (§1.1). Before this change the
-predicate read only the root and `pack`, where a sibling's loose write never appears, so it
-could not see a sibling at all; now it can. No outcome moves — the argument above holds — but
-the predicate is no longer a function of the worktree it is asked about. The property is not
+`objects/xx/tmp_obj_*` there for the length of its write (§1.1). The old root-and-pack scan
+already saw a sibling there: a sibling's *streamed* write goes to the root (§1.1) and its bulk
+checkin to `pack`, both of which it read. The round-5 record lens executed it — sibling B
+paused inside a real streamed `unpack-objects` with its root temporary open, and from sibling
+A both the current library and an exact copy of the frozen `81ee09ef` scanner returned
+`Ok(true)` (`31-r6-record-lens-library-results.json`, `31-r6-record-lens-sibling-stream.strace`,
+`31-r6-record-lens-frozen-function.rs.txt`). What this change adds is the ordinary fan-out
+loose write — `hash-object -w`, `write-tree`, `cherry-pick` — which the old scan never read.
+An earlier draft said the old scan "could not see a sibling at all", which is false
+(`PR258-SIBLING-VISIBILITY-PREDATES-THE-WIDENING`). No outcome moves — the argument above
+holds — but the predicate is not a function of the worktree it is asked about, and was not
+before this change either. The property is not
 new to the class: `unreachable_objects` already counts any unreachable object anywhere in the
 shared store when the site records no published object, which is the shape round 1's
 per-element repair measured and isolated for. Recorded, with that precedent, as
@@ -331,7 +362,14 @@ is a short-circuit. The worktree-reuse half is right as stated: `resume_open_no_
 (`src/engine/topology/dispatch.rs:297`, called in production from
 `src/engine/topology/run.rs:1073`) verifies through `verify_or_recreate` →
 `WorkspaceManager::quiescence`, which reads registration, the worktree's own git dir and HEAD,
-and never the object store — the property `element_breaks_quiescence` records and
+and performs neither of the two residue scans — not `temporary_object_files`, not
+`unreachable_objects`. It is not true that it never reads the object store: asked for
+`HoldsTree`, its `diff-index --cached` opens the expected tree object (twice, in the round-5
+record lens's trace, `31-r6-record-lens-quiescence-public.strace`, returning `Ok(Ok(()))`),
+and the `resume_open_no_attempt` chain supplies `AtBase`, which compares `rev-parse HEAD`
+with the recorded base (an earlier draft said "never the object store",
+`PR258-QUIESCENCE-OBJECT-STORE-CLAIM-OVERBROAD`). That neither residue scan is on the path is
+the property `element_breaks_quiescence` records and
 `~/tactus-artifacts/G4-ROW10-DECISION.md` §4 argues must stay. So no worktree is recreated that
 was not recreated before, and none is reused that was not reused before. But `finish_promotions`
 (`src/engine/topology/recover.rs:1225`, production at `:1015`) finishes unfinished promotions
@@ -355,8 +393,13 @@ the fan-out range `00` and `ff`, the reverse index `pack/tmp_rev_p`, the quarant
 *directory* `tmp_objdir-incoming-AbCdEf`, and `repack`'s `.tmp-1-pack-*` at the root and in
 `pack` as two negatives. The negatives are as much of the test as the positives —
 `objects/ab/tmp_other_fanout` is Git's garbage, `objects/info/tmp_info` is nobody's, and the
-`.tmp-` pair is `repack`'s. The cross-check adds no prerequisite: every test in the file runs
-git through the fixture already, and `git prune -n` writes nothing.
+`.tmp-` pair is `repack`'s. The cross-check adds no prerequisite: the suite already requires
+git — this test's own fixture runs `git init` before any row, and fails at
+`fixture.rs:148` with no `git` on `PATH` (`35-r6-listing-test-without-git.log`) — and
+`git prune -n` writes nothing. Not every test in the file runs git:
+`a_listing_that_fails_part_way_through_is_an_inspection_error_not_the_end_of_it` constructs
+its listing by hand and passes under the same `PATH` (same log; the round-5 record lens
+executed it first, `PR258-EVERY-TEST-RUNS-GIT-FALSE`).
 
 **`the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects`** (same file). A store
 of real loose objects answers `no`; a fan-out holding only objects holds no temporary file; a
@@ -370,10 +413,24 @@ it; it guards a revert to name filtering with a loose prefix match.
 The test deliberately occupies `ab`, selects an unused alphabetic pair with
 `unused_alphabetic_fan_out_pair`, creates its upper-case spelling and plants residue there.
 It always asserts the scanner's result against native lower-case lookup: positive when that
-lookup resolves, negative when it does not. **On macOS and Windows the native branch is now
-asserted, not observed**: those legs' temporary directories fold case, and a green there records
-that the guard of `PR258-CASEFOLD-FANOUT-INVISIBLE` ran. On a case-sensitive volume the native
-assertion is `false == false`, which any implementation that answers `false` there satisfies —
+lookup resolves, negative when it does not. **The native branch is required only where the leg
+declares it.** `ci.yml` sets `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` on the `macos-latest` test step
+and on the `winguest` step, whose temporary directories fold case (both legs passed round 5's
+target-OS assertion of that branch at `f4a351be`, CI run `34420353541`), and under that
+declaration the test asserts that Git's lower-case path resolved to the stored upper-case
+fan-out, so a green there records that the guard of `PR258-CASEFOLD-FANOUT-INVISIBLE` ran.
+Round 5 keyed the requirement on the target OS, `cfg!(any(target_os = "macos", windows))`,
+which fails the test on a supported case-sensitive volume — a `TMPDIR` on case-sensitive
+APFS — before the scan is checked; the round-5 regression lens executed the equivalent
+`cfg!(unix)` branch on Linux and watched it fail at that assertion, with unmodified and
+restored controls passing (`31-r6-review-regression-f4a351b.md`,
+`PR258-CASEFOLD-EXPECTATION-KEYED-ON-TARGET-OS`). Round 6 executed the replacement four ways
+(`34-r6-casefold-declaration.log`, `34-r6-casefold-declaration.json`): on this box's ext4
+`/tmp` the test passes undeclared and fails under the declaration, at "the leg's declaration
+and its filesystem disagree"; with `TMPDIR` on a private ext4 casefold mount it passes both
+undeclared and declared, the declared run being the branch CI requires. On a case-sensitive
+volume without the declaration the native assertion is `false == false`, which any
+implementation that answers `false` there satisfies —
 the round-2 name filter included; the `#[cfg(unix)]` half then supplies a lower-case symlink
 alias and asserts positive detection, which guards the link-following repair and nothing about
 case. Removing the residue must restore a negative result. No timestamp-dependent occupied
@@ -388,9 +445,9 @@ kills the round-2 filter (`13-r3-mutations-M9-native-casefold.log`). It construc
 upper-case directory without a symlink and asserts negative, positive and negative readings as
 the temporary file is planted and removed. The same log saves the expected prerequisite failure
 on ordinary case-sensitive `/tmp`; that is not counted as a passing native test. So the casefold
-P1 is guarded on the macOS and Windows legs by the default test's asserted branch, and on the
-ubuntu leg and this build box by nothing that a gate runs
-(`PR258-CASEFOLD-GUARD-PLATFORM-SHAPED`, a finding file).
+P1 is guarded on the macOS and winguest legs by the default test's required branch, under the
+declaration `ci.yml` makes on exactly those two steps, and on the ubuntu leg and this build box
+by nothing that a gate runs (`PR258-CASEFOLD-GUARD-PLATFORM-SHAPED`, a finding file).
 
 **`a_symlinked_fan_out_directory_is_followed_as_git_follows_it`** (same file). Its existing
 plant/unplant/dangling-target assertions remain. The symlink uses an unused pair selected at
@@ -501,7 +558,7 @@ witness string from the assertion that fired; a control is exit `0` and `1 passe
 
 | Mutation | Dies in | The assertion that fired |
 |---|---|---|
-| MA the root arm removed | `temporary_object_files_answers_for_the_files_git_prunes_as_its_own` | `tmp_obj_root: git prune does call it a stale temporary` (`tests.rs:10870`, `left: false`, `right: true`) |
+| MA the root arm removed | `temporary_object_files_answers_for_the_files_git_prunes_as_its_own` | ``tmp_obj_root: `git prune` does call it a stale temporary`` (`tests.rs:10870`, `left: false`, `right: true`) |
 | MB the `pack` arm removed | the same test | `pack/tmp_pack_p: …`, the same line |
 | MC the fan-out loop removed | the same test; `every_registered_residue_element_is_constructed_and_recovers`; `synthetic_git_add_residue_unreferenced_objects_and_index_lock_then_forced_scrub_converges`; `repair_materialization_synthetic_residue_recreated_after_forced_removal`; `a_symlinked_fan_out_directory_is_followed_as_git_follows_it`; `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`; `a_fan_out_link_that_loops_…`; `a_fan_out_this_process_cannot_read_…` | `00/tmp_obj_first: …`; the grid at `tests.rs:8738` (`left: None`, `right: Internal`); the attempt test at `attempt/tests.rs:1451`; the dispatch test at `dispatch/tests.rs:1148`; and the four scan tests at their fan-out assertions |
 | MC with the per-site probe | `r5_probe_every_site_registering_temporary_object_file` (a temporary test, `22-r5-mutations-MC-probe-every-site.patch`, never committed) | not a death — a reading: all six sites that register the element classify `Ok(None)` under the mutant and `Ok(Internal)` restored (§12.1) |
@@ -511,7 +568,7 @@ witness string from the assertion that fired; a control is exit `0` and `1 passe
 | MG the `read_dir` error arm returned as `Ok(false)` | `a_fan_out_this_process_cannot_read_is_an_inspection_error_not_an_absence` | `a fan-out that cannot be read is not a fan-out that holds nothing` |
 | MH the per-entry error turned into `continue` | `a_listing_that_fails_part_way_through_is_an_inspection_error_not_the_end_of_it` | `a failure before the name is not the end of the listing` |
 | MI the `is_dir()` guard dropped | `the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects` | `a regular file at a fan-out name is not an inspection failure` |
-| MJ the fan-out prefix widened to `tmp_` **and** the table's `ab/tmp_other_fanout` row flipped to `true` | the prune-set test, at the `git prune -n` cross-check and nowhere else | `ab/tmp_other_fanout: this git's own prune -n does not name it, and the table says it does` (`tests.rs:10881`) |
+| MJ the fan-out prefix widened to `tmp_` **and** the table's `ab/tmp_other_fanout` row flipped to `true` | the prune-set test, at the `git prune -n` cross-check and nowhere else | ``ab/tmp_other_fanout: this git's own `prune -n` does not name it, and the table says it does`` (`tests.rs:10881`) |
 | MK round 4's eager collection restored (`collect::<Result<Vec<_>, _>>()?` before the first read) | the loop test, at its first assertion | `` the answer `00` gave stands `` |
 | restored controls | every test above, and the probe | pass |
 
@@ -547,13 +604,28 @@ them is fixed, and nothing here depends on one.
 This fixes the classifier. It does **not** make G4 pass on its own, and it does not touch the gate's
 report.
 
-Row 10 as written in the packet requires the interrupted-materialization residue to fail
-`Worktree.Verify` so the worktree is recreated, and `~/tactus-artifacts/G4-ROW10-DECISION.md` rules
-that the row over-specifies a mechanism for the two object-store elements and should be corrected
-rather than the code changed. **That correction is owed to the design packet and is the owner's
-act** — the packet is not in this repository and nothing here edits it. What this change does is
-make the corrected row's other requirement — that every element constructed alone classifies
-`Internal` — true, which the third verification found it was not.
+Row 10 as it stood in the packet until 2026-09-09 required the interrupted-materialization
+residue class to fail `Worktree.Verify` "so the worktree is recreated", and
+`~/tactus-artifacts/G4-ROW10-DECISION.md` ruled that the row over-specifies a mechanism for the
+two object-store elements and should be corrected rather than the code changed. **That
+correction was applied to the packet on 2026-09-09** by the Gate 4 driver session, under the
+owner's written authorisation, and is recorded in
+`~/tactus-artifacts/2026-09-09-AMENDMENT-g4-row-10.md` — one leaf,
+`cumulative_review_gates.gates[3].adversarial_fault_tests[9]`, with the packet's digests before
+and after — and was independently audited on 2026-09-10 (`gpt-6-astra` at `max`,
+`~/tactus-artifacts/2026-09-10-amendment-audit-astra.md`, whose fidelity check matched the
+installed row word for word; its findings and their dispositions are in the amendment). The
+packet is not in this repository and nothing here edits it. The corrected row's requirement, in
+its own words: the class "classifies Internal for every element and recovers by the tabled
+action: an element in the worktree's git dir (…) fails Worktree.Verify, so the worktree is
+recreated with force; the object-store elements (unreferenced objects, temporary object files)
+are R27, survive reuse and recreation alike, and by themselves do not fail Worktree.Verify",
+and "in every case the materialization is reproduced deterministically". The correction
+therefore *relaxes* the verifier-failure and recreation obligation for the two object-store
+elements — standalone unreferenced-object and temporary-file residue no longer has to
+demonstrate verifier failure and recreation — and leaves the per-element `Internal` obligation
+in place, made explicit. That per-element half is what this change meets: every element
+constructed alone classifies `Internal`, which the third verification found it did not.
 
 G4 must therefore re-run on the range this merge creates: the code sha moves, so the range moves,
 and the packet forbids amending a failed gate's report.
@@ -847,8 +919,9 @@ Three tests now (§5): an unreadable fan-out at mode `000` is `Err(Io)` naming i
 errno the filesystem gave, once nothing earlier answers (MF dies); a listing whose second entry
 is an error is an error, not the end of the listing (MH dies) — that last one over a constructed
 listing, through `holds_name_prefixed`, because no filesystem the suite runs on fails a `readdir`
-to order; the seam's real caller is exercised by every positive test in the file, and the
-mapping it feeds (`entry.file_name()`) by every one of them. A regular file at a two-digit name
+to order; the seam's real caller is exercised by every test in the file that reads a real store
+through `temporary_object_files`, since every such read goes through it, and the mapping it
+feeds (`entry.file_name()`) by each of them. A regular file at a two-digit name
 is skipped, not read (MI dies).
 
 ### 12.5 The eager probe (closure F3) and the self-oracle (closure F5)
@@ -857,8 +930,13 @@ is skipped, not read (MI dies).
 `Ok(true)` before a loop at a later name is probed (MK — round 4's exact `Result<Vec<_>>`
 shape — dies at that first assertion). The prune-set test reads this git's own `git prune -n`
 after every row, so the table is falsifiable: MJ widens the predicate and the table together and
-dies only at the cross-check. The cross-check adds no prerequisite — every test in the file already
-runs git through the fixture — and `git prune -n` writes nothing.
+dies only at the cross-check. The cross-check adds no prerequisite — the suite already requires
+git, and this test's own fixture runs it before any row; not every test in the file does (§5,
+`35-r6-listing-test-without-git.log`) — and `git prune -n` writes nothing. What the cross-check
+establishes is bounded by the thirteen names it plants: it discovers no name from a producer, so
+a new spelling a future git adopts while `prune` keeps naming the old ones is outside it
+(`PR258-PRUNE-ORACLE-FUTURE-COVERAGE-OVERSTATED`); an earlier draft of the test's doc said a git
+that renames a temporary file "moves this test", which that shape cannot deliver.
 
 ### 12.6 Recorded, not engineered
 
@@ -868,8 +946,9 @@ runs git through the fixture — and `git prune -n` writes nothing.
   row in the doc table and in the test); `.tmp-<pid>-pack-*` is never named by `prune` and the
   predicate answers `false` for (two negative rows).
 - **B3 and R3, the casefold guard.** The ledger cell for `PR258-CASEFOLD-FANOUT-INVISIBLE` says
-  the named witness is `#[ignore]`d and names the legs that guard it; the sibling test asserts on
-  macOS and Windows that its native branch was the one taken, so a green there records it.
+  the named witness is `#[ignore]`d and names the legs that guard it; the sibling test asserted
+  on macOS and Windows, by target OS, that its native branch was the one taken, so a green there
+  recorded it — the keying round 6 replaced with a per-leg declaration (§13.1).
   Recorded as `PR258-CASEFOLD-GUARD-PLATFORM-SHAPED`, `accepted-risk`, with a finding file that
   says what lifts it (a casefold volume for the ubuntu leg — a workflow change).
 - **R4, the shared store.** The predicate reads the repository's store, which every
@@ -901,7 +980,12 @@ lens cited; the two open ones have files under `reviews/findings/`.
 
 `24-r5-gates.log` saves the bare invocation of `~/bin/w1-eight-iso /srv/worktrees/tmpobj` on the
 uncommitted round-5 repair — the wrapper takes its own flock, and no outer flock was added — with
-its result line, the tree it describes and the source hashes it was measured on:
+its result line, the tree it describes and the source hashes it was measured on. The block is a
+formatted extract of that log, not a contiguous copy: the `UTC=` line before `HEAD=`, the four
+lines between the last `sha256=` line and `PASS 01` (`COMMAND`, `w1-eight-iso:`, `note:` and
+`nine-command baseline`) and the `BASELINE_EXIT=0` line after `ALL 9 PASS` are omitted, and the
+trailing space `git status --short` leaves after the last `|` of `STATUS=` is trimmed; every
+value shown is in the file (`PR258-QUOTATIONS-NOT-LITERAL`):
 
 ```
 HEAD=2b048a672a51ff681d19ec7bcc369c07e252b6cd
@@ -935,3 +1019,158 @@ bare run of its own, `27-r5-gates-committed.log`, which is the run the pull requ
 its passing head; `28-r5-pr-body.md` is the body as published and `29-r5-final.patch` the
 committed diff from `2b048a67`. `19-r3-evidence-manifest.md` lists every round-5 file with its
 SHA-256 and byte count, in the rows round 3 established.
+
+## 13. Repair of the fourth review at `f4a351be`
+
+Three independent `gpt-6-astra` `max` lenses reviewed `f4a351be1f4abfb487addb7dd679e092f68dd0d8`;
+their verdicts are copied verbatim into the evidence directory as
+`31-r6-review-closure-f4a351b.md`, `31-r6-review-regression-f4a351b.md` and
+`31-r6-review-record-f4a351b.md`. Closure returned `PASS`: it executed eleven mutations, showed
+by a per-site probe that removing the fan-out loop reads `None` instead of `Internal` at all six
+sites that register the element, instrumented all 24 grid readings and found each holding
+exactly its intended element, killed a real streamed write and classified its 197 328-byte root
+temporary `Internal`, and counted zero scan calls from `Worktree.Verify`. Regression returned
+`CHANGES_REQUIRED` with one finding, and record `CHANGES_REQUIRED` with eleven. **No P1.** The
+record lens's audit matched 141/141 manifest digests and byte counts, 39/39 mutation and control
+results, 34/34 ledger bindings, 44/44 guard tokens and 56/56 evidence filenames; what it faulted
+was prose that generalised a sample. The rule of this round: every such sentence is replaced by
+what was measured, naming the producer traced, and by nothing wider; where a claim is reasoned
+rather than executed it says so. The record lens's execution artefacts survived on this box and
+are copied beside its verdict as `31-r6-record-lens-*` — its git and library results, the frozen
+scanner it compiled, the sibling and quiescence traces, its audit JSON and pass notes. Nothing
+the closure lens established is re-measured here, and no test is restructured. This session is
+`claude-fable-5-1` at `max`.
+
+### 13.1 The casefold expectation keyed on the target OS (regression, P2, executed)
+
+Round 5 made the alias test assert its native branch under
+`cfg!(any(target_os = "macos", windows))` — an environmental expectation turned into a hard
+assertion on the target OS. Case-sensitive APFS is a supported macOS format, so a developer
+whose `TMPDIR` is on one gets a panic before the scan is checked; the lens executed the
+equivalent branch on Linux by changing only that `cfg!` to `cfg!(unix)` and watched the test
+fail at the assertion, with unmodified and restored controls passing. `MAINTAINING.md` fixes a
+finding that carries a reproduction whatever its label.
+
+The `cfg!` block is replaced by a declaration: `UPSTROKE_TEST_TEMP_FOLDS_CASE=1` says that the
+temporary directory the suite runs under folds case, and only under it does the test *require*
+the native branch; unset, empty or anything else, the branch is observed and the portable
+`assert_eq!` against the filesystem's own lookup — unchanged, and exactly as strong as it was —
+is the whole assertion. `ci.yml` makes the declaration on exactly the two steps whose
+filesystems fold case, the `macos-latest` test step (an expression over the matrix, empty on
+`ubuntu-latest`) and the `winguest` step, so CI still enforces that the casefold branch is the
+one taken on the legs that guard the P1, and a case-sensitive volume anywhere else skips the
+requirement instead of failing. The workflow oracle (`src/effects/tests/workflow.rs`) refuses a
+step-level `env:` everywhere for a reason — one key retargets a compile — so it now admits this
+one map, pinned whole as `TEST_STEP_ENV` and `TEST_WINDOWS_STEP_ENV` the way the aggregate's map
+is, and four escapes measure the pin: the declaration dropped from either job, moved to the
+ubuntu leg, and a `CARGO_BUILD_TARGET` key added beside it, each refused
+(`MUT-TEST-CASEFOLD-DECLARATION-DROPPED`, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`,
+`MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG`,
+`MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`; all 124 effects tests pass,
+`36-r6-gate-logs/03-test.log`). The workflow edit is disclosed in the pull request body; a pull
+request may edit `ci.yml`, and the owner reads that diff line by line before merging
+(`MAINTAINING.md`, trust boundary).
+
+Executed four ways (`34-r6-casefold-declaration.py`, `.log`, `.json`), one test through the real
+build wrapper on this box's private target: on ext4 `/tmp`, undeclared, pass; declared, the
+declaration assertion fails — "the leg's declaration and its filesystem disagree" — which is
+the loud failure a wrong declaration should give; with `TMPDIR` on a private ext4 casefold loop
+mount (lower-case path resolves, same inode), undeclared, pass; declared, pass — the branch CI
+requires, taken. The first attempt of the harness died at `mkfs.ext4`, which the tool shell's
+`PATH` lacks, after its two ordinary-`/tmp` cases had confirmed; it is kept as
+`34-r6-casefold-declaration-first-attempt-mkfs-not-on-path.log` and the harness was run again
+whole. Native macOS and Windows execution was not available to this session; the two legs' green
+at the pushed head, with the declaration set, is what records that the required branch was
+taken there, exactly as round 5's target-OS assertion recorded it at `f4a351be`. The test's doc,
+the ledger cells for `PR258-CASEFOLD-FANOUT-INVISIBLE` and `PR258-CASEFOLD-GUARD-PLATFORM-SHAPED`
+and the latter's finding file now describe what guards the P1, on which legs, and under what
+variable. Recorded as `PR258-CASEFOLD-EXPECTATION-KEYED-ON-TARGET-OS`, fixed.
+
+### 13.2 The five blocking record corrections (record lens 1–5)
+
+1. **The replacement root-write universal** (§1.1, and the rustdoc §7 nominates as the
+   predicate's authority). Round 5 deleted "Git never writes at the object root" and wrote "any
+   `unpack-objects`, `index-pack`, fetch or clone over the threshold reaches it"; the lens fed a
+   200 000-byte blob at `core.bigFileThreshold=512` to both and found `index-pack --stdin`
+   opening only `pack/` temporaries. Re-executed here with the same pair
+   (`33-r6-strace-index-pack-vs-unpack-objects.sh`, `.log`): `unpack-objects` opened
+   `objects/tmp_obj_mnvhN0` and linked it into `84/`; `index-pack --stdin` opened
+   `pack/tmp_pack_JDEhYD`, `pack/tmp_idx_kIH6Dy` and `pack/tmp_rev_pzZgS3` and nothing at the
+   root. Both places now say that `unpack-objects` is the producer traced to the root, that
+   `index-pack` at the same threshold is not, and that fetch and clone were not traced
+   (`PR258-ROOT-WRITE-UNIVERSAL-OVERSTATES-PRODUCERS`).
+2. **Quarantine exclusivity** (§1.4). The predicate follows prefixes and never reads an entry's
+   type; the lens's four other directory names each answered `Ok(true)` and `git prune` named
+   each a stale temporary directory (`31-r6-record-lens-library-results.json`). The quarantine is
+   now an example, not the boundary (`PR258-QUARANTINE-NOT-THE-ONLY-DIRECTORY`).
+3. **When shared-store dependence began** (§4, and the finding file for
+   `PR258-SHARED-STORE-PREDICATE-READS-SIBLINGS`). A sibling's streamed write goes to the root,
+   which the old scan read; the lens paused sibling B inside a real streamed `unpack-objects` and
+   an exact copy of the frozen scanner answered `Ok(true)` from sibling A
+   (`31-r6-record-lens-sibling-stream.strace`, `31-r6-record-lens-frozen-function.rs.txt`). Both
+   places now say the old scan already saw a sibling's streamed root write and its pack writes,
+   and that this change adds the ordinary fan-out write; the ledger row's failure sequence says
+   the same (`PR258-SIBLING-VISIBILITY-PREDATES-THE-WIDENING`).
+4. **The probe and the arm deaths** (body, §4). The per-site probe's log records `EXIT=0` and
+   `1 passed; 0 failed` and prints six `Ok(None)` readings without asserting; §6 already said "not
+   a death — a reading", and the body now agrees. MA dies on `tmp_obj_root` and MB on
+   `pack/tmp_pack_p`, the arms' witnesses; §4 now attributes the widened-row deaths to the
+   prefix-narrowing mutations that carry them, M3 (`05-mutations.log`) and the round-4 lens's M4,
+   and says that no saved mutation dies on `pack/tmp_idx_p` by name
+   (`PR258-PROBE-READING-AND-ARM-DEATHS-MISATTRIBUTED`).
+5. **The oracle's future-proofing claim** (the prune-set test's doc). The test plants thirteen
+   fixed names and discovers none from a producer; the doc and §12.5 now claim an independent
+   oracle for the rows it plants and nothing about a spelling a future git adopts
+   (`PR258-PRUNE-ORACLE-FUTURE-COVERAGE-OVERSTATED`).
+
+### 13.3 The six smaller corrections (record lens 6–11)
+
+6. `quiescence` "never reads the object store" is false for `HoldsTree`, whose
+   `diff-index --cached` opened the expected tree object twice in the lens's trace
+   (`31-r6-record-lens-quiescence-public.strace`); §4 now says it performs neither residue scan,
+   and that the `resume_open_no_attempt` chain supplies `AtBase`
+   (`PR258-QUIESCENCE-OBJECT-STORE-CLAIM-OVERBROAD`).
+7. The §12.7 gate block is labelled the formatted extract it is, naming what it omits and trims;
+   the MA and MJ assertion quotations in §6 carry their literal backticks
+   (`PR258-QUOTATIONS-NOT-LITERAL`).
+8. `19-r3-evidence-manifest.md` now lists the nine round-1 files that predate it — `01`–`06` and
+   the three `07-review-*.md` — with SHA-256 and byte count, so the body's sentence that it lists
+   every file is true rather than narrowed (`PR258-MANIFEST-COVERAGE-CLAIM-EXCEEDS-CONTENTS`).
+9. "Every test in the file already runs git" is false: the listing test builds its iterator by
+   hand and passed with `PATH=/nonexistent`, while the prune-set test failed at `fixture.rs:148`
+   under the same `PATH` (`35-r6-listing-test-without-git.sh`, `.log`); §5 and §12.5 say the suite
+   requires git and this test's fixture runs it (`PR258-EVERY-TEST-RUNS-GIT-FALSE`).
+10. "A repository that has never written a pack has no `pack`" is false: a fresh `git init` on
+    git 2.43.0 already holds `objects/pack` and `objects/info` with nothing in them
+    (`32-r6-git-init-directories.log`). The rustdoc of `directory_holds_name_prefixed` and the
+    prune-set test's comment give the reason that holds — absence is not an inspection failure —
+    and the missing-directory handling is unchanged (`PR258-PACK-ABSENCE-EXPLANATION-FALSE`).
+11. The ledger cell for `PR258-SYMLINKED-FANOUT-UNFOLLOWED` says its witness is `#[cfg(unix)]`,
+    executed on Linux, and that Windows coverage of the `fs::metadata` resolution is reasoned, as
+    the casefold cell does (`PR258-SYMLINK-GUARD-CELL-OMITS-UNIX-LIMIT`).
+
+### 13.4 The driver's correction
+
+§9 said the row 10 correction "is owed to the design packet and is the owner's act". It was
+applied on 2026-09-09 under the owner's written authorisation and independently audited on
+2026-09-10; §9 now says so, cites the amendment, quotes the corrected row's requirement, and says
+what the correction relaxes — the verifier-failure and recreation obligation for the two
+object-store elements — and what it keeps, the per-element `Internal` obligation this pull request
+meets. The rest of §9 stands: G4 re-runs on the range this merge creates.
+
+### 13.5 Gates and final evidence
+
+`36-r6-gates.log` saves the bare invocation of `~/bin/w1-eight-iso /srv/worktrees/tmpobj` on the
+uncommitted round-6 repair — the wrapper takes its own flock, and no outer flock was added — with
+its result line, the tree it describes and the source hashes it was measured on, in the shape of
+§12.7's log; its complete command logs are in `36-r6-gate-logs/`, and the tenth gate ran
+separately (`36-r6-pr-ready.log`). This section is the record's last edit before that run; the
+checks that follow — formatting, whitespace, the freeze, the six shell gates, the local
+validation of the pull request body, that every round-6 file cited here and in the body exists,
+and that the casefold harness's source hash is the tree's — are saved in
+`37-r6-final-checks.log`. The committed head then gets a bare run of its own,
+`38-r6-gates-committed.log` with `38-r6-gate-logs-committed/` and `38-r6-pr-ready-committed.log`,
+which is the run the pull request body names as its passing head; `39-r6-pr-body.md` is the body
+as published and `40-r6-final.patch` the committed diff from `f4a351be`.
+`19-r3-evidence-manifest.md` lists every round-6 file, and now every file in the directory, with
+its SHA-256 and byte count (`41-r6-manifest-update.py`).

@@ -74,7 +74,19 @@ jobs:
           git config --global user.email "ci@upstroke.local"
           git config --global user.name "upstroke CI"
 
+      # `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
+      # requires its native casefold branch only where the leg declares that
+      # the temporary directory its suite runs under folds case; anywhere
+      # else -- the ubuntu leg, a developer's TMPDIR on case-sensitive APFS --
+      # it observes the branch instead of failing it. The macOS runner's
+      # temporary directory folds case and the ubuntu runner's does not, so
+      # the declaration is per leg, and `test-windows` makes the same
+      # declaration for the guest's NTFS. The workflow oracle pins this one
+      # step-level `env:` as a whole map (`TEST_STEP_ENV`), the way it pins
+      # the aggregate's: any other key here is refused.
       - run: cargo test --all-targets --all-features
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}
 
   # The Windows suite runs on an ephemeral self-hosted runner: a throwaway
   # overlay of a frozen Server 2025 image on the build box, one job per boot,
@@ -118,6 +130,8 @@ jobs:
       # is today's count on this platform less a margin; removing that many
       # tests is a deliberate act, and it edits this number in the same change.
       - name: Test, and witness that the suite ran
+        env:
+          UPSTROKE_TEST_TEMP_FOLDS_CASE: "1"
         run: |
           cargo test --all-targets --all-features | Tee-Object -Variable log
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

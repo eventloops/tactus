@@ -7,7 +7,7 @@ pr: 258
 reviewed_sha: 2b048a672a51ff681d19ec7bcc369c07e252b6cd
 location: src/workspace_manager.rs:4634
 provenance: introduced_by_feature
-first_bad: G4-TEMP-OBJECT-FANOUT-UNSCANNED — the widening that closes it is what makes the predicate see a sibling; the class it joins is `unreachable_objects`'s, which has read the whole shared store since it was written
+first_bad: G4-TEMP-OBJECT-FANOUT-UNSCANNED — the widening that closes it is what makes the predicate see a sibling's ordinary fan-out write; the root-and-pack scan already saw a sibling's streamed root write and its pack writes, and the class it joins is `unreachable_objects`'s, which has read the whole shared store since it was written
 guard: `temporary_object_files`' doc states the property and its precedent; no test constructs a sibling's in-flight write, because the property is a design question (row 10 / R27), not a defect a test can close
 ---
 
@@ -29,10 +29,17 @@ worktree both resolve to `…/main/.git/objects`).
 
 No outcome moves today: `verify_object` refuses on `Internal` and on `None` alike, and the
 predicate is only reached on a path already headed for `Refusal::ObjectMissing`. What has
-changed is a property: **the predicate is no longer a function of the worktree it is asked
-about.** Before the widening it read the object root and `pack`, where a sibling's loose
-write never appears, so it could not see a sibling at all; now it can, and the answer is
-not reproducible from the worktree's own state.
+changed is the reach of a property the predicate already had: **it is not a function of the
+worktree it is asked about.** Before the widening it read the object root and `pack`, where a
+sibling's *streamed* loose write and its bulk-checkin pack write already appeared: the round-5
+record lens paused sibling B inside a real streamed `unpack-objects` and an exact copy of the
+frozen `81ee09ef` scanner answered `Ok(true)` from sibling A, as the current library did
+(`~/tactus-artifacts/tmpobj-evidence/31-r6-record-lens-library-results.json`). What the
+widening adds is a sibling's *ordinary* fan-out loose write — `hash-object -w`, `write-tree`,
+`cherry-pick` — which the old scan never read; an earlier draft of this file said the old scan
+"could not see a sibling at all", which is false
+(`PR258-SIBLING-VISIBILITY-PREDATES-THE-WIDENING`). Either way the answer is not reproducible
+from the worktree's own state.
 
 **The precedent, so this row is not read as a regression this change introduced.** The
 property is not new to the class. `unreachable_objects` runs `git fsck --unreachable` over

@@ -176,6 +176,18 @@ command runs this?". A parsed document has no comments in it at all, so that
 class is gone by construction rather than by a strip whose bite had to be
 asserted.
 
+## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);`
+
+The step that runs the suite is the one step in this job that may carry an
+`env:`, and only the map [`TEST_STEP_ENV`] pins: the declaration that the
+leg's temporary directory folds case, under which
+`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
+requires its native branch. Every other step keeps [`STEP_FIELDS`], and the
+map is compared whole by [`step_env_complaints`]. Measured,
+`MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
+`MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG` and
+`MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
+
 ## `pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {` › `if scalar(step, "run").is_some() {`
 
 This job is a matrix, so each `run:` step resolves a shell once per
@@ -239,6 +251,12 @@ about the jobs that install and this one does not. The action and its
 step-pin check alone accepted it. Zero installs, as an equality.
 Measured, `MUT-TEST-WINDOWS-TOOLCHAIN-INSTALLED`.
 
+## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);`
+
+The same one-step allowance as the hosted job's, pinned to
+[`TEST_WINDOWS_STEP_ENV`]: the guest's NTFS folds case, so the declaration
+is `1` outright. Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
+
 ## `pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {` › `let running = steps_of(job)`
 
 The whole step, not the command inside it. The command says which suite
@@ -259,6 +277,14 @@ tests `master` while every other leg reads the candidate. [`STEP_FIELDS`]
 admits `with:` because the toolchain and cache actions need it; on a
 checkout step it is refused whole. Measured, `MUT-TEST-WINDOWS-CHECKOUT-REF`
 and `MUT-TEST-CHECKOUT-REF`.
+
+## `fn step_env_complaints(`
+
+Every way a step's `env:` is not the map pinned for it -- absent, a different
+value, an extra key, or a value YAML does not read as a string. An equality
+over the whole map, for the reason the aggregate's is: a step-level
+environment can retarget the compile the step performs, so admitting the
+field by name would hand back the escape [`STEP_FIELDS`] closes.
 
 ## `fn step_pin_complaints(job: &Yaml, named: &str, code: &str, scripts: &[&str]) -> Vec<String> {`
 
