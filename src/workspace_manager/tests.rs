@@ -31,7 +31,9 @@ use std::collections::BTreeSet;
 // The repository fixture and the three Git helpers are `fixture`'s, not
 // this module's: `src/engine/topology/**` needs them too and cannot reach
 // an effect primitive of its own. See that module for why they moved.
-use super::fixture::{Fixture, died_by_abort, died_by_kill, git, git_out, run_kill_child, scratch};
+use super::fixture::{
+    Fixture, died_by_abort, died_by_kill, fan_out_directory, git, git_out, run_kill_child, scratch,
+};
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
 /// snapshot input is built from.
@@ -8953,8 +8955,18 @@ fn construct_element(fixture: &Fixture, path: &Path, element: ResidueElement) ->
             "an object an interrupted command wrote\n",
         )),
         ResidueElement::TemporaryObjectFile => {
+            // In a fan-out directory the store already holds, beside real
+            // objects, where the common loose write leaves it. Planted at
+            // the object root this exercised only the arm the scan always
+            // had, and the grid the per-element evidence rests on stayed
+            // green with the fan-out loop deleted
+            // (`PR258-GRID-PLANTS-AT-THE-OBJECT-ROOT`).
             let objects = object_directory(&fixture.base).expect("object directory");
-            fs::write(objects.join("tmp_obj_synthetic"), b"partial").expect("temp object");
+            fs::write(
+                fan_out_directory(&objects).join("tmp_obj_synthetic"),
+                b"partial",
+            )
+            .expect("temp object");
             None
         }
         ResidueElement::IndexLock => {
@@ -10734,26 +10746,67 @@ fn a_worktree_inspecting_read_writes_no_index() {
     );
 }
 
+/// How a name is planted for the table below.
+#[derive(Clone, Copy)]
+enum Planted {
+    File,
+    Directory,
+}
+
+/// The paths this git's own `prune -n` names as stale temporaries — "Removing
+/// stale temporary file …" and "… directory …" — with `\` read as `/` so a
+/// Windows spelling of the store compares the same.
+fn prune_names(repository: &Path) -> Vec<String> {
+    let output = git_out(repository, &["prune", "-n"]);
+    assert!(
+        output.status.success(),
+        "git prune -n: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            line.strip_prefix("Removing stale temporary file ")
+                .or_else(|| line.strip_prefix("Removing stale temporary directory "))
+        })
+        .map(|path| path.replace('\\', "/"))
+        .collect()
+}
+
 /// [`temporary_object_files`] answers for exactly the files Git prunes as its
-/// own, in every place Git leaves one.
+/// own, in every place Git leaves one — and `git prune -n` itself is read
+/// beside every row, so the table is Git's and not this test's.
 ///
 /// `resource_accounting[R27]` says "Git prunes temporary object files itself",
 /// so `git prune` is the authority on which files these are. Measured on
 /// git 2.43.0 by planting one candidate name in each plausible place and
 /// reading `git prune -n`
-/// (`~/tactus-artifacts/tmpobj-evidence/03-git-prune-own-set.log`): every row
-/// below marked `true` was named "Removing stale temporary file", and the two
-/// marked `false` were not — `objects/ab/tmp_other_fanout` is reported as a
-/// *bad sha1 file* and counted in `garbage`, and nothing under `objects/info`
-/// is touched at all.
+/// (`~/tactus-artifacts/tmpobj-evidence/03-git-prune-own-set.log`,
+/// `21-r5-git-prune-producers-outside-the-sample.log`): every row below
+/// marked `true` was named "Removing stale temporary file" — or "directory",
+/// for the one directory — and the rows marked `false` were not:
+/// `objects/ab/tmp_other_fanout` is reported as a *bad sha1 file* and counted
+/// in `garbage`, nothing under `objects/info` is touched at all, and
+/// `repack`'s `.tmp-<pid>-pack-*` is `repack`'s to clean, not `prune`'s. The
+/// same `git prune -n` is run here after each planting: a row the predicate
+/// and this git disagree on fails, so a git that renames a temporary file
+/// moves this test rather than silently returning the predicate to `false`
+/// (`PR258-PRUNE-SET-IS-A-SELF-ORACLE`).
 ///
-/// The fan-out row is the one that matters and the one that was missed. A
-/// loose object's temporary file is written in the fan-out directory the
-/// object's final name will live in, never at the object root
-/// (`02-strace-where-git-writes.log`), so a scan of the root and `pack` alone
-/// never saw the file a killed write leaves: a real `SIGKILL` requested at half of a
-/// separately measured 3.878 s write left `objects/b7/tmp_obj_ybqfZf` and this function answered
-/// `false` (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`, `01-real-kill-frozen.log`).
+/// The fan-out rows are the ones that were missed. A loose object's
+/// temporary file is written in the fan-out directory the object's final
+/// name will live in by `hash-object -w` and `write-tree`
+/// (`02-strace-where-git-writes.log`), so a scan of the root and `pack`
+/// alone never saw the file a killed write leaves: a real `SIGKILL`
+/// requested at half of a separately measured 3.878 s write left
+/// `objects/b7/tmp_obj_ybqfZf` and this function answered `false`
+/// (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`, `01-real-kill-frozen.log`). The root
+/// rows are real too: a streamed object above `core.bigFileThreshold` is
+/// written at the root, its fan-out unknown until the stream ends
+/// (`20-r5-strace-git-writes-in-three-places.log`). `00` and `ff` are the
+/// two ends of the range the scan probes, and a range short by one at either
+/// end answers `false` for exactly one of them
+/// (`PR258-FANOUT-RANGE-BOUNDS-UNWITNESSED`).
 ///
 /// Each name is planted **alone** and removed again, so each row is this
 /// function's answer to that name and nothing else.
@@ -10761,46 +10814,91 @@ fn a_worktree_inspecting_read_writes_no_index() {
 fn temporary_object_files_answers_for_the_files_git_prunes_as_its_own() {
     let fixture = Fixture::new("temp-object-scan");
     let objects = object_directory(&fixture.base).expect("object directory");
-    // `pack` and a fan-out directory need not exist yet; Git creates each when
-    // it first writes there, and so does this.
-    fs::create_dir_all(objects.join("pack")).expect("the pack directory");
-    fs::create_dir_all(objects.join("ab")).expect("a fan-out directory");
-    fs::create_dir_all(objects.join("info")).expect("the info directory");
+    // `pack`, `info` and a fan-out directory need not exist yet; Git creates
+    // each when it first writes there, and so does this.
+    for directory in ["pack", "info", "00", "ab", "ff"] {
+        fs::create_dir_all(objects.join(directory)).expect("a store directory");
+    }
 
     assert!(
         !temporary_object_files(&fixture.base).expect("scan"),
         "a store Git has not been killed inside holds none"
     );
+    assert_eq!(
+        prune_names(&fixture.base),
+        Vec::<String>::new(),
+        "and this git's `prune -n` names no stale temporary in it"
+    );
 
-    for (relative, git_calls_it_its_own) in [
-        // The object root: any `tmp_` name.
-        ("tmp_obj_root", true),
-        ("tmp_other_root", true),
-        // The pack directory: any `tmp_` name, which is both the pack Git was
-        // writing and the index it writes beside it.
-        ("pack/tmp_pack_p", true),
-        ("pack/tmp_idx_p", true),
-        // A fan-out directory: `tmp_obj_` is Git's temporary loose object.
-        ("ab/tmp_obj_fanout", true),
+    for (relative, planted_as, git_calls_it_its_own) in [
+        // The object root: any `tmp_` name ...
+        ("tmp_obj_root", Planted::File, true),
+        ("tmp_other_root", Planted::File, true),
+        // ... including receive-pack's quarantine directory, which is there
+        // for the length of a push into the repository and which prune
+        // removes as "a stale temporary directory".
+        ("tmp_objdir-incoming-AbCdEf", Planted::Directory, true),
+        // The pack directory: any `tmp_` name, which is the pack Git was
+        // writing, the index it writes beside it, and the reverse index.
+        ("pack/tmp_pack_p", Planted::File, true),
+        ("pack/tmp_idx_p", Planted::File, true),
+        ("pack/tmp_rev_p", Planted::File, true),
+        // A fan-out directory: `tmp_obj_` is Git's temporary loose object —
+        // at both ends of the range the scan probes, and in the middle.
+        ("00/tmp_obj_first", Planted::File, true),
+        ("ab/tmp_obj_fanout", Planted::File, true),
+        ("ff/tmp_obj_last", Planted::File, true),
         // A fan-out name that is not `tmp_obj_` is Git's *garbage* — a bad
         // sha1 file — and Git does not prune it, so it is not this element.
-        ("ab/tmp_other_fanout", false),
+        ("ab/tmp_other_fanout", Planted::File, false),
         // `objects/info` holds no objects and Git prunes nothing in it.
-        ("info/tmp_info", false),
+        ("info/tmp_info", Planted::File, false),
+        // `repack` names its in-flight pack `.tmp-<pid>-pack-*`; `prune`
+        // never names it, so R27's "Git prunes temporary object files
+        // itself" does not cover it and neither does this.
+        (".tmp-1-pack-x.pack", Planted::File, false),
+        ("pack/.tmp-1-pack-y.pack", Planted::File, false),
     ] {
         let planted = objects.join(relative);
-        fs::write(&planted, b"half an object\n").expect("plant");
+        match planted_as {
+            Planted::File => fs::write(&planted, b"half an object\n").expect("plant"),
+            Planted::Directory => {
+                fs::create_dir(&planted).expect("plant");
+                fs::write(planted.join("held"), b"an object in quarantine\n").expect("plant");
+            }
+        }
         assert_eq!(
             temporary_object_files(&fixture.base).expect("scan"),
             git_calls_it_its_own,
-            "{relative}: `git prune` {} call it a stale temporary file",
+            "{relative}: `git prune` {} call it a stale temporary",
             if git_calls_it_its_own {
                 "does"
             } else {
                 "does not"
             }
         );
-        fs::remove_file(&planted).expect("unplant");
+        let named = prune_names(&fixture.base);
+        assert_eq!(
+            named
+                .iter()
+                .any(|name| name.ends_with(&format!("objects/{relative}"))),
+            git_calls_it_its_own,
+            "{relative}: this git's own `prune -n` {} name it, and the table says it {}: {named:?}",
+            if git_calls_it_its_own {
+                "does not"
+            } else {
+                "does"
+            },
+            if git_calls_it_its_own {
+                "does"
+            } else {
+                "does not"
+            }
+        );
+        match planted_as {
+            Planted::File => fs::remove_file(&planted).expect("unplant"),
+            Planted::Directory => fs::remove_dir_all(&planted).expect("unplant"),
+        }
         assert!(
             !temporary_object_files(&fixture.base).expect("scan"),
             "{relative}: and removing it leaves the store with none"
@@ -10812,10 +10910,16 @@ fn temporary_object_files_answers_for_the_files_git_prunes_as_its_own() {
 ///
 /// A loose object's own name is 38 hexadecimal characters in a two-character
 /// directory, and neither is a temporary file; `pack` holds packs and their
-/// indexes; `info` holds `alternates` and `packs`. None of them is an answer,
-/// and a directory whose name is not two hexadecimal digits is not descended
-/// into at all — including one that merely starts with two, which is what
-/// distinguishes a fan-out from a caller's own scratch directory.
+/// indexes; `info` holds `alternates` and `packs`. None of them is an answer.
+/// The scan resolves Git's 256 canonical two-digit names by construction, so
+/// `objects/abc` is never a candidate against the shipped design; the decoy
+/// assertion below cannot fail against it and is kept as the guard against a
+/// revert to name filtering with a loose prefix match
+/// (`PR258-DECOY-DOC-OVERSTATES-ITS-GUARD`). A regular file at a two-digit
+/// name resolves but is not a directory, so it is not a fan-out and is not
+/// read as one — without that guard `read_dir` on it would be an inspection
+/// error, `NotADirectory`, for a store nothing is wrong with
+/// (`PR258-IS-DIR-GUARD-UNWITNESSED`).
 #[test]
 fn the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects() {
     let fixture = Fixture::new("temp-object-scan-negative");
@@ -10846,6 +10950,20 @@ fn the_temporary_object_scan_answers_no_for_a_store_of_ordinary_objects() {
     assert!(
         !temporary_object_files(&fixture.base).expect("scan"),
         "a fan-out holding only objects holds no temporary object file"
+    );
+
+    // And a regular file at a fan-out name: resolved, not a directory, not
+    // read.
+    let (file_at_a_fan_out_name, _) = unused_alphabetic_fan_out_pair(&objects);
+    fs::write(
+        &file_at_a_fan_out_name,
+        b"a file where a fan-out could be\n",
+    )
+    .expect("plant");
+    assert!(
+        !temporary_object_files(&fixture.base)
+            .expect("a regular file at a fan-out name is not an inspection failure"),
+        "a regular file at a two-digit name is not a fan-out"
     );
 }
 
@@ -10878,6 +10996,17 @@ fn unused_alphabetic_fan_out_pair(objects: &Path) -> (PathBuf, PathBuf) {
 /// lookup result. An occupied `ab` cannot suppress it. Unix additionally supplies
 /// a lower-case symlink alias when the filesystem distinguishes the spellings,
 /// so ordinary case-sensitive CI also executes positive alias detection.
+///
+/// **Which branch guards what.** On macOS and Windows, whose temporary
+/// directories fold case, the native branch is asserted rather than
+/// observed, so a green there records that the guard of
+/// `PR258-CASEFOLD-FANOUT-INVISIBLE` ran. On a case-sensitive volume — the
+/// ubuntu leg, and the build box the ten gates run on — the native assertion
+/// is `false == false`, which any implementation that answers `false` there
+/// satisfies, the round-2 name filter included; the symlink half then
+/// guards the link-following repair and nothing about case. The casefold
+/// P1 is guarded on two of the three CI legs and on neither of those two
+/// (`PR258-CASEFOLD-GUARD-PLATFORM-SHAPED`).
 #[test]
 fn the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does() {
     let fixture = Fixture::new("temp-object-case-alias");
@@ -10897,6 +11026,16 @@ fn the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does() {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => panic!("inspect the lower-case lookup {}: {error}", lower.display()),
     };
+    // Recorded, not observed: the macOS and Windows legs run on
+    // case-insensitive temporary directories, and this is the branch that
+    // guards the casefold P1 in CI.
+    if cfg!(any(target_os = "macos", windows)) {
+        assert!(
+            native_alias,
+            "on macOS and Windows the stored upper-case fan-out resolves through Git's lower-case \
+             path, so the native branch of this guard must be the one taken"
+        );
+    }
     assert_eq!(
         temporary_object_files(&fixture.base).expect("scan stored upper-case fan-out"),
         native_alias,
@@ -10923,9 +11062,13 @@ fn the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does() {
 
 /// Execute with TMPDIR (Unix) or the system temporary directory (Windows) on a
 /// case-insensitive filesystem. This fails its prerequisite instead of silently
-/// passing on a case-sensitive volume. The default alias test above also runs on
-/// ordinary CI; this integration witness specifically rejects a read_dir filter
-/// that discards stored upper-case names before resolving Git's lower-case path.
+/// passing on a case-sensitive volume. It never runs in CI — nothing passes
+/// `--ignored` — and on a case-sensitive volume the default alias test above
+/// takes its negative branch, which a `read_dir` filter that discards stored
+/// upper-case names before resolving Git's lower-case path also satisfies; so
+/// this witness is what rejects that filter on Linux, and it was executed on
+/// ext4 casefold (`09-r3-targeted.log`, `13-r3-mutations-M9-native-casefold.log`)
+/// rather than by a gate.
 #[test]
 #[ignore = "requires a case-insensitive temporary filesystem; run explicitly with --ignored"]
 fn a_native_case_insensitive_fan_out_alias_is_detected() {
@@ -11004,5 +11147,147 @@ fn a_symlinked_fan_out_directory_is_followed_as_git_follows_it() {
     assert!(
         !temporary_object_files(&fixture.base).expect("a dangling fan-out link is not an error"),
         "a fan-out link with no target holds no temporary object file"
+    );
+}
+
+/// An inspection failure at a later canonical name cannot discard an answer an
+/// earlier fan-out already gave; once nothing earlier answers, the failure is
+/// the caller's to see rather than a silent `false`.
+///
+/// Round 4's `fan_out_directories` collected all 256 probes before the caller
+/// read any, so a symlink loop at a later name turned a store whose
+/// `objects/00` held residue from `Ok(true)` into `Err(FilesystemLoop)`
+/// (`PR258-EAGER-FANOUT-PROBE-DISCARDS-A-KNOWN-TRUE`); the probe is streamed
+/// into the read now. The loop is also the witness for the `fs::metadata`
+/// error arm: replaced by a skip, the scan reads `Ok(false)` for a store it
+/// could not inspect (`PR258-ERROR-ARMS-SILENCEABLE`).
+///
+/// Unix only, because the loop is a symlink.
+#[cfg(unix)]
+#[test]
+fn a_fan_out_link_that_loops_is_an_inspection_error_once_no_earlier_fan_out_answers() {
+    let fixture = Fixture::new("temp-object-symlink-loop");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    let first = objects.join("00");
+    fs::create_dir_all(&first).expect("the first fan-out the scan probes");
+    fs::write(first.join("tmp_obj_early"), b"half an object\n").expect("plant");
+    // Every alphabetic pair sorts after `00`, so the loop is probed later.
+    let (looped, _) = unused_alphabetic_fan_out_pair(&objects);
+    std::os::unix::fs::symlink(&looped, &looped).expect("a fan-out link that resolves to itself");
+    // `ELOOP`, whose `ErrorKind` (`FilesystemLoop`) is not yet stable to name
+    // and whose number differs between Linux and Darwin; the scan's error is
+    // compared with the one the filesystem gives here.
+    let loop_errno = match fs::metadata(&looped) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            error.raw_os_error().expect("an error the OS reported")
+        }
+        other => panic!("premise: resolving the link is a loop, not an absence: {other:?}"),
+    };
+
+    assert!(
+        temporary_object_files(&fixture.base).expect("the answer `00` gave stands"),
+        "`00` answers before the loop is probed, and its answer is not discarded"
+    );
+
+    fs::remove_file(first.join("tmp_obj_early")).expect("unplant");
+    let error = temporary_object_files(&fixture.base)
+        .expect_err("a fan-out that cannot be resolved is not a fan-out that holds nothing");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Io { path, source }
+                if path == &looped && source.raw_os_error() == Some(loop_errno)
+        ),
+        "the error names the looping fan-out, with the OS's own errno: {error}"
+    );
+}
+
+/// A fan-out this process cannot read is an inspection failure the caller
+/// sees, not an absence: `PermissionDenied` is not `NotFound` (§7).
+///
+/// This is the one production difference the change discloses — an
+/// unreadable two-digit directory makes `verify_object` return `Io` where the
+/// old scan reached `Refusal::ObjectMissing` — and the `read_dir` arm that
+/// carries it was replaceable by `Ok(false)` with every test green
+/// (`PR258-ERROR-ARMS-SILENCEABLE`). Evaluated on the Unix legs, where a mode
+/// bit binds a non-root user.
+#[cfg(unix)]
+#[test]
+fn a_fan_out_this_process_cannot_read_is_an_inspection_error_not_an_absence() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let fixture = Fixture::new("temp-object-unreadable-fan-out");
+    let objects = object_directory(&fixture.base).expect("object directory");
+    let (fan_out, _) = unused_alphabetic_fan_out_pair(&objects);
+    fs::create_dir(&fan_out).expect("the fan-out");
+    fs::write(fan_out.join("tmp_obj_hidden"), b"half an object\n").expect("plant");
+    let _restore = RestoreMode {
+        path: fan_out.clone(),
+    };
+    fs::set_permissions(&fan_out, fs::Permissions::from_mode(0o000)).expect("make it unreadable");
+    // The injection must bite: root, or a process holding CAP_DAC_READ_SEARCH,
+    // lists through a mode of 000, and this test would then measure nothing.
+    assert!(
+        fs::read_dir(&fan_out).is_err(),
+        "prerequisite not met: the mode bit did not bind (running as root or with \
+         CAP_DAC_READ_SEARCH); this test needs an unprivileged user"
+    );
+
+    let error = temporary_object_files(&fixture.base)
+        .expect_err("a fan-out that cannot be read is not a fan-out that holds nothing");
+    assert!(
+        matches!(
+            &error,
+            UpstrokeError::Io { path, source }
+                if path == &fan_out && source.kind() == std::io::ErrorKind::PermissionDenied
+        ),
+        "the error names the fan-out it could not read: {error}"
+    );
+}
+
+/// A listing that fails part-way through is an inspection failure, not the
+/// end of the listing.
+///
+/// `fs::read_dir` yields its entries one at a time and can fail between two
+/// of them; `holds_name_prefixed` reads that failure as an answer nobody has
+/// rather than as "no more names" (§7). No filesystem the suite runs on fails
+/// a `readdir` to order, so the listing is constructed
+/// (`PR258-ERROR-ARMS-SILENCEABLE`).
+#[test]
+fn a_listing_that_fails_part_way_through_is_an_inspection_error_not_the_end_of_it() {
+    use std::ffi::OsString;
+    let name = |name: &str| -> std::io::Result<OsString> { Ok(OsString::from(name)) };
+    let failure = || -> std::io::Result<OsString> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "the listing failed after its first entry",
+        ))
+    };
+
+    assert!(
+        matches!(
+            holds_name_prefixed([name("ef0123"), name("tmp_obj_x")].into_iter(), "tmp_"),
+            Ok(true)
+        ),
+        "a name with the prefix is found"
+    );
+    assert!(
+        matches!(
+            holds_name_prefixed([name("ef0123")].into_iter(), "tmp_"),
+            Ok(false)
+        ),
+        "a listing without the prefix holds none"
+    );
+    let error = holds_name_prefixed(
+        [name("ef0123"), failure(), name("tmp_obj_x")].into_iter(),
+        "tmp_",
+    )
+    .expect_err("a failure before the name is not the end of the listing");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        matches!(
+            holds_name_prefixed([name("tmp_obj_x"), failure()].into_iter(), "tmp_"),
+            Ok(true)
+        ),
+        "a name found before the failure is an answer, and the listing stops there"
     );
 }

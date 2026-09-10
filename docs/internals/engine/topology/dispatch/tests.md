@@ -348,18 +348,28 @@ the site registers may be observed and the class must be `None`, and after,
 where this element and nothing else must be observed — and the pair is what
 makes the reading between them the element's own.
 
-**And constructed where Git leaves it.** A loose object's temporary file is
-written in the fan-out directory the object's final name will live in,
-`objects/XX/tmp_obj_*`, never at the object root: measured with `strace`,
-`hash-object -w` opens `objects/01/tmp_obj_z86GbB` and `write-tree` opens
-`objects/bf/tmp_obj_GgXRvX`. This test's stand-in was at the root, which is
-where `temporary_object_files` looked and where no Git writes, so test and
-scan were self-consistent and blind together. A real `SIGKILL` requested at half of a separately measured
+**And constructed where the materialization's own write leaves it.** A
+loose object's temporary file is written in the fan-out directory the
+object's final name will live in, `objects/XX/tmp_obj_*`: measured with
+`strace`, `hash-object -w` opens `objects/01/tmp_obj_z86GbB` and
+`write-tree` opens `objects/bf/tmp_obj_GgXRvX`. The object root is not a
+place Git never writes — a streamed object above `core.bigFileThreshold`
+goes there, its fan-out unknown until the stream ends, which is why the scan
+keeps its root arm; `temporary_object_files` carries that trace. This test's
+stand-in was at the root, the one place the scan looked and not where a
+cherry-pick's writes go, so test and scan were self-consistent and blind
+together. A real `SIGKILL` requested at half of a separately measured
 3.878 s loose-object write left `objects/b7/tmp_obj_ybqfZf`; `git prune -n`
 named it a stale temporary file; the scan answered `false`, no element was
 observed, the class was `None` and no tabled recovery was owed for it
 (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`). The scan reads the fan-out directories
-now, and the element is constructed in one.
+now, and the element is constructed in one, through the fixture's
+`fan_out_directory` — the helper the other two places a test constructs
+this element, `construct_element` in `workspace_manager::tests` and
+`plant_stage_residue` in `attempt::tests`, use as well. Planted at the root,
+each of those exercised the arm the scan always had, so the grid the
+per-element evidence rests on stayed green with the fan-out loop deleted
+(`PR258-GRID-PLANTS-AT-THE-OBJECT-ROOT`).
 
 ## `fn synthetic_materialization_residue_element(element: ResidueElement) {`
 
@@ -367,14 +377,6 @@ One element, in a repository of its own: the repair dispatched, a control
 materialized to hold the expected tree and bytes, the generation's worktree
 removed and re-added at the base, the element constructed alone, the class
 read either side of the construction, and the tabled recovery run.
-
-## `fn fan_out_directory(objects: &Path) -> PathBuf {`
-
-A fan-out directory the store already holds, to construct Git's temporary
-object file in. Git creates the directory when it is missing and writes the
-temporary file inside it, so any two-hexadecimal-digit name would serve; one
-that already exists puts the file beside real objects, which is the shape
-the trace records.
 
 ## `fn a_forced_recreation_preserves_the_object_store_residue_it_recovers_over() {`
 

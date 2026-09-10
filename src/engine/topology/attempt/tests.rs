@@ -17,7 +17,8 @@ use crate::topology::events::{GenerationCloseReason, GenerationId, SessionId};
 use crate::topology::fold::{GenerationClass, TaskState};
 use crate::workspace_manager::fixture::Fixture;
 use crate::workspace_manager::fixture::{
-    KillableGitChild, died_by_kill, git, remove_dir, remove_file, time_git, write_file,
+    KillableGitChild, died_by_kill, fan_out_directory, git, remove_dir, remove_file, time_git,
+    write_file,
 };
 use crate::workspace_manager::{
     NoHooks, ResidueTarget, VerifyFailure, classify_object_residue, object_directory,
@@ -1438,8 +1439,15 @@ fn plant_stage_residue(base: &Path, worktree: &Path, element: ResidueElement) {
             );
         }
         ResidueElement::TemporaryObjectFile => {
+            // In a fan-out directory the store already holds, where the
+            // interrupted `git add`'s own loose write leaves it. Planted at
+            // the object root this exercised only the arm the scan always
+            // had (`PR258-GRID-PLANTS-AT-THE-OBJECT-ROOT`).
             let objects = object_directory(worktree).expect("the object directory");
-            write_file(&objects.join("tmp_obj_synthetic"), b"half an object\n");
+            write_file(
+                &fan_out_directory(&objects).join("tmp_obj_synthetic"),
+                b"half an object\n",
+            );
             assert!(temporary_object_files(worktree).expect("temp files"));
         }
         ResidueElement::IndexLock => {

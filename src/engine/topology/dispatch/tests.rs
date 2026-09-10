@@ -14,7 +14,7 @@ use crate::topology::effects::{
 use crate::topology::events::{CandidateRef, GitRef};
 use crate::topology::fold::{GenerationClass, TaskState};
 use crate::workspace_manager::WorkspaceManager;
-use crate::workspace_manager::fixture::{git, remove_file, write_file};
+use crate::workspace_manager::fixture::{fan_out_directory, git, remove_file, write_file};
 
 const APPEND: EffectSiteId = EffectSiteId::Event(crate::topology::effects::EventSite::Append);
 const INTENT: EffectSiteId = EffectSiteId::Worktree(WorktreeSite::WriteIntent);
@@ -1121,23 +1121,27 @@ fn synthetic_materialization_residue_element(element: ResidueElement) {
             planted_object = Some(id);
         }
         ResidueElement::TemporaryObjectFile => {
-            // **Where Git actually leaves it.** A loose object's temporary
-            // file is created in the fan-out directory the object's final name
-            // will live in: measured with `strace -f -e trace=openat,link`,
-            // `hash-object -w` opens `objects/01/tmp_obj_z86GbB` and links it
-            // to `objects/01/74d67c…`, and `write-tree` opens
-            // `objects/bf/tmp_obj_GgXRvX`. Neither writes `objects/tmp_obj_*`,
-            // and a real `SIGKILL` requested at half of a separately measured 3.878 s loose-object write left
-            // `objects/b7/tmp_obj_ybqfZf`.
+            // **Where the materialization's own write leaves it.** A loose
+            // object's temporary file is created in the fan-out directory the
+            // object's final name will live in: measured with
+            // `strace -f -e trace=openat,link`, `hash-object -w` opens
+            // `objects/01/tmp_obj_z86GbB` and links it to
+            // `objects/01/74d67c…`, and `write-tree` opens
+            // `objects/bf/tmp_obj_GgXRvX`; a real `SIGKILL` requested at half
+            // of a separately measured 3.878 s loose-object write left
+            // `objects/b7/tmp_obj_ybqfZf`. Git does write at the object root
+            // as well — a streamed object above `core.bigFileThreshold`, its
+            // fan-out unknown until the stream ends — which is why the scan
+            // keeps its root arm; `temporary_object_files` carries that trace.
             //
             // This test used to construct its stand-in at the object root
-            // instead — which is exactly where the scan looked and where no
-            // Git writes — so it exercised the scan's own convention rather
-            // than the element, and stayed green while
-            // `temporary_object_files` could not see the file Git leaves at
-            // all (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`). It is planted in a
-            // fan-out directory the store already holds, beside real objects,
-            // as the trace shows.
+            // instead — the one place the scan looked, and not where a
+            // cherry-pick's writes go — so it exercised the arm the scan
+            // already had rather than the element, and stayed green while
+            // `temporary_object_files` could not see the file the killed
+            // materialization leaves (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`). It
+            // is planted in a fan-out directory the store already holds,
+            // beside real objects, as the trace shows.
             let objects = object_directory(&worktree).expect("the object directory");
             let planted = fan_out_directory(&objects).join("tmp_obj_repair");
             write_file(&planted, b"half an object\n");
@@ -1216,35 +1220,6 @@ fn synthetic_materialization_residue_element(element: ResidueElement) {
             "R27: Git prunes its own temporary object files; the recovery does not"
         );
     }
-}
-
-/// A fan-out directory the object store already holds, to construct Git's
-/// temporary object file in.
-///
-/// Git creates the fan-out directory when it is missing and writes the
-/// temporary file inside it, so any two-hexadecimal-digit name would do; one
-/// that already exists puts the file beside real objects, which is the shape
-/// the trace in
-/// [`temporary_object_files`](crate::workspace_manager::temporary_object_files)
-/// records.
-fn fan_out_directory(objects: &Path) -> PathBuf {
-    let mut names: Vec<PathBuf> = std::fs::read_dir(objects)
-        .expect("the object directory")
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_dir()
-                && path.file_name().is_some_and(|name| {
-                    let name = name.to_string_lossy();
-                    name.len() == 2 && name.chars().all(|character| character.is_ascii_hexdigit())
-                })
-        })
-        .collect();
-    names.sort();
-    names
-        .into_iter()
-        .next()
-        .expect("a store with objects in it has a fan-out directory")
 }
 
 /// R27 across a **forced recreation**: what an interrupted materialization
