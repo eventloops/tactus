@@ -28,6 +28,16 @@
 # unreachable and --enqueue enqueued nothing. It failed closed, and it failed invisibly, which is
 # why an organization owner is now refused outright rather than carried into the query.
 #
+# LOGIN must be shaped like a GitHub account name -- 1 to 39 ASCII letters and digits with single
+# hyphens between them -- and anything else is refused, never tried: an account that cannot exist
+# reads as `no-review` on every pull request, which is the silence this flag exists to end. The
+# value reaches the comment query as string data and is never part of the query's text, so a
+# string shaped like a query is compared as a login and matches nothing. Spelling is compared
+# without regard to case, as GitHub compares it: `EventLoops` and `eventloops` are one account.
+# A bot login of the form `name[bot]` is not a GitHub account name and is refused; no such account
+# posts reviews here today, and admitting one is a change to whom this audit trusts, not a widened
+# pattern.
+#
 # Lanes, decided by the branch prefix and nothing else (a lane:* label is output, never input;
 # a wrong one is corrected by --apply and reported as lane-label-mismatch):
 #   lane:findings-p3     codex/findings-p3-*   must fix everything; ready only on a PASS verdict
@@ -40,8 +50,8 @@
 #     ruleset is read; once the merge queue replaces that requirement, BEHIND is what the queue
 #     exists to handle and no longer blocks)
 #   - the newest `upstroke-ci` and `upstroke-pr-policy` check runs on the head succeeded
-#   - the latest review comment by the repository owner (the `Reviewed head:` workflow form with
-#     its fenced JSON verdict, or the `<!-- upstroke-frontier-review -->` prose form) reviewed
+#   - the latest review comment by the trusted reviewer above (the `Reviewed head:` workflow form
+#     with its fenced JSON verdict, or the `<!-- upstroke-frontier-review -->` prose form) reviewed
 #     the head itself, or a commit the head differs from only by clean merge commits (git's own
 #     merge of the two parents, the branch diff byte-identical before and after, and no gate
 #     edited by the pull request) and pushes confined to reviews/findings/ or reviews/FINDINGS.md
@@ -64,9 +74,12 @@
 # (the review is prose the audit cannot judge: findings without ids, or a severity token outside
 # the numbered findings, so a person reads it), and NOT-READY with the blockers listed.
 #
-# Only review comments posted by the repository owner count, and there is no override: the
-# owner is MAINTAINING's one trusted writer, and anyone else's comment carrying the markers is
-# ignored, so a contributor cannot mint a PASS.
+# Exactly one account's review comments count, and anyone else's comment carrying the markers is
+# ignored, so a contributor cannot mint a PASS. Which account that is comes from the caller --
+# --reviewer or UPSTROKE_REVIEW_AUTHOR -- and only when neither is given does a User owner stand
+# in. The override moves that trust; it never widens it, and there is no value of it that admits
+# a second author. MAINTAINING names the trusted writer, and pointing this audit at anyone else
+# is a decision the caller states on the command line, where it is visible.
 #
 # Limits, stated so nobody reads more into READY than it says: the audit sees severities and the
 # fields the review JSON carries. A finding whose object carries a witness, reproduction, repro,
@@ -241,30 +254,61 @@ ruleset_state() {
   echo "$strict $queue"
 }
 
+# valid_login LOGIN: whether LOGIN is shaped like a GitHub account name -- 1 to 39 characters of
+# ASCII letters and digits, single hyphens between them and none at either end. Nothing that fails
+# this is widened to fit. The value is a trust decision and it reaches a jq program, so a string
+# GitHub cannot issue as a login is a typo, another option read by mistake, or an injection
+# attempt; none of the three is an account, and each is refused rather than carried.
+valid_login() {
+  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9]|-[A-Za-z0-9])*$ ]] && ((${#1} <= 39))
+}
+
 # reviewer_login OVERRIDE OWNER_LOGIN OWNER_TYPE: the account whose reviews count, or nothing and
 # a non-zero status when it cannot be settled. An explicit override always wins. Otherwise the
 # repository's owner stands in, but only when that owner is a User: an Organization owns no voice
 # and cannot have written a review, so inheriting it produces a filter that matches nothing.
 # Refusing here turns a fleet-wide silent `no-review` into one loud message at startup.
+# Whichever side supplies it, the answer must be a login: this is the last gate before the value
+# becomes the audit's notion of who may say PASS, and it holds even where main checked first.
 reviewer_login() {
   local override="$1" owner_login="$2" owner_type="$3"
   if [[ -n "$override" ]]; then
+    valid_login "$override" || return 1
     printf '%s' "$override"
     return 0
   fi
-  if [[ "$owner_type" == "User" && -n "$owner_login" ]]; then
+  if [[ "$owner_type" == "User" ]] && valid_login "$owner_login"; then
     printf '%s' "$owner_login"
     return 0
   fi
   return 1
 }
 
-# latest_review_id PR: the id of the newest review comment posted by the repository owner, or
+# review_comment_filter: the jq program latest_review_id runs, held here rather than inline so the
+# gate can run the exact text the audit runs. The login is not in that text: it arrives as string
+# data in UPSTROKE_AUDIT_REVIEWER, which the call sets and so always overrides whatever the
+# environment held (`gh api --jq` takes no --arg, and env is its way to pass a value in). A string
+# shaped like jq is therefore compared as a login and matches nothing, rather than becoming part
+# of the predicate. Both sides are lowered first because GitHub resolves `EventLoops` and
+# `eventloops` to one account and an audit that split them would report the correct reviewer's
+# blocking review as `no-review`. An unset variable is an error here, not an empty match: this
+# audit's failures must be loud, and a filter that quietly matches nobody is the defect it exists
+# to prevent.
+review_comment_filter() {
+  cat <<'JQ'
+[ .[]
+  | select((.user.login | ascii_downcase) == (env.UPSTROKE_AUDIT_REVIEWER | ascii_downcase))
+  | select(.body | test("<!-- upstroke-frontier-review|Reviewed head: [0-9a-f]{40}"))
+] | last | select(. != null) | "\(.created_at) \(.id)"
+JQ
+}
+
+# latest_review_id PR: the id of the newest review comment posted by the trusted reviewer, or
 # nothing. `--paginate` hands `--jq` each page separately, so `last` is per page: each page
 # yields its newest match as "<created_at> <id>" and the newest across pages wins by timestamp.
 latest_review_id() {
-  gh api "repos/$repo/issues/$1/comments?per_page=100" --paginate \
-    --jq "[.[] | select(.user.login == \"$reviewer\") | select(.body | test(\"<!-- upstroke-frontier-review|Reviewed head: [0-9a-f]{40}\"))] | last | select(. != null) | \"\(.created_at) \(.id)\"" \
+  UPSTROKE_AUDIT_REVIEWER="$reviewer" \
+    gh api "repos/$repo/issues/$1/comments?per_page=100" --paginate --jq "$(review_comment_filter)" \
     | sort | tail -1 | awk '{print $2}'
   return 0
 }
@@ -282,22 +326,41 @@ retargeted_after() {
 
 # ---- the audit ----------------------------------------------------------------------------------
 
+# The same sentence ends every malformed-login refusal: the reason a near-miss is refused rather
+# than tried is that trying it is what silence looks like.
+bad_login_why="Naming an account that cannot exist reads as no-review on every pull request."
+
 main() {
   apply=0
   enqueue=0
   ready_label="ready-to-merge"
   reviewer_override="${UPSTROKE_REVIEW_AUTHOR:-}"
+  if [[ -n "$reviewer_override" ]] && ! valid_login "$reviewer_override"; then
+    echo "refusing: UPSTROKE_REVIEW_AUTHOR=[$reviewer_override] is not a GitHub login." >&2
+    echo "  A login is 1-39 letters, digits and single interior hyphens. $bad_login_why" >&2
+    exit 2
+  fi
   prs=()
   while (($#)); do
     case "$1" in
       --apply) apply=1 ;;
       --enqueue) apply=1; enqueue=1 ;;
       --ready-label)
-        ready_label="$2"; shift
-        [[ "$ready_label" == lane:* ]] && { echo "refusing: --ready-label must not be a lane:* label" >&2; exit 2; } ;;
+        # $2 is read only once it is known to exist and to not be the next option: an absent
+        # argument aborted on `$2: unbound variable`, and a following flag was consumed as the
+        # value, which switched that flag off without saying so.
+        (($# >= 2)) || { echo "refusing: --ready-label needs a label name" >&2; exit 2; }
+        [[ "$2" == lane:* ]] && { echo "refusing: --ready-label must not be a lane:* label" >&2; exit 2; }
+        [[ "$2" == --* ]] && { echo "refusing: --ready-label needs a label name, got the option [$2]" >&2; exit 2; }
+        ready_label="$2"; shift ;;
       --reviewer)
-        reviewer_override="$2"; shift
-        [[ -n "$reviewer_override" ]] || { echo "refusing: --reviewer needs a login" >&2; exit 2; } ;;
+        (($# >= 2)) || { echo "refusing: --reviewer needs a login" >&2; exit 2; }
+        if ! valid_login "$2"; then
+          echo "refusing: --reviewer [$2] is not a GitHub login." >&2
+          echo "  A login is 1-39 letters, digits and single interior hyphens. $bad_login_why" >&2
+          exit 2
+        fi
+        reviewer_override="$2"; shift ;;
       -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
       *) prs+=("$1") ;;
     esac
@@ -309,9 +372,13 @@ main() {
   owner_login="$(gh api "repos/$repo" --jq .owner.login)"
   owner_type="$(gh api "repos/$repo" --jq .owner.type)"
   if ! reviewer="$(reviewer_login "$reviewer_override" "$owner_login" "$owner_type")"; then
-    echo "refusing: $repo is owned by $owner_login (type $owner_type), which authors no review comments." >&2
-    echo "  Name the account whose reviews count: --reviewer LOGIN, or UPSTROKE_REVIEW_AUTHOR=LOGIN." >&2
-    echo "  Without it every pull request reads no-review and nothing is ever READY." >&2
+    if [[ -n "$reviewer_override" ]]; then
+      echo "refusing: [$reviewer_override] is not a GitHub login. $bad_login_why" >&2
+    else
+      echo "refusing: $repo is owned by $owner_login (type $owner_type), which authors no review comments." >&2
+      echo "  Name the account whose reviews count: --reviewer LOGIN, or UPSTROKE_REVIEW_AUTHOR=LOGIN." >&2
+      echo "  Without it every pull request reads no-review and nothing is ever READY." >&2
+    fi
     exit 2
   fi
   read -r strict_up_to_date has_queue <<< "$(ruleset_state)"
@@ -373,7 +440,7 @@ audit_one() {
     esac
   done
 
-  # The latest owner review: its posting time, its kind, and its parse.
+  # The latest review by the trusted account: its posting time, its kind, and its parse.
   local review_id review_at review_file kind reviewed="" verdict="" review_base="-"
   findings=()
   review_id="$(latest_review_id "$pr")"

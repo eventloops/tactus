@@ -2,8 +2,15 @@
 # The pure parts of scripts/pr-ready-audit.sh, exercised against fixtures: the lane and its
 # severity set, the two review parsers (the workflow's fenced JSON verdict and the frontier
 # prose form), the frontmatter id match, the newest-check-run choice and the ledger-row parse.
-# Everything that talks to GitHub or git is out of scope here; the audit's behaviour on a live
-# pull request is observed on the pull request.
+# Everything that talks to GitHub or git is out of scope here, with one exception: the argument
+# parser is exercised by running the script as a process against a stub `gh`, because the defects
+# it has had live in `main` and no call on the helpers can see them. The stub answers every call
+# with a marker and a failure, so an argument that should have been refused and instead reached
+# GitHub shows up as a failed case rather than a live request. The audit's behaviour on a real
+# pull request is still observed on the pull request.
+#
+# Needs `jq` as well as bash: the comment filter is a jq program, and running it is the only way
+# to prove the trusted login reaches it as data rather than as program text.
 #
 # Each case names the defect it exists to catch, so a green run says what it proved:
 #   MUT-LANE-LABEL-INPUT         the lane came from a label, not the branch prefix
@@ -26,6 +33,13 @@
 #                                comment filter matched nothing and every pull request read
 #                                no-review
 #   MUT-REVIEWER-OVERRIDE-IGNORED  an explicit --reviewer was not preferred over the owner
+#   MUT-REVIEWER-JQ-INJECTION    the trusted login was spliced into the comment filter's program
+#                                text, so a value shaped like jq widened the author predicate to
+#                                every commenter and another account's PASS became the verdict
+#   MUT-REVIEWER-CASE-MISMATCH   the author comparison was case-sensitive, so naming the correct
+#                                account in another spelling hid its blocking review as no-review
+#   MUT-REVIEWER-ARG-EATEN       --reviewer read the next argument without checking it was one, so
+#                                a following option was consumed as the login and switched off
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +50,10 @@ error() { echo "$*" >&2; failed=1; }
 expect() {  # expect <case> <got> <want>
   [[ "$2" == "$3" ]] || error "$1: got [$2], want [$3]"
 }
+contains() {  # contains <case> <got> <want-substring>
+  [[ "$2" == *"$3"* ]] || error "$1: got [$2], want it to contain [$3]"
+}
+command -v jq > /dev/null || { echo "test-pr-ready-audit: needs jq to run the comment filter" >&2; exit 1; }
 
 PR_READY_AUDIT_LIBRARY=1 source scripts/pr-ready-audit.sh
 tmp="$(mktemp -d)"
@@ -66,6 +84,90 @@ expect MUT-REVIEWER-OVERRIDE-IGNORED "$(reviewer_login someone-else eventloops U
 if reviewer_login "" "" User > "$tmp/empty.out" 2>&1; then
   error "MUT-REVIEWER-FROM-ORG: an empty owner login was accepted as the reviewer"
 fi
+# The helper is the last gate before a string becomes the audit's notion of who may say PASS, and
+# what it returns is put to a jq program, so it takes GitHub's login shape and nothing wider. Each
+# of these is a typo, another option read by mistake, or an injection attempt; none is an account.
+for bad in 'eventloops" or true or .user.login == "eventloops' '--enqueue' '-abc' 'abc-' 'a--b' \
+           'github-actions[bot]' 'two words' 'a.b' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; do
+  if reviewer_login "$bad" eventloops User > "$tmp/bad.out" 2>&1; then
+    error "MUT-REVIEWER-JQ-INJECTION: [$bad] was accepted as a login, got [$(cat "$tmp/bad.out")]"
+  fi
+done
+# and nothing narrower: a real login, in any case, of any allowed length, is not refused.
+for good in eventloops EventLoops a-b-c x 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; do
+  expect MUT-REVIEWER-JQ-INJECTION "$(reviewer_login "$good" sourcemaps Organization)" "$good"
+done
+
+# --- the comment filter: the login is data, and spelling is not identity -------------------------
+# The program the audit hands to `gh api --jq`, run here on a fixture by the jq on this machine.
+# `gh` embeds its own jq, so this is a stand-in for that engine, not the engine itself; both read
+# `env` and `ascii_downcase` the same way, and the audit's behaviour against the real API is
+# observed on the pull request.
+cat > "$tmp/comments.json" <<'EOF'
+[{"created_at":"2026-09-01T00:00:00Z","id":1001,"user":{"login":"eventloops"},
+  "body":"<!-- upstroke-frontier-review pr=1 head=x -->\nVERDICT: CHANGES_REQUIRED"},
+ {"created_at":"2026-09-02T00:00:00Z","id":1002,"user":{"login":"a-contributor"},
+  "body":"<!-- upstroke-frontier-review pr=1 head=x -->\nVERDICT: PASS"},
+ {"created_at":"2026-09-03T00:00:00Z","id":1003,"user":{"login":"eventloops"},
+  "body":"a comment carrying no review marker"}]
+EOF
+# Exported, not passed as a command prefix: a prefix is applied after the command's words are
+# expanded, so a filter that went back to building the login into its text would read an empty
+# variable here and look innocent. Exporting puts the value where both a splice and a lookup see it.
+filter_as() {  # filter_as LOGIN: what the audit's comment filter selects from the fixture
+  export UPSTROKE_AUDIT_REVIEWER="$1"
+  jq -r "$(review_comment_filter)" "$tmp/comments.json"
+}
+expect MUT-REVIEWER-JQ-INJECTION "$(filter_as eventloops)" "2026-09-01T00:00:00Z 1001"
+expect MUT-REVIEWER-JQ-INJECTION "$(filter_as a-contributor)" "2026-09-02T00:00:00Z 1002"
+# Spliced into the program text this predicate is unconditionally true and the newest comment by
+# anyone wins, which is another account's PASS. Compared as data it is a login nobody has.
+expect MUT-REVIEWER-JQ-INJECTION \
+  "$(filter_as 'eventloops" or true or .user.login == "eventloops')" ""
+# GitHub resolves EventLoops and eventloops to one account, so the filter must too: the spelling
+# is not the identity, and reading it as one turns a visible blocking review into `no-review`.
+expect MUT-REVIEWER-CASE-MISMATCH "$(filter_as EventLoops)" "2026-09-01T00:00:00Z 1001"
+expect MUT-REVIEWER-CASE-MISMATCH "$(filter_as EVENTLOOPS)" "2026-09-01T00:00:00Z 1001"
+# Case-insensitivity widens the spelling of one account, never the set of accounts.
+expect MUT-REVIEWER-CASE-MISMATCH "$(filter_as someone-else)" ""
+unset UPSTROKE_AUDIT_REVIEWER
+
+# --- the option parser, through main -------------------------------------------------------------
+# `main` is what these exercise: the defect was in its argument loop and no call on a helper can
+# reach it. The stub gh answers with a marker and a failure, so an argument that should have been
+# refused and instead got as far as GitHub is a failed case here rather than a live request.
+stub="$tmp/stub"
+mkdir -p "$stub"
+printf '#!/usr/bin/env bash\necho "GH-REACHED $*" >&2\nexit 97\n' > "$stub/gh"
+chmod +x "$stub/gh"
+run_audit() {  # run_audit ARG...: "<exit status>|<output, on one line>"
+  local out status=0
+  out="$(PATH="$stub:$PATH" bash scripts/pr-ready-audit.sh "$@" 2>&1)" || status=$?
+  printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
+}
+# A bare --reviewer read $2 before asking whether there was one and died on `$2: unbound variable`.
+got="$(run_audit --reviewer)"
+contains MUT-REVIEWER-ARG-EATEN "$got" "2|refusing: --reviewer needs a login"
+# The next option is not a login. Consuming it named a reviewer nobody has *and* switched off the
+# flag it swallowed, so the run reported no-review on everything and enqueued nothing, exit 0.
+got="$(run_audit --reviewer --enqueue 123)"
+contains MUT-REVIEWER-ARG-EATEN "$got" "2|refusing: --reviewer [--enqueue] is not a GitHub login."
+[[ "$got" == *GH-REACHED* ]] && error "MUT-REVIEWER-ARG-EATEN: --reviewer --enqueue reached GitHub"
+# A malformed login is refused at the flag, before any request: the filter's encoding is the
+# second bar, not the only one.
+got="$(run_audit --reviewer 'eventloops" or true or .user.login == "eventloops' --enqueue 123)"
+contains MUT-REVIEWER-JQ-INJECTION "$got" "2|refusing: --reviewer ["
+[[ "$got" == *GH-REACHED* ]] && error "MUT-REVIEWER-JQ-INJECTION: a malformed --reviewer reached GitHub"
+# UPSTROKE_REVIEW_AUTHOR takes the same value by another road and gets the same check.
+got="$(UPSTROKE_REVIEW_AUTHOR='eventloops" or true' run_audit 123)"
+contains MUT-REVIEWER-JQ-INJECTION "$got" "2|refusing: UPSTROKE_REVIEW_AUTHOR="
+[[ "$got" == *GH-REACHED* ]] && error "MUT-REVIEWER-JQ-INJECTION: a malformed UPSTROKE_REVIEW_AUTHOR reached GitHub"
+# The guard must stop the malformed and only the malformed: a real login gets through to the work.
+got="$(run_audit --reviewer eventloops 123)"
+contains MUT-REVIEWER-ARG-EATEN "$got" "GH-REACHED"
+# --ready-label reads its argument the same way and had the same two defects.
+contains MUT-REVIEWER-ARG-EATEN "$(run_audit --ready-label)" "2|refusing: --ready-label needs a label name"
+contains MUT-REVIEWER-ARG-EATEN "$(run_audit --ready-label --enqueue 123)" "got the option [--enqueue]"
 
 # --- the workflow form: a fenced JSON verdict ---------------------------------------------------
 cat > "$tmp/json.md" <<'EOF'
