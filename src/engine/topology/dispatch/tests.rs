@@ -1260,16 +1260,16 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
                 "sample {sample}: the child was running when the kill fired and yet exited \
                  {status:?}"
             );
-            // A completed pick measured the pick, within the clock at which
-            // the parent established its exit: `ran`, the poll that found it
-            // gone, or, when the kill attempt did not stop it — it exited
-            // between the poll that found it running and the system call, or
-            // the attempt failed and sent nothing — the clock once `wait` had
-            // returned its status. The kill's own clock bounds no such child
+            // A completed pick measured the pick, and what is fed back is the
+            // clock at which the parent established its exit: `ran`, the poll
+            // that found it gone, or, when the kill attempt did not stop it —
+            // it exited between the poll that found it running and the system
+            // call, or the attempt failed and sent nothing — the clock once
+            // `wait` had returned its status. The kill's own clock is neither
             // (the ultra reviews of `2d3fa9d1` and `8441c5fe`, finding 1 of
             // each).
-            if let Some(within) = ran.or(child.reaped()) {
-                budget.completed(within);
+            if let Some(clock) = ran.or(child.reaped()) {
+                budget.completed(clock);
             }
         }
         let fired = child

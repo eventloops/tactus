@@ -1704,6 +1704,21 @@ fn sample_once(
         }
         child.kill();
         let status = child.wait();
+        // The rung is a delay after the spawn's return, where `deadline` was
+        // set, and the child's clocks run from an origin read before the
+        // spawn; `spawned` is the spawn's own latency on them. Both readings
+        // are brought to the rung's reference: `fired` is then compared with
+        // its rung on the clock the rung was set on, and `ran` rebuilds the
+        // schedule from what the children ran after the spawn returned. Read
+        // from the origin, as they were once it moved before the spawn
+        // (`18e75081`), a slow spawn counted toward the rung: the ultra
+        // review of `ec87d6ed` (finding 1) paused the spawn one second and
+        // removed the deadline loop, and every kill, fired the instant the
+        // spawn returned, read 1.0002 s against rungs of 0.66–7.5 ms and
+        // passed.
+        let spawned = child.spawned();
+        let ran = ran.map(|ran| ran.saturating_sub(spawned));
+        let fired = child.fired().map(|fired| fired.saturating_sub(spawned));
 
         let target = ResidueTarget::new(&fixture.base).at(&path);
         let class = classify_object_residue(site, &target).ok();
@@ -1728,7 +1743,7 @@ fn sample_once(
             argv,
             after,
             ran,
-            fired: child.fired(),
+            fired,
             killed: died_by_kill(&status),
             failed: (!status.success() && !died_by_kill(&status))
                 .then(|| status.code())

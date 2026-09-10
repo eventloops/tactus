@@ -389,16 +389,24 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
 /// [`Command`].
 pub(crate) struct KillableGitChild {
     child: std::process::Child,
-    /// Read before `Command::spawn` is called, so the child's run — the
-    /// exec the parent never sees, the pick, the exit — begins after the
-    /// origin and ends before any reading below that is taken once its exit
-    /// was established; [`time_git`]'s probe is timed from the same place.
-    /// Until 2026-09-10 it was read once the spawn had returned (the ultra
-    /// review of `d1fef26d`, finding 1): a parent paused 20 ms between the
-    /// two let a 1.02 ms pick complete before the origin existed, the poll
-    /// found it gone at 4.5 µs, the samplers fed that back, and every later
-    /// rung was aimed at 22–178 µs, under the pick's first write.
-    spawned: std::time::Instant,
+    /// The origin of every clock below, read before `Command::spawn` is
+    /// called, so the child's run — the exec the parent never sees, the
+    /// pick, the exit — begins after it and ends before any reading below
+    /// that is taken once its exit was established; [`time_git`]'s probe is
+    /// timed from the same place. Until 2026-09-10 it was read once the
+    /// spawn had returned (the ultra review of `d1fef26d`, finding 1): a
+    /// parent paused 20 ms between the two let a 1.02 ms pick complete
+    /// before the origin existed, the poll found it gone at 4.5 µs, the
+    /// samplers fed that back, and every later rung was aimed at 22–178 µs,
+    /// under the pick's first write.
+    origin: std::time::Instant,
+    /// The clock once `Command::spawn` had returned: the spawn's own
+    /// latency, which every clock below includes, and during which the
+    /// child may already be running, or done. The two samplers of this
+    /// fixture aim from the origin and subtract nothing; the `T-ATTEMPT`
+    /// sampler sets its rungs as delays after the spawn's return and reads
+    /// its clocks from there ([`Self::spawned`]).
+    spawned: std::time::Duration,
     /// The clock once a kill attempt at this child had returned, or `None`
     /// if none was ever made. Written only by [`Self::kill`], read after
     /// [`std::process::Child::kill`] returned, whatever it returned. It
@@ -410,7 +418,7 @@ pub(crate) struct KillableGitChild {
     /// `Ok`: nothing was sent, and the child ran on.
     kill_error: Option<std::io::Error>,
     /// The clock once [`Self::wait`] had returned the child's status, or
-    /// `None` until it has. The child had exited by then, on every path.
+    /// `None` until it has.
     reaped: Option<std::time::Duration>,
 }
 
@@ -461,7 +469,7 @@ impl KillableGitChild {
     /// Spawn `git -C cwd <args>` with its streams discarded; [`sampled_git`]
     /// says which `git`.
     pub(crate) fn spawn(cwd: &Path, args: &[String]) -> Self {
-        let spawned = std::time::Instant::now();
+        let origin = std::time::Instant::now();
         let child = Command::new(sampled_git())
             .arg("-C")
             .arg(cwd)
@@ -472,8 +480,10 @@ impl KillableGitChild {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn the sampled git child");
+        let spawned = origin.elapsed();
         Self {
             child,
+            origin,
             spawned,
             fired: None,
             kill_error: None,
@@ -506,7 +516,7 @@ impl KillableGitChild {
     /// as 117 µs, and the batch collapsed the same way).
     pub(crate) fn kill(&mut self) {
         let outcome = self.child.kill();
-        self.fired = Some(self.spawned.elapsed());
+        self.fired = Some(self.origin.elapsed());
         self.kill_error = outcome.err();
     }
 
@@ -525,7 +535,7 @@ impl KillableGitChild {
     /// `None` while it is still running.
     pub(crate) fn exited(&mut self) -> Option<std::time::Duration> {
         match self.child.try_wait() {
-            Ok(Some(_)) => Some(self.spawned.elapsed()),
+            Ok(Some(_)) => Some(self.origin.elapsed()),
             _ => None,
         }
     }
@@ -534,7 +544,7 @@ impl KillableGitChild {
     /// is the only thing a kill changes.
     pub(crate) fn wait(&mut self) -> std::process::ExitStatus {
         let status = self.child.wait().expect("reap the sampled git child");
-        self.reaped = Some(self.spawned.elapsed());
+        self.reaped = Some(self.origin.elapsed());
         status
     }
 
@@ -559,7 +569,7 @@ impl KillableGitChild {
     /// back like any completion, as [`Self::reaped`], the clock once
     /// [`Self::wait`] has returned that status.
     pub(crate) fn run_until(&mut self, aim: std::time::Duration) -> Option<std::time::Duration> {
-        let deadline = self.spawned + aim;
+        let deadline = self.origin + aim;
         loop {
             if let Some(ran) = self.exited() {
                 return Some(ran);
@@ -582,6 +592,24 @@ impl KillableGitChild {
     /// one-millisecond sleep.
     const SPIN_WITHIN: std::time::Duration = std::time::Duration::from_millis(4);
 
+    /// The clock once `Command::spawn` had returned, from the origin read
+    /// before it: the spawn's own latency, which [`Self::fired`],
+    /// [`Self::exited`] and [`Self::reaped`] all include. The two samplers
+    /// of this fixture aim from the origin, feed back from it and subtract
+    /// nothing. The `T-ATTEMPT` sampler (`engine::topology::attempt::tests`)
+    /// sets each rung as a delay after the spawn's return and asserts that
+    /// its kill fired no sooner than the rung, so it subtracts this from
+    /// `fired`, and from the clock `exited` read, to bring both to the
+    /// reference its rungs and its retry budget have. Read from the origin,
+    /// its `fired` counted the spawn's latency toward the rung: the ultra
+    /// review of `ec87d6ed` (finding 1) paused the spawn one second after
+    /// the origin and removed that sampler's deadline loop, and every kill,
+    /// fired the instant the spawn returned, read 1.0002 s against rungs of
+    /// 0.66–7.5 ms and passed.
+    pub(crate) fn spawned(&self) -> std::time::Duration {
+        self.spawned
+    }
+
     /// The clock once a kill attempt at this child had returned, if one was
     /// ever made — whatever it returned. It orders the attempt against the
     /// child's clock and says nothing else: not that the signal was sent
@@ -598,10 +626,10 @@ impl KillableGitChild {
     }
 
     /// The clock once [`Self::wait`] had returned the child's status, if it
-    /// has, from the origin read before its spawn. The child had exited by
-    /// then, on every path — killed, missed by the kill, or never reached by
-    /// a failed attempt — and for a child that ended with a completion's
-    /// status this is what the samplers feed back.
+    /// has, from the origin read before its spawn — whichever way the child
+    /// ended: killed, missed by the kill, or never reached by a failed
+    /// attempt. For a child that ended with a completion's status this is
+    /// what the samplers feed back.
     pub(crate) fn reaped(&self) -> Option<std::time::Duration> {
         self.reaped
     }
@@ -697,13 +725,12 @@ pub(crate) fn time_git(cwd: &Path, args: &[String]) -> std::time::Duration {
 /// writes, and a completion the parent saw late — woken after the exit, or
 /// a child the kill did not stop, fed back as the clock once its `wait` had
 /// returned — is followed as it was read, never as a ceiling. What the
-/// ladder follows is
-/// the median of the last [`KillBudget::RECENT`] such bounds, over however
-/// many exist: the first completion sets the budget alone, of two the
-/// longer is taken, and from three on one late bound among three is
-/// outvoted by the other two while two are not — so a late first
-/// observation holds until two shorter completions follow it, and three
-/// late ones hold until two do ([`KillBudget::current`]).
+/// ladder follows is the median of the last [`KillBudget::RECENT`] such
+/// completions, over however many exist: the first sets the budget alone,
+/// of two the longer is taken, and from three on one late observation
+/// among three is outvoted by the other two while two are not — so a late
+/// first observation holds until two shorter completions follow it, and
+/// three late ones hold until two do ([`KillBudget::current`]).
 pub(crate) struct KillBudget {
     probe: std::time::Duration,
     /// The clock at which the parent established the exit of each child
@@ -774,17 +801,21 @@ impl KillBudget {
             .mul_f64(f64::from(rung + 1) / f64::from(rungs + 1))
     }
 
-    /// A child ended with a completion's status: `within` is the clock at
+    /// A child ended with a completion's status: `clock` is the clock at
     /// which the parent established its exit, from the origin read before
     /// its spawn — the poll that found it gone, or, when the kill attempt
     /// did not stop it, the return of the `wait` that reaped it. The two
-    /// differ in what became of the aim: the first was never reached, the
-    /// child having exited before it; the second was reached with the child
-    /// still running, and the kill sent from there missed it, or was not
-    /// sent at all ([`KillableGitChild::kill_error`]). The budget follows
-    /// what the child took either way, as the parent read it.
-    pub(crate) fn completed(&mut self, within: std::time::Duration) {
-        self.completed.push(within);
+    /// differ in what the parent did, not in where the exit fell against
+    /// the aim, which the parent cannot see: on the first, no poll reached
+    /// the aim with the child running and no kill was sent — a parent
+    /// descheduled across the aim and the exit alike finds the child gone
+    /// at its next poll, whichever of the two came first; on the second, a
+    /// poll reached the aim with the child still running, and the kill sent
+    /// from there missed it, or was not sent at all
+    /// ([`KillableGitChild::kill_error`]). The budget follows what the child
+    /// took either way, as the parent read it.
+    pub(crate) fn completed(&mut self, clock: std::time::Duration) {
+        self.completed.push(clock);
     }
 
     /// How many children have moved the budget.
