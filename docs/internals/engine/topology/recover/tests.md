@@ -3402,33 +3402,61 @@ is CI's.
 
 The rung's aim, `(rung + 1) / (SAMPLING_N + 1)` of the current budget, and
 `KillableGitChild::run_until` in place of a sleep then a kill: the child is
-polled to the aim — once a millisecond while it is far, continuously
-through its last four — and the poll that reaches the aim with the child
-still running sends the kill itself, so the kill is at most a poll late
-rather than a scheduler's wake-up late, and nothing runs between the
-observation and the kill. A child that exits first is observed at the poll
-that finds it gone, and that observation is the number the budget follows:
-the parent's clock, an upper bound on the pick, tight by one poll while the
-parent holds a core and late by the scheduler's wake-up when it does not —
-not the child's own time, which no wait reports to a parent (`wait4`
-carries CPU times; Windows' `GetProcessTimes` carries an exit time and the
-fixture does not bind it). What remains is the window between that last
-poll and the kill's system call: a parent descheduled there lets the child
-finish, the kill misses, and the child's status is a completion; such a
-pick is fed back too, bounded by the time the kill fired, where until
-2026-09-10 it was thrown away (the ultra review of `f837f4ca`, finding 2 —
-reproduced at `62f55943` with a 2 ms sleep planted in that window: the old
-loop refuses having "followed 0 completion(s)", this one refuses having
-followed all sixteen). Neither the window nor a late observation is closed
-by this; both are damped by the median of the last three completions and
-corrected by the next pick a rung is aimed past. On the build box the kill
-fires within half a microsecond of its aim, and a completion is observed within
-70 µs of a blocking wait's clock through the spun last four milliseconds
-and within 0.8 ms through the slept phase before them; macOS and Windows
-are reasoned, not measured. Every spawn's aim and outcome — the kill's own
-time, or the completion's — goes into the refusal's message, with the probe
-and the number of completions the ladder followed, so a red leg carries the
-timing evidence the finding said it lacked.
+polled to the aim — once a millisecond while it is far, continuously through
+its last four — and the poll that reaches the aim with the child still
+running sends the kill itself, with no return to the caller between the two,
+so the sleep that used to sit between the aim and the kill is gone. A child
+that exits first is observed at the poll that finds it gone, and that
+observation is the number the budget follows: the parent's clock, an upper
+bound on the pick — the next poll's when the parent holds a core, the
+wake-up's when it does not — not the child's own time, which no wait reports
+to a parent (`wait4` carries CPU times; Windows' `GetProcessTimes` carries
+an exit time and the fixture does not bind it). What remains is the window
+between that last poll's `try_wait` and the kill's system call: a parent
+descheduled there lets the child finish, the kill misses, and the child's
+status is a completion. Such a pick is fed back too, where until 2026-09-10
+it was thrown away (the ultra review of `f837f4ca`, finding 2), and the
+number it is fed back as is the clock `KillableGitChild::kill` reads **once
+`Child::kill` has returned**: by then the signal has been sent and a child
+the kill missed had exited, so the child cannot have outrun it. At
+`62f55943` the clock was read *before* the system call, and the ultra review
+of `2d3fa9d1` (finding 1) showed what that fed back: a 20 ms pause planted
+between the read and the call let run 0's pick run to completion and fed it
+back as the instant before the pause — 120.8 µs, for a pick the probe had
+just measured at 1.09 ms, below the pick, clamped to the 200 µs floor — so
+every later rung was aimed at 44–178 µs, before the pick's first write at
+about 0.6 ms; seven children died as `None` with nothing written,
+`killed_while_running >= 1` was satisfied, and the run passed on kills of
+nothing (`spawns=8 killed=7 completions=1`, twice at `2d3fa9d1`), where the
+reviewer's control with that feedback off reached two `Internal` residues.
+The same pause at `95eece1c` feeds run 0 back as 20.16 ms, the pause's own
+length; the next two rungs, aimed at 4.5 and 6.7 ms, are past the pick and
+complete in 1.06 ms each, the median of the three is back at the pick, and
+runs 3 to 7 are killed at 470–939 µs, four of them `Internal` (`spawns=8
+killed=5 completions=3`, twice). A pause with the recorded clock asserted
+not to precede the pause's end fails at `2d3fa9d1` on the first kill and
+passes at `95eece1c`. A pause on every spawn refuses at both heads, having
+followed all sixteen completions: the floor is unchanged and still fires
+when no kill can land. What the budget follows is a median over however many
+of the last three completions exist — one completion sets the budget alone,
+of two the longer is taken, of three the middle — so a late observation is
+not corrected by the next pick: a late first observation holds until two
+shorter completions follow it, and three late ones hold until two do, each
+correction costing the batch two controls, which the sixteen-spawn bound
+affords once. Measured on the build box, and only there: over three
+unmutated runs, 24 kills, the clock a kill recorded — read after
+`Child::kill` returned, so with the system call inside it — was 2.9–5.6 µs
+past its aim, and the dispatch sampler's 24 were 1.6–3.6 µs; and over three
+separate populations of forty `git --version` children each, the median
+clock at which a blocking `wait` saw its child gone was 269 µs (242–382), at
+which `run_until` saw it while spinning 341 µs (311–438) and while sleeping
+1.054 ms (1.037–1.065). Those are medians of separate populations, not
+per-exit lags and not maxima; they size the observation's lateness on this
+host and bound nothing, and macOS and Windows are reasoned, not measured.
+Every spawn's aim and outcome — the clock at which the kill had returned, or
+the completion's — goes into the refusal's message, with the probe and the
+number of completions the ladder followed, so a red leg carries the timing
+evidence the finding said it lacked.
 
 ## `const SAMPLING_N: u32 = 8;` › `let mut child = KillableGitChild::spawn(`
 
