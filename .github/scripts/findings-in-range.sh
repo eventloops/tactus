@@ -14,29 +14,56 @@
 # frontier review each. .github/scripts/test-pr-policy.sh now builds real
 # repositories and calls this.
 #
-# THE BOUNDARY IS THE MERGE BASE, NOT THE EVENT'S BASE SHA. This is the whole
-# shape of the file and it is the third attempt at it.
+# THE BOUNDARY IS THE MERGE BASE, NOT THE EVENT'S BASE SHA -- AND IT IS A
+# DEFAULT AND NOT A GUARANTEE. Read the second paragraph before believing the
+# first.
 #
 #   The event's base SHA is the TARGET BRANCH'S CURRENT HEAD, which moves for
 #   reasons that have nothing to do with this pull request. Rooting the listings
-#   there let master decide a pull request's verdict: with two findings sharing
-#   a description at the branch point, one of them repaired by the pull request
-#   and the same one independently deleted on master, `<base>..<head>` no longer
-#   reaches the branch point once master has moved. The ambiguous name that was
-#   refused at exit 1 before master moved CONFORMED at exit 0 after it. Same
-#   head, same diff, opposite verdict.
+#   there let master decide a pull request's verdict in the ordinary case: with
+#   two findings sharing a description at the branch point, one of them repaired
+#   by the pull request and the same one independently deleted on master,
+#   `<base>..<head>` no longer reaches the branch point once master has moved.
+#   The ambiguous name that was refused at exit 1 before master moved CONFORMED
+#   at exit 0 after it. Same head, same diff, opposite verdict. The merge base
+#   holds under that: the new commits descend from master's old head and are not
+#   ancestors of this head, so the best common ancestor is where it was.
 #
-#   The merge base does not move. Advancing master adds commits that descend
-#   from its old head and are not ancestors of this head, so the best common
-#   ancestor is unchanged; only rewriting the target branch's history, or the
-#   pull request itself merging or rebasing onto master -- which changes the
-#   head, and so is inside the pull request -- can move it.
+#   IT IS NOT A FIXED POINT, AND NOTHING HERE CAN MAKE IT ONE. The merge base
+#   moves as soon as master absorbs a commit THIS BRANCH ALSO CONTAINS: master
+#   merges another pull request carrying commit C, C is an ancestor of this
+#   head, and the merge base advances to C. Everything between the old boundary
+#   and C leaves the candidate set, and a name that was ambiguous becomes
+#   unambiguous with no push to the branch. Measured on the same head: exit 1,
+#   `names 2 findings` before that merge; exit 0, `conforms` after it.
 #
-#   Every merge base is listed, not one. `git merge-base` picks one of several
-#   best common ancestors when the histories criss-cross, and a candidate set
-#   that depends on which one it picked is the same class of bug. Listing all of
-#   them can only WIDEN the set, and a wider set fails closed: it can turn an
-#   accepted name into an ambiguous refusal and never the other way round.
+#   THAT IS THE RIGHT ANSWER RATHER THAN A HOLE, AND IT IS WHY NO FOURTH
+#   BOUNDARY IS TRIED HERE. What a fix-P<n>/ name claims is that this pull
+#   request repairs one FILED finding, and whether a description picks out one
+#   finding or two is a property of the LEDGER -- which other pull requests
+#   legitimately change. If the twin really was resolved by something else, the
+#   name really is unambiguous now, and exit 0 is correct. Three boundaries have
+#   been tried -- the two endpoint trees, `<event base>..<head>`, and the merge
+#   base -- and each was disproved by a case where the ledger moved underneath
+#   an unchanged head. A boundary that does not move is not the missing piece;
+#   there is no such boundary, because the thing being resolved is not a
+#   property of the branch. So: THIS SCRIPT RESOLVES THE NAME AGAINST THE LEDGER
+#   AS IT STANDS WHEN IT RUNS, and it runs again on every synchronize and on the
+#   queue entry that is actually merged.
+#
+#   The merge base is still the right DEFAULT. It is the boundary that does not
+#   drag in a finding this branch never saw -- rooted at the target's current
+#   head, this pull request's own candidate set gained 23 of master's findings,
+#   308 names instead of 285 -- and it holds under every way master advances
+#   except absorbing this branch's own commits. It is chosen for that, not for a
+#   fixity it does not have.
+#
+#   EVERY MERGE BASE IS LISTED, AND EACH ONE'S RANGE IS TAKEN SEPARATELY.
+#   `git merge-base` picks one of several best common ancestors when the
+#   histories criss-cross, and a candidate set that depends on which one it
+#   picked is the same class of bug. But listing them all is conservative only
+#   if the answer is the UNION of what each boundary gives ALONE; see the loop
+#   at the foot of this file for the way that was got wrong.
 #
 # THE THREE SOURCES.
 #
@@ -55,8 +82,10 @@
 #   it. Taken only at the two ends the diff is empty for such a finding -- the
 #   add and the delete cancel -- which is measured in test-pr-policy.sh.
 #
-#   That commit set is fixed by the merge base and the head alone, so it does
-#   not drift when master advances either.
+#   That commit set is a function of the merge base and the head alone, so it
+#   does not drift when master advances -- until master advances THROUGH one of
+#   this branch's own commits, which moves the merge base and is the case the
+#   boundary paragraph above refuses to pretend it can prevent.
 #
 # THE TREES ARE LISTED, NOT ASKED WHAT CHANGED. `git log -- reviews/findings/`
 # answers a different question -- which commits changed that path, after
@@ -120,10 +149,26 @@ done < "$out/merge-bases" | sort -u > "$out/merge-base-findings"
 
 findings_in "$head" | sort -u > "$out/head-findings"
 
-# Reachable from the head and from none of the merge bases: the pull request's
-# own commits, and nothing the target branch has done since the branch point.
-{ echo "$head"; sed -e 's/^/^/' "$out/merge-bases"; } \
-  | git rev-list --stdin > "$out/range-commits"
+# THE RANGE IS THE UNION OF THE PER-BOUNDARY RANGES, NOT `rev-list head ^b1 ^b2`.
+# One rev-list excluding every merge base at once is the INTERSECTION of the
+# ranges the bases give individually, and an intersection is NARROWER than any
+# of its members -- so a second merge base could shrink the candidate set, which
+# is the direction that turns an ambiguous name into an accepted one.
+#
+#   Measured on criss-crossed histories with two best common ancestors L and R,
+#   where L's history files a finding and then repairs and deletes it, and R
+#   carries a second finding of the same severity, category and description.
+#   Resolved from R alone the two twins are both in the set: exit 1, `names 2
+#   findings`. Resolved from the real target, which discovers L as well, adding
+#   L to one exclusion list dropped the commit that held the first twin and the
+#   ambiguous name CONFORMED at exit 0.
+#
+# Each base therefore contributes the range it would give on its own, and the
+# results are unioned. That restores the property the paragraph at the top of
+# this file relies on: another merge base can only widen the set.
+while read -r merge_base; do
+  git rev-list "$head" "^$merge_base" || exit 1
+done < "$out/merge-bases" | sort -u > "$out/range-commits"
 while read -r commit; do
   findings_in "$commit" || exit 1
 done < "$out/range-commits" | sort -u > "$out/range-findings"

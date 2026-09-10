@@ -549,18 +549,28 @@ if ( cd "$repo_d" && "$BASH" "$range_script" \
   exit 1
 fi
 
-# ---- nothing outside the pull request may change the verdict ------------------------------
+# ---- what advancing master may and may not do to a verdict ---------------------------------
 #
 # The listings were rooted at the EVENT'S BASE SHA, which is the target branch's
 # head at the moment of the event and moves for reasons that have nothing to do
-# with the pull request. Both repositories below are run twice against the SAME
-# HEAD -- once with the target at the branch point, once with it advanced -- and
-# the two verdicts must be equal. Rooted at the event's base they were not.
+# with the pull request. The first two repositories below are each run twice
+# against the SAME HEAD -- once with the target at the branch point, once with
+# it advanced -- and the two verdicts must be equal. Rooted at the event's base
+# they were not.
 #
 # The shape is a DIVERGENT BOUNDARY: a finding that exists at the branch point,
 # is repaired by the pull request, and is independently deleted on master. Once
 # master has moved, `<base>..<head>` no longer reaches the branch point and the
 # finding is in no listing at all.
+#
+# THAT IS NOT A CLAIM THAT THE VERDICT IS A FUNCTION OF THE HEAD. It is not, and
+# the THIRD repository here pins the case where it legitimately changes: master
+# merging a pull request that carries one of THIS branch's commits moves the
+# merge base forward, and an ambiguous name becomes unambiguous with no push to
+# the branch. That is the right answer rather than a hole -- whether a
+# description names one finding or two is a property of the LEDGER, which other
+# pull requests change -- and the two cases are drawn apart here so that neither
+# can be read as the other.
 
 # One description, two findings, one of them repaired here and deleted there:
 # losing it leaves a single match and an AMBIGUOUS name conforms, which is the
@@ -615,6 +625,56 @@ if [[ "$f_before" != "$f_after" ]]; then
 fi
 if [[ "$f_before" != 0 ]]; then
   echo "a repaired finding must resolve from the merge base at either target; got $f_before" >&2
+  exit 1
+fi
+
+# AND THE CASE THAT IS NOT A GUARANTEE, pinned so that the line between the two
+# is a test and not a paragraph. master merges another pull request carrying
+# commit C; C is an ancestor of THIS head, so the merge base advances to C,
+# everything between the old boundary and C leaves the candidate set, and the
+# ambiguous name conforms on an unchanged head. Executed by the round-4 frontier
+# review against 277b3f26 and kept as documented behaviour rather than repaired:
+# no choice of boundary makes the verdict a function of the head, because what
+# is being resolved -- does this description name one finding, or two -- is a
+# property of the ledger, and other pull requests legitimately change it.
+repo_i="$fixture_dir/repo-absorbed-commit"
+new_repo "$repo_i"
+mkdir -p "$repo_i/reviews/findings"
+echo one > "$repo_i/reviews/findings/P2_correctness_202609010000_shared-name.md"
+echo two > "$repo_i/reviews/findings/P2_correctness_202609020000_shared-name.md"
+git -C "$repo_i" add -A && git -C "$repo_i" commit -q -m 'branch point: two findings share a description'
+i_branch_point="$(git -C "$repo_i" rev-parse HEAD)"
+# C, the repair, on a commit that this pull request and an earlier one both
+# carry. Nothing about it is exotic: a batch pull request opened from this
+# branch point legitimately holds it.
+git -C "$repo_i" checkout -q -b shared-repair
+git -C "$repo_i" rm -q 'reviews/findings/P2_correctness_202609010000_shared-name.md'
+git -C "$repo_i" commit -q -m 'C: the shared repair deletes the first twin'
+i_shared="$(git -C "$repo_i" rev-parse HEAD)"
+git -C "$repo_i" checkout -q -b pr
+echo change > "$repo_i/pr-change.txt"
+git -C "$repo_i" add -A && git -C "$repo_i" commit -q -m 'the pull request adds its own change'
+i_head="$(git -C "$repo_i" rev-parse HEAD)"
+git -C "$repo_i" checkout -q -B trunk "$i_branch_point"
+echo unrelated > "$repo_i/target-change.txt"
+git -C "$repo_i" add -A && git -C "$repo_i" commit -q -m 'master advances independently'
+git -C "$repo_i" merge -q --no-ff "$i_shared" -m 'master merges an earlier pull request carrying C'
+i_advanced="$(git -C "$repo_i" rev-parse HEAD)"
+
+# The fixture is only about anything if the merge base really does move.
+[[ "$(git -C "$repo_i" merge-base "$i_branch_point" "$i_head")" == "$i_branch_point" ]] \
+  || { echo 'the fixture was meant to start with the merge base at the branch point' >&2; exit 1; }
+[[ "$(git -C "$repo_i" merge-base "$i_advanced" "$i_head")" == "$i_shared" ]] \
+  || { echo 'the fixture was meant to move the merge base onto the absorbed commit' >&2; exit 1; }
+
+i_before="$(verdict "$repo_i" "$i_branch_point" "$i_head" 'fix-P2/correctness_shared-name')"
+i_after="$(verdict "$repo_i" "$i_advanced" "$i_head" 'fix-P2/correctness_shared-name')"
+if [[ "$i_before" != 1 ]]; then
+  echo "both twins stand in the ledger at the branch point, so the name is ambiguous; got $i_before" >&2
+  exit 1
+fi
+if [[ "$i_after" != 0 ]]; then
+  echo "once master carries the repair one twin is left, so the name resolves; got $i_after" >&2
   exit 1
 fi
 
@@ -718,6 +778,137 @@ if [[ "$(id -u)" -ne 0 ]] && chmod 600 "$twin_dir" 2>/dev/null && [[ ! -x "$twin
   chmod 700 "$twin_dir"
 else
   echo 'note: skipping the unsearchable-directory case (running as root, or chmod had no effect)' >&2
+fi
+
+# ---- another merge base may only WIDEN the candidate set --------------------------------------
+#
+# `git merge-base` picks ONE of several best common ancestors when histories
+# criss-cross, so every one of them is listed. That is conservative only if the
+# answer is the UNION of what each boundary gives ALONE. Excluding the ancestors
+# of every base from a single rev-list is the INTERSECTION of those ranges, and
+# an intersection is narrower than its members: adding the second base DROPPED
+# the commit holding one twin of an ambiguous name, and the same head that one
+# base refused at exit 1 conformed at exit 0. Executed by the round-4 frontier
+# review; the listings are built by findings-in-range.sh, so this is a test of
+# the boundary and not of the validator.
+repo_j="$fixture_dir/repo-criss-cross"
+new_repo "$repo_j"
+echo seed > "$repo_j/seed.txt"
+git -C "$repo_j" add -A && git -C "$repo_j" commit -q -m 'common root'
+j_root="$(git -C "$repo_j" rev-parse HEAD)"
+# L files a twin and then repairs it, deleting the file, so that twin exists
+# only in a commit BETWEEN the root and L -- which is what an exclusion list can
+# swallow.
+git -C "$repo_j" checkout -q -b left "$j_root"
+commit_finding "$repo_j" 'P2_correctness_202609010000_shared-name.md' 'left files the first twin'
+git -C "$repo_j" rm -q 'reviews/findings/P2_correctness_202609010000_shared-name.md'
+git -C "$repo_j" commit -q -m 'left repairs and deletes its twin'
+j_left="$(git -C "$repo_j" rev-parse HEAD)"
+# R carries the second twin, and one finding nothing else names.
+git -C "$repo_j" checkout -q -b right "$j_root"
+commit_finding "$repo_j" 'P2_correctness_202609020000_shared-name.md' 'right files the second twin'
+commit_finding "$repo_j" 'P3_liveness_202609030000_only-one-of-these.md' 'right files an unambiguous finding'
+j_right="$(git -C "$repo_j" rev-parse HEAD)"
+# The head and the target merge L and R in opposite orders, so neither base is
+# an ancestor of the other and `git merge-base` has a choice to make.
+git -C "$repo_j" checkout -q -b pr "$j_left"
+git -C "$repo_j" merge -q --no-ff "$j_right" -m 'the head merges right into left'
+j_head="$(git -C "$repo_j" rev-parse HEAD)"
+git -C "$repo_j" checkout -q -b target "$j_right"
+git -C "$repo_j" merge -q --no-ff "$j_left" -m 'the target merges left into right'
+j_target="$(git -C "$repo_j" rev-parse HEAD)"
+if [[ "$(git -C "$repo_j" merge-base --all "$j_target" "$j_head" | wc -l)" != 2 ]]; then
+  echo 'the fixture was meant to produce two best common ancestors' >&2
+  exit 1
+fi
+# One boundary alone sees both twins and refuses. Every boundary together must
+# not see FEWER findings than one of them does.
+j_one="$(verdict "$repo_j" "$j_right" "$j_head" 'fix-P2/correctness_shared-name')"
+if [[ "$j_one" != 1 ]]; then
+  echo "resolved from one merge base the twins are ambiguous; got $j_one" >&2
+  exit 1
+fi
+j_both="$(verdict "$repo_j" "$j_target" "$j_head" 'fix-P2/correctness_shared-name')"
+if [[ "$j_both" != 1 ]]; then
+  echo "a second merge base narrowed the set and an ambiguous name conformed; got $j_both" >&2
+  exit 1
+fi
+# And widening must not have become a blanket refusal: a name that really does
+# pick out one finding still resolves across the same two boundaries.
+j_unique="$(verdict "$repo_j" "$j_target" "$j_head" 'fix-P3/liveness_only-one-of-these')"
+if [[ "$j_unique" != 0 ]]; then
+  echo "an unambiguous name must still resolve across criss-crossed boundaries; got $j_unique" >&2
+  exit 1
+fi
+
+# ---- a symlink wearing a finding's name is not a finding either -------------------------------
+#
+# git calls one a `120000 blob` and findings-in-range.sh's mode filter drops it.
+# Bash's -e and -f FOLLOW a link, so the DIRECTORY-listing path -- the documented
+# way to run this validator by hand against a working tree -- resolved
+# fix-P2/correctness_<desc> at exit 0 on the very commit the workflow path
+# refused at exit 1. Two answers to one documented question is the defect, so
+# both paths are asserted on the same repository.
+repo_k="$fixture_dir/repo-symlink-not-a-finding"
+new_repo "$repo_k"
+echo seed > "$repo_k/seed.txt"
+git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m base
+k_base="$(git -C "$repo_k" rev-parse HEAD)"
+mkdir -p "$repo_k/reviews/findings"
+ln -s ../../seed.txt "$repo_k/reviews/findings/P2_correctness_202609101200_not-a-finding.md"
+# A real finding beside it, so the case proves a filter and not an empty tree.
+echo fixture > "$repo_k/reviews/findings/P3_liveness_202609101300_a-real-finding.md"
+git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m 'a symlink named like a finding'
+k_head="$(git -C "$repo_k" rev-parse HEAD)"
+if ! git -C "$repo_k" ls-tree "$k_head" reviews/findings/ | grep -q '^120000 blob '; then
+  echo 'the fixture was meant to commit a SYMLINK named like a finding' >&2
+  exit 1
+fi
+k_tree="$(verdict "$repo_k" "$k_base" "$k_head" 'fix-P2/correctness_not-a-finding')"
+if [[ "$k_tree" != 1 ]]; then
+  echo "a committed symlink named like a finding must not resolve a fix-P*/ branch; got $k_tree" >&2
+  exit 1
+fi
+# The same commit judged the documented by-hand way: that working tree's
+# reviews/findings/ handed straight in as the listing. This is the path that
+# accepted, and it must now agree with the one above.
+if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
+  "$repo_k/reviews/findings" >/dev/null 2>&1; then
+  echo 'a symlink named like a finding resolved when a directory was the listing' >&2
+  exit 1
+fi
+# The regular file beside it resolves both ways, so the filter is a filter and
+# not a listing read as empty.
+k_real="$(verdict "$repo_k" "$k_base" "$k_head" 'fix-P3/liveness_a-real-finding')"
+if [[ "$k_real" != 0 ]]; then
+  echo "the regular file beside the symlink must still resolve from the trees; got $k_real" >&2
+  exit 1
+fi
+if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+  "$repo_k/reviews/findings" >/dev/null 2>&1; then
+  echo 'the regular file beside the symlink must still resolve from a directory listing' >&2
+  exit 1
+fi
+# A DANGLING link is a non-finding and not a read failure, which is what git
+# says about it too: a 120000 blob is one whether or not anything is at the
+# other end. Left as the only entry, the name is refused for naming no finding
+# rather than for a listing that could not be examined.
+dangling_dir="$fixture_dir/dangling-dir"
+mkdir -p "$dangling_dir"
+ln -s ./nothing-is-here "$dangling_dir/P2_correctness_202609101200_not-a-finding.md"
+dangling_rc=0
+dangling_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' "$dangling_dir" 2>&1)" \
+  || dangling_rc=$?
+if [[ "$dangling_rc" != 1 ]]; then
+  echo "a dangling symlink named like a finding must be refused; got $dangling_rc" >&2
+  exit 1
+fi
+if ! grep -q 'names no finding' <<< "$dangling_out"; then
+  echo 'a dangling symlink must read as no finding, not as a listing that cannot be examined' >&2
+  exit 1
 fi
 
 # ---- the gate must not recommend a destructive migration ------------------------------------

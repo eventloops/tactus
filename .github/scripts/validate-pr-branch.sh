@@ -97,13 +97,22 @@
 # ambiguous and still refused.
 #
 # THE FIRST LISTING IS THE MERGE BASE AND NOT THE TARGET BRANCH'S CURRENT HEAD.
-# Rooting it at the target's current head let something OUTSIDE the pull request
-# decide the verdict: two findings sharing a description at the branch point,
-# one repaired by the pull request and the same one independently deleted on
-# master, and an ambiguous name that was refused at exit 1 before master moved
-# CONFORMED at exit 0 after it -- same head, same diff. The merge base does not
-# move when master advances. .github/scripts/findings-in-range.sh builds the
-# three listings and states the whole argument.
+# Rooting it at the target's current head let master decide the verdict in the
+# ordinary case: two findings sharing a description at the branch point, one
+# repaired by the pull request and the same one independently deleted on master,
+# and an ambiguous name that was refused at exit 1 before master moved CONFORMED
+# at exit 0 after it -- same head, same diff. The merge base holds under that.
+#
+# THAT IS A DEFAULT AND NOT A GUARANTEE, AND THIS SCRIPT PROMISES NOTHING ABOUT
+# AN UNCHANGED HEAD. The merge base itself moves when master absorbs a commit
+# this branch also contains, and an ambiguous name can become unambiguous with
+# no push to the branch. That is the RIGHT answer: whether a description picks
+# out one finding or two is a property of the LEDGER, which other pull requests
+# legitimately change, and this script answers "does this name resolve to
+# exactly one filed finding" AGAINST THE LISTINGS IT IS HANDED, which are the
+# ledger as it stands when the check runs. It is not a statement about the head,
+# and no way of choosing the boundary would make it one.
+# .github/scripts/findings-in-range.sh states the whole argument.
 #
 # WHY ALL THREE AND NOT JUST THE PULL REQUEST'S COMMITS. A finding the pull
 # request never touched appears in none of its commits, so the merge-base tree
@@ -113,11 +122,16 @@
 # commit of its own. It costs one ls-tree, and the expensive failure of this
 # rule is a FALSE REFUSAL of a legitimate branch.
 #
-# A FINDING IS A REGULAR FILE. A committed DIRECTORY named
-# reviews/findings/P2_correctness_<timestamp>_<description>.md/ is a tree and
-# not a finding, and it satisfied fix-P2/correctness_<description> with no
-# finding file in existence. findings-in-range.sh checks the mode; a directory
-# passed here as a listing is filtered the same way.
+# A FINDING IS A REGULAR FILE, AND A SYMLINK IS NOT ONE. A committed DIRECTORY
+# named reviews/findings/P2_correctness_<timestamp>_<description>.md/ is a tree
+# and not a finding, and it satisfied fix-P2/correctness_<description> with no
+# finding file in existence. A committed SYMLINK wearing that name is a
+# `120000 blob` and not a finding either. findings-in-range.sh's mode filter
+# refuses both; the DIRECTORY-listing path here did not, because bash's -e and
+# -f FOLLOW a symlink, so a link to any regular file resolved at exit 0 exactly
+# what the workflow's path refused at exit 1. The documented by-hand API and the
+# workflow now implement one rule: the mode filter there, an explicit -L test
+# here.
 #
 # With no listing at all only the grammar is checked, which is how the fixtures
 # exercise it without a repository. With one listing, that listing alone is the
@@ -195,7 +209,7 @@ ends: the merge-base tree, the head tree, and every commit between them. A
 repair that deleted the file is resolved by the merge base; a pull request that
 files the finding and repairs it in one go is resolved by its own commits,
 whichever one the file lived in. Only a regular file is a finding: a directory
-carrying a finding's name is not one.
+or a symlink carrying a finding's name is not one.
 
 There is no fix/<slug> prefix. A bug worth a branch is worth a finding, so file
 the finding and branch fix-P<n>/ after it. findings/<slug> is for a pull request
@@ -281,11 +295,14 @@ check_listing "$range_findings"
 # a listing can be readable when it is checked and unreadable when it is read,
 # and a directory can be readable and still not listable.
 #
-# A DIRECTORY IS LISTED DOWN TO ITS REGULAR FILES. `ls -1` names a subdirectory
-# exactly as it names a file, so reviews/findings/P2_correctness_<ts>_<desc>.md/
-# -- a directory, holding no finding -- resolved fix-P2/correctness_<desc>. The
-# `ls` still runs, so an unlistable directory still fails rather than reading as
-# empty; each name is then kept only if it is a regular file.
+# A DIRECTORY IS LISTED DOWN TO ITS REGULAR FILES, AND A SYMLINK IS NOT ONE.
+# `ls -1` names a subdirectory, and a symlink, exactly as it names a file, so
+# reviews/findings/P2_correctness_<ts>_<desc>.md/ -- a directory, holding no
+# finding -- and a symlink of the same name each resolved
+# fix-P2/correctness_<desc>. The `ls` still runs, so an unlistable directory
+# still fails rather than reading as empty; each name is then kept only if it is
+# a regular file AND not a symlink, which is the rule git's mode filter applies
+# in findings-in-range.sh.
 read_listing() {
   local listing="$1" out entry
   if [[ -d "$listing" ]]; then
@@ -295,6 +312,16 @@ read_listing() {
       # An entry `ls` named and this cannot stat is a READ FAILURE and not a
       # non-finding: a directory can be readable and still not searchable, and
       # every name in it would otherwise be dropped in silence.
+      # A SYMLINK IS NOT A FINDING, and it is tested FIRST because -e and -f
+      # both follow one: a link named like a finding and pointing at any
+      # regular file resolved a fix-P*/ branch here while git's mode filter
+      # refused the identical commit. Testing -L first also keeps a DANGLING
+      # link a non-finding rather than a read failure, which is what git says
+      # about it too -- a 120000 blob is a 120000 blob whether or not anything
+      # is at the other end.
+      if [[ -L "$listing/$entry" ]]; then
+        continue
+      fi
       if [[ ! -e "$listing/$entry" ]]; then
         echo "branch-name-policy: '$listing/$entry' is listed and cannot be examined" >&2
         return 1
