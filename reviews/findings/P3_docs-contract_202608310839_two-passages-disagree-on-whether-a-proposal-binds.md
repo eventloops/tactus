@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 40
 reviewed_sha:
-location: proposals/README.md:22
+location: DESIGN.md:11
 provenance: undetermined
 first_bad:
 guard: project owner, carried by the documentation-authority pass

@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 7
 reviewed_sha:
-location: topology/events.rs
+location: src/engine/topology/recover.rs:1366
 provenance: undetermined
 first_bad:
 guard: PR8 implementer (the slice that gives the merge queue a repair to spawn)

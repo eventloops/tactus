@@ -5,7 +5,7 @@ disposition: deferred
 category: crash-consistency
 pr: 5
 reviewed_sha:
-location: coordinator.rs:93
+location: src/engine/coordinator.rs:91, src/engine/resume.rs:103
 provenance: undetermined
 first_bad:
 guard: PR6/PR7 implementer (the slice that can pause a run)
