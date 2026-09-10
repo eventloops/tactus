@@ -119,15 +119,14 @@ Three things follow from doing it this way, and all three are the reason for it:
   message is also the record of who holds the claim: `git log -1 <ref>` answers it, and nothing
   else on the box does. A holder re-pushing its own claim is always safe; the loser takes the next
   finding.
-- **Attribution and revert stay per-finding** even though review and merge are per-batch — but the
-  unit of revert is a commit, not a merge. Assembly cherry-picks, and a cherry-pick creates no merge
-  commit, so there is no per-finding merge to `git revert -m 1`; reverting the *batch* merge removes
-  every member's fix, measured. What cherry-picking does preserve is one commit per commit of each
-  fix branch, landed unchanged, so a single finding is rolled back by reverting its own commits and
-  the others survive — provided those commits are selected by the finding's `id`, read from the
-  trailer block by git's own parser, over the batch's own history and no wider. Every one of those
-  three qualifications replaces something a review measured going wrong. §8 gives the command and
-  what each part of it is for.
+- **Attribution stays per-finding. Revert does not.** Review and merge are per-batch, and so is
+  rollback. What cherry-picking preserves is one commit per commit of each fix branch, landed
+  unchanged, each carrying its finding's `id` in a trailer — enough to say which commits closed
+  which finding, which is what §8 uses it for. It is **not** enough to take one member out and leave
+  the others working: two members can share a prerequisite, the history attributes that shared line
+  to whichever member landed first, and reverting that member removes a line the other still
+  compiles against. Measured in §8, with a shared `use` line and `error[E0433]`. **The batch is the
+  unit of revert**, and §8 gives the sequence for taking one member out — it goes through the batch.
 
 **When the matrix says one finding per pull request, the fix branch *is* the pull request branch.**
 No batch branch is created. P1 lanes therefore behave exactly as they do today.
@@ -149,9 +148,12 @@ conflicting on the import block alone.
 
 > A conflict at batch assembly is resolved in the pick that hit it, by the implementer, and the
 > member keeps its own commit and its own `Finding:` trailer. Measured on that import conflict:
-> resolve the hunk, `git cherry-pick --continue` exit **0**, the member's trailer intact, and the
-> per-finding rollback in §8 still selects exactly that one commit and leaves the other member's fix
-> and import in place.
+> resolve the hunk, `git cherry-pick --continue` exit **0**, and the trailer intact. What resolving
+> in the pick does *not* buy is per-member rollback. A shared declaration is precisely the case
+> where
+> reverting one member can break another, so the batch is the unit of revert (§8) — an earlier
+> revision of this passage claimed the opposite on the strength of one example whose two members
+> happened to need *different* imports.
 
 An earlier revision of this section aborted the batch and filed the discrepancy against an
 "offending finding". On the case above there is no offending finding: both write sets named exactly
@@ -335,8 +337,8 @@ getting it right before the agent is spawned and reading the diff afterwards —
 gate. §9 records a checker as owed and says what it would and would not buy.
 
 **That rule binds across concurrent pull requests, and only there.** Inside one batch the bar is
-adjacency, not the module: two findings may share a module, and may share a file, provided their
-fixes do not touch the same function or the same shared declaration (§5, rule 1). A batch is
+adjacency, not the module: two findings may share a module, may share a file, and may share a
+declaration, provided their fixes do not touch the same function (§5, rule 1). A batch is
 implemented one member at a time on its own fix branch, so same-module members are never written
 concurrently and cannot race. Reading disjointness into the batch as well is what would turn a
 69-finding module into 69 pull requests.
@@ -439,8 +441,17 @@ nothing else. A function-only reading of this rule calls that pair adjacency-dis
 
 **Adjacency changes who does the work, not whether the batch survives.** A shared function is worth
 splitting the batch for, because two fixes rewriting one body need to be read together. A shared
-declaration is not: it is a one-line resolution in the pick, taken by the implementer, and §2 says
-what happens then. Neither is a scheduling error and neither is filed against a finding.
+declaration is not: the pair stays in the batch and the conflict is a one-line resolution in the
+pick, taken by the implementer, and §2 says what happens then. Neither is a scheduling error and
+neither is filed against a finding.
+
+**Keeping shared declarations in the batch is what costs the per-member revert, and that is the
+trade.** Two members that both need one declaration have a prerequisite the history can attribute to
+only one of them, so reverting that one can break the other — measured in §8, a shared `use` line
+and `error[E0433]`. Splitting every such pair into its own pull request would buy per-member revert
+back, and would also split most `workspace_manager` batches on their import block, which is the
+outcome this process exists to avoid. So they are batched, the batch is the unit of revert (§8), and
+those are one decision rather than two rules.
 
 The two constraints have different scopes and different checks: write-set disjointness (§4) governs
 what runs *concurrently* and is computed by the orchestrator over each finding's declared writes —
@@ -597,74 +608,104 @@ disclosed in the body. Never push to `master` directly. Delete the batch branch 
 fix branch after the merge — a fix branch left behind still reads as a live claim on its module.
 
 **Which is why every fix commit carries its finding in a trailer.** The branches are deleted; the
-trailer is what survives them, and together with the range the rollback selects over it is the whole
-of the per-finding revert guarantee in §2:
+trailer is what survives them, and it is how a landed commit is attributed to the finding it closed:
 
 ```
 Finding: <id>                       the finding's `id`, from its frontmatter — not its filename
 ```
 
-**The value is the `id` and nothing else.** Two earlier revisions of this section used
-`<category>_<desc>` from the filename, which drops severity and timestamp, so two different findings
-can carry one value — and the ledger's naming permits it. Measured on
-`P2_correctness_202609110100_beta.md` and `P3_correctness_202609110200_beta.md`, two findings with
-disjoint locations that both reduce to `correctness_beta`: with the batches merged one after the
-other, rolling back the second removed both fixes and restored both finding files, `git revert
---no-commit` exit **0**. The `id` is the stable identifier `README.md` already designates for
+**The value is the `id` and nothing else.** Two earlier revisions used `<category>_<desc>` from the
+filename, which drops severity and timestamp, so two different findings can carry one value — and
+the ledger's naming permits it. The `id` is the stable identifier `README.md` already designates for
 exactly this, and `scripts/pr-ready-audit.sh` already resolves findings by it. Across all 307 files
 at `44edb2a1` the 307 ids are distinct — measured; no gate checks that, so it is a property of the
-ledger today rather than a guarantee.
+ledger today and not a guarantee.
 
 **So a fix branch and its commits are named by different things, deliberately.** The branch carries
 `<category>_<desc>` from the filename, because that is what the branch gate resolves back to a
 finding file and what makes `git ls-remote --heads origin 'fix-*'` readable as a board (§2). The
 commit carries the `id`, because that is what has to be unambiguous years later when the branch is
-gone. Naming both after the filename is what produced the failure above.
+gone.
 
-Rolling one member out of a landed batch:
+### What the trailer is for, and what it is not for
+
+**It is for attribution and audit** — which landed commits closed a given finding, once its branch
+is gone:
 
 ```bash
 MERGE=<the batch's merge commit>
-ID=PRX-BETA-DOCSTRING
+ID=PRX-BETA
 
-# the batch's OWN history, and git's own trailer parser
+# the batch's own history, git's own trailer parser, and a forced string comparison
 git log --format='%H %(trailers:key=Finding,valueonly,separator=%x2C)' "$MERGE^1..$MERGE^2" \
-  | awk -v id="$ID" '$2 == id { print $1 }'                    # newest first
-git revert --no-commit <newest> … <oldest>                      # exit 0
-git commit -m "revert: $ID"
+  | awk -v id="$ID" '$2 "" == id "" { print $1 }'
 ```
 
-**Two details in that command are the whole of it, and each replaces something that was measured to
-fail.**
+Three details in that, each replacing something a review measured going wrong:
 
 - **`$MERGE^1..$MERGE^2`, not `<batch-base>..$MERGE`.** The base-to-merge range walks the first
-  parent through every batch that landed earlier, so it contains their commits too. On the pair
-  above, the documented `B..<second merge>` range selected both batches' fixes; `^1..^2` is the
-  second-parent side alone and selected one. Exit codes captured directly:
-
-  ``` base..merge      + a message-wide grep     2 of 2 selected   revert exit 0   BOTH fixes gone,
-  both finding files restored merge^1..merge^2 + the trailer parser       1 selected        revert
-  exit 0   the other member's fix and its deletion intact ```
-
+  parent through every batch that landed earlier, so it holds their commits too — measured, it
+  selected two batches' fixes where one was asked for.
 - **`%(trailers:…)`, not `--grep`.** `--grep` searches the whole message, so a commit that *quotes*
-  another finding's trailer — in a fenced block explaining what it is not — matches it. Measured: an
-  anchored `--grep='^Finding: PRX-BETA-CRASH$'` selected a commit whose only real trailer is
-  `PRX-BETA-DOCSTRING`. `%(trailers:key=Finding,valueonly)` reads the trailer block and reports
-  `PRX-BETA-DOCSTRING` alone, and `git interpret-trailers --parse` agrees.
-  `scripts/pr-ready-audit.sh` had to make the same distinction for frontmatter ids and its comment
-  says so: a matching line in prose or a code block is not the field.
+  another finding's trailer in a fenced block matches it. Measured: an anchored
+  `--grep='^Finding: PRX-BETA-CRASH$'` selected a commit whose only real trailer is
+  `PRX-BETA-DOCSTRING`. `scripts/pr-ready-audit.sh` had to make the same distinction for frontmatter
+  ids, and its comment says so: a matching line in prose or a code block is not the field.
+- **`$2 "" == id ""`, not `$2 == id`.** `awk` compares numerically when both sides look like
+  numbers, so a bare `==` treats the distinct ids `1` and `01` as equal — and `validate-pr-body.sh`
+  accepts both as distinct ids, checked. Measured on two independent fixes carrying those trailers:
+  `$2 == id` with `ID=01` selected **2** commits and reverting them exited **0** with both fixes
+  gone; the forced-string form selected **1**, and the right one for each of the two ids. No id in
+  the ledger is numeric today, which is luck and not a rule. Concatenating `""` makes both sides
+  strings.
 
-  The comparison is then string *equality* in `awk`, not a pattern, so no anchoring question arises
-  and a prefix relation between two ids cannot mis-select.
+**It is not a rollback mechanism, and this document no longer says it is.** Three revisions of this
+section promised that reverting one member's commits leaves the other members working. That is
+false, and the reason is not a defect in the selector: the selector can be exactly right and the
+result still broken.
 
-With the batch's own history and a parsed trailer matched exactly, the other member's fix survives.
-Two cases are worth stating because they are the ones that do not: **reverting the batch merge**
-(`git revert -m 1 <merge>`) removes *every* member, so it is a batch-level act and never a
-per-finding one; and a **repair round** (§7) commits after assembly, where nothing binds a commit to
-a member unless the trailer does. Keep a repair commit to one finding and give it that finding's
-trailer. A repair that genuinely spans members forfeits the per-finding revert for the members it
-spans, and the batch is the unit again for those — say so in the pull request body rather than
-discovering it during a rollback.
+> **The batch is the unit of revert.** Reverting a batch's merge restores the pre-batch state.
+> **Reverting one member of a batch is not guaranteed to leave the other members working**, because
+> members can share a prerequisite that the history attributes to whichever landed first. If one
+> member has to come out, revert the batch and re-land the rest.
+
+Measured on a batch whose two members share a prerequisite. `alpha()` and `beta()` are separate
+findings in one file, and each fix independently needs `use std::time::Duration;`. Each member
+builds alone with its own mutation witness passing and the other's failing, and the assembled batch
+passes both. Both picks apply at exit **0**, the import appears once, and `git log -S` attributes it
+to whichever member landed first. Rolling that member back, with the selector above:
+
+```
+selector for the first member          1 commit selected   correct
+git revert --no-commit                 exit 0
+git commit                             exit 0
+the other member afterwards            rustc exit 1        error[E0433]: cannot find type `Duration`
+the other member's finding file        still deleted
+```
+
+**No trailer scheme repairs this.** The import is a prerequisite of both fixes and belongs to both.
+A per-commit attribution has to give it to one, git gives it to whichever landed first, and
+reverting that one takes a line the other still compiles against — while the ledger says the second
+finding is closed, because its file is gone. Nothing about the selection was wrong.
+
+What does work, measured on the same batch:
+
+```
+git revert -m 1 --no-commit <merge>    exit 0   tree byte-identical to the pre-batch tree, both
+                                                finding files restored, both witnesses failing again
+git cherry-pick <the member that stays>  exit 0 compiles, that member's witness passes, its finding
+                                                file deleted, the other's restored
+```
+
+So taking one member out of a landed batch is: revert the batch merge, then re-land each member that
+stays by cherry-picking its fix branch again. The finding that came out returns to the queue with
+its file restored, which is where §2 wants it. It costs the batch's other members a re-land and
+nothing else, and unlike a per-member revert it cannot leave `master` in a state no member intended.
+
+**A repair round (§7) is the same shape.** It commits after assembly, so nothing binds it to a
+member unless the trailer does; keep a repair commit to one finding and give it that finding's
+trailer so the attribution query still answers. A repair that genuinely spans members gets no
+per-member attribution at all — say so in the pull request body rather than discovering it later.
 
 ---
 
