@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 7
 reviewed_sha:
-location: attempt.rs
+location: 
 provenance: undetermined
 first_bad:
 guard: project owner — the claims protocol a fresh session carries
