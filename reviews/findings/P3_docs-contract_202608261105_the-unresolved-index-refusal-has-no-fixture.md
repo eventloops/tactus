@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 7
 reviewed_sha: 
-location: 
+location: src/engine/attempt.rs:366
 provenance: pre_existing
 first_bad: 
 guard: the project owner, as a G2 erratum question
