@@ -755,7 +755,9 @@ actually fired, how the child ended, and what the classifier answered.
 
 ## `struct Sample` › `ran: Option<std::time::Duration>,`
 
-The child's **own** duration, when it finished before the kill.
+How long the child had run when the poll found it finished, from the
+spawn's return, when it finished before the kill — measured as `fired` is
+(`let spawned = child.spawned();` below).
 
 `None` when the kill got there first, which is the case this harness
 wants. When every sample is `Some`, the schedule raced a number that
@@ -872,6 +874,25 @@ finished is a measurement; acting on it is not. Breaking out early
 and killing there fires the kill sooner than the rung it was aimed
 at, which the shape assertions below refuse — measured on the
 Windows guest, where a kill fired at 40.3ms against a 48.5ms rung.
+
+## `let spawned = child.spawned();`
+
+The rung is a delay after the spawn's return, where `deadline` was set.
+The fixture's clocks — `fired`, and the one `exited` read into `ran` — run
+from an origin read before the spawn (#259 moved it there on 2026-09-10,
+for the two samplers that aim from it), and `KillableGitChild::spawned` is
+the spawn's own latency on that clock. Both readings have it subtracted, so
+the kill is compared with its rung on the clock the rung was set on, and
+the retry's schedule is rebuilt from what the children ran after the spawn
+returned — the reference this sampler had before the origin moved. Read
+from the origin, a slow spawn counted toward the rung: the ultra review of
+`ec87d6ed` (finding 1) paused the spawn one second after the origin and
+removed the deadline loop, and every kill, fired the instant the spawn
+returned, read 1.0002 s against rungs of 0.66–7.5 ms; the sampler passed,
+twice, on sixteen kills that followed no rung. With the readings from the
+spawn's return the same mutant fails on the first sample — a kill fired
+3.5 µs after its child was spawned, sooner than the 951 µs rung it was
+aimed at — and the sampler passes unmutated 25 of 25 (#259's body, W5).
 
 ## `fixture`
 
