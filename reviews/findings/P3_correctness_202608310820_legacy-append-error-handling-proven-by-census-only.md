@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 5
 reviewed_sha:
-location: src/events/log/tests.rs:3083, src/engine/coordinator.rs:285, src/engine/options.rs:70
+location: src/events/log/tests.rs:3083, src/engine/coordinator.rs:285, src/engine/options.rs:70, src/engine/resume.rs:531
 provenance: undetermined
 first_bad:
 guard: PR7 implementer, or whichever lane plumbs an observer through engine::Harness
