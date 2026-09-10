@@ -166,6 +166,14 @@ findings_in "$head" | sort -u > "$out/head-findings"
 # Each base therefore contributes the range it would give on its own, and the
 # results are unioned. That restores the property the paragraph at the top of
 # this file relies on: another merge base can only widen the set.
+#
+# Under a criss-cross the union then holds commits that are ALSO reachable from
+# the target -- R's own commits, when L is the other base. That is deliberate,
+# not a leak: they are reachable from this head, so they are in this branch, and
+# the direction is the conservative one. A wider set can turn an accepted name
+# into an ambiguous refusal and never the other way round. Where there is one
+# merge base, which is every open pull request in this repository today, this
+# loop is the single rev-list it replaces.
 while read -r merge_base; do
   git rev-list "$head" "^$merge_base" || exit 1
 done < "$out/merge-bases" | sort -u > "$out/range-commits"

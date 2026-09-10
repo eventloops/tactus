@@ -309,9 +309,6 @@ read_listing() {
     out="$(ls -1 -- "$listing")" || return 1
     while IFS= read -r entry; do
       [[ -n "$entry" ]] || continue
-      # An entry `ls` named and this cannot stat is a READ FAILURE and not a
-      # non-finding: a directory can be readable and still not searchable, and
-      # every name in it would otherwise be dropped in silence.
       # A SYMLINK IS NOT A FINDING, and it is tested FIRST because -e and -f
       # both follow one: a link named like a finding and pointing at any
       # regular file resolved a fix-P*/ branch here while git's mode filter
@@ -322,6 +319,9 @@ read_listing() {
       if [[ -L "$listing/$entry" ]]; then
         continue
       fi
+      # An entry `ls` named and this cannot stat is a READ FAILURE and not a
+      # non-finding: a directory can be readable and still not searchable, and
+      # every name in it would otherwise be dropped in silence.
       if [[ ! -e "$listing/$entry" ]]; then
         echo "branch-name-policy: '$listing/$entry' is listed and cannot be examined" >&2
         return 1
