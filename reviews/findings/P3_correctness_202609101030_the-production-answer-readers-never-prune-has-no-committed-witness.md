@@ -8,7 +8,7 @@ reviewed_sha: 7e0110a13acce525567a7ac43abb016a232d6236
 location: src/interaction.rs:288
 provenance: pre_existing
 first_bad:
-guard: the round that makes `an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step` read the published file after the loop's ingestion and assert it byte-identical (R21), or commits the G4 measurement's `G4K` shape with its `published_unchanged` assertion
+guard: the round that makes `an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnations_first_step` read the published file after the loop's ingestion and assert it byte-identical (R21) — the G4 measurements' `published_unchanged` is printed, not asserted, so committing their shape unchanged would leave the rewrite case unguarded
 ---
 
 ## Failure sequence
@@ -25,8 +25,10 @@ file after `rundir::ingest_answer`. The layer the loop actually calls, `EventLog
        the T-ANSWER tests in src/engine/topology/recover/tests.rs) checks the event that was
        appended and never reads the file afterwards
     -> the only tests that die are this run's temporary T-ANSWER kill measurements, `G4K-torn` and
-       `G4K-complete`, which assert the published file is still present and byte-unchanged after
-       the resume
+       `G4K-complete`, and they die on their **existence** assertion —
+       `assert!(published.is_file(), "R21: the answer file is never pruned")`. The byte comparison
+       beside it is printed (`published_unchanged=true`) and not asserted, so a reader that
+       *rewrote* the file rather than pruning it would not be caught even by these
 
 Measured here at `7e0110a1` (gate report §3; log
 `~/tactus-artifacts/g4r3-evidence-7e0110a1/mutations/mut-MR1.log`), reproducing what G4's second run
