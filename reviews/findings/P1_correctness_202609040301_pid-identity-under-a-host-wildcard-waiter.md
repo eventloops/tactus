@@ -24,13 +24,34 @@ was written in.
 
 ## Adjacency, recorded 2026-09-10 by the findings-sweep Phase 0 triage
 
-**Not a duplicate of `PR125-CLOSE-DISCARDED-KILL-RESULT`, and not schedulable
-beside it.** That row carries the same `location:` — `src/agent/proc.rs:2320` —
-and is a different defect at the same place: it is about the *result* of
-`kill` being discarded, this one about the *pid* the call names. Both were
-recorded against `0bff83df` and the line has drifted since; the sites are the
-`libc::kill(…, SIGKILL)` calls on the helper's end path, and the host
-wildcard-waiter reasoning is now beside `install_reaper_dispositions`
-(`:2411`). Whichever is repaired first moves the other's line number, so
-re-derive it from the failure sequence rather than trusting `:2320`, and the
-two may not share a batch: they edit the same lines.
+**Not a duplicate of `PR125-CLOSE-DISCARDED-KILL-RESULT`, not schedulable beside
+it, and — corrected 2026-09-10 after review — not the same scope as it.**
+
+Both rows carry `location: src/agent/proc.rs:2320`, recorded against `0bff83df`,
+and the line has drifted: it now lands in the reaper's spawn setup, with
+`install_reaper_dispositions` at `:2411`. Re-derive the sites from the failure
+sequence rather than trusting `:2320`.
+
+**This row's scope is every helper kill that names a PID, whether or not the
+result is checked.** Censused at this head, in the production region (the
+`termination` module's tests begin at `:4384`), five calls signal a helper by
+PID rather than by process group:
+
+| site | result |
+|---|---|
+| `:2244` `Reaper::abandon` | **kept** — `kill_errno`, reported through `describe_helper_end` (`:2737`) |
+| `:2694` guard-setup failure | discarded |
+| `:3214` descriptor-configuration failure | discarded |
+| `:3245` guard failed-READY path | **kept** — `kill_errno`, reported in the error string |
+| `:4359` `reap_bounded` | discarded |
+
+**`:2244` and `:3245` are this row's and not the other's.** They already preserve
+what `kill` returned, so `PR125-CLOSE-DISCARDED-KILL-RESULT` has nothing left to
+repair at either — and both still signal by PID, so a host that reaps with
+wildcard waits can collect the helper, the kernel can reuse the number, and a
+call whose return value is *checked* can kill the replacement and report success.
+A repair scoped to the discarded-result sites omits exactly these two.
+
+The three discarded PID kills (`:2694`, `:3214`, `:4359`) are where the two rows
+overlap. Whichever is repaired first moves the other's line numbers, so the two
+may not share a batch.
