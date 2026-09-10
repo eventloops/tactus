@@ -10,9 +10,9 @@ what runs in parallel with what.
 > box needs to name this one, it is spelled **findings sweep** in full.
 
 It exists because the ledger stopped being a list and became a backlog. Measured on `master` at
-`44edb2a1`, 2026-09-10: **307 open findings** — 14 P1, 106 P2, 186 P3, and one `P4` that is outside the
-category vocabulary the gates enforce. Fixing those one pull request at a time is not a plan, and
-sending an agent at each of them at once produces a merge-conflict storm and a review bill with
+`44edb2a1`, 2026-09-10: **307 open findings** — 14 P1, 106 P2, 186 P3, and one `P4` that is outside
+the category vocabulary the gates enforce. Fixing those one pull request at a time is not a plan,
+and sending an agent at each of them at once produces a merge-conflict storm and a review bill with
 nothing to show for it. The rules below are what sits between those two failures.
 
 ---
@@ -120,13 +120,14 @@ Three things follow from doing it this way, and all three are the reason for it:
   else on the box does. A holder re-pushing its own claim is always safe; the loser takes the next
   finding.
 - **Attribution and revert stay per-finding** even though review and merge are per-batch — but the
-  unit of revert is a commit, not a merge. Assembly cherry-picks, and a cherry-pick creates no
-  merge commit, so there is no per-finding merge to `git revert -m 1`; reverting the *batch* merge
-  removes every member's fix, measured. What cherry-picking does preserve is one commit per commit
-  of each fix branch, landed unchanged, so a single finding is rolled back by reverting its own
-  commits and the others survive — provided its commits are selected by an *exactly* matched
-  trailer, which is where that guarantee is easiest to lose. §8 says how they stay findable after
-  the branches are deleted, and how the match is anchored.
+  unit of revert is a commit, not a merge. Assembly cherry-picks, and a cherry-pick creates no merge
+  commit, so there is no per-finding merge to `git revert -m 1`; reverting the *batch* merge removes
+  every member's fix, measured. What cherry-picking does preserve is one commit per commit of each
+  fix branch, landed unchanged, so a single finding is rolled back by reverting its own commits and
+  the others survive — provided those commits are selected by the finding's `id`, read from the
+  trailer block by git's own parser, over the batch's own history and no wider. Every one of those
+  three qualifications replaces something a review measured going wrong. §8 gives the command and
+  what each part of it is for.
 
 **When the matrix says one finding per pull request, the fix branch *is* the pull request branch.**
 No batch branch is created. P1 lanes therefore behave exactly as they do today.
@@ -139,14 +140,27 @@ starts **after** the claim commit — `git cherry-pick "$CLAIM..$TIP"`. Picking 
 itself stops the sequence: it is empty against the batch branch, and `git cherry-pick` halts with
 `The previous cherry-pick is now empty` and exits 1, measured.
 
-**Every pick must apply cleanly.** Members may share a module — that is what a batch is for (§4) —
-but they are adjacency-disjoint by construction (§5), so a conflict here is not a scheduling
-accident: either a finding's fix landed outside the write set it declared (§4), or two members
-turned out to touch the same function.
+**A pick that does not apply cleanly is resolved, not blamed.** Members may share a module — that is
+what a batch is for (§4) — and two members with correct write sets and no shared function can still
+conflict, because a conflict is a fact about *text*, not about scheduling. Measured: one member
+changed `alpha()` and added `use std::time::Duration;`; the other changed `beta()` and added
+`use std::path::Path;` at the same insertion point. First pick exit **0**, second pick exit **1**,
+conflicting on the import block alone.
 
-> A conflict at batch assembly aborts the batch, returns its members to the queue, and files the
-> discrepancy — a write set that did not describe the fix, or a missed adjacency — against the
-> offending finding. It is never resolved by hand.
+> A conflict at batch assembly is resolved in the pick that hit it, by the implementer, and the
+> member keeps its own commit and its own `Finding:` trailer. Measured on that import conflict:
+> resolve the hunk, `git cherry-pick --continue` exit **0**, the member's trailer intact, and the
+> per-finding rollback in §8 still selects exactly that one commit and leaves the other member's fix
+> and import in place.
+
+An earlier revision of this section aborted the batch and filed the discrepancy against an
+"offending finding". On the case above there is no offending finding: both write sets named exactly
+the file they wrote and the two fixes touched different functions. Aborting and rebatching under the
+same rule reproduces the same conflict. **Abort only when the conflict tells you something** — a
+member that wrote somewhere its finding never reserved (§4) is worth filing; a member that turns out
+to share a function with another (§5, rule 1) is worth splitting out. A shared import block is
+neither, and the fact that the conflict happened proves nothing about which of those it was, so the
+diff has to be read before anything is filed.
 
 **A clean assembly is not evidence that the scheduling data was right, and must not be read as
 one.** An earlier revision of this section called assembly the cheapest place to discover bad
@@ -163,8 +177,8 @@ scheduling data. It does not discover it at all, for two reasons, both measured:
   merge.
 
 What assembly does catch is textual conflict between members of one batch, and that is worth having
-because it is early and cheap. It is not a safety net for §4. The backstop for §4 is the merge
-queue rejecting a rebuilt entry, and that one is expensive.
+because it is early and cheap. It is not a safety net for §4, and §4 has none: nothing anywhere in
+this process compares what a fix wrote against what its finding reserved.
 
 ---
 
@@ -269,21 +283,63 @@ the ones its finding names.** The standing example is `src/export.rs`, whose tes
 or not the finding mentions it, and is therefore not concurrent with anything else in the `export`
 lane. A declared set assembled by reading the `location:` line and nothing else will miss couplings
 of that shape, and missing one is how a pair of individually green pull requests produces a red
-`master`.
+`master`. That coupling is the lucky case: it breaks an assertion, so CI names it. The unlucky case
+is the one below, where nothing does.
 
-**The declared set is a bound, not a guess.** An implementer that discovers it needs a path outside
-its reservation stops and returns the finding to the orchestrator to be rescheduled; it does not
-write there and let the merge find out. Nothing enforces that mechanically today (§9). The backstop
-when it is broken is the merge queue: it rebuilds the second entry on the first, and the rebuild
-fails — exit 1 by rebase, by cherry-pick and by merge alike, measured — *after* both batches have
-been implemented and reviewed in full. Avoiding that cost is the whole reason the reservation is
-computed up front.
+**The declared set is a bound, and nothing enforces it.** An implementer that discovers it needs a
+path outside its reservation stops and returns the finding to the orchestrator to be rescheduled.
+That is a duty, not a mechanism, and this section is exact about how little sits behind it because
+three earlier revisions of it each claimed a detector that does not exist.
+
+> **Nothing compares what a fix wrote against what its finding reserved.** Not git, not
+> `upstroke-ci`, not `upstroke-pr-policy`, not the merge queue, not `scripts/pr-ready-audit.sh`. A
+> pull request that writes outside its reservation lands, and nothing reports that it did.
+
+Measured with a reservation deliberately broken. A reserved `shared.txt`, B reserved
+`unrelated.txt`, each also reserving its own finding file, so the declared sets were disjoint and
+the rule above permitted both at once. B then also wrote a distant hunk of `shared.txt`. Exit codes
+captured directly:
+
+```
+assemble batch A                          exit 0
+assemble batch B                          exit 0
+land A                                    exit 0
+rebuild B on A by merge                   exit 0    combined assertions pass
+rebuild B on A by cherry-pick             exit 0    combined assertions pass
+rebuild B on A by rebase                  exit 0    combined assertions pass
+```
+
+The out-of-reservation line is on `master` and no step objected.
+
+**What git catches is textual overlap, which is a different thing and a much smaller one.** The same
+violation, varied only in where B wrote:
+
+```
+a distant hunk of a file A edited         merge exit 0    undetected
+the same line A edited                    merge exit 1
+a file A deleted (modify/delete)          merge exit 1
+```
+
+Those last two are why an earlier revision believed the queue enforced the reservation: its one
+reproduction was the modify/delete case, and it generalised. Git compares text; a reservation is not
+text, and the two agree only when a violation happens to land in the same region. CI is no better
+placed — it catches a violation only when the violation also breaks an assertion, which the
+`src/export.rs` coupling above would and a distant hunk in an unrelated function would not.
+
+**So this is what §4 buys, stated at the size it actually is.** Computing exclusion from planned
+writes rather than from `location:` stops the scheduler from *allocating* two concurrent pull
+requests onto one path, and a correct allocation cannot produce the modify/delete collision that
+motivated the rule. That is scheduling hygiene, and hygiene is not a safety property. **A write set
+that is wrong or incomplete is a silent failure with no detector**, and the only two defences are
+getting it right before the agent is spawned and reading the diff afterwards — a review duty, not a
+gate. §9 records a checker as owed and says what it would and would not buy.
 
 **That rule binds across concurrent pull requests, and only there.** Inside one batch the bar is
 adjacency, not the module: two findings may share a module, and may share a file, provided their
-fixes do not touch the same function (§5, rule 1). A batch is implemented one member at a time on
-its own fix branch, so same-module members are never written concurrently and cannot race. Reading
-disjointness into the batch as well is what would turn a 69-finding module into 69 pull requests.
+fixes do not touch the same function or the same shared declaration (§5, rule 1). A batch is
+implemented one member at a time on its own fix branch, so same-module members are never written
+concurrently and cannot race. Reading disjointness into the batch as well is what would turn a
+69-finding module into 69 pull requests.
 
 **The unit is the module, not the file.** `{src/X.rs, src/X/**}` is one lane, because a fix in
 `src/workspace_manager.rs` will nearly always edit `src/workspace_manager/tests.rs` — treating them
@@ -369,12 +425,27 @@ Two consequences the orchestrator must act on:
 ## 5. Four rules that override the matrix
 
 **1. Adjacency beats severity, and adjacency — not the module — is the bar inside a batch.** Two
-findings in the same module may share a batch, and normally will. Two findings whose fixes touch
-the same function may not, even when the matrix permits the count. The two constraints have
-different scopes and different checks: write-set disjointness (§4) governs what runs *concurrently*
-and is checked by script over each finding's declared writes — not its `location:` — before any
-agent is spawned; adjacency governs what shares a *diff*, needs the code read to see, and so is
-raised by the implementer, who splits the batch.
+findings in the same module may share a batch, and normally will. Two findings whose fixes touch the
+same **function** may not, even when the matrix permits the count.
+
+**Adjacency is not only functions. It is any place two fixes must both write to one line or one
+insertion point**, and the common case is a shared declaration rather than shared logic: the `use`
+block at the top of a module, a `mod` list, a `#[derive]` or attribute list, an enum's variants, a
+`match` whose arms are added at one place, an allowlist or table appended to at its end. Two fixes
+in different functions of one file collide there routinely. Measured: one member changed `alpha()`
+and added `use std::time::Duration;`, the other changed `beta()` and added `use std::path::Path;`
+after the same line — first pick exit **0**, second exit **1**, conflicting on the import block and
+nothing else. A function-only reading of this rule calls that pair adjacency-disjoint and is wrong.
+
+**Adjacency changes who does the work, not whether the batch survives.** A shared function is worth
+splitting the batch for, because two fixes rewriting one body need to be read together. A shared
+declaration is not: it is a one-line resolution in the pick, taken by the implementer, and §2 says
+what happens then. Neither is a scheduling error and neither is filed against a finding.
+
+The two constraints have different scopes and different checks: write-set disjointness (§4) governs
+what runs *concurrently* and is computed by the orchestrator over each finding's declared writes —
+not its `location:` — before any agent is spawned, and nothing verifies it afterwards; adjacency
+governs what shares a *diff*, needs the code read to see, and so is raised by the implementer.
 
 **2. The authority exception.** A `docs-contract` finding cited as authority by a gate report or a
 design section **leaves the docs lane** and takes the severity of the thing that depends on it.
@@ -526,57 +597,74 @@ disclosed in the body. Never push to `master` directly. Delete the batch branch 
 fix branch after the merge — a fix branch left behind still reads as a live claim on its module.
 
 **Which is why every fix commit carries its finding in a trailer.** The branches are deleted; the
-trailer is what survives them, and it is the whole of the per-finding revert guarantee in §2:
+trailer is what survives them, and together with the range the rollback selects over it is the whole
+of the per-finding revert guarantee in §2:
 
 ```
-Finding: <category>_<desc>          the same <desc> as the fix branch, so one finding, one string
+Finding: <id>                       the finding's `id`, from its frontmatter — not its filename
 ```
 
-Rolling one member out of a landed batch, measured end to end on a two-member batch where one
-member was a two-commit fix:
+**The value is the `id` and nothing else.** Two earlier revisions of this section used
+`<category>_<desc>` from the filename, which drops severity and timestamp, so two different findings
+can carry one value — and the ledger's naming permits it. Measured on
+`P2_correctness_202609110100_beta.md` and `P3_correctness_202609110200_beta.md`, two findings with
+disjoint locations that both reduce to `correctness_beta`: with the batches merged one after the
+other, rolling back the second removed both fixes and restored both finding files, `git revert
+--no-commit` exit **0**. The `id` is the stable identifier `README.md` already designates for
+exactly this, and `scripts/pr-ready-audit.sh` already resolves findings by it. Across all 307 files
+at `44edb2a1` the 307 ids are distinct — measured; no gate checks that, so it is a property of the
+ledger today rather than a guarantee.
+
+**So a fix branch and its commits are named by different things, deliberately.** The branch carries
+`<category>_<desc>` from the filename, because that is what the branch gate resolves back to a
+finding file and what makes `git ls-remote --heads origin 'fix-*'` readable as a board (§2). The
+commit carries the `id`, because that is what has to be unambiguous years later when the branch is
+gone. Naming both after the filename is what produced the failure above.
+
+Rolling one member out of a landed batch:
 
 ```bash
-# both anchors matter: ^ opens the trailer line, $ closes the value
-git log --format=%H --grep='^Finding: correctness_beta$' <batch-base>..<merge>   # newest first
-git revert --no-commit <newest> … <oldest>                                       # exit 0
-git commit -m 'revert: correctness_beta'
+MERGE=<the batch's merge commit>
+ID=PRX-BETA-DOCSTRING
+
+# the batch's OWN history, and git's own trailer parser
+git log --format='%H %(trailers:key=Finding,valueonly,separator=%x2C)' "$MERGE^1..$MERGE^2" \
+  | awk -v id="$ID" '$2 == id { print $1 }'                    # newest first
+git revert --no-commit <newest> … <oldest>                      # exit 0
+git commit -m "revert: $ID"
 ```
 
-**The closing `$` is the easy one to lose and the one that breaks the guarantee.** A trailer value
-is a prefix of any longer value that starts with it, so unanchored, `'^Finding: correctness_beta'`
-also matches `Finding: correctness_beta-timeout`. Put those two independently fixed findings in one
-batch and run the rollback for `correctness_beta`; measured on exactly that pair, exit codes
-captured directly:
+**Two details in that command are the whole of it, and each replaces something that was measured to
+fail.**
 
-```
-'^Finding: correctness_beta'          3 of 3 selected   revert exit 0   BOTH fixes gone
-'^Finding: correctness_beta$'         1 selected        revert exit 0   beta gone, timeout intact
-'^Finding: correctness_beta-timeout$' 2 selected        revert exit 0   timeout gone, beta intact
-```
+- **`$MERGE^1..$MERGE^2`, not `<batch-base>..$MERGE`.** The base-to-merge range walks the first
+  parent through every batch that landed earlier, so it contains their commits too. On the pair
+  above, the documented `B..<second merge>` range selected both batches' fixes; `^1..^2` is the
+  second-parent side alone and selected one. Exit codes captured directly:
 
-The unanchored form does not fail loudly: `git revert --no-commit` exits **0** having reverted a
-finding nobody asked about. Note also that the damage is one-directional — the finding whose value
-is the *prefix* is the one whose rollback over-reaches, so testing the rollback on the longer name
-proves nothing about the shorter one. `git log --grep` matches per line of the commit message, so
-`$` is the end of the trailer line; `--fixed-strings` is not an alternative, because it makes `^`
-and `$` literal and removes the anchoring entirely.
+  ``` base..merge      + a message-wide grep     2 of 2 selected   revert exit 0   BOTH fixes gone,
+  both finding files restored merge^1..merge^2 + the trailer parser       1 selected        revert
+  exit 0   the other member's fix and its deletion intact ```
 
-**And this is not a constructed hazard.** The trailer value is `<category>_<desc>` taken from the
-finding's filename, and at `44edb2a1` the ledger already holds a pair in which one value is a strict
-prefix of another: `docs-contract_rustdoc-links-in-markdown` (`PR161-ASTRA-RUSTDOC-LINKS`, P2) and
-`docs-contract_rustdoc-links-in-markdown-notes` (`PR162-ASTRA-NOTES-RUSTDOC-LINKS`, P3). That is the
-only such pair in the 307, and their severities put them in different batches as they stand, so the
-collision is not reachable today — but a guarantee must not rest on the ledger never filing a
-co-batched pair, and §5's authority exception can move a `docs-contract` finding's severity.
+- **`%(trailers:…)`, not `--grep`.** `--grep` searches the whole message, so a commit that *quotes*
+  another finding's trailer — in a fenced block explaining what it is not — matches it. Measured: an
+  anchored `--grep='^Finding: PRX-BETA-CRASH$'` selected a commit whose only real trailer is
+  `PRX-BETA-DOCSTRING`. `%(trailers:key=Finding,valueonly)` reads the trailer block and reports
+  `PRX-BETA-DOCSTRING` alone, and `git interpret-trailers --parse` agrees.
+  `scripts/pr-ready-audit.sh` had to make the same distinction for frontmatter ids and its comment
+  says so: a matching line in prose or a code block is not the field.
 
-With the value anchored at both ends, the other member's fix survives. Two cases are worth stating
-because they are the ones that do not: **reverting the batch merge** (`git revert -m 1 <merge>`)
-removes *every* member, so it is a batch-level act and never a per-finding one; and a **repair
-round** (§7) commits after assembly, where nothing binds a commit to a member unless the trailer
-does. Keep a repair commit to one finding and give it that finding's trailer. A repair that
-genuinely spans members forfeits the per-finding revert for the members it spans, and the batch is
-the unit again for those — say so in the pull request body rather than discovering it during a
-rollback.
+  The comparison is then string *equality* in `awk`, not a pattern, so no anchoring question arises
+  and a prefix relation between two ids cannot mis-select.
+
+With the batch's own history and a parsed trailer matched exactly, the other member's fix survives.
+Two cases are worth stating because they are the ones that do not: **reverting the batch merge**
+(`git revert -m 1 <merge>`) removes *every* member, so it is a batch-level act and never a
+per-finding one; and a **repair round** (§7) commits after assembly, where nothing binds a commit to
+a member unless the trailer does. Keep a repair commit to one finding and give it that finding's
+trailer. A repair that genuinely spans members forfeits the per-finding revert for the members it
+spans, and the batch is the unit again for those — say so in the pull request body rather than
+discovering it during a rollback.
 
 ---
 
@@ -596,8 +684,10 @@ rollback.
   branch on an undeclared path; where the declared set is *recorded* is part of that design and is
   deliberately not settled here. Note what such a checker would and would not buy: it would catch a
   fix that wrote outside its reservation, but not a reservation that was incomplete when it was
-  written, which is the harder half and stays a reading duty. Until it exists the merge queue is the
-  only enforcement, and it charges a fully implemented and reviewed batch for the discovery.
+  written, which is the harder half and stays a reading duty. **Until it exists there is no
+  enforcement at all**, and no partial one either: the queue is not a fallback, because it never
+  compares a diff with a reservation (§4, measured). A violation lands silently unless it happens to
+  collide textually or break an assertion.
 - **Which lane a sweep pull request is in.** `scripts/pr-ready-audit.sh` decides a lane from the
   branch prefix alone and knows three: `codex/findings-p3-*`, `codex/findings-*`, and everything
   else. Both prefixes this process uses fall through to *everything else*. Running the audit's own
