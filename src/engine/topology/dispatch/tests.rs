@@ -1261,9 +1261,10 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
                  {status:?}"
             );
             // A completed pick measured the pick: within `ran` when it exited
-            // before its aim, and within the kill's own time when it exited
-            // between the poll that found it running and the kill — the
-            // completion a kill that missed used to throw away.
+            // before its aim, and, when it exited between the poll that found
+            // it running and the kill, within the clock read once the kill
+            // attempt had returned — a bound the child cannot have outrun,
+            // where the clock before the kill's system call was not.
             if let Some(within) = ran.or(child.fired()) {
                 budget.completed(within);
             }
@@ -1325,8 +1326,8 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
             "sample {sample}: aimed at {aim:?}, {}{}",
             match ran {
                 Some(ran) => format!("completed in {ran:?}"),
-                None if killed => format!("killed at {fired}"),
-                None => format!("outran the kill fired at {fired}"),
+                None if killed => format!("killed, the kill returned at {fired}"),
+                None => format!("outran the kill, exited within {fired}"),
             },
             class.map_or_else(|| ", refused".to_owned(), |class| format!(", {class:?}"))
         ));

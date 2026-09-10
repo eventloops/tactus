@@ -392,8 +392,10 @@ pub(crate) struct KillableGitChild {
     /// Started once the spawn has returned, so what [`Self::kill`] reads
     /// off it is time the child was left *running*.
     spawned: std::time::Instant,
-    /// What the clock said when a kill fired at this child, or `None` if
-    /// none ever did. Written only by [`Self::kill`].
+    /// The clock once a kill attempt at this child had returned, or `None`
+    /// if none was ever sent. Written only by [`Self::kill`], and read
+    /// *after* [`std::process::Child::kill`] returns, never before it: a
+    /// child the kill missed had exited no later than this.
     fired: Option<std::time::Duration>,
 }
 
@@ -461,15 +463,28 @@ impl KillableGitChild {
         }
     }
 
-    /// Kill the child, recording when the kill fired.
+    /// Kill the child, recording the clock once the kill attempt has
+    /// returned.
     ///
-    /// The clock is read at the instant of the kill and stored *after* the
-    /// kill returns, so deleting `self.child.kill()` leaves `outcome`
+    /// Read after `Child::kill` returns, never before it. The samplers feed
+    /// a child the kill missed — one that exited between the poll that
+    /// found it running and the kill's system call — back into the budget
+    /// as a completion bounded by this clock, so the clock has to be one
+    /// the child cannot have outrun: by the time the call returns the
+    /// signal has been sent, and a child it missed had already exited.
+    /// Until 2026-09-10 the clock was read *before* the call, and a parent
+    /// descheduled between the read and the call fed a pick that then ran to
+    /// completion back as the instant before the pause — below the pick,
+    /// clamped to [`KillBudget::FLOOR`] — and every later rung was aimed
+    /// before the pick's first write (the ultra review of `2d3fa9d1`,
+    /// finding 1: a 20 ms pause planted there left seven kills of children
+    /// that had not begun as the evidence of a batch).
+    ///
+    /// `outcome` is bound so that deleting `self.child.kill()` leaves it
     /// unbound and the module stops compiling.
     pub(crate) fn kill(&mut self) {
-        let fired = self.spawned.elapsed();
         let outcome = self.child.kill();
-        self.fired = Some(fired);
+        self.fired = Some(self.spawned.elapsed());
         let _ = outcome;
     }
 
@@ -480,9 +495,10 @@ impl KillableGitChild {
     /// platform hands a parent — `wait4` carries a child's CPU times and no
     /// wall-clock exit, and Windows' `GetProcessTimes`, which does, is not
     /// bound here. So the number is an upper bound on the child's run,
-    /// tight by one poll while the parent holds a core and late by the
-    /// scheduler's wake-up when it does not, and [`KillBudget`] follows it
-    /// as the bound it is.
+    /// reached by the next poll when the parent holds a core — at once
+    /// while [`Self::run_until`] spins, after a sleep of a millisecond
+    /// before then — and after the scheduler's wake-up when it does not,
+    /// and [`KillBudget`] follows it as the bound it is.
     ///
     /// `None` while it is still running.
     pub(crate) fn exited(&mut self) -> Option<std::time::Duration> {
@@ -514,8 +530,9 @@ impl KillableGitChild {
     /// platform's: between that poll's `try_wait` and the kill's own system
     /// call the parent can be descheduled, and a child that exits in that
     /// window is missed by the kill and ends on its own terms — its status
-    /// is a completion, not the kill's signature, and [`Self::fired`] bounds
-    /// how long it ran, which the samplers feed back like any completion.
+    /// is a completion, not the kill's signature, and [`Self::fired`], read
+    /// once the kill attempt had returned, bounds how long it ran, which the
+    /// samplers feed back like any completion.
     pub(crate) fn run_until(&mut self, aim: std::time::Duration) -> Option<std::time::Duration> {
         let deadline = self.spawned + aim;
         loop {
@@ -540,7 +557,9 @@ impl KillableGitChild {
     /// one-millisecond sleep.
     const SPIN_WITHIN: std::time::Duration = std::time::Duration::from_millis(4);
 
-    /// When a kill fired at this child, if one ever did.
+    /// The clock once a kill attempt at this child had returned, if one was
+    /// ever sent: the signal was sent no later than this, and a child the
+    /// kill missed had exited no later than this.
     pub(crate) fn fired(&self) -> Option<std::time::Duration> {
         self.fired
     }
@@ -634,8 +653,14 @@ pub(crate) fn time_git(cwd: &Path, args: &[String]) -> std::time::Duration {
 /// It follows in both directions and is not capped at the probe: a host
 /// that slows after the probe needs rungs past it to reach the pick's
 /// writes, and a completion the parent saw late — woken after the exit, or
-/// a kill that missed — is an upper bound on the pick that the median of
-/// the last [`KillBudget::RECENT`] damps, never a ceiling.
+/// a kill that missed, bounded by the clock once the kill had returned — is
+/// an upper bound on the pick, never a ceiling. What the ladder follows is
+/// the median of the last [`KillBudget::RECENT`] such bounds, over however
+/// many exist: the first completion sets the budget alone, of two the
+/// longer is taken, and from three on one late bound among three is
+/// outvoted by the other two while two are not — so a late first
+/// observation holds until two shorter completions follow it, and three
+/// late ones hold until two do ([`KillBudget::current`]).
 pub(crate) struct KillBudget {
     probe: std::time::Duration,
     /// Within how long of their spawn the children that completed before
@@ -648,9 +673,11 @@ impl KillBudget {
     /// the command's.
     pub(crate) const FLOOR: std::time::Duration = std::time::Duration::from_micros(200);
 
-    /// How many of the most recent completions the budget follows: enough
-    /// that one descheduled parent does not set the ladder alone, few
-    /// enough that the first completion moves it at once.
+    /// How many of the most recent completions the budget follows: three,
+    /// so that once three exist one late observation among them is outvoted
+    /// by the other two, and so that the first completion replaces the probe
+    /// at once. Until three exist nothing is outvoted: one completion sets
+    /// the ladder alone, and of two the longer is taken.
     pub(crate) const RECENT: usize = 3;
 
     /// From a probe's uninterrupted runs, in order. The first is the
@@ -679,7 +706,10 @@ impl KillBudget {
     }
 
     /// The budget now: the median of the last [`Self::RECENT`] children
-    /// that finished before their kill, or the probe's while none has.
+    /// that finished before their kill, over however many have — one alone,
+    /// the longer of two, the middle of three — or the probe's while none
+    /// has. [`median`] takes the upper of an even count, so a late first
+    /// completion is not displaced by one shorter one; two are needed.
     pub(crate) fn current(&self) -> std::time::Duration {
         let recent: Vec<std::time::Duration> = self
             .completed
@@ -702,9 +732,11 @@ impl KillBudget {
 
     /// A child completed before its kill, within `within` of its spawn: how
     /// long it ran as the parent saw it exit, or, when it exited between the
-    /// poll that found it running and the kill, when the kill fired. Either
-    /// bounds the pick from above, the ladder was aimed past it, and the
-    /// budget follows what it measured.
+    /// poll that found it running and the kill, the clock once the kill
+    /// attempt had returned. Either bounds the pick from above — the second
+    /// only because it is read after the kill's system call, never before
+    /// it — the ladder was aimed past it, and the budget follows what it
+    /// measured.
     pub(crate) fn completed(&mut self, within: std::time::Duration) {
         self.completed.push(within);
     }

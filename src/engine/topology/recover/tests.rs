@@ -10103,9 +10103,10 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
                  {status:?}"
             );
             // A completed pick measured the pick: within `ran` when it exited
-            // before its aim, and within the kill's own time when it exited
-            // between the poll that found it running and the kill — the
-            // completion a kill that missed used to throw away.
+            // before its aim, and, when it exited between the poll that found
+            // it running and the kill, within the clock read once the kill
+            // attempt had returned — a bound the child cannot have outrun,
+            // where the clock before the kill's system call was not.
             if let Some(within) = ran.or(child.fired()) {
                 budget.completed(within);
             }
@@ -10117,8 +10118,8 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
             "run {run}: aimed at {aim:?}, {}",
             match ran {
                 Some(ran) => format!("completed in {ran:?}"),
-                None if died_by_kill => format!("killed at {fired}"),
-                None => format!("outran the kill fired at {fired}"),
+                None if died_by_kill => format!("killed, the kill returned at {fired}"),
+                None => format!("outran the kill, exited within {fired}"),
             }
         ));
         let _ = remove_git_ref_lock_residue(&fixture.git_dir);
