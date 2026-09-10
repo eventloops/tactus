@@ -10036,47 +10036,59 @@ fn remove_git_ref_lock_residue(git_dir: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
+    use crate::workspace_manager::fixture::{KillBudget, KillableGitChild, died_by_kill, time_git};
+
     const SAMPLING_N: u32 = 8;
+    /// One bounded retry: when the first `SAMPLING_N` all completed before
+    /// their kill, the ladder has been re-aimed inside what they took, and
+    /// `SAMPLING_N` more are sampled on it before the refusal below fires.
+    const MAX_SPAWNS: u32 = 2 * SAMPLING_N;
+    /// A warm-up the budget discards, then the three it takes the median of.
+    const PROBE_PICKS: usize = 4;
     let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
 
     let two_tasks = || Damage {
         two_tasks: true,
         ..Damage::default()
     };
-    let budget = {
+    let mut budget = {
         let probe = Fixture::build("sample-probe", two_tasks());
         let (planted, head) = plant_stale_queued_candidate(&probe);
         let staging = plant_staging_worktree(&probe, 1, head.as_str());
-        let started = std::time::Instant::now();
-        let output = crate::workspace_manager::fixture::git_out(
-            &staging,
-            &["cherry-pick", planted.commit.as_str()],
-        );
-        assert!(
-            output.status.success(),
-            "the probe pick must really run: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        started.elapsed().max(Duration::from_micros(200))
+        let argv = vec!["cherry-pick".to_owned(), planted.commit.0.clone()];
+        let mut picks = Vec::with_capacity(PROBE_PICKS);
+        for _ in 0..PROBE_PICKS {
+            picks.push(time_git(&staging, &argv));
+            crate::workspace_manager::fixture::git(
+                &staging,
+                &["reset", "-q", "--hard", head.as_str()],
+            );
+        }
+        KillBudget::probed(&picks)
     };
 
     let mut observed = Vec::new();
     let mut refusals = Vec::new();
+    let mut timeline = Vec::new();
     let mut killed_while_running = 0_u32;
-    for run in 0..SAMPLING_N {
+    let mut spawns = 0_u32;
+    while spawns < SAMPLING_N || (killed_while_running == 0 && spawns < MAX_SPAWNS) {
+        let run = spawns;
+        spawns += 1;
         let fixture = Fixture::build(&format!("sample-{run}"), two_tasks());
         let (planted, head) = plant_stale_queued_candidate(&fixture);
         let staging = plant_staging_worktree(&fixture, 1, head.as_str());
 
-        let mut child = crate::workspace_manager::fixture::KillableGitChild::spawn(
+        let aim = budget.aim(run % SAMPLING_N, SAMPLING_N);
+        let mut child = KillableGitChild::spawn(
             &staging,
             &["cherry-pick".to_owned(), planted.commit.0.clone()],
         );
-        std::thread::sleep(budget.mul_f64(f64::from(run + 1) / f64::from(SAMPLING_N + 1)));
-        let running_at_kill = child.exited().is_none();
+        let ran = child.run_until(aim);
+        let running_at_kill = ran.is_none();
         child.kill();
         let status = child.wait();
-        let died_by_kill = crate::workspace_manager::fixture::died_by_kill(&status);
+        let died_by_kill = died_by_kill(&status);
         assert!(
             died_by_kill || status.success(),
             "run {run}: the child ended {status:?}, which is neither the kill's signature nor \
@@ -10090,7 +10102,18 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
                 "run {run}: the child was running when the kill fired and yet exited \
                  {status:?}"
             );
+            if let Some(ran) = ran {
+                budget.completed(ran);
+            }
         }
+        timeline.push(format!(
+            "run {run}: aimed at {aim:?}, {}",
+            match ran {
+                Some(ran) => format!("completed in {ran:?}"),
+                None if died_by_kill => "killed".to_owned(),
+                None => "outran the kill".to_owned(),
+            }
+        ));
         let _ = remove_git_ref_lock_residue(&fixture.git_dir);
 
         let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
@@ -10122,20 +10145,25 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
 
     assert!(
         refusals.is_empty(),
-        "the classifier refused {} of {SAMPLING_N} samples: {refusals:?}",
+        "the classifier refused {} of {spawns} samples: {refusals:?}",
         refusals.len()
     );
     assert_eq!(
         observed.len(),
-        SAMPLING_N as usize,
+        spawns as usize,
         "every sample was classified into one of the site's classes and recovered"
     );
     assert!(
         killed_while_running >= 1,
-        "no sample died by the kill: the ladder's first rung fires at one ninth of a measured \
-         pick, so a kill that reaches a running child cannot leave it exit 0, and a run in which \
-         every child exited cleanly is a run in which nothing was killed — the evidence of \
-         {SAMPLING_N} samples was of completed picks, not of kills: {observed:?}"
+        "no sample died by the kill: the ladder is aimed at fractions of the probe's median pick \
+         and re-aimed inside every pick that completed before its kill, and when the first \
+         {SAMPLING_N} samples all completed, {SAMPLING_N} more were sampled on the re-aimed \
+         ladder, so a kill that reaches a running child cannot leave it exit 0, and a run in \
+         which every child exited cleanly is a run in which nothing was killed — the evidence of \
+         {spawns} samples was of completed picks, not of kills: {observed:?}; the probe measured \
+         {:?}, and the ladder followed {} completion(s): {timeline:?}",
+        budget.probe(),
+        budget.completions()
     );
 }
 

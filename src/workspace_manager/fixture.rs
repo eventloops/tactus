@@ -495,6 +495,41 @@ impl KillableGitChild {
         self.child.wait().expect("reap the sampled git child")
     }
 
+    /// Leave the child running until `aim` after its spawn or until it
+    /// exits on its own, and say which: how long it ran if it exited, `None`
+    /// if it is still running at the aim, where a kill can reach it.
+    ///
+    /// Polled, never slept through. `sleep(aim)` then `kill` reports nothing
+    /// about the child and wakes when the scheduler pleases, so on a loaded
+    /// host the kill is late by the wake-up and the sampler cannot tell a
+    /// child it missed from one it never aimed inside. Here [`Self::exited`]
+    /// is asked once a millisecond while the aim is far, and continuously
+    /// once it is within [`Self::SPIN_WITHIN`], so the kill fires within a
+    /// poll of its aim and the duration reported is the child's own, which
+    /// is the only number a recalibration can honestly use.
+    pub(crate) fn run_until(&mut self, aim: std::time::Duration) -> Option<std::time::Duration> {
+        let deadline = self.spawned + aim;
+        loop {
+            if let Some(ran) = self.exited() {
+                return Some(ran);
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return None;
+            }
+            if deadline - now > Self::SPIN_WITHIN {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    /// How close to its aim [`Self::run_until`] stops sleeping and polls
+    /// continuously: wider than a loaded host's wake-up from a
+    /// one-millisecond sleep.
+    const SPIN_WITHIN: std::time::Duration = std::time::Duration::from_millis(4);
+
     /// When a kill fired at this child, if one ever did.
     pub(crate) fn fired(&self) -> Option<std::time::Duration> {
         self.fired
@@ -567,4 +602,103 @@ pub(crate) fn time_git(cwd: &Path, args: &[String]) -> std::time::Duration {
         String::from_utf8_lossy(&output.stderr)
     );
     elapsed
+}
+
+/// A kill sampler's budget: how long an uninterrupted run of the sampled
+/// command takes on this machine, now.
+///
+/// A sampler aims its kills at fixed fractions of one duration, and every
+/// sampler in this tree that took that duration from a single measured run
+/// has been red on a hosted macOS runner with every kill landing after its
+/// child had already finished (`PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE`,
+/// `PR80-MACOS-WORKSPACE-SAMPLER-COLD-PROBE-RECURRENCE`,
+/// `RECOVER-CHERRY-PICK-SAMPLER-COLD-PROBE`,
+/// `G4B-O10-REPAIR-MATERIALIZE-SAMPLER-MACOS-KILL-FLOOR`). So the budget is
+/// never one number. It starts as the median of a probe's runs after a
+/// discarded warm-up, and it follows the sampled children themselves: a
+/// child that finished before its kill has measured the command under the
+/// sampler's own conditions, at that moment, and the next kill is aimed
+/// inside what it took. An inflated probe is corrected by the first child
+/// that outruns it; a host that drifts is tracked rung by rung.
+pub(crate) struct KillBudget {
+    probe: std::time::Duration,
+    /// How long the children that finished before their kill ran, oldest
+    /// first.
+    completed: Vec<std::time::Duration>,
+}
+
+impl KillBudget {
+    /// No budget below this: a measurement that small is the clock's, not
+    /// the command's.
+    pub(crate) const FLOOR: std::time::Duration = std::time::Duration::from_micros(200);
+
+    /// How many of the most recent completions the budget follows: enough
+    /// that one descheduled parent does not set the ladder alone, few
+    /// enough that the first completion moves it at once.
+    pub(crate) const RECENT: usize = 3;
+
+    /// From a probe's uninterrupted runs, in order. The first is the
+    /// warm-up and is discarded — the first run in a fresh worktree pays
+    /// for cold caches and, on Windows, an antivirus pass — and the budget
+    /// is the median of the rest, because the failure mode of one
+    /// measurement is one outlier, which a median discards and a mean
+    /// keeps.
+    pub(crate) fn probed(runs: &[std::time::Duration]) -> Self {
+        assert!(
+            runs.len() > 1,
+            "a budget needs a warm-up run and at least one after it: {runs:?}"
+        );
+        let after_warm_up = runs.get(1..).unwrap_or_default();
+        Self {
+            probe: median(after_warm_up)
+                .unwrap_or(Self::FLOOR)
+                .max(Self::FLOOR),
+            completed: Vec::new(),
+        }
+    }
+
+    /// What the probe measured, for the record a red run carries.
+    pub(crate) fn probe(&self) -> std::time::Duration {
+        self.probe
+    }
+
+    /// The budget now: the median of the last [`Self::RECENT`] children
+    /// that finished before their kill, or the probe's while none has.
+    pub(crate) fn current(&self) -> std::time::Duration {
+        let recent: Vec<std::time::Duration> = self
+            .completed
+            .iter()
+            .rev()
+            .take(Self::RECENT)
+            .copied()
+            .collect();
+        median(&recent).unwrap_or(self.probe).max(Self::FLOOR)
+    }
+
+    /// Where the kill of rung `rung` (from zero) of `rungs` is aimed: the
+    /// ladder's fraction `(rung + 1) / (rungs + 1)` of the current budget,
+    /// so the rungs stay spread through the command and never reach its
+    /// measured end.
+    pub(crate) fn aim(&self, rung: u32, rungs: u32) -> std::time::Duration {
+        self.current()
+            .mul_f64(f64::from(rung + 1) / f64::from(rungs + 1))
+    }
+
+    /// A child finished before its kill, having run for `ran`: the ladder
+    /// was aimed past it, and the budget follows what it measured.
+    pub(crate) fn completed(&mut self, ran: std::time::Duration) {
+        self.completed.push(ran);
+    }
+
+    /// How many children have moved the budget.
+    pub(crate) fn completions(&self) -> usize {
+        self.completed.len()
+    }
+}
+
+/// The median of `durations`; `None` of none.
+pub(crate) fn median(durations: &[std::time::Duration]) -> Option<std::time::Duration> {
+    let mut sorted = durations.to_vec();
+    sorted.sort_unstable();
+    sorted.get(sorted.len() / 2).copied()
 }

@@ -3343,12 +3343,61 @@ not a linked worktree's git dir, which recovery reclaims itself.
 
 Object.ProposalCherryPick's frozen sampling N (effects/residue-classes.json).
 
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `const MAX_SPAWNS: u32 = 2 * SAMPLING_N;`
+
+One bounded retry, the shape `PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE` gave
+the T-ATTEMPT sampler: when the first `SAMPLING_N` children all completed
+before their kill, the ladder has by then been re-aimed inside what they
+took, and `SAMPLING_N` more are sampled on it before the refusal at the end
+fires. Every child, in either half, is classified, reclaimed and driven to
+integration, so a completed pick is verified as a control and counted as
+nothing. The refusal counts kills only, over every spawn, and the retry does
+not weaken it: sixteen clean exits are still a run in which nothing was
+killed.
+
 ## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let two_tasks = || Damage {`
 
 How long the same pick takes when nothing kills it, measured in a probe
-fixture of its own; the kill ladder is fractions of it.
+fixture of its own: four uninterrupted picks in the probe's staging
+worktree, the worktree reset to the head between them, the first discarded
+as the warm-up and the median of the other three taken
+(`fixture::KillBudget`). The kill ladder is fractions of that budget, and
+the budget then follows the samples — a child that completed before its
+kill has measured the pick under the sampler's own conditions, at that
+moment, and the next rung is aimed inside the median of the last three
+such completions.
 
-## `const SAMPLING_N: u32 = 8;` › `let mut child = crate::workspace_manager::fixture::KillableGitChild::spawn(`
+Until 2026-09-10 the budget was one pick, the first cherry-pick in a fresh
+staging worktree, and every kill was `sleep(fraction)` then `kill`.
+`RECOVER-CHERRY-PICK-SAMPLER-COLD-PROBE`: on the hosted `test (macos-latest)`
+leg that one measurement was, four times in three days, more than nine
+times the picks it scheduled — all eight children exited 0 before the
+lowest rung — and the refusal fired on a pull request whose diff was
+Markdown (run 34304029954 at `828da6cd`), on two pushes to master
+(34328230257 at `9a6897ea`, 34356671343 at `74da2cbb`) and on a merge-queue
+entry for #258 (34433061085), a leg that was red on 4 of the 147 hosted
+macOS runs between 2026-09-07 and 2026-09-10 for this test alone. The
+refusal was right each time: nothing had been sampled. Measured on the
+build box at `81ee09ef`: the first pick in a fresh staging worktree takes
+1.1 ms against 0.94 ms warm, a pick's first write lands about 0.6 ms in
+and the eight rungs land five `None` and three `Internal`, so an aim even
+twice too long misses every write window; 25 runs alone never failed here
+before the change and 25 never failed after it, and the leg's own evidence
+is CI's.
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let aim = budget.aim(run % SAMPLING_N, SAMPLING_N);`
+
+The rung's aim, `(rung + 1) / (SAMPLING_N + 1)` of the current budget, and
+`KillableGitChild::run_until` in place of a sleep: the child is polled to
+the aim — once a millisecond while it is far, continuously through its last
+four — so the kill fires within a poll of where it was aimed rather than
+after a scheduler's wake-up, and a child that exits first reports its own
+duration, which is the number the budget follows. Every spawn's aim and
+outcome goes into the refusal's message, with the probe and the number of
+completions the ladder followed, so a red leg carries the timing evidence
+the finding said it lacked.
+
+## `const SAMPLING_N: u32 = 8;` › `let mut child = KillableGitChild::spawn(`
 
 The real child, killed at an uncontrolled point of the ladder.
 

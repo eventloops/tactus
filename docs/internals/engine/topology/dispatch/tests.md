@@ -398,8 +398,37 @@ name still and is recorded, not changed
 (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`). The same run failed the kill-count
 floor on macOS with 6 kills in 32 spawns and 26 picks complete before their
 kill — four of the six mid-write — because the budget was one cold probe pick
-spread over a schedule most warm picks beat; the budget is now the shorter of
-two probe picks and `MAX_SPAWNS` is `8 × SAMPLING_N`.
+spread over a schedule most warm picks beat. The shorter of two probe picks
+and `MAX_SPAWNS = 8 × SAMPLING_N` answered it, and the answer was not enough.
+
+**The budget follows the picks it schedules.**
+`G4B-O10-REPAIR-MATERIALIZE-SAMPLER-MACOS-KILL-FLOOR` records 7 kills in 64
+spawns on `test (macos-latest)` at `c00c8638`, a Markdown-only pull request,
+and the merge-queue entry for #258 (run 34432439820) collected 5 in 64 —
+three before git's first write, two mid-write, and 59 picks complete before
+their kill, which places the lowest rung at the write window's start and the
+second past the pick's end: a budget some six times the picks it scheduled,
+taken from two probe picks in a row. So the budget is `fixture::KillBudget`:
+four probe picks in the probe worktree with `read-tree --reset -u HEAD`
+between them, the first discarded as the warm-up and the median of the other
+three taken; and it follows the samples — a child that completed before its
+kill has measured the pick under the sampler's own conditions, at that
+moment, and the next rung is aimed inside the median of the last three such
+completions, so an inflated probe is corrected by the first child that
+outruns it and a drifting host is tracked rung by rung. The kill itself is
+`KillableGitChild::run_until` rather than `sleep` then `kill`: the child is
+polled to the aim, once a millisecond while it is far and continuously
+through its last four, so the kill fires within a poll of the aim rather
+than after a loaded host's wake-up, and a child that exits first reports its
+own duration. The floors are unchanged; each one's message now carries the
+probe, the number of completions the ladder followed and every spawn's aim
+and outcome. Measured on the build box at `81ee09ef`: the pick takes about
+0.77 ms in a fresh worktree and warm alike, its first write lands about
+0.58 ms in and `MERGE_MSG` at its end, so one cycle of the ladder lands six
+`None`, one `Internal` and one `After` without `MERGE_MSG` and the floors are
+met in eight spawns; 25 runs alone never failed here before the change and 25
+never failed after it. Of the 147 hosted macOS runs between 2026-09-07 and
+2026-09-10, this floor was red on 3; the leg's own evidence is CI's.
 
 ## `fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {`
 

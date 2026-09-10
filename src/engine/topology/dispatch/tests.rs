@@ -1174,13 +1174,12 @@ fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {
 /// place, none between — so `KillableGitChild::spawn` runs the real binary
 /// (`fixture::sampled_git`; `PR249-KILL-SAMPLER-WINDOWS-WRAPPER`).
 ///
-/// The budget is the shorter of two probe picks, not the first: the first
-/// pick in a fresh worktree is a cold one, and a schedule spread over it
-/// lands most kills after a warm pick has finished — macOS at `56ea88c9`
-/// collected 6 kills in 32 spawns with 26 picks complete before their kill.
+/// The budget is `fixture::KillBudget`: the median of three probe picks
+/// after a discarded warm-up, re-aimed inside every pick that completed
+/// before its kill. The notes carry the two macOS reds that sized it.
 #[test]
 fn sampled_repair_materialization_child_kills_every_residue_classified_and_recovered() {
-    use crate::workspace_manager::fixture::{KillableGitChild, died_by_kill};
+    use crate::workspace_manager::fixture::{KillBudget, KillableGitChild, died_by_kill, time_git};
     use crate::workspace_manager::{ResidueTarget, classify_object_residue};
 
     /// Children that must die by the kill.
@@ -1188,6 +1187,8 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
     /// Spawns allowed to collect them: a pick faster than every kill point
     /// fails here, loudly, rather than counting its completions.
     const MAX_SPAWNS: u32 = 8 * SAMPLING_N;
+    /// A warm-up the budget discards, then the three it takes the median of.
+    const PROBE_PICKS: usize = 4;
 
     let mut run = Run::started("sampled-materialization");
     let source = protected_candidate(&mut run);
@@ -1208,10 +1209,14 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
         .manager
         .add_worktree(run.hooks.effects(), &probe_slot, &head)
         .expect("probe worktree");
-    let cold = crate::workspace_manager::fixture::time_git(&probe, &argv);
-    git(&probe, &["read-tree", "--reset", "-u", "HEAD"]);
-    let warm = crate::workspace_manager::fixture::time_git(&probe, &argv);
-    let budget = cold.min(warm).max(std::time::Duration::from_micros(200));
+    let mut picks = Vec::with_capacity(PROBE_PICKS);
+    for pick in 0..PROBE_PICKS {
+        if pick > 0 {
+            git(&probe, &["read-tree", "--reset", "-u", "HEAD"]);
+        }
+        picks.push(time_git(&probe, &argv));
+    }
+    let mut budget = KillBudget::probed(&picks);
     let expected_tree = git(&probe, &["write-tree"]);
     let expected_files = expected_checkout(&run, &head, &source.commit_sha.0, &["c.txt"]);
     assert_checkout_is(&probe, &expected_files, "probe");
@@ -1219,6 +1224,7 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
     let mut kills = Vec::new();
     let mut completed_classes = Vec::new();
     let mut refusals = Vec::new();
+    let mut timeline = Vec::new();
     let mut spawns = 0_u32;
     while (kills.len() < SAMPLING_N as usize || !kills.iter().any(KilledSample::while_writing))
         && spawns < MAX_SPAWNS
@@ -1237,11 +1243,10 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
             .add_worktree(run.hooks.effects(), &slot, &head)
             .expect("sample worktree");
 
+        let aim = budget.aim(sample % SAMPLING_N, SAMPLING_N);
         let mut child = KillableGitChild::spawn(&worktree, &argv);
-        std::thread::sleep(
-            budget.mul_f64(f64::from(sample % SAMPLING_N + 1) / f64::from(SAMPLING_N + 1)),
-        );
-        let running_at_kill = child.exited().is_none();
+        let ran = child.run_until(aim);
+        let running_at_kill = ran.is_none();
         child.kill();
         let status = child.wait();
         let killed = died_by_kill(&status);
@@ -1256,6 +1261,9 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
                 "sample {sample}: the child was running when the kill fired and yet exited \
                  {status:?}"
             );
+            if let Some(ran) = ran {
+                budget.completed(ran);
+            }
         }
 
         let target = ResidueTarget::new(&run.fixture.base).at(&worktree);
@@ -1307,6 +1315,15 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
             .remove_intent(run.hooks.effects(), &slot)
             .expect("scrub the sample intent");
 
+        timeline.push(format!(
+            "sample {sample}: aimed at {aim:?}, {}{}",
+            match ran {
+                Some(ran) => format!("completed in {ran:?}"),
+                None if killed => "killed".to_owned(),
+                None => "outran the kill".to_owned(),
+            },
+            class.map_or_else(|| ", refused".to_owned(), |class| format!(", {class:?}"))
+        ));
         if let Some(class) = class {
             if killed {
                 kills.push(KilledSample {
@@ -1318,6 +1335,11 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
             }
         }
     }
+    let schedule = format!(
+        "the probe measured {:?} and the ladder followed {} completion(s): {timeline:?}",
+        budget.probe(),
+        budget.completions()
+    );
 
     assert!(
         refusals.is_empty(),
@@ -1329,7 +1351,7 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
         kills.len() >= SAMPLING_N as usize,
         "{} children died by the kill in {spawns} spawns; {} picks completed before their kill \
          and are controls, not samples of an interruption: killed={kills:?}, \
-         completed={completed_classes:?}",
+         completed={completed_classes:?}; {schedule}",
         kills.len(),
         completed_classes.len()
     );
@@ -1344,7 +1366,7 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
             .iter()
             .any(|class| *class != ObjectResidue::After),
         "every one of the {} kills landed after the index was published, so the sample \
-         interrupted no materialization the site registers: {killed_classes:?}",
+         interrupted no materialization the site registers: {killed_classes:?}; {schedule}",
         kills.len()
     );
     assert!(
@@ -1352,7 +1374,7 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
         "none of the {} kills in {spawns} spawns landed while the pick was writing — each \
          found a child that had not begun (`None`, nothing written) or one that had finished \
          (`After` with `MERGE_MSG` in place) — so the sample interrupted no materialization \
-         under way: {kills:?}",
+         under way: {kills:?}; {schedule}",
         kills.len()
     );
 }
