@@ -124,7 +124,9 @@ Three things follow from doing it this way, and all three are the reason for it:
   merge commit, so there is no per-finding merge to `git revert -m 1`; reverting the *batch* merge
   removes every member's fix, measured. What cherry-picking does preserve is one commit per commit
   of each fix branch, landed unchanged, so a single finding is rolled back by reverting its own
-  commits and the others survive. §8 says how they stay findable after the branches are deleted.
+  commits and the others survive — provided its commits are selected by an *exactly* matched
+  trailer, which is where that guarantee is easiest to lose. §8 says how they stay findable after
+  the branches are deleted, and how the match is anchored.
 
 **When the matrix says one finding per pull request, the fix branch *is* the pull request branch.**
 No batch branch is created. P1 lanes therefore behave exactly as they do today.
@@ -139,15 +141,30 @@ itself stops the sequence: it is empty against the batch branch, and `git cherry
 
 **Every pick must apply cleanly.** Members may share a module — that is what a batch is for (§4) —
 but they are adjacency-disjoint by construction (§5), so a conflict here is not a scheduling
-accident: either a finding's `location` did not describe where its fix actually landed, or two
-members turned out to touch the same function.
+accident: either a finding's fix landed outside the write set it declared (§4), or two members
+turned out to touch the same function.
 
 > A conflict at batch assembly aborts the batch, returns its members to the queue, and files the
-> discrepancy — a wrong `location`, or a missed adjacency — against the offending finding. It is
-> never resolved by hand.
+> discrepancy — a write set that did not describe the fix, or a missed adjacency — against the
+> offending finding. It is never resolved by hand.
 
-That is a deliberate design choice: assembly is the cheapest possible place to discover bad
-scheduling data, because it happens before a single review token is spent.
+**A clean assembly is not evidence that the scheduling data was right, and must not be read as
+one.** An earlier revision of this section called assembly the cheapest place to discover bad
+scheduling data. It does not discover it at all, for two reasons, both measured:
+
+- **A wrong write set applies cleanly.** Two members whose fixes land in one file at different
+  hunks were cherry-picked with one member's declared paths naming a module it never touched: both
+  picks exit **0**, and the assembled tree carries both hunks. Nothing in a cherry-pick reads a
+  finding's declared paths, so a member that wrote outside its reservation is invisible here.
+- **Assembly cannot see the other pull request at all.** Each batch is cut from `master`'s head and
+  picked in isolation, so the collision §4 exists to prevent — two *concurrent* pull requests
+  writing one path — is outside both assemblies' field of view by construction. In §4's
+  reproduction each batch assembled at exit **0** and the conflict appeared only at the second
+  merge.
+
+What assembly does catch is textual conflict between members of one batch, and that is worth having
+because it is early and cheap. It is not a safety net for §4. The backstop for §4 is the merge
+queue rejecting a rebuilt entry, and that one is expensive.
 
 ---
 
@@ -195,13 +212,72 @@ These bind across every lane at once and override the per-lane column above.
 
 ---
 
-## 4. The module lane — the binding constraint
+## 4. The write set — the binding constraint
 
 The matrix says *how many* and *which lenses*. It cannot say *what may run together*. That is
-decided by file overlap, and it is checked mechanically from `location:` **before any agent is
-spawned**.
+decided by file overlap. It is checked mechanically **before any agent is spawned**, and the check
+is not over `location:`.
 
-> **Two pull requests may be in flight together only if their module sets are disjoint.**
+> **Two pull requests may be in flight together only if their planned write sets are disjoint.**
+
+**`location:` records where the defect is, not where the fix will write.** Those are different sets,
+and the second is the one exclusion needs. Scheduling from the first has a hole that is already in
+the ledger:
+
+- `PR146-ASTRA-001` is a defect *inside another finding's file* — its `location:` is
+  `reviews/findings/P3_correctness_202609042224_sampling-n-is-the-registrys-own-number.md:41`, and
+  its fix repairs prose there.
+- `SWEEP-BIJECTION-005` **is** that other finding, with
+  `location: src/topology/effects/bijection.rs:450`. §8 requires the pull request that resolves it
+  to delete that file.
+
+The two `location:` values fall in different lanes — one a path under `reviews/findings/`, the other
+`topology/effects` — so a disjointness check computed over `location:` permits both pull requests at
+once. It should not. Measured in a disposable repository carrying those two findings' real text,
+exit codes captured directly:
+
+```
+assemble the correctness batch                        exit 0
+assemble the documentation batch                      exit 0
+merge the correctness batch — the file is deleted     exit 0
+merge the documentation batch                         exit 1   CONFLICT (modify/delete)
+```
+
+**Every fix writes at least one path that no `location:` declares: its own finding file, which
+resolution deletes (§8).** A fix's write set is therefore always strictly larger than its
+`location:`, and a schedule read off `location:` is always reasoning about the wrong set. This pair
+is simply the case where the difference collides.
+
+**What the orchestrator reserves is the planned write set**, declared per finding before any agent
+is spawned, and made of three parts:
+
+- every path the fix is expected to edit or create, each mapped to its module lane by the rule
+  below;
+- **its own finding file, always**, because §8 deletes it on resolution;
+- **any other finding file it will write** — which is what `PR146-ASTRA-001` is. A `location:` under
+  `reviews/findings/` means the fix writes another finding's file, and that file is deleted by
+  whichever pull request resolves *its* finding.
+
+Two pull requests may be in flight together only when those sets are disjoint. A historical defect
+location does not establish that exclusion and never did.
+
+**The declared set must be complete, which means it includes the paths a fix *forces* and not only
+the ones its finding names.** The standing example is `src/export.rs`, whose tests `include_str!`
+`README.md`, `MAINTAINING.md`, `design/15_design_event_log_resume_run_layout.md` and
+`design/25_design_export_decisions_schema.md` and assert that particular sentences appear in them: a
+`docs-contract` fix that rewords one of those sentences has `src/export.rs` in its write set whether
+or not the finding mentions it, and is therefore not concurrent with anything else in the `export`
+lane. A declared set assembled by reading the `location:` line and nothing else will miss couplings
+of that shape, and missing one is how a pair of individually green pull requests produces a red
+`master`.
+
+**The declared set is a bound, not a guess.** An implementer that discovers it needs a path outside
+its reservation stops and returns the finding to the orchestrator to be rescheduled; it does not
+write there and let the merge find out. Nothing enforces that mechanically today (§9). The backstop
+when it is broken is the merge queue: it rebuilds the second entry on the first, and the rebuild
+fails — exit 1 by rebase, by cherry-pick and by merge alike, measured — *after* both batches have
+been implemented and reviewed in full. Avoiding that cost is the whole reason the reservation is
+computed up front.
 
 **That rule binds across concurrent pull requests, and only there.** Inside one batch the bar is
 adjacency, not the module: two findings may share a module, and may share a file, provided their
@@ -234,18 +310,35 @@ the contention is not evenly spread:
 | `agent/proc` | 19 | **4** |
 | `rundir` | 15 | 1 |
 | *(the `src/` tail — 20 modules, 1–11 findings each)* | 62 | 1 |
-| *(`location:` outside `src/` — 40 paths in `docs/`, `design/`, `.github/`, `reviews/`)* | 57 | 0 |
+| *(`location:` outside `src/` — 40 paths, 29 of them under `docs/`, `design/`, `.github/`, `reviews/`)* | 57 | 0 |
 | *(unschedulable — no `location:` at all, §6)* | 39 | 3 |
 | **Total** | **307** | **14** |
 
 **How that was counted**, so that it can be redone rather than believed: the `location:` line of
-each of the 307 files at `44edb2a1`, file part only, mapped to a module by the rule above and
-counted strictly as written. Five findings name a path that does not resolve from the repository
-root — `rundir.rs`, `coordinator.rs`, `attempt.rs`, `engine/topology.rs`, `topology/events.rs` —
-and are counted outside `src/`, where they are written, rather than where a reader would guess they
-were meant. Four of the five are an obvious `src/` prefix away; `attempt.rs` matches three files in
-the tree and is a guess nobody should make on a scheduler's behalf. Repairing those five lines is
-Phase 0 work (§6) and moves at most five findings between rows.
+each of the 307 files at `44edb2a1`, file part only — everything before the first `:` — mapped to a
+module by the rule above and counted strictly as written. The other eleven of the 40 non-`src/`
+paths are `Cargo.toml`, `DESIGN.md`, `pr8-plan.md`, `scripts/pr-ready-audit.sh` and the seven
+unresolved names below.
+
+**Nine findings name a path that does not resolve from the repository root**, tested against
+`git ls-tree -r --name-only 44edb2a1`. They are counted outside `src/`, where they are written,
+rather than where a reader would guess they were meant. They do not all want the same repair, which
+is why §6 makes resolving them a Phase 0 gate and not a bulk rename:
+
+| Unresolved `location:` | What it actually needs |
+|---|---|
+| `rundir.rs`, `engine/topology.rs`, `topology/events.rs` | a `src/` prefix — the prefixed path exists |
+| `coordinator.rs` | *not* a `src/` prefix: the only file of that name is `src/engine/coordinator.rs` |
+| `attempt.rs` | ambiguous — `src/engine/attempt.rs` and `src/engine/topology/attempt.rs` both match, and it is a guess nobody should make on a scheduler's behalf |
+| `proposals/README.md` | a tree retired on 2026-09-03 (`87dcc6ce`); the finding must be re-pointed or closed |
+| `reviews/2026-08-28-macos-proc-signal-single-failure.md`, `reviews/2026-08-28-windows-topology-kill-single-failure.md` | historical review records moved to the private lab repository on 2026-09-04 (`9885e475`); they are not in this repository to point at |
+| `report.json` | a run artifact's filename, not a repository path — it has never existed in any commit here |
+
+An earlier revision of this paragraph said five, listed only the first five names, and called four
+of them an obvious `src/` prefix away. Three are. `coordinator.rs` needs `src/engine/`, and
+`attempt.rs` matches two files, not three. Repairing these nine lines is Phase 0 work (§6) and moves
+at most nine findings between rows — fewer in practice, because four of them name nothing in this
+repository and so may not move into an `src/` row at all.
 
 An earlier draft of this table gave `workspace_manager` as 58. That was the parent, `tests.rs` and
 `worktree.rs` and nothing else, and it dropped the eleven findings filed against `residue.rs` (3),
@@ -258,7 +351,7 @@ sizes lane by lane — 24 `correctness` P2 at five to a batch is five pull reque
 `docs-contract` P3 at twenty is one, `security-trust` never batches — they come to **16 sequential
 pull requests**: 3 in Phase 1, 10 of P2, 3 of P3. Treat 16 as a floor, not an estimate. Adjacency
 splits batches further, a repair round costs a lane wall-clock without reducing the count, and a
-`location:` that turns out to be wrong returns its finding to the queue. The tail is where nearly
+write set that turns out to be wrong returns its finding to the queue. The tail is where nearly
 all the real parallelism lives.
 
 Two consequences the orchestrator must act on:
@@ -278,10 +371,10 @@ Two consequences the orchestrator must act on:
 **1. Adjacency beats severity, and adjacency — not the module — is the bar inside a batch.** Two
 findings in the same module may share a batch, and normally will. Two findings whose fixes touch
 the same function may not, even when the matrix permits the count. The two constraints have
-different scopes and different checks: module-disjointness (§4) governs what runs *concurrently*
-and is checked by script from `location:` before any agent is spawned; adjacency governs what
-shares a *diff*, needs the code read to see, and so is raised by the implementer, who splits the
-batch.
+different scopes and different checks: write-set disjointness (§4) governs what runs *concurrently*
+and is checked by script over each finding's declared writes — not its `location:` — before any
+agent is spawned; adjacency governs what shares a *diff*, needs the code read to see, and so is
+raised by the implementer, who splits the batch.
 
 **2. The authority exception.** A `docs-contract` finding cited as authority by a gate report or a
 design section **leaves the docs lane** and takes the severity of the thing that depends on it.
@@ -301,23 +394,38 @@ symlink resolution — and both were caught by a lens chosen for the code rather
 
 ## 6. Priority
 
-**Phase 0 — triage. Nothing else starts until this clears.** Measured at `44edb2a1`, 2026-09-10,
-**48 findings** cannot be scheduled as they stand — the first five bullets below, which are
+**Phase 0 — triage. Nothing else starts until this clears.** Recomputed at `44edb2a1`, 2026-09-10,
+**52 findings** cannot be scheduled as they stand — the first five bullets below, which are
 disjoint sets and sum exactly. A sixth bullet is not unschedulable but is waste:
 
-- **39 findings have an empty `location:`.** They are unschedulable — with no module, they cannot
-  be allocated a lane or checked for disjointness. Three of them are P1s.
+- **39 findings have an empty `location:`.** They are unschedulable — with nothing to derive a write
+  set from, they cannot be allocated a lane or checked for disjointness (§4). Three of them are P1s.
 - **One finding is `disposition: fixed`** and should have been deleted; `README.md` is explicit
   that this directory holds outstanding work and nothing else.
 - **Two findings carry the README's placeholder text** verbatim in `disposition`.
 - **One finding is `P4`**, outside the vocabulary `.github/scripts/test-pr-policy.sh` enforces.
   It is either a P3 or it is not a finding.
-- **Five `location:` lines name a path that does not exist from the repository root** —
-  `rundir.rs`, `coordinator.rs`, `attempt.rs`, `engine/topology.rs`, `topology/events.rs`. Four
-  want a `src/` prefix. `attempt.rs` matches three files in the tree and its finding must say
-  which. A path a script cannot resolve is a lane it cannot be given (§4).
+- **Nine `location:` lines name a path that does not exist from the repository root.** §4 lists all
+  nine against the repair each one needs, because they are not one rename: three want a `src/`
+  prefix, `coordinator.rs` wants `src/engine/`, `attempt.rs` is ambiguous between two files, three
+  name trees retired from this repository, and `report.json` names a run artifact that has never
+  been a path here. A path a script cannot resolve is a write set it cannot be given (§4).
 - **Two P1s share `src/agent/proc.rs:2320`** and are probably one finding filed twice. Fixing a
   duplicate twice wastes a P1 slot, which is the scarcest thing in the sweep.
+
+**How the 52 was counted**, so it can be redone rather than believed: read `location:`, `severity:`
+and `disposition:` from all 307 files at `44edb2a1`; take the file part of each nonempty `location:`
+and test it against `git ls-tree -r --name-only 44edb2a1`. That gives 39 empty, 9 unresolved, 1
+`fixed`, 2 placeholder and 1 `P4`. The five sets were then checked pairwise for overlap; there is
+none, so 39 + 9 + 1 + 2 + 1 sums to **52** rather than merely totalling it. An earlier revision of
+this section said 48, having counted five unresolved paths instead of nine.
+
+**Phase 0 is not clear until every nonempty `location:` resolves.** That check is run over the whole
+directory and must come back empty — not sampled, and not satisfied by the field looking populated.
+A finding whose `location:` names a path that is not in the tree cannot be given a write set and so
+cannot be scheduled at all (§4). Because the write set is what every exclusion decision is computed
+from, an unresolved path left in the ledger does not merely mislay one finding; it removes the basis
+for the disjointness the round is relying on.
 
 **Phase 1 — the 14 P1s, one at a time.** They are the irreducible serial core, and they run before
 the bulk rather than interleaved with it. A P2 batch that lands in `workspace_manager.rs` before
@@ -403,7 +511,7 @@ Approval gates **entry** to the queue, not the queue itself. A batch enters when
 - every lens for its lane has reported, and no P1 is outstanding;
 - the body carries the six sections and the canonical nine-column ledger header;
 - the ledger row for each member finding is present, and each member's file is deleted in the same
-  pull request.
+  pull request — which is why that deletion is part of the write set §4 reserves for every fix.
 
 **The queue *is* locked while a gate run is in flight.** A gate report is bound to a frozen range;
 if `master` moves under it the range is stale, and the packet forbids amending a failed gate's
@@ -428,18 +536,47 @@ Rolling one member out of a landed batch, measured end to end on a two-member ba
 member was a two-commit fix:
 
 ```bash
-git log --format=%H --grep='^Finding: correctness_beta' <batch-base>..<merge>   # newest first
-git revert --no-commit <newest> … <oldest>                                      # exit 0
+# both anchors matter: ^ opens the trailer line, $ closes the value
+git log --format=%H --grep='^Finding: correctness_beta$' <batch-base>..<merge>   # newest first
+git revert --no-commit <newest> … <oldest>                                       # exit 0
 git commit -m 'revert: correctness_beta'
 ```
 
-The other member's fix survives it. Two cases are worth stating because they are the ones that do
-not: **reverting the batch merge** (`git revert -m 1 <merge>`) removes *every* member, so it is a
-batch-level act and never a per-finding one; and a **repair round** (§7) commits after assembly,
-where nothing binds a commit to a member unless the trailer does. Keep a repair commit to one
-finding and give it that finding's trailer. A repair that genuinely spans members forfeits the
-per-finding revert for the members it spans, and the batch is the unit again for those — say so in
-the pull request body rather than discovering it during a rollback.
+**The closing `$` is the easy one to lose and the one that breaks the guarantee.** A trailer value
+is a prefix of any longer value that starts with it, so unanchored, `'^Finding: correctness_beta'`
+also matches `Finding: correctness_beta-timeout`. Put those two independently fixed findings in one
+batch and run the rollback for `correctness_beta`; measured on exactly that pair, exit codes
+captured directly:
+
+```
+'^Finding: correctness_beta'          3 of 3 selected   revert exit 0   BOTH fixes gone
+'^Finding: correctness_beta$'         1 selected        revert exit 0   beta gone, timeout intact
+'^Finding: correctness_beta-timeout$' 2 selected        revert exit 0   timeout gone, beta intact
+```
+
+The unanchored form does not fail loudly: `git revert --no-commit` exits **0** having reverted a
+finding nobody asked about. Note also that the damage is one-directional — the finding whose value
+is the *prefix* is the one whose rollback over-reaches, so testing the rollback on the longer name
+proves nothing about the shorter one. `git log --grep` matches per line of the commit message, so
+`$` is the end of the trailer line; `--fixed-strings` is not an alternative, because it makes `^`
+and `$` literal and removes the anchoring entirely.
+
+**And this is not a constructed hazard.** The trailer value is `<category>_<desc>` taken from the
+finding's filename, and at `44edb2a1` the ledger already holds a pair in which one value is a strict
+prefix of another: `docs-contract_rustdoc-links-in-markdown` (`PR161-ASTRA-RUSTDOC-LINKS`, P2) and
+`docs-contract_rustdoc-links-in-markdown-notes` (`PR162-ASTRA-NOTES-RUSTDOC-LINKS`, P3). That is the
+only such pair in the 307, and their severities put them in different batches as they stand, so the
+collision is not reachable today — but a guarantee must not rest on the ledger never filing a
+co-batched pair, and §5's authority exception can move a `docs-contract` finding's severity.
+
+With the value anchored at both ends, the other member's fix survives. Two cases are worth stating
+because they are the ones that do not: **reverting the batch merge** (`git revert -m 1 <merge>`)
+removes *every* member, so it is a batch-level act and never a per-finding one; and a **repair
+round** (§7) commits after assembly, where nothing binds a commit to a member unless the trailer
+does. Keep a repair commit to one finding and give it that finding's trailer. A repair that
+genuinely spans members forfeits the per-finding revert for the members it spans, and the batch is
+the unit again for those — say so in the pull request body rather than discovering it during a
+rollback.
 
 ---
 
@@ -450,6 +587,17 @@ the pull request body rather than discovering it during a rollback.
   change available to the schedule — and it invalidates the `location:` line of all 35 findings that
   point into it. That trade is the owner's.
 - **Whether `camwork` opens to Opus implementers** (§1).
+- **Whether anything but discipline holds a write-set reservation** (§4). The reservation is
+  declared before an agent is spawned, and the agent is trusted not to write outside it. Nothing
+  checks that: no gate compares a fix branch's diff against the paths its finding reserved, and
+  nothing derives the reservation from the finding file either — `location:` is the only
+  machine-readable field there, and §4 is the reason it is not sufficient. The obvious next thing to
+  build is a checker that reads the declared set, diffs the fix branch against it, and fails the
+  branch on an undeclared path; where the declared set is *recorded* is part of that design and is
+  deliberately not settled here. Note what such a checker would and would not buy: it would catch a
+  fix that wrote outside its reservation, but not a reservation that was incomplete when it was
+  written, which is the harder half and stays a reading duty. Until it exists the merge queue is the
+  only enforcement, and it charges a fully implemented and reviewed batch for the discovery.
 - **Which lane a sweep pull request is in.** `scripts/pr-ready-audit.sh` decides a lane from the
   branch prefix alone and knows three: `codex/findings-p3-*`, `codex/findings-*`, and everything
   else. Both prefixes this process uses fall through to *everything else*. Running the audit's own
