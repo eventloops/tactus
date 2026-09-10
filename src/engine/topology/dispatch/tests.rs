@@ -14,7 +14,7 @@ use crate::topology::effects::{
 use crate::topology::events::{CandidateRef, GitRef};
 use crate::topology::fold::{GenerationClass, TaskState};
 use crate::workspace_manager::WorkspaceManager;
-use crate::workspace_manager::fixture::{git, remove_file, write_file};
+use crate::workspace_manager::fixture::{fan_out_directory, git, remove_file, write_file};
 
 const APPEND: EffectSiteId = EffectSiteId::Event(crate::topology::effects::EventSite::Append);
 const INTENT: EffectSiteId = EffectSiteId::Worktree(WorktreeSite::WriteIntent);
@@ -997,10 +997,45 @@ fn a_repair_dispatch_records_what_its_materialization_observed() {
 
 #[test]
 fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {
+    let elements = MATERIALIZE.residue_elements();
+    assert_eq!(
+        elements.len(),
+        4,
+        "Object.RepairMaterialize registers four elements and this test constructs each: \
+         {elements:?}"
+    );
+    for element in elements {
+        synthetic_materialization_residue_element(*element);
+    }
+}
+
+/// One registered element of `Object.RepairMaterialize`'s residue class,
+/// constructed **alone** in a repository of its own, classified, and recovered
+/// by the tabled action.
+///
+/// **A repository per element**, which is the shape
+/// `synthetic_git_add_residue_unreferenced_objects_and_index_lock_then_forced_scrub_converges`
+/// arrived at for `Object.CandidateStage`, for the same reason and with the
+/// same measurement behind it. Two of these four live in the **shared** object
+/// store and are permanent until Git prunes them — that is R27, and it is
+/// asserted below — so constructing them in sequence in one repository leaves
+/// each later element's slot carrying the earlier one's. This site records no
+/// published object, so [`ResidueElement::UnreferencedObject`] is observed
+/// whenever the store holds *any* unreachable object at all; measured on the
+/// shared-store form of this test, the orphan planted for the first element
+/// was still there supplying the `Internal` that the second element's
+/// assertion read.
+///
+/// So the reading is made **twice**: once before the element is constructed,
+/// where nothing the site registers may be observed and the class must be
+/// `None`, and once after, where this element and nothing else must be
+/// observed. The pair is what makes the `Internal` between them this
+/// element's own.
+fn synthetic_materialization_residue_element(element: ResidueElement) {
     use crate::topology::effects::ObjectResidue;
     use crate::workspace_manager::{
         ResidueTarget, classify_object_residue, element_breaks_quiescence, object_directory,
-        temporary_object_files, unreachable_objects,
+        observed_residue_elements, temporary_object_files, unreachable_objects,
     };
 
     let mut run = Run::started("synthetic-materialization");
@@ -1037,116 +1072,257 @@ fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {
     let expected_files = expected_checkout(&run, &head, &source.commit_sha.0, &["c.txt"]);
     assert_checkout_is(&control, &expected_files, "control");
 
-    let elements = MATERIALIZE.residue_elements();
+    // A fresh worktree at the base to plant into: the forced removal and the
+    // add, which is what the tabled recovery does after a failed verification
+    // (the intent the dispatch wrote is still there).
+    run.fixture
+        .manager
+        .remove_worktree(run.hooks.effects(), &open.slot)
+        .expect("forced removal");
+    run.fixture
+        .manager
+        .add_worktree(run.hooks.effects(), &open.slot, &open.base.0)
+        .expect("a fresh worktree at the base");
+
+    let target = ResidueTarget::new(&run.fixture.base).at(&worktree);
     assert_eq!(
-        elements.len(),
-        4,
-        "Object.RepairMaterialize registers four elements and this test constructs each: \
-         {elements:?}"
+        observed_residue_elements(MATERIALIZE, &target).expect("observed"),
+        Vec::new(),
+        "{element:?}: the worktree is quiescent and the store holds nothing this site \
+         registers before the element is constructed, so what the assertions below read is \
+         this element alone"
     );
-    let mut planted_objects = Vec::new();
-    for element in elements {
-        // A fresh worktree at the base to plant into: the forced removal and
-        // the add, which is what the tabled recovery does after a failed
-        // verification (the intent the dispatch wrote is still there).
-        run.fixture
-            .manager
-            .remove_worktree(run.hooks.effects(), &open.slot)
-            .expect("forced removal");
-        run.fixture
-            .manager
-            .add_worktree(run.hooks.effects(), &open.slot, &open.base.0)
-            .expect("a fresh worktree at the base");
+    assert_eq!(
+        classify_object_residue(MATERIALIZE, &target).expect("classified"),
+        ObjectResidue::None,
+        "{element:?}: and the class before the element is constructed is `None`"
+    );
 
-        let dir = git_dir(&worktree);
-        match element {
-            ResidueElement::UnreferencedObject => {
-                let orphan = run.fixture.root.join(format!("orphan-{element:?}"));
-                write_file(
-                    &orphan,
-                    b"an object a killed pick wrote and never published\n",
-                );
-                let id = git(
-                    &worktree,
-                    &["hash-object", "-w", orphan.to_str().expect("utf-8")],
-                );
-                assert!(
-                    unreachable_objects(&run.fixture.base)
-                        .expect("fsck")
-                        .contains(&id),
-                    "the planted object must really be unreachable"
-                );
-                planted_objects.push(id);
-            }
-            ResidueElement::TemporaryObjectFile => {
-                let objects = object_directory(&worktree).expect("the object directory");
-                write_file(&objects.join("tmp_obj_repair"), b"half an object\n");
-                assert!(temporary_object_files(&worktree).expect("temp files"));
-            }
-            ResidueElement::IndexLock => write_file(&dir.join("index.lock"), b""),
-            ResidueElement::CherryPickHead => {
-                write_file(
-                    &dir.join("CHERRY_PICK_HEAD"),
-                    format!("{}\n", source.commit_sha).as_bytes(),
-                );
-            }
-            other => panic!("`{other:?}` is not registered for Object.RepairMaterialize"),
+    let dir = git_dir(&worktree);
+    let mut planted_object = None;
+    let mut planted_temporary = None;
+    match element {
+        ResidueElement::UnreferencedObject => {
+            let orphan = run.fixture.root.join(format!("orphan-{element:?}"));
+            write_file(
+                &orphan,
+                b"an object a killed pick wrote and never published\n",
+            );
+            let id = git(
+                &worktree,
+                &["hash-object", "-w", orphan.to_str().expect("utf-8")],
+            );
+            assert!(
+                unreachable_objects(&run.fixture.base)
+                    .expect("fsck")
+                    .contains(&id),
+                "the planted object must really be unreachable"
+            );
+            planted_object = Some(id);
         }
-
-        let target = ResidueTarget::new(&run.fixture.base).at(&worktree);
-        assert_eq!(
-            classify_object_residue(MATERIALIZE, &target).expect("classified"),
-            ObjectResidue::Internal,
-            "{element:?}: objects written with the reference unpublished is the Internal class"
-        );
-
-        let mark = run.mark();
-        let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
-            .expect("the tabled recovery converges");
-        assert_eq!(
-            matches!(resumed.reuse, Reuse::Recreated { .. }),
-            element_breaks_quiescence(*element),
-            "{element:?}: administrative residue is recreated with force, and residue that \
-             lives only in the shared object store is not what `Worktree.Verify` refuses on"
-        );
-        assert_eq!(
-            resumed.materialized,
-            Some(crate::topology::events::Materialization::Clean),
-            "{element:?}: the materialization is reproduced deterministically"
-        );
-        assert_eq!(
-            run.count_after(mark, MATERIALIZE, HookPhase::After),
-            1,
-            "{element:?}: exactly one cherry-pick reproduces it"
-        );
-        assert_eq!(
-            git(&worktree, &["write-tree"]),
-            expected_tree,
-            "{element:?}: and it is the tree an uninterrupted materialization produces"
-        );
-        assert_checkout_is(&worktree, &expected_files, &format!("{element:?}"));
-        assert!(
-            classify_object_residue(MATERIALIZE, &target).expect("classified")
-                == ObjectResidue::After,
-            "{element:?}: after the recovery the index references the merge objects"
-        );
-        if let Ok(objects) = object_directory(&worktree) {
-            if objects.join("tmp_obj_repair").exists() {
-                remove_file(&objects.join("tmp_obj_repair"));
-            }
+        ResidueElement::TemporaryObjectFile => {
+            // **Where the materialization's own write leaves it.** A loose
+            // object's temporary file is created in the fan-out directory the
+            // object's final name will live in: measured with
+            // `strace -f -e trace=openat,link`, `hash-object -w` opens
+            // `objects/01/tmp_obj_z86GbB` and links it to
+            // `objects/01/74d67c…`, and `write-tree` opens
+            // `objects/bf/tmp_obj_GgXRvX`; a real `SIGKILL` requested at half
+            // of a separately measured 3.878 s loose-object write left
+            // `objects/b7/tmp_obj_ybqfZf`. Git does write at the object root
+            // as well — a streamed object above `core.bigFileThreshold`, its
+            // fan-out unknown until the stream ends — which is why the scan
+            // keeps its root arm; `temporary_object_files` carries that trace.
+            //
+            // This test used to construct its stand-in at the object root
+            // instead — the one place the scan looked, and not where a
+            // cherry-pick's writes go — so it exercised the arm the scan
+            // already had rather than the element, and stayed green while
+            // `temporary_object_files` could not see the file the killed
+            // materialization leaves (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`). It
+            // is planted in a fan-out directory the store already holds,
+            // beside real objects, as the trace shows.
+            let objects = object_directory(&worktree).expect("the object directory");
+            let planted = fan_out_directory(&objects).join("tmp_obj_repair");
+            write_file(&planted, b"half an object\n");
+            assert!(
+                temporary_object_files(&worktree).expect("temp files"),
+                "Git's temporary object file, where Git leaves it: {}",
+                planted.display()
+            );
+            planted_temporary = Some(planted);
         }
+        ResidueElement::IndexLock => write_file(&dir.join("index.lock"), b""),
+        ResidueElement::CherryPickHead => {
+            write_file(
+                &dir.join("CHERRY_PICK_HEAD"),
+                format!("{}\n", source.commit_sha).as_bytes(),
+            );
+        }
+        other => panic!("`{other:?}` is not registered for Object.RepairMaterialize"),
     }
-    for object in &planted_objects {
+
+    assert_eq!(
+        observed_residue_elements(MATERIALIZE, &target).expect("observed"),
+        vec![element],
+        "{element:?}: constructing it makes it, and nothing else the site registers, observed"
+    );
+    assert_eq!(
+        classify_object_residue(MATERIALIZE, &target).expect("classified"),
+        ObjectResidue::Internal,
+        "{element:?}: objects written with the reference unpublished is the Internal class"
+    );
+
+    let mark = run.mark();
+    let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+        .expect("the tabled recovery converges");
+    assert_eq!(
+        matches!(resumed.reuse, Reuse::Recreated { .. }),
+        element_breaks_quiescence(element),
+        "{element:?}: administrative residue is recreated with force, and residue that lives \
+         only in the shared object store is not what `Worktree.Verify` refuses on"
+    );
+    assert_eq!(
+        resumed.materialized,
+        Some(crate::topology::events::Materialization::Clean),
+        "{element:?}: the materialization is reproduced deterministically"
+    );
+    assert_eq!(
+        run.count_after(mark, MATERIALIZE, HookPhase::After),
+        1,
+        "{element:?}: exactly one cherry-pick reproduces it"
+    );
+    assert_eq!(
+        git(&worktree, &["write-tree"]),
+        expected_tree,
+        "{element:?}: and it is the tree an uninterrupted materialization produces"
+    );
+    assert_checkout_is(&worktree, &expected_files, &format!("{element:?}"));
+    assert!(
+        classify_object_residue(MATERIALIZE, &target).expect("classified") == ObjectResidue::After,
+        "{element:?}: after the recovery the index references the merge objects"
+    );
+
+    // R27: what the interrupted materialization left in the shared object
+    // store is Git's, and neither recovery — reuse or forced recreation —
+    // deletes it. Git prunes both of these itself; the engine may not.
+    if let Some(id) = &planted_object {
         assert!(
-            crate::workspace_manager::fixture::git_out(
-                &run.fixture.base,
-                &["cat-file", "-e", object]
-            )
-            .status
-            .success(),
+            crate::workspace_manager::fixture::git_out(&run.fixture.base, &["cat-file", "-e", id])
+                .status
+                .success(),
             "R27: an object an interrupted materialization wrote is Git's, never deleted"
         );
     }
+    if let Some(planted) = &planted_temporary {
+        assert!(
+            planted.exists(),
+            "R27: Git prunes its own temporary object files; the recovery does not"
+        );
+    }
+}
+
+/// R27 across a **forced recreation**: what an interrupted materialization
+/// left in the shared object store is Git's, and removing and re-adding the
+/// worktree does not delete it.
+///
+/// **Why this is its own test.** [`synthetic_materialization_residue_element`]
+/// constructs each element alone, which is what `command_internal_sub_effects`
+/// requires — and that isolation puts the two object-store elements in exactly
+/// the runs whose recovery *reuses* the worktree, so none of them exercises
+/// preservation across a recreation. The shared-store form of that test used
+/// to cover this by accident: the orphan it planted for `UnreferencedObject`
+/// survived into the `IndexLock` and `CherryPickHead` iterations, which do
+/// recreate, and its closing assertion read it there. Isolating the elements
+/// removed that cover along with the contamination.
+///
+/// Found by #258's regression review, which injected `git prune --expire=now`
+/// into the forced-recreation branch and watched the shared-store test die at
+/// its R27 assertion while the isolated one accepted the mutation.
+///
+/// So this constructs the object-store residue **and** the administrative
+/// residue that makes `Worktree.Verify` fail, asserts the recovery really did
+/// recreate, and asserts both object-store elements are still there
+/// afterwards. It asserts nothing about which element classified the worktree
+/// — that is the isolated test's job, and mixing the two is what made the
+/// per-element evidence vacuous in the first place.
+#[test]
+fn a_forced_recreation_preserves_the_object_store_residue_it_recovers_over() {
+    use crate::workspace_manager::{object_directory, temporary_object_files, unreachable_objects};
+
+    let mut run = Run::started("recreation-preserves-r27");
+    let source = protected_candidate(&mut run);
+    let repair = run.spawn_repair(ALPHA);
+    let head = run.fixture.head.clone();
+    let dispatched = dispatch_repair(&mut run, repair, 0, &head, &source);
+    let open = dispatched.open_generation();
+    let worktree = dispatched.worktree.clone();
+
+    run.fixture
+        .manager
+        .remove_worktree(run.hooks.effects(), &open.slot)
+        .expect("forced removal");
+    run.fixture
+        .manager
+        .add_worktree(run.hooks.effects(), &open.slot, &open.base.0)
+        .expect("a fresh worktree at the base");
+
+    // R27's two, both in the shared object store.
+    let orphan = run.fixture.root.join("orphan-across-recreation");
+    write_file(
+        &orphan,
+        b"an object a killed pick wrote and never published\n",
+    );
+    let planted_object = git(
+        &worktree,
+        &["hash-object", "-w", orphan.to_str().expect("utf-8")],
+    );
+    assert!(
+        unreachable_objects(&run.fixture.base)
+            .expect("fsck")
+            .contains(&planted_object),
+        "the planted object must really be unreachable"
+    );
+    let objects = object_directory(&worktree).expect("the object directory");
+    let planted_temporary = fan_out_directory(&objects).join("tmp_obj_repair");
+    write_file(&planted_temporary, b"half an object\n");
+    assert!(
+        temporary_object_files(&worktree).expect("temp files"),
+        "Git's temporary object file, where Git leaves it"
+    );
+
+    // And the administrative residue that makes `Worktree.Verify` fail, so the
+    // tabled recovery is a forced removal and re-add rather than a reuse.
+    write_file(&git_dir(&worktree).join("index.lock"), b"");
+
+    let resumed = resume_open_no_attempt(&run.fixture.manager, &mut run.hooks, &open)
+        .expect("the tabled recovery converges");
+    assert!(
+        matches!(resumed.reuse, Reuse::Recreated { .. }),
+        "the administrative residue must have forced a recreation, or this test proves nothing \
+         about one: {:?}",
+        resumed.reuse
+    );
+    assert_eq!(
+        resumed.materialized,
+        Some(crate::topology::events::Materialization::Clean),
+        "the materialization is reproduced deterministically"
+    );
+
+    assert!(
+        crate::workspace_manager::fixture::git_out(
+            &run.fixture.base,
+            &["cat-file", "-e", &planted_object]
+        )
+        .status
+        .success(),
+        "R27: an object an interrupted materialization wrote is Git's; a forced recreation of \
+         the worktree does not delete it"
+    );
+    assert!(
+        planted_temporary.exists(),
+        "R27: Git prunes its own temporary object files; a forced recreation does not"
+    );
 }
 
 /// N real `cherry-pick --no-commit` children killed at spread points, every

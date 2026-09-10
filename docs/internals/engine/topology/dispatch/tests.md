@@ -329,11 +329,78 @@ at run end with `LineageHeld`, and the log replaying equal.
 ## `fn repair_materialization_synthetic_residue_recreated_after_forced_removal() {`
 
 `command_internal_sub_effects`, synthetic half, for `Object.RepairMaterialize`:
-each of the four declared elements planted into a fresh worktree at the
-base, classified `Internal`, and recovered by `resume_open_no_attempt` —
-reused or recreated exactly as `element_breaks_quiescence` says, the
-materialization reproduced once, the tree the control's, the planted
-objects untouched.
+each of the four declared elements constructed **alone**, classified
+`Internal`, and recovered by `resume_open_no_attempt` — reused or recreated
+exactly as `element_breaks_quiescence` says, the materialization reproduced
+once, the tree the control's, what it left in the object store untouched.
+
+**A repository per element**, which is what
+`synthetic_git_add_residue_unreferenced_objects_and_index_lock_then_forced_scrub_converges`
+arrived at for `Object.CandidateStage`, for the same reason. Two of the four
+are R27 and stay until Git prunes them, so one shared store carries each
+element's residue into the next element's slot; and this site records no
+published object, so `UnreferencedObject` is observed whenever the store
+holds any unreachable object at all. Measured on the shared-store form of
+this test: the orphan constructed for the first element was still there
+supplying the `Internal` that the second element's assertion read. The class
+is now read **twice** per element — before the construction, where nothing
+the site registers may be observed and the class must be `None`, and after,
+where this element and nothing else must be observed — and the pair is what
+makes the reading between them the element's own.
+
+**And constructed where the materialization's own write leaves it.** A
+loose object's temporary file is written in the fan-out directory the
+object's final name will live in, `objects/XX/tmp_obj_*`: measured with
+`strace`, `hash-object -w` opens `objects/01/tmp_obj_z86GbB` and
+`write-tree` opens `objects/bf/tmp_obj_GgXRvX`. The object root is not a
+place Git never writes — a streamed object above `core.bigFileThreshold`
+goes there, its fan-out unknown until the stream ends, which is why the scan
+keeps its root arm; `temporary_object_files` carries that trace. This test's
+stand-in was at the root, the one place the scan looked and not where a
+cherry-pick's writes go, so test and scan were self-consistent and blind
+together. A real `SIGKILL` requested at half of a separately measured
+3.878 s loose-object write left `objects/b7/tmp_obj_ybqfZf`; `git prune -n`
+named it a stale temporary file; the scan answered `false`, no element was
+observed, the class was `None` and no tabled recovery was owed for it
+(`G4-TEMP-OBJECT-FANOUT-UNSCANNED`). The scan reads the fan-out directories
+now, and the element is constructed in one, through the fixture's
+`fan_out_directory` — the helper the other two places a test constructs
+this element, `construct_element` in `workspace_manager::tests` and
+`plant_stage_residue` in `attempt::tests`, use as well. Planted at the root,
+each of those exercised the arm the scan always had, so the grid the
+per-element evidence rests on stayed green with the fan-out loop deleted
+(`PR258-GRID-PLANTS-AT-THE-OBJECT-ROOT`).
+
+## `fn synthetic_materialization_residue_element(element: ResidueElement) {`
+
+One element, in a repository of its own: the repair dispatched, a control
+materialized to hold the expected tree and bytes, the generation's worktree
+removed and re-added at the base, the element constructed alone, the class
+read either side of the construction, and the tabled recovery run.
+
+## `fn a_forced_recreation_preserves_the_object_store_residue_it_recovers_over() {`
+
+R27 across a **forced recreation**: what an interrupted materialization left
+in the shared object store is Git's, and removing and re-adding the worktree
+does not delete it.
+
+**Why it is a second test and not another element.** Constructing each element
+alone puts the two object-store elements in exactly the runs whose recovery
+*reuses* the worktree, so none of them crosses a recreation. The shared-store
+form of the per-element test covered this by accident — the orphan it planted
+first survived into the `IndexLock` and `CherryPickHead` iterations, which do
+recreate, and its closing assertion read it there. Isolating the elements
+removed the accident and the cover with it. Found by #258's regression review,
+which injected `git prune --expire=now` into the forced-recreation branch and
+watched the shared-store test die at its R27 assertion while the isolated one
+accepted the mutation (M8).
+
+So this one constructs the object-store residue **and** the `index.lock` that
+makes `Worktree.Verify` fail, asserts the recovery really recreated rather
+than reused, and asserts both object-store elements are still there. It
+asserts nothing about which element classified the worktree: that is the
+per-element test's job, and mixing the two is what made the per-element
+evidence vacuous in the first place.
 
 ## `fn checkout_bytes(worktree: &Path) -> BTreeMap<String, Vec<u8>> {`
 

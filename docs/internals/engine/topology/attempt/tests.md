@@ -670,6 +670,12 @@ object directory, which is why they survive the scrub below while the
 index lock does not. That difference is the point of planting them
 separately rather than as one blob of "residue".
 
+The temporary object file goes into a fan-out directory the store already
+holds (the fixture's `fan_out_directory`), where a killed `git add`'s own
+loose write leaves it. Planted at the object root, as it was, it exercised
+only the arm `temporary_object_files` always had, and this test stayed green
+with the fan-out loop deleted (`PR258-GRID-PLANTS-AT-THE-OBJECT-ROOT`).
+
 ## `fn plant_stage_residue(base: &Path, worktree: &Path, element: ResidueElement) {` › `write_file(`
 
 An orphan blob: written into the store and referenced by nothing.

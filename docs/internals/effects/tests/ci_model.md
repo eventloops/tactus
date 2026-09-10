@@ -277,12 +277,58 @@ absent for a reason of its own: a step-level environment is enough to
 retarget the compile the gate performs -- `CARGO_BUILD_TARGET` on the macOS
 leg lints a target no `#[cfg(target_os = "macos")]` body belongs to, while
 the `run:` scalar still matches character for character. Measured,
-`MUT-GATE-STEP-RETARGETED`.
+`MUT-GATE-STEP-RETARGETED`. The steps that carry an `env:` outside the
+aggregate are the two that run the suite, the hosted test step and the
+Windows step, and their maps are pinned whole by [`TEST_STEP_ENV`] and
+[`TEST_WINDOWS_STEP_ENV`] rather than admitted by field name.
+
+## `pub(super) const TEMP_FOLDS_CASE_KEY: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";`
+
+The one declaration a test step makes to the suite it runs: that the
+temporary directory the suite runs under folds case.
+`the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does`
+*requires* its native casefold branch -- Git's lower-case fan-out path
+resolving to a stored upper-case directory -- only where this variable is
+exactly `1`, and observes the branch everywhere else, so a case-sensitive
+volume anywhere the variable is not set takes the negative branch instead of
+failing (`PR258-CASEFOLD-EXPECTATION-KEYED-ON-TARGET-OS`: keyed on the target
+OS, the requirement failed on a supported case-sensitive volume before the
+scan was checked). The declaration is per leg because the filesystems are:
+the macOS runner's temporary directory folds case, the ubuntu runner's does
+not, and the guest's NTFS does.
+
+## `pub(super) const TEST_STEP_ENV: [(&str, &str); 1] = [(`
+
+The whole `env:` map of the hosted step that runs the suite, as an equality.
+The value is an expression over the matrix -- `1` on `macos-latest`, empty on
+`ubuntu-latest` -- so one step declares for both legs. Pinned whole, the way
+[`WORKFLOW_ENV`] and the aggregate's map are: a dropped binding makes the leg
+observe the casefold branch instead of requiring it, so a temporary directory
+that stopped folding case would pass unreported (undeclared on ext4 the alias
+test passes, declared it fails at the declaration,
+`34-r6-casefold-declaration.log`); a value other than `1` on
+a folding leg does the same, and any other key is the step-level environment
+[`STEP_FIELDS`] refuses everywhere else, since one key is enough to retarget
+the compile. Measured, `MUT-TEST-CASEFOLD-DECLARATION-DROPPED`,
+`MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG` and
+`MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV`.
+
+## `pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];`
+
+The same declaration on the self-hosted step, `1` outright: one runner, no
+matrix. Measured, `MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED`.
+
+## `pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];`
+
+The fields the step that runs the suite may declare: [`STEP_FIELDS`] plus the
+`env` whose map [`TEST_STEP_ENV`] and [`TEST_WINDOWS_STEP_ENV`] pin. Every
+other step of both test jobs keeps [`STEP_FIELDS`].
 
 ## `pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];`
 
-The fields the aggregate's one step may declare. It is the only step in this
-contract that needs an environment, and the mapping is pinned key by key.
+The fields the aggregate's one step may declare: `name`, `run` and `shell`,
+plus the `env` whose mapping is pinned key by key -- as the two suite-running
+steps' maps are pinned by [`TEST_STEP_ENV`] and [`TEST_WINDOWS_STEP_ENV`].
 
 ## `pub(super) const AGGREGATE_JOB_FIELDS: [&str; 6] =`
 

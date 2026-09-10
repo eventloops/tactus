@@ -17,10 +17,10 @@ use super::ci_model::{
     DEFAULTS_RUN_FIELDS, ENCODED_RUSTFLAGS_KEY, GATE_JOB_FIELDS, GATE_SCRIPTS, KNOWN_SHELLS,
     MSRV_COMMAND, MSRV_JOB, MSRV_JOB_FIELDS, OPTIONAL_DEFAULTS_FIELD, PINNED_ACTIONS,
     REQUIRED_CONTEXT, RUSTFLAGS_KEY, RUSTFLAGS_VALUE, SELF_HOSTED_TEST_PLATFORM, STABLE_TOOLCHAIN,
-    STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS, TEST_WINDOWS_JOB,
-    TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS, TEST_WINDOWS_SCRIPTS, TOOLCHAIN_ACTION,
-    TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS, WINDOWS_TEST_WITNESS, WORKFLOW_ENV,
-    WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
+    STEP_FIELDS, TEST_COMMAND, TEST_JOB_FIELDS, TEST_SCRIPTS, TEST_STEP_ENV, TEST_STEP_FIELDS,
+    TEST_WINDOWS_JOB, TEST_WINDOWS_JOB_FIELDS, TEST_WINDOWS_LABELS, TEST_WINDOWS_SCRIPTS,
+    TEST_WINDOWS_STEP_ENV, TOOLCHAIN_ACTION, TOOLCHAIN_COMPONENTS, WINDOWS_BUILD_WITNESS,
+    WINDOWS_TEST_WITNESS, WORKFLOW_ENV, WORKFLOW_FIELDS, WORKFLOW_PERMISSIONS,
 };
 use super::repo_root;
 
@@ -448,10 +448,24 @@ pub(super) fn ci_test_job_complaints(doc: &Yaml) -> Vec<String> {
         out.push(format!("[unexpected-job-field] `test` {complaint}"));
     }
     for (index, step) in steps_of(job).iter().enumerate() {
-        let strange = unexpected(&field_names(step), &STEP_FIELDS);
+        let runs_the_suite = scalar(step, "run") == Some(TEST_COMMAND);
+        let allowed: &[&str] = if runs_the_suite {
+            &TEST_STEP_FIELDS
+        } else {
+            &STEP_FIELDS
+        };
+        let strange = unexpected(&field_names(step), allowed);
         if !strange.is_empty() {
             out.push(format!(
                 "[unexpected-step-field] `test` step {index} declares {strange:?}"
+            ));
+        }
+        if runs_the_suite {
+            out.extend(step_env_complaints(
+                step,
+                &format!("`test` step {index}"),
+                "test-step-env",
+                &TEST_STEP_ENV,
             ));
         }
         if scalar(step, "run").is_some() {
@@ -612,10 +626,24 @@ pub(super) fn ci_test_windows_job_complaints(doc: &Yaml) -> Vec<String> {
         ));
     }
     for (index, step) in steps_of(job).iter().enumerate() {
-        let strange = unexpected(&field_names(step), &STEP_FIELDS);
+        let runs_the_suite = scalar(step, "run") == Some(WINDOWS_TEST_WITNESS);
+        let allowed: &[&str] = if runs_the_suite {
+            &TEST_STEP_FIELDS
+        } else {
+            &STEP_FIELDS
+        };
+        let strange = unexpected(&field_names(step), allowed);
         if !strange.is_empty() {
             out.push(format!(
                 "[unexpected-step-field] `{TEST_WINDOWS_JOB}` step {index} declares {strange:?}"
+            ));
+        }
+        if runs_the_suite {
+            out.extend(step_env_complaints(
+                step,
+                &format!("`{TEST_WINDOWS_JOB}` step {index}"),
+                "test-windows-step-env",
+                &TEST_WINDOWS_STEP_ENV,
             ));
         }
         if scalar(step, "run").is_some() {
@@ -703,6 +731,33 @@ fn checkout_complaints(job: &Yaml, named: &str, code: &str) -> Vec<String> {
         ));
     }
     out
+}
+
+fn step_env_complaints(
+    step: &Yaml,
+    named: &str,
+    code: &str,
+    pinned: &[(&str, &str)],
+) -> Vec<String> {
+    let expected: BTreeMap<String, String> = pinned
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    let env = field(step, "env").and_then(scalar_map);
+    if env.as_ref() == Some(&expected) {
+        return Vec::new();
+    }
+    vec![format!(
+        "[{code}] {named} binds {env:#?}, not exactly {expected:#?}. The step that runs the \
+         suite carries one declaration -- that the temporary directory the suite runs under \
+         folds case, which \
+         `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` requires \
+         its native branch under and observes without -- and the map is pinned whole: a \
+         dropped binding makes the leg observe the casefold branch instead of requiring it, so \
+         a temporary directory that stopped folding case would pass unreported; a value \
+         other than `1` on a folding leg does the same, and any other key is a step-level \
+         environment that can retarget the compile."
+    )]
 }
 
 fn step_pin_complaints(job: &Yaml, named: &str, code: &str, scripts: &[&str]) -> Vec<String> {
@@ -1642,6 +1697,57 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         refused_as: "test-job-run-script",
     },
     WorkflowEscape {
+        name: "MUT-TEST-CASEFOLD-DECLARATION-DROPPED",
+        escape: "the hosted test step no longer declares that the macOS runner's temporary \
+                 directory folds case, so the alias test observes its native branch there \
+                 instead of requiring it: a folding temporary directory is no longer a \
+                 prerequisite of the leg, and on a temporary directory that does not fold \
+                 case the undeclared test passes with the branch unrun where the declared \
+                 one fails at the declaration (34-r6-casefold-declaration.log, ext4) -- while \
+                 every pin still matches",
+        job: Some("test"),
+        anchor: "        env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "",
+        refused_as: "test-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-CASEFOLD-DECLARED-ON-THE-WRONG-LEG",
+        escape: "the declaration moves to the ubuntu runner, whose temporary directory does not \
+                 fold case: the macOS leg observes instead of requiring, and the ubuntu leg \
+                 fails its declaration loudly -- a red that reads as a flake rather than as \
+                 the guard having moved",
+        job: Some("test"),
+        anchor: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}\n",
+        refused_as: "test-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV",
+        escape: "the hosted test step's `env:`, one of the two step-level maps this contract \
+                 admits, gains a second key: \
+                 `CARGO_BUILD_TARGET` retargets the compile the suite performs while the \
+                 `run:` scalar and the declaration both still match -- \
+                 `MUT-GATE-STEP-RETARGETED`'s shape on the step that now carries an \
+                 environment",
+        job: Some("test"),
+        anchor: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
+        replacement: "          UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n\
+                      \x20         CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu\n",
+        refused_as: "test-step-env",
+    },
+    WorkflowEscape {
+        name: "MUT-TEST-WINDOWS-CASEFOLD-DECLARATION-DROPPED",
+        escape: "the self-hosted step no longer declares that the guest's NTFS folds case, so \
+                 the alias test observes its native branch on Windows instead of requiring \
+                 it, with the witness script and every label still matching",
+        job: Some("test-windows"),
+        anchor: "        env:\n\
+                 \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: \"1\"\n",
+        replacement: "",
+        refused_as: "test-windows-step-env",
+    },
+    WorkflowEscape {
         name: "MUT-GATE-RUN-RETARGETED",
         escape: "a step ahead of the Windows Clippy gate and the build witness checks out \
                  `master`; both pinned commands then run against a tree the candidate never \
@@ -1894,8 +2000,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-RUSTFLAGS-STEP-OVERRIDE",
-        escape: "the narrowing one level down, in the one step this contract allows an `env:` \
-                 at all -- the aggregate's. A step-level binding is the smallest form of the \
+        escape: "the narrowing one level down, in the aggregate's step, whose field set allows \
+                 an `env:`. A step-level binding is the smallest form of the \
                  same defect and the one a field-set equality cannot see, because the field is \
                  legal there.",
         job: Some("merge-gate"),
@@ -2080,8 +2186,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-RUSTFLAGS-STEP-OVERRIDE-MIXED-CASE",
-        escape: "the same in mixed case, one level down, in the one step this contract allows \
-                 an `env:` at all",
+        escape: "the same in mixed case, one level down, in the aggregate's step",
         job: Some("merge-gate"),
         anchor: "          LINT_RESULT: ${{ needs.lint.result }}\n",
         replacement: "          LINT_RESULT: ${{ needs.lint.result }}\n\

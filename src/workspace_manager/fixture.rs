@@ -342,6 +342,40 @@ pub(crate) fn create_dir(path: &Path) {
     fs::create_dir_all(path).expect("create a fixture directory");
 }
 
+/// A fan-out directory the object store already holds, to construct Git's
+/// temporary object file in.
+///
+/// Git creates the fan-out directory when it is missing and writes the
+/// temporary file inside it, so any two-hexadecimal-digit name would do; one
+/// that already exists puts the file beside real objects, which is the shape
+/// the trace in
+/// [`temporary_object_files`](crate::workspace_manager::temporary_object_files)
+/// records. Shared by the three places a test constructs the element —
+/// `construct_element`, `plant_stage_residue` and the dispatch
+/// materialization test — so that none of them plants at the object root,
+/// where the arm the scan always had would see it and the fan-out arm this
+/// element is evidence for would not be exercised
+/// (`PR258-GRID-PLANTS-AT-THE-OBJECT-ROOT`).
+pub(crate) fn fan_out_directory(objects: &Path) -> PathBuf {
+    let mut names: Vec<PathBuf> = fs::read_dir(objects)
+        .expect("the object directory")
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path.file_name().is_some_and(|name| {
+                    let name = name.to_string_lossy();
+                    name.len() == 2 && name.chars().all(|character| character.is_ascii_hexdigit())
+                })
+        })
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .next()
+        .expect("a store with objects in it has a fan-out directory")
+}
+
 /// Remove `path` if it is there. Idempotent, like every reclaim.
 pub(crate) fn remove_file(path: &Path) {
     match fs::remove_file(path) {

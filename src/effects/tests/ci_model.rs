@@ -96,6 +96,17 @@ pub(super) const GATE_JOB_FIELDS: [&str; 4] = ["name", "runs-on", "steps", "time
 
 pub(super) const STEP_FIELDS: [&str; 5] = ["name", "run", "shell", "uses", "with"];
 
+pub(super) const TEMP_FOLDS_CASE_KEY: &str = "UPSTROKE_TEST_TEMP_FOLDS_CASE";
+
+pub(super) const TEST_STEP_ENV: [(&str, &str); 1] = [(
+    TEMP_FOLDS_CASE_KEY,
+    "${{ matrix.os == 'macos-latest' && '1' || '' }}",
+)];
+
+pub(super) const TEST_WINDOWS_STEP_ENV: [(&str, &str); 1] = [(TEMP_FOLDS_CASE_KEY, "1")];
+
+pub(super) const TEST_STEP_FIELDS: [&str; 6] = ["env", "name", "run", "shell", "uses", "with"];
+
 pub(super) const AGGREGATE_STEP_FIELDS: [&str; 4] = ["env", "name", "run", "shell"];
 
 pub(super) const AGGREGATE_JOB_FIELDS: [&str; 6] =

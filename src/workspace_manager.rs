@@ -4497,40 +4497,208 @@ pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError
 
 /// Whether Git's own temporary object files are present.
 ///
-/// Git writes a loose object to `objects/tmp_obj_XXXXXX` and renames it into
-/// place, and packs to `objects/pack/tmp_pack_*`. `resource_accounting[R27]`
-/// accounts for both and says "Git prunes temporary object files itself".
+/// `resource_accounting[R27]` accounts for them and says "Git prunes temporary
+/// object files itself", so **the set this answers for is the set Git prunes**,
+/// and `git prune` is what says which that is. Measured on git 2.43.0 by
+/// planting one candidate name in each plausible place and reading
+/// `git prune -n` (`~/tactus-artifacts/tmpobj-evidence/03-git-prune-own-set.log`
+/// and `21-r5-git-prune-producers-outside-the-sample.log`):
+///
+/// | planted | `git prune` calls it |
+/// |---|---|
+/// | `objects/tmp_obj_root`, `objects/tmp_other_root` | a stale temporary file |
+/// | `objects/tmp_objdir-incoming-AbCdEf/`, a directory | a stale temporary **directory** |
+/// | `objects/pack/tmp_pack_p`, `objects/pack/tmp_idx_p`, `objects/pack/tmp_rev_p` | a stale temporary file |
+/// | `objects/00/tmp_obj_first`, `objects/ab/tmp_obj_fanout`, `objects/ff/tmp_obj_last` | a stale temporary file |
+/// | `objects/ab/tmp_other_fanout` | a bad sha1 file, left as garbage |
+/// | `objects/info/tmp_info` | nothing; left alone |
+/// | `objects/.tmp-1-pack-x.pack`, `objects/pack/.tmp-1-pack-y.pack` | nothing; not named |
+///
+/// So this answers `true` for a `tmp_` name in the object root or in `pack`,
+/// and for a `tmp_obj_` name in a fan-out directory. A `tmp_` name in a
+/// fan-out that is not `tmp_obj_` is Git's *garbage*, not its temporary file,
+/// and is deliberately not one of these; nor is `repack`'s
+/// `.tmp-<pid>-pack-*`, which `prune -n` did not name and R27's sentence does
+/// not cover. The root arm reads names, not entry types, so it also matches a
+/// directory such as `receive-pack`'s quarantine, `tmp_objdir-incoming-*`,
+/// planted here by `mkdir` and named by `prune -n` a stale temporary
+/// directory; upstroke runs no `push`, `fetch`, `clone` or `receive-pack`
+/// (`PR258-ROOT-ARM-MATCHES-QUARANTINE-DIRECTORY`).
+///
+/// **Git was traced writing in three places, which is why there are three arms.**
+/// Measured with `strace -f -e trace=openat,link,rename` on git 2.43.0
+/// (`02-strace-where-git-writes.log`,
+/// `20-r5-strace-git-writes-in-three-places.log`):
+///
+/// - the common loose write goes to the **fan-out** the object's final name
+///   will live in: `hash-object -w` opens `objects/20/tmp_obj_XybLdf` and
+///   links it to `objects/20/f5eb9d…`, and `write-tree` opens
+///   `objects/65/tmp_obj_2Kql8B`. Neither wrote at the root in those
+///   traces;
+/// - a **streamed** loose write — an object above `core.bigFileThreshold`,
+///   whose oid, and so whose fan-out, is unknown until the stream ends —
+///   goes to the **object root**: `unpack-objects` with the threshold at 512
+///   opened `objects/tmp_obj_KSwW4k` and linked it to `objects/88/fb3fef…`.
+///   `unpack-objects` is the producer traced to the root; `index-pack --stdin`
+///   fed the same 200 000-byte object at the same threshold opened only
+///   `pack/tmp_pack_*`, `pack/tmp_idx_*` and `pack/tmp_rev_*`
+///   (`33-r6-strace-index-pack-vs-unpack-objects.log`), so exceeding the
+///   threshold does not by itself send a producer to the root, and fetch and
+///   clone were not traced. The store is the one the engine shares with the
+///   user's own git;
+/// - bulk checkin above the threshold goes to **`pack`**: `hash-object -w`
+///   and `git add` of a 100 000-byte file at the same threshold opened
+///   `objects/pack/tmp_pack_2bgAj0` and `objects/pack/tmp_idx_HebZJG` and
+///   renamed them to `pack-156f22…`.
+///
+/// Scanning the root and `pack` alone therefore never saw the file the
+/// common write leaves: a real `SIGKILL` requested at half of a separately
+/// measured 3.878 s loose-object write left `objects/b7/tmp_obj_ybqfZf`,
+/// `git prune -n` named it a stale temporary file, and this function answered
+/// `false` — so no element was observed, the interrupted materialization
+/// classified
+/// [`ObjectResidue::None`](crate::topology::effects::ObjectResidue::None)
+/// rather than `Internal`, and no tabled recovery was owed for it
+/// (`G4-TEMP-OBJECT-FANOUT-UNSCANNED`; `01-real-kill-frozen.log`).
+///
+/// Fan-out discovery probes Git's 256 canonical names, `00` through `ff`,
+/// with `fs::metadata` — bounded at 256 lookups whatever the object root
+/// holds — and reads only a name that resolves to a directory, one `read_dir`
+/// each, stopping at the first match ([`fan_out_directories`]). The walk is
+/// made on the residue classifier's path, beside the
+/// `git fsck --connectivity-only` that [`unreachable_objects`] runs for the
+/// same classification; it is not on `Worktree.Verify`'s path, which reads
+/// neither. The store it reads is the repository's, which a linked worktree
+/// shares with every other worktree of the repository, so a sibling task's
+/// healthy in-flight write is a temporary object file here for as long as it
+/// lasts — as an unreachable object anywhere in the shared store already is
+/// for [`unreachable_objects`] (`PR258-SHARED-STORE-PREDICATE-READS-SIBLINGS`).
 ///
 /// # Errors
 ///
-/// A Git or I/O error.
+/// A Git error resolving the object directory, or an I/O error naming the
+/// path that could not be inspected: only an actual not-found is absence
+/// (§7). A fan-out this process cannot read is `PermissionDenied`; a fan-out
+/// symlink that loops is `FilesystemLoop`, and one that leads through a
+/// regular file is `NotADirectory`. On Windows a directory another process
+/// is deleting is delete-pending and answers `ERROR_ACCESS_DENIED` —
+/// `PermissionDenied`, not `NotFound` — until that process's handle closes,
+/// the shape [`remove_tree_once_handles_close`] and `runner::container`'s
+/// `RACING_ACCESS_ATTEMPTS` measured; a fan-out that a concurrent `git gc` is
+/// removing is therefore an inspection error there rather than the skip it
+/// is on Unix.
 pub fn temporary_object_files(worktree: &Path) -> Result<bool, UpstrokeError> {
     let object_dir = object_directory(worktree)?;
-    for (directory, prefix) in [
-        (object_dir.clone(), "tmp_obj_"),
-        (object_dir.join("pack"), "tmp_pack_"),
-    ] {
-        let entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(source) => {
-                return Err(UpstrokeError::Io {
-                    path: directory,
-                    source,
-                });
-            }
-        };
-        for entry in entries {
-            let entry = entry.map_err(|source| UpstrokeError::Io {
-                path: directory.clone(),
-                source,
-            })?;
-            if entry.file_name().to_string_lossy().starts_with(prefix) {
-                return Ok(true);
-            }
+    if directory_holds_name_prefixed(&object_dir, "tmp_")?
+        || directory_holds_name_prefixed(&object_dir.join("pack"), "tmp_")?
+    {
+        return Ok(true);
+    }
+    for fan_out in fan_out_directories(&object_dir) {
+        if directory_holds_name_prefixed(&fan_out?, "tmp_obj_")? {
+            return Ok(true);
         }
     }
     Ok(false)
+}
+
+/// Whether `directory` holds an entry whose name starts with `prefix`.
+///
+/// A directory that is not there holds nothing: `NotFound` answers `false`,
+/// for a fan-out directory and for `pack` alike, because absence is not an
+/// inspection failure — not because a store without packs lacks a `pack`
+/// (`git init` on git 2.43.0 creates `pack` and `info` empty,
+/// `32-r6-git-init-directories.log`). Other failures — opening the
+/// directory, or listing it part-way through — are the caller's to see.
+fn directory_holds_name_prefixed(directory: &Path, prefix: &str) -> Result<bool, UpstrokeError> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(UpstrokeError::Io {
+                path: directory.to_path_buf(),
+                source,
+            });
+        }
+    };
+    holds_name_prefixed(
+        entries.map(|entry| entry.map(|entry| entry.file_name())),
+        prefix,
+    )
+    .map_err(|source| UpstrokeError::Io {
+        path: directory.to_path_buf(),
+        source,
+    })
+}
+
+/// Whether one of `names` starts with `prefix`, stopping at the first that
+/// does.
+///
+/// The names are what [`fs::read_dir`] yields, and a listing can fail
+/// part-way through as well as at the open. That failure is an answer nobody
+/// has, not the end of the listing, so it is returned rather than read as
+/// "no more names" (§7). It is kept apart from the open so that the
+/// part-way failure has a witness: no filesystem the suite runs on fails a
+/// `readdir` to order, so the test constructs the listing.
+fn holds_name_prefixed(
+    names: impl Iterator<Item = std::io::Result<std::ffi::OsString>>,
+    prefix: &str,
+) -> std::io::Result<bool> {
+    for name in names {
+        if name?.to_string_lossy().starts_with(prefix) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Git's canonical `00` through `ff` fan-out paths that resolve to a
+/// directory, each yielded as it is probed.
+///
+/// Git opens these lower-case paths regardless of their stored spelling. On
+/// a case-insensitive filesystem `ab` can resolve to a directory stored as
+/// `AB`; filtering `read_dir` names would miss a temporary object Git writes
+/// there. On a case-sensitive filesystem a distinct `AB` is not traversed.
+/// The lookup is bounded at 256 metadata calls, independent of store size,
+/// and it is lazy: the caller reads each directory before the next name is
+/// probed, so an inspection failure at a later name cannot discard the
+/// answer an earlier fan-out has already given — collected up front, a
+/// symlink loop at `objects/ff` turned a store whose `objects/00` held
+/// residue from `Ok(true)` into an error
+/// (`PR258-EAGER-FANOUT-PROBE-DISCARDS-A-KNOWN-TRUE`).
+///
+/// **Directory targets are followed, because Git follows them.** The type is
+/// read with [`fs::metadata`], which resolves symbolic links, and not with
+/// `DirEntry::file_type`, which reports the link itself: a store whose
+/// `objects/93` is a symlink to a directory is one Git writes
+/// `objects/93/tmp_obj_*` into and prunes from, and reading the link's own
+/// type answered "not a directory" and walked past it. That was this scan's
+/// original defect surviving its own repair, found by the class review of
+/// #258 with a real `SIGKILL` inside a `hash-object -w` — `git prune -n`
+/// named the file and this function still answered `false`.
+///
+/// A name that is gone by the time it is asked about is skipped: on Unix
+/// that is what a store Git is pruning concurrently looks like, and a name
+/// that is gone holds no temporary object file. (On Windows a name being
+/// deleted is delete-pending and answers `PermissionDenied` until the
+/// deleter's handle closes; [`temporary_object_files`] says so.) A name that
+/// resolves to something other than a directory is not a fan-out and is not
+/// read. Every other inspection failure — a name this process may not
+/// resolve, a symlink loop, a link through a regular file — is the caller's
+/// to see (§7) rather than a silent `false`.
+fn fan_out_directories(object_dir: &Path) -> impl Iterator<Item = Result<PathBuf, UpstrokeError>> {
+    (0_u8..=255).filter_map(move |prefix| {
+        let candidate = object_dir.join(format!("{prefix:02x}"));
+        match fs::metadata(&candidate) {
+            Ok(metadata) if metadata.is_dir() => Some(Ok(candidate)),
+            Ok(_) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(source) => Some(Err(UpstrokeError::Io {
+                path: candidate,
+                source,
+            })),
+        }
+    })
 }
 
 /// The repository's object directory.
