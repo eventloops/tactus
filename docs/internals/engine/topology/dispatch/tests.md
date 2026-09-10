@@ -424,20 +424,32 @@ A child that exits first is observed at the poll that finds it gone — the
 parent's clock, an upper bound on the pick, not the child's own — and a
 child that finishes in the window between that last poll's `try_wait` and
 the kill's system call, the parent descheduled there, ends with a
-completion's status and is fed back, where until 2026-09-10 it was thrown
-away (the ultra review of `f837f4ca`, finding 2), as the clock
-`KillableGitChild::kill` reads once `Child::kill` has returned — a bound the
-child cannot have outrun. At `62f55943` that clock was read before the
-system call, and a parent paused there fed a completed pick back as the
-instant before the pause, below the pick and clamped to the floor (the ultra
-review of `2d3fa9d1`, finding 1). This sampler's mid-write floor refuses the
-ladder that follows from it — at `2d3fa9d1` a 20 ms pause on the first kill
-fed sample 0 back as 83.7 µs, every later rung was aimed at 22–178 µs, and
-the run went red with `none of the 63 kills in 64 spawns landed while the
-pick was writing` — where the recover sampler's `>= 1` does not; at
-`95eece1c` the same pause feeds the pick back as the pause's own length, the
-next two picks complete in 1.06 ms, and the floors are met in thirteen
-spawns with `Internal` kills among the eight. The window and a late
+completion's status and is fed back, where until 2026-09-10 it was thrown away
+(the ultra review of `f837f4ca`, finding 2), bounded by the clock at which the
+parent established the exit — `reaped`, read once `Child::wait` has returned
+the status. The kill's own clock is not that: `Child::kill` returns `Ok` once
+the signal is sent and also for a child that has already exited, and `Err`
+when nothing was sent, so the clock once it has returned orders the call and
+bounds no child. At `62f55943` that clock was read before the system call, and
+a parent paused there fed a completed pick back as the instant before the
+pause, below the pick and clamped to the floor (the ultra review of
+`2d3fa9d1`, finding 1); at `95eece1c` it was read after the call with its
+`Result` discarded, and a first kill made to return `Err` without sending fed
+a child still running at 83 µs back as 83 µs (the ultra review of `8441c5fe`,
+finding 1). This sampler's mid-write floor refuses the ladder that follows
+from either — at `2d3fa9d1` a 20 ms pause on the first kill fed sample 0 back
+as 83.7 µs, every later rung was aimed at 22–178 µs, and the run went red with
+`none of the 63 kills in 64 spawns landed while the pick was writing`; the
+failed kill at `8441c5fe` went red the same way — where the recover sampler's
+`>= 1` did not, and that sampler now carries the same floor (its notes). Here
+the failed kill's child is fed back as the wait's clock — the kill failed at
+97.9 µs, the wait returned at 728 µs, 728 µs fed back; 87.7 µs, 743 µs, 743 µs
+— the ladder follows a real pick and the floors are met; the same injection
+with the feedback reverted to the kill's clock is red twice with `none of the
+63 kills in 64 spawns`. The 20 ms pause, from `95eece1c` on, feeds sample 0
+back as the pause's own length (here 20.139 and 20.148 ms, against a pause
+that ended at 20.134 and 20.143 ms), the next two picks complete in 1.06 ms,
+and the floors are met with `Internal` kills among the eight. The window and a late
 observation remain. The budget is a median over however many of the last
 three completions exist — one alone, the longer of two, the middle of three
 — so a late observation holds until two shorter completions follow it, not
@@ -445,13 +457,14 @@ until the next; the recover notes carry the build-box measurements, stated
 as the medians of separate populations they are, and macOS and Windows are
 reasoned, not measured. The floors are unchanged; each one's message now
 carries the probe, the number of completions the ladder followed and every
-spawn's aim and outcome, the clock at which the kill had returned or the
-completion's. Measured on the build box at `81ee09ef`: the pick takes about
+spawn's aim and outcome — completed, in the poll's clock; killed, with the
+clock at which the kill returned; outran the kill, with that clock and the
+wait's; or outlived a kill that failed, with its error and the wait's clock. Measured on the build box at `81ee09ef`: the pick takes about
 0.77 ms in a fresh worktree and warm alike, its first write lands about 0.58
 ms in and `MERGE_MSG` at its end, so one cycle of the ladder lands six
 `None`, one `Internal` and one `After` without `MERGE_MSG` and the floors
-are met in eight spawns; 25 runs alone never failed here before the change
-and 25 never failed after it. Of the 155 hosted macOS runs that completed
+are met in eight spawns; 0 of 25 runs alone failed here before the change
+and 0 of 25 after it. Of the 155 hosted macOS runs that completed
 between 2026-09-07 and 2026-09-10, this floor was red on 3, by this message:
 34293462480 at `56ea88c9` (6 kills in 32 spawns), 34385164329 at `c00c8638`
 (7 in 64) and the merge-queue entry for #258, 34432439820 (5 in 64); the

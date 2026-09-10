@@ -3346,25 +3346,36 @@ Object.ProposalCherryPick's frozen sampling N (effects/residue-classes.json).
 ## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `const MAX_SPAWNS: u32 = 2 * SAMPLING_N;`
 
 One bounded retry, the shape `PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE` gave
-the T-ATTEMPT sampler: when the first `SAMPLING_N` children all completed
-before their kill, the ladder has by then been re-aimed inside what they
-took, and `SAMPLING_N` more are sampled on it before the refusal at the end
-fires. Every child, in either half, is classified, reclaimed and driven to
-integration, so a completed pick is verified as a control and counted as
-nothing. The refusal counts kills only, over every spawn, and the retry does
-not weaken it: sixteen clean exits are still a run in which nothing was
-killed.
+the T-ATTEMPT sampler: when no kill of the first `SAMPLING_N` landed inside a
+writing pick — every child completed before its kill, or every kill found a
+child that had not begun or one that had finished — the ladder has by then
+been re-aimed inside every pick that completed, and `SAMPLING_N` more are
+sampled on it before the refusals at the end fire. Every child, in either
+half, is classified, reclaimed and driven to integration, so a completed pick
+is verified as a control and counted as nothing. The refusals count kills
+only, over every spawn, and the retry does not weaken them: sixteen clean
+exits are still a run in which nothing was killed, and sixteen kills of
+children that had not begun are still a run in which no pick under way was
+interrupted.
 
 The second batch is a whole batch. The loop plans `SAMPLING_N` spawns and,
-when the eighth is in and nothing has died, plans `MAX_SPAWNS`; until
-2026-09-10 it went on only while no kill had landed, so the second batch
-ended at its first kill — reproduced: eight controls, run 8 killed at
-117 µs and classified `None`, `spawns=9`, a pass — and one earliest-rung,
-pre-write kill stood as the evidence of a batch (the ultra review of
-`f837f4ca`, finding 1). Reproduced again at `62f55943` with the first
-batch's aims fifty times too long: the old loop stops at `spawns=9,
+when the eighth is in and no kill has landed inside a writing pick, plans
+`MAX_SPAWNS`; until 2026-09-10 it went on only while no kill had landed, so
+the second batch ended at its first kill — reproduced: eight controls, run 8
+killed at 117 µs and classified `None`, `spawns=9`, a pass — and one
+earliest-rung, pre-write kill stood as the evidence of a batch (the ultra
+review of `f837f4ca`, finding 1). Reproduced again at `62f55943` with the
+first batch's aims fifty times too long: the old loop stops at `spawns=9,
 killed=1`; this one runs `spawns=16, killed=8`, every kill in the second
-batch, the ladder having followed the first batch's eight completions.
+batch, the ladder having followed the first batch's eight completions. The
+batch's condition widened from "no kill" to "no kill inside a writing pick"
+with the floor below (`killed_while_writing`), so that the retry serves it as
+it serves the vacuity refusal. A batch of kills that all found children that
+had not begun leaves the budget nothing to follow — a killed child measures no
+pick — so the second batch is aimed as the first was, and when it lands the
+same way the refusal fires with every aim and class in its message: the honest
+outcome for a budget short of every pick, which the ladder can correct only
+through a completion.
 
 ## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let two_tasks = || Damage {`
 
@@ -3394,9 +3405,54 @@ right each time: nothing had been sampled. Measured on the
 build box at `81ee09ef`: the first pick in a fresh staging worktree takes
 1.1 ms against 0.94 ms warm, a pick's first write lands about 0.6 ms in
 and the eight rungs land five `None` and three `Internal`, so an aim even
-twice too long misses every write window; 25 runs alone never failed here
-before the change and 25 never failed after it, and the leg's own evidence
-is CI's.
+twice too long misses every write window; 0 of 25 runs alone failed here
+before the change and 0 of 25 after it, and the leg's own evidence is CI's.
+
+## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let mut killed_while_writing = 0_u32;`
+
+The second floor, added 2026-09-10: at least one kill must have found the
+pick's own state — `Internal`: its index lock, its sequencer state, an object
+written and not yet published — which is a kill after the pick's first write
+and before its publish, inside a pick under way. A kill that found nothing
+written (`None`) interrupted a child that had not begun; one that found the
+commit published (`After`) interrupted a pick that had finished; both are
+kills, and `killed_while_running >= 1` — which stays, and fires first —
+accepts either. Both P1s this pull request produced had one shape: the budget
+collapsed, every kill landed before the first write, and this sampler passed
+on seven `None` kills (the ultra reviews of `2d3fa9d1` and `8441c5fe`, finding
+1 of each) while the dispatch sampler's `while_writing` floor refused the same
+ladder both times. The floor here is that one's, on the class the classifier
+answered for a killed child: `Internal` only — a killed `After` is not
+counted, where the dispatch floor counts an `After` whose `MERGE_MSG` is
+missing, because this sampler reads no element of a published pick before
+recovery reclaims it.
+
+Measured on the build box before it was added, 25 unmutated runs, every run
+eight kills in eight spawns: 2 to 4 of the eight were `Internal` (median 3; 10
+runs with 2, 12 with 3, 3 with 4), the rest `None` but for one `After`, and
+every run had at least one. Where they land is structural: with the probe's
+median at 946 µs (894–1072) and the first write about 0.6 ms in, rungs 1 to 3
+(aimed at about 105, 210 and 315 µs) were `None` in all 25 runs, rung 4 (421
+µs) `Internal` once, rung 5 (526 µs) 6 times, rung 6 (631 µs) 20 times, rung 7
+(736 µs) 24 times and rung 8 (841 µs) 17 times, with 7 `None` — picks whose
+first write came after 841 µs — and the one `After`. With the floor in place,
+0 of 25 runs failed. Against it: every kill aimed at zero at spawn, which this
+sampler passed before, now refuses twice with `none of the 16 kills in 16
+spawns landed while the pick was writing`; and the failed-kill injection with
+the feedback reverted to the kill's clock — the ladder collapsed as at
+`8441c5fe` — refuses twice with `none of the 15 kills in 16 spawns`, the whole
+second batch having run. macOS is reasoned, not measured: the three hosted
+dispatch reds in the census each had only their lowest rung inside the pick,
+at about two thirds of it, and 9 of those 18 kills had found the pick writing
+(4 of 6, 3 of 7, 2 of 5), so the runner's first write sits where this box's
+does relative to the pick; the full pick's write phase — index, tree, commit,
+ref and the sequencer's cleanup — is longer than the no-commit pick's; and the
+dispatch floor has caused none of that leg's reds. What the floor cannot do is
+correct a budget short of every pick: a killed child measures no pick, so a
+batch of `None` kills leaves the second batch aimed as the first was, and
+sixteen of them refuse with every aim and class in the message — a red that
+says what it sampled, which is the outcome this floor prefers to a pass on
+kills of nothing.
 
 ## `fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {` › `let aim = budget.aim(run % SAMPLING_N, SAMPLING_N);`
 
@@ -3414,49 +3470,67 @@ to a parent (`wait4` carries CPU times; Windows' `GetProcessTimes` carries
 an exit time and the fixture does not bind it). What remains is the window
 between that last poll's `try_wait` and the kill's system call: a parent
 descheduled there lets the child finish, the kill misses, and the child's
-status is a completion. Such a pick is fed back too, where until 2026-09-10
-it was thrown away (the ultra review of `f837f4ca`, finding 2), and the
-number it is fed back as is the clock `KillableGitChild::kill` reads **once
-`Child::kill` has returned**: by then the signal has been sent and a child
-the kill missed had exited, so the child cannot have outrun it. At
-`62f55943` the clock was read *before* the system call, and the ultra review
-of `2d3fa9d1` (finding 1) showed what that fed back: a 20 ms pause planted
-between the read and the call let run 0's pick run to completion and fed it
-back as the instant before the pause — 120.8 µs, for a pick the probe had
-just measured at 1.09 ms, below the pick, clamped to the 200 µs floor — so
-every later rung was aimed at 44–178 µs, before the pick's first write at
-about 0.6 ms; seven children died as `None` with nothing written,
-`killed_while_running >= 1` was satisfied, and the run passed on kills of
-nothing (`spawns=8 killed=7 completions=1`, twice at `2d3fa9d1`), where the
-reviewer's control with that feedback off reached two `Internal` residues.
-The same pause at `95eece1c` feeds run 0 back as 20.16 ms, the pause's own
-length; the next two rungs, aimed at 4.5 and 6.7 ms, are past the pick and
-complete in 1.06 ms each, the median of the three is back at the pick, and
-runs 3 to 7 are killed at 470–939 µs, four of them `Internal` (`spawns=8
-killed=5 completions=3`, twice). A pause with the recorded clock asserted
-not to precede the pause's end fails at `2d3fa9d1` on the first kill and
-passes at `95eece1c`. A pause on every spawn refuses at both heads, having
-followed all sixteen completions: the floor is unchanged and still fires
-when no kill can land. What the budget follows is a median over however many
-of the last three completions exist — one completion sets the budget alone,
-of two the longer is taken, of three the middle — so a late observation is
-not corrected by the next pick: a late first observation holds until two
-shorter completions follow it, and three late ones hold until two do, each
-correction costing the batch two controls, which the sixteen-spawn bound
-affords once. Measured on the build box, and only there: over three
-unmutated runs, 24 kills, the clock a kill recorded — read after
-`Child::kill` returned, so with the system call inside it — was 2.9–5.6 µs
-past its aim, and the dispatch sampler's 24 were 1.6–3.6 µs; and over three
-separate populations of forty `git --version` children each, the median
-clock at which a blocking `wait` saw its child gone was 269 µs (242–382), at
-which `run_until` saw it while spinning 341 µs (311–438) and while sleeping
-1.054 ms (1.037–1.065). Those are medians of separate populations, not
-per-exit lags and not maxima; they size the observation's lateness on this
-host and bound nothing, and macOS and Windows are reasoned, not measured.
-Every spawn's aim and outcome — the clock at which the kill had returned, or
-the completion's — goes into the refusal's message, with the probe and the
-number of completions the ladder followed, so a red leg carries the timing
-evidence the finding said it lacked.
+status is a completion. Such a pick is fed back too, where until 2026-09-10 it was thrown away (the
+ultra review of `f837f4ca`, finding 2), and the number it is fed back as is
+the clock at which the parent established the exit: for a child the poll found
+gone, that poll's; for a child that was running at its aim and ended with a
+completion's status, the clock `KillableGitChild::wait` reads once
+`Child::wait` has returned that status (`reaped`). The kill's own clock is not
+that number. `Child::kill` returns `Ok` once the signal is sent and also for a
+child that has already exited, and `Err` when nothing was sent, so the clock
+once it has returned orders the call and bounds no child; two heads fed it
+back as a bound and each was a P1. At `62f55943` the clock was read *before*
+the system call, and the ultra review of `2d3fa9d1` (finding 1) showed what
+that fed back: a 20 ms pause planted between the read and the call let run 0's
+pick run to completion and fed it back as the instant before the pause — 120.8
+µs, for a pick the probe had just measured at 1.09 ms, below the pick, clamped
+to the 200 µs floor — so every later rung was aimed at 44–178 µs, before the
+pick's first write at about 0.6 ms; seven children died as `None` with nothing
+written, `killed_while_running >= 1` was satisfied, and the run passed on
+kills of nothing (`spawns=8 killed=7 completions=1`, twice at `2d3fa9d1`),
+where the reviewer's control with that feedback off reached two `Internal`
+residues. At `95eece1c` the clock was read after the call and its `Result`
+discarded, and the ultra review of `8441c5fe` (finding 1) made the first kill
+return `Err` without sending, asserted `try_wait()` still `Ok(None)` once the
+clock was recorded — the child alive after the alleged bound — and let it
+finish: fed back as 117 µs, the same collapse, `spawns=8 killed=7
+completions=1`, a pass. The same injection here, with an oracle in
+`KillBudget::completed` that the bound fed back does not precede the clock at
+which the child's status came in: at `8441c5fe` it fails on run 0 (a bound of
+105.6 µs for a child whose exit was established at 1.20 ms; 102.2 µs against
+966 µs the second time), and at this head the bound fed back is the wait's
+clock itself (the kill failed at 108.3 µs, the wait returned at 1.012 ms,
+1.012 ms fed back; 110.0 µs, 1.031 ms, 1.031 ms), the ladder follows a real
+pick and the run passes on kills inside it. The 20 ms pause, from `95eece1c`
+on, feeds run 0 back as the pause's own length — here 20.164 and 20.174 ms
+against a pause that ended at 20.159 and 20.170 ms, the bound asserted not to
+precede it; at `2d3fa9d1` that assertion fails on the first kill — and the
+next two rungs, aimed at 4.5 and 6.7 ms, are past the pick and complete in
+1.1–2.1 ms, the median of the three is back at the pick and the later rungs
+are killed inside it (at `95eece1c`: runs 3 to 7 killed at 470–939 µs, four of
+them `Internal`, `spawns=8 killed=5 completions=3`, twice). A pause on every
+spawn refuses, having followed all sixteen completions: the vacuity floor is
+unchanged and still fires when no kill can land. What the budget follows is a
+median over however many of the last three completions exist — one completion
+sets the budget alone, of two the longer is taken, of three the middle — so a
+late observation is not corrected by the next pick: a late first observation
+holds until two shorter completions follow it, and three late ones hold until
+two do, each correction costing the batch two controls. Measured on the build
+box, and only there: over three unmutated runs at `95eece1c`, 24 kills, the
+clock a kill recorded — read after `Child::kill` returned, so with the system
+call inside it — was 2.9–5.6 µs past its aim, and the dispatch sampler's 24
+were 1.6–3.6 µs; and over three separate populations of forty `git --version`
+children each, the median clock at which a blocking `wait` saw its child gone
+was 269 µs (242–382), at which `run_until` saw it while spinning 341 µs
+(311–438) and while sleeping 1.054 ms (1.037–1.065). Those are medians of
+separate populations, not per-exit lags and not maxima; they size the
+observation's lateness on this host and bound nothing, and macOS and Windows
+are reasoned, not measured. Every spawn's aim and outcome goes into the
+refusals' messages — completed, in the poll's clock; killed, with the clock at
+which the kill returned; outran the kill, with that clock and the wait's; or
+outlived a kill that failed, with its error and the wait's clock — with the
+probe and the number of completions the ladder followed, so a red leg carries
+the timing evidence the finding said it lacked.
 
 ## `const SAMPLING_N: u32 = 8;` › `let mut child = KillableGitChild::spawn(`
 
