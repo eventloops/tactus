@@ -1260,18 +1260,24 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
                 "sample {sample}: the child was running when the kill fired and yet exited \
                  {status:?}"
             );
-            // A completed pick measured the pick: within `ran` when it exited
-            // before its aim, and, when it exited between the poll that found
-            // it running and the kill, within the clock read once the kill
-            // attempt had returned — a bound the child cannot have outrun,
-            // where the clock before the kill's system call was not.
-            if let Some(within) = ran.or(child.fired()) {
+            // A completed pick measured the pick, within the clock at which
+            // the parent established its exit: `ran`, the poll that found it
+            // gone, or, when the kill attempt did not stop it — it exited
+            // between the poll that found it running and the system call, or
+            // the attempt failed and sent nothing — the clock once `wait` had
+            // returned its status. The kill's own clock bounds no such child
+            // (the ultra reviews of `2d3fa9d1` and `8441c5fe`, finding 1 of
+            // each).
+            if let Some(within) = ran.or(child.reaped()) {
                 budget.completed(within);
             }
         }
         let fired = child
             .fired()
             .map_or_else(|| "never".to_owned(), |fired| format!("{fired:?}"));
+        let reaped = child
+            .reaped()
+            .map_or_else(|| "never".to_owned(), |reaped| format!("{reaped:?}"));
 
         let target = ResidueTarget::new(&run.fixture.base).at(&worktree);
         let class = match classify_object_residue(MATERIALIZE, &target) {
@@ -1324,10 +1330,15 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
 
         timeline.push(format!(
             "sample {sample}: aimed at {aim:?}, {}{}",
-            match ran {
-                Some(ran) => format!("completed in {ran:?}"),
-                None if killed => format!("killed, the kill returned at {fired}"),
-                None => format!("outran the kill, exited within {fired}"),
+            match (ran, child.kill_error()) {
+                (Some(ran), _) => format!("completed in {ran:?}"),
+                (None, _) if killed => format!("killed, the kill returned at {fired}"),
+                (None, None) => {
+                    format!("outran the kill, which returned at {fired}; exited by {reaped}")
+                }
+                (None, Some(error)) => format!(
+                    "outlived the kill, which failed at {fired} ({error}); exited by {reaped}"
+                ),
             },
             class.map_or_else(|| ", refused".to_owned(), |class| format!(", {class:?}"))
         ));

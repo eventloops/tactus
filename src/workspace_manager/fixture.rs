@@ -389,14 +389,22 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
 /// [`Command`].
 pub(crate) struct KillableGitChild {
     child: std::process::Child,
-    /// Started once the spawn has returned, so what [`Self::kill`] reads
-    /// off it is time the child was left *running*.
+    /// Started once the spawn has returned, so every clock below is time
+    /// the child was left *running*.
     spawned: std::time::Instant,
     /// The clock once a kill attempt at this child had returned, or `None`
-    /// if none was ever sent. Written only by [`Self::kill`], and read
-    /// *after* [`std::process::Child::kill`] returns, never before it: a
-    /// child the kill missed had exited no later than this.
+    /// if none was ever made. Written only by [`Self::kill`], read after
+    /// [`std::process::Child::kill`] returned, whatever it returned. It
+    /// orders the attempt against the child's clock and nothing more: it
+    /// does not say the signal was sent ([`Self::kill_error`] does), and it
+    /// does not say the child had exited ([`Self::reaped`] does).
     fired: Option<std::time::Duration>,
+    /// What [`std::process::Child::kill`] returned when it did not return
+    /// `Ok`: nothing was sent, and the child ran on.
+    kill_error: Option<std::io::Error>,
+    /// The clock once [`Self::wait`] had returned the child's status, or
+    /// `None` until it has. The child had exited by then, on every path.
+    reaped: Option<std::time::Duration>,
 }
 
 /// The `git` a sampled child runs, so that a kill of the child is a kill of
@@ -460,32 +468,38 @@ impl KillableGitChild {
             child,
             spawned: std::time::Instant::now(),
             fired: None,
+            kill_error: None,
+            reaped: None,
         }
     }
 
-    /// Kill the child, recording the clock once the kill attempt has
-    /// returned.
+    /// Send the kill, recording the clock once the attempt has returned and
+    /// what it returned.
     ///
-    /// Read after `Child::kill` returns, never before it. The samplers feed
-    /// a child the kill missed — one that exited between the poll that
-    /// found it running and the kill's system call — back into the budget
-    /// as a completion bounded by this clock, so the clock has to be one
-    /// the child cannot have outrun: by the time the call returns the
-    /// signal has been sent, and a child it missed had already exited.
-    /// Until 2026-09-10 the clock was read *before* the call, and a parent
-    /// descheduled between the read and the call fed a pick that then ran to
-    /// completion back as the instant before the pause — below the pick,
-    /// clamped to [`KillBudget::FLOOR`] — and every later rung was aimed
-    /// before the pick's first write (the ultra review of `2d3fa9d1`,
-    /// finding 1: a 20 ms pause planted there left seven kills of children
-    /// that had not begun as the evidence of a batch).
-    ///
-    /// `outcome` is bound so that deleting `self.child.kill()` leaves it
-    /// unbound and the module stops compiling.
+    /// Neither says the child has exited. `Child::kill` returns `Ok` once
+    /// the signal is sent, and also for a child that has already exited
+    /// (std documents that; on Windows `TerminateProcess` answers
+    /// `ERROR_ACCESS_DENIED` for a process that has ended or is ending, and
+    /// std reports that as `Ok`), and it returns `Err` when nothing was
+    /// sent at all and the child runs on. So the clock recorded here
+    /// orders the attempt and bounds nothing: a child that was still
+    /// running at a failed attempt, or that exited between the poll that
+    /// found it running and the system call, ends with a completion's
+    /// status, and the bound the samplers feed back for it is
+    /// [`Self::reaped`], read once [`Self::wait`] has returned that status.
+    /// Until 2026-09-10 the samplers fed such a child back as this clock:
+    /// first as the clock read *before* the call (the ultra review of
+    /// `2d3fa9d1`, finding 1: a 20 ms pause between the read and the call
+    /// fed a completed 1.09 ms pick back as 121 µs, below the pick and
+    /// clamped to [`KillBudget::FLOOR`], and seven kills of children that
+    /// had not begun were the evidence of a batch), then as the clock read
+    /// after it (the ultra review of `8441c5fe`, finding 1: an attempt made
+    /// to fail on the first kill fed a child still running at 117 µs back
+    /// as 117 µs, and the batch collapsed the same way).
     pub(crate) fn kill(&mut self) {
         let outcome = self.child.kill();
         self.fired = Some(self.spawned.elapsed());
-        let _ = outcome;
+        self.kill_error = outcome.err();
     }
 
     /// Whether the child has exited on its own, and when the parent saw it.
@@ -508,9 +522,12 @@ impl KillableGitChild {
         }
     }
 
-    /// Reap it. The wait status is the only thing a kill changes.
+    /// Reap it, recording the clock once its status is in. The wait status
+    /// is the only thing a kill changes.
     pub(crate) fn wait(&mut self) -> std::process::ExitStatus {
-        self.child.wait().expect("reap the sampled git child")
+        let status = self.child.wait().expect("reap the sampled git child");
+        self.reaped = Some(self.spawned.elapsed());
+        status
     }
 
     /// Leave the child running until `aim` after its spawn or until it
@@ -530,9 +547,9 @@ impl KillableGitChild {
     /// platform's: between that poll's `try_wait` and the kill's own system
     /// call the parent can be descheduled, and a child that exits in that
     /// window is missed by the kill and ends on its own terms — its status
-    /// is a completion, not the kill's signature, and [`Self::fired`], read
-    /// once the kill attempt had returned, bounds how long it ran, which the
-    /// samplers feed back like any completion.
+    /// is a completion, not the kill's signature, and the samplers feed it
+    /// back like any completion, bounded by [`Self::reaped`], the clock
+    /// once [`Self::wait`] has returned that status.
     pub(crate) fn run_until(&mut self, aim: std::time::Duration) -> Option<std::time::Duration> {
         let deadline = self.spawned + aim;
         loop {
@@ -558,10 +575,27 @@ impl KillableGitChild {
     const SPIN_WITHIN: std::time::Duration = std::time::Duration::from_millis(4);
 
     /// The clock once a kill attempt at this child had returned, if one was
-    /// ever sent: the signal was sent no later than this, and a child the
-    /// kill missed had exited no later than this.
+    /// ever made — whatever it returned. It orders the attempt against the
+    /// child's clock and says nothing else: not that the signal was sent
+    /// ([`Self::kill_error`]), not that the child had exited
+    /// ([`Self::reaped`]).
     pub(crate) fn fired(&self) -> Option<std::time::Duration> {
         self.fired
+    }
+
+    /// What the kill attempt returned when it was not `Ok`: nothing was
+    /// sent, and the child ran on to an end of its own.
+    pub(crate) fn kill_error(&self) -> Option<&std::io::Error> {
+        self.kill_error.as_ref()
+    }
+
+    /// The clock once [`Self::wait`] had returned the child's status, if it
+    /// has. The child had exited by then, on every path — killed, missed by
+    /// the kill, or never reached by a failed attempt — so for a child that
+    /// ended with a completion's status this is the bound on its pick that
+    /// the samplers feed back.
+    pub(crate) fn reaped(&self) -> Option<std::time::Duration> {
+        self.reaped
     }
 }
 
@@ -653,8 +687,9 @@ pub(crate) fn time_git(cwd: &Path, args: &[String]) -> std::time::Duration {
 /// It follows in both directions and is not capped at the probe: a host
 /// that slows after the probe needs rungs past it to reach the pick's
 /// writes, and a completion the parent saw late — woken after the exit, or
-/// a kill that missed, bounded by the clock once the kill had returned — is
-/// an upper bound on the pick, never a ceiling. What the ladder follows is
+/// a child the kill did not stop, bounded by the clock once its `wait` had
+/// returned — is an upper bound on the pick, never a ceiling. What the
+/// ladder follows is
 /// the median of the last [`KillBudget::RECENT`] such bounds, over however
 /// many exist: the first completion sets the budget alone, of two the
 /// longer is taken, and from three on one late bound among three is
@@ -663,8 +698,9 @@ pub(crate) fn time_git(cwd: &Path, args: &[String]) -> std::time::Duration {
 /// late ones hold until two do ([`KillBudget::current`]).
 pub(crate) struct KillBudget {
     probe: std::time::Duration,
-    /// Within how long of their spawn the children that completed before
-    /// their kill had exited, as the parent saw it, oldest first.
+    /// Within how long of their spawn the children that ended with a
+    /// completion's status had exited, as the parent established it,
+    /// oldest first.
     completed: Vec<std::time::Duration>,
 }
 
@@ -730,13 +766,12 @@ impl KillBudget {
             .mul_f64(f64::from(rung + 1) / f64::from(rungs + 1))
     }
 
-    /// A child completed before its kill, within `within` of its spawn: how
-    /// long it ran as the parent saw it exit, or, when it exited between the
-    /// poll that found it running and the kill, the clock once the kill
-    /// attempt had returned. Either bounds the pick from above — the second
-    /// only because it is read after the kill's system call, never before
-    /// it — the ladder was aimed past it, and the budget follows what it
-    /// measured.
+    /// A child ended with a completion's status, within `within` of its
+    /// spawn: the clock at which the parent established its exit — the poll
+    /// that found it gone, or, when the kill attempt did not stop it, the
+    /// return of the `wait` that reaped it. Either is read after the exit
+    /// and so bounds the pick from above; the ladder was aimed past it, and
+    /// the budget follows what it measured.
     pub(crate) fn completed(&mut self, within: std::time::Duration) {
         self.completed.push(within);
     }
