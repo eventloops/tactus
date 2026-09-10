@@ -119,14 +119,16 @@ Three things follow from doing it this way, and all three are the reason for it:
   message is also the record of who holds the claim: `git log -1 <ref>` answers it, and nothing
   else on the box does. A holder re-pushing its own claim is always safe; the loser takes the next
   finding.
-- **Attribution stays per-finding. Revert does not.** Review and merge are per-batch, and so is
-  rollback. What cherry-picking preserves is one commit per commit of each fix branch, landed
-  unchanged, each carrying its finding's `id` in a trailer — enough to say which commits closed
-  which finding, which is what §8 uses it for. It is **not** enough to take one member out and leave
-  the others working: two members can share a prerequisite, the history attributes that shared line
-  to whichever member landed first, and reverting that member removes a line the other still
-  compiles against. Measured in §8, with a shared `use` line and `error[E0433]`. **The batch is the
-  unit of revert**, and §8 gives the sequence for taking one member out — it goes through the batch.
+- **Attribution is per-finding. Rollback is not a guarantee at any granularity.** What
+  cherry-picking preserves is one commit per commit of each fix branch, landed unchanged, each
+  carrying its finding's `id` in a trailer — enough to say which commits closed which finding, which
+  is what §8 uses it for. It is **not** enough to take one member out and leave the others working:
+  two members can share a prerequisite, the history attributes that shared line to whichever member
+  landed first, and reverting that member removes a line the other still compiles against. Reverting
+  the whole batch is no safer in general, because work that landed *after* it can depend on it the
+  same way. Both measured in §8, with a shared `use` line and `error[E0433]`. Taking a member out is
+  a reconstruction that §8 describes and that has to be validated when it is done, rather than
+  anything promised here in advance.
 
 **When the matrix says one finding per pull request, the fix branch *is* the pull request branch.**
 No batch branch is created. P1 lanes therefore behave exactly as they do today.
@@ -149,11 +151,10 @@ conflicting on the import block alone.
 > A conflict at batch assembly is resolved in the pick that hit it, by the implementer, and the
 > member keeps its own commit and its own `Finding:` trailer. Measured on that import conflict:
 > resolve the hunk, `git cherry-pick --continue` exit **0**, and the trailer intact. What resolving
-> in the pick does *not* buy is per-member rollback. A shared declaration is precisely the case
-> where
-> reverting one member can break another, so the batch is the unit of revert (§8) — an earlier
-> revision of this passage claimed the opposite on the strength of one example whose two members
-> happened to need *different* imports.
+> in the pick does *not* buy is per-member rollback: a shared declaration is precisely the case
+> where reverting one member can break another (§8) — an earlier revision of this passage claimed
+> the opposite on the strength of one example whose two members happened to need *different*
+> imports.
 
 An earlier revision of this section aborted the batch and filed the discrepancy against an
 "offending finding". On the case above there is no offending finding: both write sets named exactly
@@ -445,13 +446,14 @@ declaration is not: the pair stays in the batch and the conflict is a one-line r
 pick, taken by the implementer, and §2 says what happens then. Neither is a scheduling error and
 neither is filed against a finding.
 
-**Keeping shared declarations in the batch is what costs the per-member revert, and that is the
-trade.** Two members that both need one declaration have a prerequisite the history can attribute to
-only one of them, so reverting that one can break the other — measured in §8, a shared `use` line
-and `error[E0433]`. Splitting every such pair into its own pull request would buy per-member revert
-back, and would also split most `workspace_manager` batches on their import block, which is the
-outcome this process exists to avoid. So they are batched, the batch is the unit of revert (§8), and
-those are one decision rather than two rules.
+**Keeping shared declarations in the batch is what makes reverting one member unsafe, and that is
+the trade.** Two members that both need one declaration have a prerequisite the history can
+attribute to only one of them, so reverting that one can break the other — measured in §8, a shared
+`use` line and `error[E0433]`. Splitting every such pair into its own pull request would take that
+case out of the batch, and would also split most `workspace_manager` batches on their import block,
+which is the outcome this process exists to avoid. It would not make a revert safe: §8's third
+reproduction is a fix in a *separate*, serial pull request that depends on the same import and is
+broken by the same revert. So they are batched, and §8 says what reverting them actually is.
 
 The two constraints have different scopes and different checks: write-set disjointness (§4) governs
 what runs *concurrently* and is computed by the orchestrator over each finding's declared writes —
@@ -659,21 +661,39 @@ Three details in that, each replacing something a review measured going wrong:
   the ledger is numeric today, which is luck and not a rule. Concatenating `""` makes both sides
   strings.
 
-**It is not a rollback mechanism, and this document no longer says it is.** Three revisions of this
-section promised that reverting one member's commits leaves the other members working. That is
-false, and the reason is not a defect in the selector: the selector can be exactly right and the
-result still broken.
+**It is not a rollback mechanism, and no trailer scheme makes it one.** Three revisions of this
+section promised that reverting one member's commits leaves the other members working; a fourth kept
+the promise and moved it to the batch. Both were false, and the reason is not a defect in the
+selector — the selector can be exactly right and the result still broken.
 
-> **The batch is the unit of revert.** Reverting a batch's merge restores the pre-batch state.
-> **Reverting one member of a batch is not guaranteed to leave the other members working**, because
-> members can share a prerequisite that the history attributes to whichever landed first. If one
-> member has to come out, revert the batch and re-land the rest.
+> **Reverting sweep work is an ordinary `git revert` with the ordinary consequence: it removes what
+> those commits added, and anything that has come to depend on what it removes stops building.**
+> Whether anything has is a fact about the tree at the moment you revert, and nothing here settles
+> that in advance — not the batch boundary, not the trailer, not a reservation. **So a revert is
+> assessed and validated — build it, run the witnesses — before it is relied on.** What this
+> document contributes is knowing *which* commits belong to which finding. That is attribution, not
+> safety.
 
-Measured on a batch whose two members share a prerequisite. `alpha()` and `beta()` are separate
-findings in one file, and each fix independently needs `use std::time::Duration;`. Each member
-builds alone with its own mutation witness passing and the other's failing, and the assembled batch
-passes both. Both picks apply at exit **0**, the import appears once, and `git log -S` attributes it
-to whichever member landed first. Rolling that member back, with the selector above:
+Four reproductions sit behind that, each run to completion with its exit codes captured directly,
+and each one killed a guarantee an earlier revision of this section made. The batch throughout is
+two findings in one file, `alpha()` and `beta()`, whose fixes each independently need
+`use std::time::Duration;`. Each member builds alone with its own mutation witness passing and the
+other's failing; both picks apply at exit **0**; the assembled batch is `rustc` exit **0** with
+`2 passed; 0 failed`.
+
+**1. A batch merge reverts, and with nothing landed on top of it the tree comes back.**
+
+```
+git revert -m 1 --no-commit <merge>    exit 0   write-tree equal to the pre-batch tree, both member
+                                                finding files restored, both witnesses failing again
+```
+
+That was measured with the merge at `HEAD`. It is a statement about that tree, not about a tree that
+has moved since — which is reproduction 3.
+
+**2. Reverting one member can break another member.** The shared import appears once in the
+assembled history, and `git log -S` attributes it to whichever member landed first. Selecting that
+member with the query above and reverting it:
 
 ```
 selector for the first member          1 commit selected   correct
@@ -683,29 +703,63 @@ the other member afterwards            rustc exit 1        error[E0433]: cannot 
 the other member's finding file        still deleted
 ```
 
-**No trailer scheme repairs this.** The import is a prerequisite of both fixes and belongs to both.
-A per-commit attribution has to give it to one, git gives it to whichever landed first, and
-reverting that one takes a line the other still compiles against — while the ledger says the second
-finding is closed, because its file is gone. Nothing about the selection was wrong.
+Nothing about the selection was wrong. The import is a prerequisite of both fixes; a per-commit
+attribution has to give it to one; git gives it to whichever landed first; reverting that one takes
+a line the other still compiles against — and the ledger reads the second finding as closed, because
+§8 deleted its file.
 
-What does work, measured on the same batch:
+**3. Reverting the whole batch can break work that landed after it.** A later fix `C`, in a
+different function and entirely serial with respect to the batch, uses the `Duration` import the
+batch introduced. Before the revert all three witnesses pass at exit **0**. Then:
 
 ```
-git revert -m 1 --no-commit <merge>    exit 0   tree byte-identical to the pre-batch tree, both
-                                                finding files restored, both witnesses failing again
-git cherry-pick <the member that stays>  exit 0 compiles, that member's witness passes, its finding
-                                                file deleted, the other's restored
+git revert -m 1 --no-commit <the batch merge>   exit 0
+C afterwards                           rustc exit 1        error[E0433]: cannot find type `Duration`
+C's finding file                       still deleted
 ```
 
-So taking one member out of a landed batch is: revert the batch merge, then re-land each member that
-stays by cherry-picking its fix branch again. The finding that came out returns to the queue with
-its file restored, which is where §2 wants it. It costs the batch's other members a re-land and
-nothing else, and unlike a per-member revert it cannot leave `master` in a state no member intended.
+No concurrency, no batching and no reservation was involved. This is what reverting a commit does in
+any repository: it removes things later work may depend on. It is why this section offers no
+rollback guarantee at any granularity, per-member or per-batch — the batch boundary is not a
+property of the tree, and the tree is what a build reads.
+
+**4. Re-landing what came out is not a recipe.** Three ways the obvious reconstruction fails, each
+reproduced:
+
+```
+cherry-pick the member's fix branch      exit 128   fatal: bad revision 'fix-P2/correctness_beta'
+                                                    — §8 deleted it after the merge, and a fresh
+                                                    clone has neither the branch nor its objects
+cherry-pick the member's landed commit   exit 0     then rustc exit 1, error[E0433] — the landed
+                                                    commit lacks the import the history attributed
+                                                    to its sibling
+cherry-pick the original fix branch,     exit 0     the member's own witness passes at exit 0 and
+after a repair made during review                   the review's witness fails at exit 101,
+                                                    'attempt to add with overflow'
+```
+
+The third is the one to read twice. A batch is repaired *after* assembly (§7), so the original fix
+branch is not the fix that was reviewed, and re-landing it silently returns the defect the review
+caught while the finding file stays deleted. A control run shows the first two are a consequence of
+what survives rather than of git: given the member's original independent commit, re-landing it is
+exit **0**, compiles, and its witness passes. Nothing preserves those commits — this section deletes
+the branches after the merge, and the trailer attributes the *landed* commits rather than the
+original ones — so a reconstruction starts from what landed, and §9 records whether anything should
+preserve them.
+
+**So taking a member out of a landed batch is a reconstruction, not a command.** Revert the batch
+merge; work out what each surviving member's content should now be — its landed commits, plus any
+repair the review demanded, against whatever `master` has since become; re-land that; then validate
+it, with a build and with every witness in the batch and the witnesses of anything that landed after
+it. The finding that came out returns to the queue with its file restored, which is where §2 wants
+it. Whether any step of that applies cleanly is a question about the tree, and where it does not, it
+is ordinary work on ordinary git conflicts.
 
 **A repair round (§7) is the same shape.** It commits after assembly, so nothing binds it to a
 member unless the trailer does; keep a repair commit to one finding and give it that finding's
-trailer so the attribution query still answers. A repair that genuinely spans members gets no
-per-member attribution at all — say so in the pull request body rather than discovering it later.
+trailer, so the attribution query still answers and a reconstruction can find the repair rather than
+lose it. A repair that genuinely spans members gets no per-member attribution at all — say so in the
+pull request body rather than discovering it later.
 
 ---
 
@@ -716,6 +770,13 @@ per-member attribution at all — say so in the pull request body rather than di
   change available to the schedule — and it invalidates the `location:` line of all 35 findings that
   point into it. That trade is the owner's.
 - **Whether `camwork` opens to Opus implementers** (§1).
+- **Whether anything preserves a member's pre-assembly commits.** §8 deletes every fix branch after
+  the merge, so what survives a batch is its landed commits and their trailers. Reconstructing a
+  member from those is what §8's fourth reproduction measures failing — the landed commit can lack a
+  prerequisite the history gave to a sibling — while the same reconstruction from the retained
+  original commit succeeded. Keeping the fix branches, or archiving their tips under a ref, would
+  change that; leaving it alone costs the reconstruction exactly that case. Not decided here, and
+  neither option makes a revert safe: §8's third reproduction is a separate pull request entirely.
 - **Whether anything but discipline holds a write-set reservation** (§4). The reservation is
   declared before an agent is spawned, and the agent is trusted not to write outside it. Nothing
   checks that: no gate compares a fix branch's diff against the paths its finding reserved, and
