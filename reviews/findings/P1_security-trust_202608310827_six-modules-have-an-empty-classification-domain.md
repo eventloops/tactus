@@ -5,7 +5,7 @@ disposition: deferred
 category: security-trust
 pr: 7
 reviewed_sha:
-location: src/effects.rs:691
+location: src/effects.rs:691, effects/wrappers.toml:921
 provenance: undetermined
 first_bad:
 guard: project owner — the post-v0.2 pass over PR3's layer

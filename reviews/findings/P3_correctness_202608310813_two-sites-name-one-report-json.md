@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 3
 reviewed_sha:
-location: src/topology/effects/sites.rs:1302
+location: src/topology/effects/sites.rs:1302, src/effects/tests/artifacts.rs:58, effect_sites.json:1238
 provenance: undetermined
 first_bad:
 guard: project owner
