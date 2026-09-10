@@ -36,7 +36,19 @@
 # without regard to case, as GitHub compares it: `EventLoops` and `eventloops` are one account.
 # A bot login of the form `name[bot]` is not a GitHub account name and is refused; no such account
 # posts reviews here today, and admitting one is a change to whom this audit trusts, not a widened
-# pattern.
+# pattern. The character set is spelled out rather than written as a range, because a range in a
+# bash regex is resolved by the locale's collation and not by ASCII: under en_US.utf8 `[A-Za-z]`
+# admits `é` and the Kelvin sign, so a check whose comment promised ASCII passed `evéntloops`
+# through to the API as a login nobody has.
+#
+# Which source supplies LOGIN is settled before the value is checked, and only the value this run
+# will trust is checked: the flag replaces the environment variable rather than being read after
+# it, so an inherited UPSTROKE_REVIEW_AUTHOR this run does not use cannot refuse the run that
+# overrode it. Neither --reviewer nor --ready-label will take the next option as its value: an
+# argument beginning with a hyphen is refused, never consumed. The test is the hyphen and not a
+# list of today's options, because a guard written as that list drifted from the options there
+# are and let `-h` through; consuming an option both misnames the value and silently switches
+# off the flag it swallowed.
 #
 # Lanes, decided by the branch prefix and nothing else (a lane:* label is output, never input;
 # a wrong one is corrected by --apply and reported as lane-label-mismatch):
@@ -67,6 +79,13 @@
 #     exactly one file under reviews/findings/ on the branch whose YAML frontmatter (the block
 #     between the opening --- and the next) carries `id: <the finding id>`; a rejected or
 #     accepted-risk row is the owner's call and sends the pull request to MANUAL
+#
+# A lookup this audit could not complete is not an answer, and the two are never merged. An
+# unreadable comment page blocks as `review-lookup-failed`, an unreadable timeline as
+# `timeline-lookup-failed`, and an unreadable ruleset list refuses the whole run before the first
+# pull request is read. Reading "I could not look" as "there is nothing there" is precisely how a
+# blocked pull request enqueues: a page whose failure was swallowed dropped the newest review from
+# the comparison and let an older PASS win, on a pull request its own reviewer had blocked.
 #
 # Other states: NEEDS-ATTEST (the head moved past the reviewed commit by more than clean merges
 # and ledger pushes: a repair-only push the owner reads and attests under step 5, a merge commit
@@ -244,10 +263,15 @@ ensure_labels() {
 # ruleset_state: prints "<strict> <queue>", 1 or 0 each: whether an active branch ruleset still
 # requires an up-to-date branch, and whether one carries the merge-queue rule. Every active
 # branch ruleset is read, which over-approximates on the safe side.
+# Non-zero means the rulesets could not be read, which is not the same answer as "there are
+# none": `for id in $(gh api ...)` runs zero times either way, and zero active rulesets reads as
+# "nothing requires an up-to-date branch", which drops the BEHIND blocker. The list is fetched
+# first and its status checked before the loop, so a failure refuses instead of relaxing.
 ruleset_state() {
-  local strict=0 queue=0 id rules
-  for id in $(gh api "repos/$repo/rulesets?targets=branch" --jq '.[] | select(.enforcement == "active") | .id'); do
-    rules="$(gh api "repos/$repo/rulesets/$id" --jq '.rules[] | "\(.type)=\(.parameters.strict_required_status_checks_policy // "")"')"
+  local strict=0 queue=0 id ids rules
+  ids="$(gh api "repos/$repo/rulesets?targets=branch" --jq '.[] | select(.enforcement == "active") | .id')" || return 1
+  for id in $ids; do
+    rules="$(gh api "repos/$repo/rulesets/$id" --jq '.rules[] | "\(.type)=\(.parameters.strict_required_status_checks_policy // "")"')" || return 1
     grep -q '^merge_queue=' <<< "$rules" && queue=1
     grep -q '^required_status_checks=true$' <<< "$rules" && strict=1
   done
@@ -259,8 +283,16 @@ ruleset_state() {
 # this is widened to fit. The value is a trust decision and it reaches a jq program, so a string
 # GitHub cannot issue as a login is a typo, another option read by mistake, or an injection
 # attempt; none of the three is an account, and each is refused rather than carried.
+#
+# The set is written out character by character. A range inside a bash regex is resolved by the
+# locale's collating order rather than by ASCII, so `[A-Za-z0-9]` is not the ASCII alphabet it
+# looks like: under en_US.utf8 it admits `é` and U+212A KELVIN SIGN, and `--reviewer evéntloops`
+# reached the API as a login nobody has -- the silent `no-review` this flag exists to end, let
+# through by the check that promised to stop it. `[[:alnum:]]` has the same defect for the same
+# reason. An explicit list means one thing in every locale, and the gate runs it under two.
 valid_login() {
-  [[ "$1" =~ ^[A-Za-z0-9]([A-Za-z0-9]|-[A-Za-z0-9])*$ ]] && ((${#1} <= 39))
+  local ascii_alnum='[0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz]'
+  [[ "$1" =~ ^$ascii_alnum($ascii_alnum|-$ascii_alnum)*$ ]] && ((${#1} <= 39))
 }
 
 # reviewer_login OVERRIDE OWNER_LOGIN OWNER_TYPE: the account whose reviews count, or nothing and
@@ -294,34 +326,59 @@ reviewer_login() {
 # blocking review as `no-review`. An unset variable is an error here, not an empty match: this
 # audit's failures must be loud, and a filter that quietly matches nobody is the defect it exists
 # to prevent.
+#
+# The two type guards come first and they are not defensive decoration. GitHub's REST schema lets
+# an issue comment's `user` be null -- a deleted account -- and `ascii_downcase` raises on null,
+# which fails the whole page, not the one comment: `--paginate` runs this program once per page,
+# so one unrelated comment by a deleted account removed every review on its page from the
+# comparison and let an older PASS win. A comment whose author or body is not a string is not
+# this reviewer's review; it is dropped, and the fetch's own status is what reports failure.
 review_comment_filter() {
   cat <<'JQ'
 [ .[]
+  | select((.user.login? | type) == "string")
+  | select((.body? | type) == "string")
   | select((.user.login | ascii_downcase) == (env.UPSTROKE_AUDIT_REVIEWER | ascii_downcase))
   | select(.body | test("<!-- upstroke-frontier-review|Reviewed head: [0-9a-f]{40}"))
 ] | last | select(. != null) | "\(.created_at) \(.id)"
 JQ
 }
 
-# latest_review_id PR: the id of the newest review comment posted by the trusted reviewer, or
-# nothing. `--paginate` hands `--jq` each page separately, so `last` is per page: each page
-# yields its newest match as "<created_at> <id>" and the newest across pages wins by timestamp.
+# latest_review_id PR: the id of the newest review comment posted by the trusted reviewer.
+# Empty output and status 0 mean the reviewer has posted none. Non-zero means the lookup itself
+# did not complete -- a page `gh` could not read or parse, an API error -- and the answer is
+# unknown; the caller must not read that as "none".
+#
+# `--paginate` hands `--jq` each page separately, so `last` is per page: each page yields its
+# newest match as "<created_at> <id>" and the newest across pages wins by timestamp. That is
+# exactly why a suppressed failure is not a conservative default here. A lost page removes
+# candidates from a comparison that takes the newest, so losing the page holding the newest
+# review promotes an older one -- and the older one may be the PASS that the newest revoked.
+# This function used to end in `return 0`, which discarded that status along with the pipeline's
+# own, and a blocked pull request enqueued on a stale PASS. Fetch first, check, then reduce.
 latest_review_id() {
-  UPSTROKE_AUDIT_REVIEWER="$reviewer" \
-    gh api "repos/$repo/issues/$1/comments?per_page=100" --paginate --jq "$(review_comment_filter)" \
-    | sort | tail -1 | awk '{print $2}'
-  return 0
+  local matches
+  matches="$(UPSTROKE_AUDIT_REVIEWER="$reviewer" \
+    gh api "repos/$repo/issues/$1/comments?per_page=100" --paginate --jq "$(review_comment_filter)")" \
+    || return 1
+  [[ -n "$matches" ]] || return 0
+  sort <<< "$matches" | tail -1 | awk '{print $2}'
 }
 
-# retargeted_after PR ISO-TIME: succeeds when the pull request's base was changed after that
-# moment, which a review posted before it cannot have seen.
-retargeted_after() {
-  local when
-  for when in $(gh api "repos/$repo/issues/$1/timeline?per_page=100" --paginate \
-      --jq '.[] | select(.event == "base_ref_changed") | .created_at'); do
-    [[ "$when" > "$2" ]] && return 0
+# base_changed_after PR ISO-TIME: prints `yes` when the pull request's base was changed after
+# that moment -- a diff the review posted before it cannot have seen -- and `no` when it was not.
+# Non-zero means the timeline could not be read, and that is a third answer, not `no`: this
+# gates the enqueue, and `for when in $(gh api ...)` iterates zero times whether the timeline
+# holds no base change or the request failed, so a swallowed failure would enqueue a pull request
+# retargeted since its review. Same defect as the comment lookup above, same consequence.
+base_changed_after() {
+  local timeline when
+  timeline="$(gh api "repos/$repo/issues/$1/timeline?per_page=100" --paginate \
+    --jq '.[] | select(.event == "base_ref_changed") | .created_at')" || return 1
+  for when in $timeline; do
+    [[ "$when" > "$2" ]] && { echo yes; return 0; }
   done
-  return 1
+  echo no
 }
 
 # ---- the audit ----------------------------------------------------------------------------------
@@ -330,42 +387,59 @@ retargeted_after() {
 # than tried is that trying it is what silence looks like.
 bad_login_why="Naming an account that cannot exist reads as no-review on every pull request."
 
+# option_like VALUE: whether VALUE is an option rather than a value for one. The test is the
+# leading hyphen, not a list of the options the `case` below takes: the guard that rejected only
+# `--*` was such a list, it had already drifted from the parser, and `--ready-label -h` consumed
+# `-h` and ran a whole audit. Nothing this script takes as an option's value begins with a hyphen
+# -- a GitHub login cannot, and a label name that does is refused rather than swallowed, which is
+# the safe direction for a guard whose only job is to not eat the next flag.
+option_like() { [[ "$1" == -?* ]]; }
+
 main() {
   apply=0
   enqueue=0
   ready_label="ready-to-merge"
-  reviewer_override="${UPSTROKE_REVIEW_AUTHOR:-}"
-  if [[ -n "$reviewer_override" ]] && ! valid_login "$reviewer_override"; then
-    echo "refusing: UPSTROKE_REVIEW_AUTHOR=[$reviewer_override] is not a GitHub login." >&2
-    echo "  A login is 1-39 letters, digits and single interior hyphens. $bad_login_why" >&2
-    exit 2
-  fi
   prs=()
+  local reviewer_flag="" reviewer_given=0 reviewer_override reviewer_said
   while (($#)); do
     case "$1" in
       --apply) apply=1 ;;
       --enqueue) apply=1; enqueue=1 ;;
       --ready-label)
-        # $2 is read only once it is known to exist and to not be the next option: an absent
+        # $2 is read only once it is known to exist and to not be another option: an absent
         # argument aborted on `$2: unbound variable`, and a following flag was consumed as the
         # value, which switched that flag off without saying so.
         (($# >= 2)) || { echo "refusing: --ready-label needs a label name" >&2; exit 2; }
+        option_like "$2" && { echo "refusing: --ready-label needs a label name, got the option [$2]" >&2; exit 2; }
         [[ "$2" == lane:* ]] && { echo "refusing: --ready-label must not be a lane:* label" >&2; exit 2; }
-        [[ "$2" == --* ]] && { echo "refusing: --ready-label needs a label name, got the option [$2]" >&2; exit 2; }
         ready_label="$2"; shift ;;
       --reviewer)
         (($# >= 2)) || { echo "refusing: --reviewer needs a login" >&2; exit 2; }
-        if ! valid_login "$2"; then
-          echo "refusing: --reviewer [$2] is not a GitHub login." >&2
-          echo "  A login is 1-39 letters, digits and single interior hyphens. $bad_login_why" >&2
-          exit 2
-        fi
-        reviewer_override="$2"; shift ;;
+        option_like "$2" && { echo "refusing: --reviewer needs a login, got the option [$2]" >&2; exit 2; }
+        # The value is kept, not yet judged: which source wins is settled after the loop, and only
+        # the value that wins is checked. Checking the environment before the loop meant an
+        # inherited UPSTROKE_REVIEW_AUTHOR this run replaces still had to be a valid login for the
+        # run to start, and even --help refused.
+        reviewer_flag="$2"; reviewer_given=1; shift ;;
       -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
       *) prs+=("$1") ;;
     esac
     shift
   done
+
+  # Source precedence first, then validation of the one value this run will trust.
+  if ((reviewer_given)); then
+    reviewer_override="$reviewer_flag"
+    reviewer_said="--reviewer [$reviewer_override]"
+  else
+    reviewer_override="${UPSTROKE_REVIEW_AUTHOR:-}"
+    reviewer_said="UPSTROKE_REVIEW_AUTHOR=[$reviewer_override]"
+  fi
+  if [[ -n "$reviewer_override" ]] && ! valid_login "$reviewer_override"; then
+    echo "refusing: $reviewer_said is not a GitHub login." >&2
+    echo "  A login is 1-39 letters, digits and single interior hyphens. $bad_login_why" >&2
+    exit 2
+  fi
 
   repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
   local owner_login owner_type
@@ -381,7 +455,17 @@ main() {
     fi
     exit 2
   fi
-  read -r strict_up_to_date has_queue <<< "$(ruleset_state)"
+  local rulesets
+  # `read <<< "$(...)"` cannot see the failure of what it reads, and an unread ruleset would read
+  # as "no ruleset requires an up-to-date branch", quietly dropping the BEHIND blocker for every
+  # pull request in the run. This is one fact for the whole run, so a failure refuses the run.
+  if ! rulesets="$(ruleset_state)"; then
+    echo "refusing: could not read $repo's branch rulesets." >&2
+    echo "  Their state decides whether a BEHIND pull request blocks; unread, every one of them" >&2
+    echo "  would audit as though no ruleset required an up-to-date branch." >&2
+    exit 2
+  fi
+  read -r strict_up_to_date has_queue <<< "$rulesets"
 
   if ((${#prs[@]} == 0)); then
     mapfile -t prs < <(gh api "repos/$repo/pulls?state=open&per_page=100" --paginate --jq '.[].number')
@@ -443,8 +527,12 @@ audit_one() {
   # The latest review by the trusted account: its posting time, its kind, and its parse.
   local review_id review_at review_file kind reviewed="" verdict="" review_base="-"
   findings=()
-  review_id="$(latest_review_id "$pr")"
-  if [[ -z "$review_id" ]]; then
+  # Three outcomes, kept apart. A lookup that failed is not a pull request without a review: the
+  # audit does not know what the reviewer said, so it says so and blocks, rather than proceeding
+  # on whatever survived the failure.
+  if ! review_id="$(latest_review_id "$pr")"; then
+    blockers+=("review-lookup-failed")
+  elif [[ -z "$review_id" ]]; then
     blockers+=("no-review")
   else
     review_at="$(gh api "repos/$repo/issues/comments/$review_id" --jq '.created_at')"
@@ -475,7 +563,10 @@ audit_one() {
     # changed after the review was posted is a diff the review never saw, and the workflow
     # form's base commit must lie on the current base branch (and, off master, not on master,
     # since the integration branch carries master's history too).
-    if retargeted_after "$pr" "$review_at"; then
+    local retargeted
+    if ! retargeted="$(base_changed_after "$pr" "$review_at")"; then
+      blockers+=("timeline-lookup-failed")
+    elif [[ "$retargeted" == yes ]]; then
       blockers+=("retargeted-after-review")
     fi
   fi
@@ -647,9 +738,12 @@ audit_one() {
         # queue on the new base with both contexts re-run there but without a review of that
         # diff, and it is visible on the pull request's timeline as a base change after the
         # review, which the next audit reports.
-        local base_now
+        local base_now retargeted_now
         base_now="$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq .baseRefName)"
-        if [[ "$base_now" != "$base" ]] || retargeted_after "$pr" "$review_at"; then
+        if ! retargeted_now="$(base_changed_after "$pr" "$review_at")"; then
+          echo "      could not re-read the timeline to check the base: not enqueued"
+          state=BASE-MOVED
+        elif [[ "$base_now" != "$base" || "$retargeted_now" == yes ]]; then
           echo "      base changed since the audit read $base: not enqueued"
           state=BASE-MOVED
         fi
