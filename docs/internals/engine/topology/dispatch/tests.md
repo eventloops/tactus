@@ -421,11 +421,11 @@ polled to the aim, once a millisecond while it is far and continuously
 through its last four, and the poll that reaches the aim with the child
 still running sends the kill, with no return to the caller between the two.
 A child that exits first is observed at the poll that finds it gone — the
-parent's clock, an upper bound on the pick, not the child's own — and a
-child that finishes in the window between that last poll's `try_wait` and
-the kill's system call, the parent descheduled there, ends with a
+parent's clock, from an origin read before the spawn, not the child's own —
+and a child that finishes in the window between that last poll's `try_wait`
+and the kill's system call, the parent descheduled there, ends with a
 completion's status and is fed back, where until 2026-09-10 it was thrown away
-(the ultra review of `f837f4ca`, finding 2), bounded by the clock at which the
+(the ultra review of `f837f4ca`, finding 2), as the clock at which the
 parent established the exit — `reaped`, read once `Child::wait` has returned
 the status. The kill's own clock is not that: `Child::kill` returns `Ok` once
 the signal is sent and also for a child that has already exited, and `Err`
@@ -443,14 +443,21 @@ as 83.7 µs, every later rung was aimed at 22–178 µs, and the run went red wi
 failed kill at `8441c5fe` went red the same way — where the recover sampler's
 `>= 1` did not, and that sampler now carries the same floor (its notes). Here
 the failed kill's child is fed back as the wait's clock — the kill failed at
-97.9 µs, the wait returned at 728 µs, 728 µs fed back; 87.7 µs, 743 µs, 743 µs
+95.3 µs, the wait returned at 769 µs, 769 µs fed back; 86.9 µs, 763 µs, 763 µs
 — the ladder follows a real pick and the floors are met; the same injection
 with the feedback reverted to the kill's clock is red twice with `none of the
 63 kills in 64 spawns`. The 20 ms pause, from `95eece1c` on, feeds sample 0
-back as the pause's own length (here 20.139 and 20.148 ms, against a pause
-that ended at 20.134 and 20.143 ms), the next two picks complete in 1.06 ms,
-and the floors are met with `Internal` kills among the eight. The window and a late
-observation remain. The budget is a median over however many of the last
+back as the pause's own length (here 20.137 and 20.144 ms, against a pause
+that ended at 20.131 and 20.138 ms), the next two picks complete in 1.10–1.12
+ms, and the floors are met with `Internal` kills among the eight. The origin
+itself moved last: until 2026-09-10 it was read once `Command::spawn` had
+returned (the ultra review of `d1fef26d`, finding 1), and a 20 ms pause there
+on the first child let sample 0 complete before the origin existed, fed back
+as 2.2–2.3 µs against a probe of 706–724 µs, every later rung aimed at 22–178
+µs and this floor red twice with `none of the 63 kills in 64 spawns`; read
+before the spawn now, the same pause feeds sample 0 back as 20.1 ms against a
+20.05 ms pause, the next picks complete in 0.87–1.12 ms and the floors are met
+in 13 spawns (#259's body, W4). The window and a late observation remain. The budget is a median over however many of the last
 three completions exist — one alone, the longer of two, the middle of three
 — so a late observation holds until two shorter completions follow it, not
 until the next; the recover notes carry the build-box measurements, stated

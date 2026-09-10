@@ -3463,9 +3463,9 @@ its last four — and the poll that reaches the aim with the child still
 running sends the kill itself, with no return to the caller between the two,
 so the sleep that used to sit between the aim and the kill is gone. A child
 that exits first is observed at the poll that finds it gone, and that
-observation is the number the budget follows: the parent's clock, an upper
-bound on the pick — the next poll's when the parent holds a core, the
-wake-up's when it does not — not the child's own time, which no wait reports
+observation is the number the budget follows: the parent's clock, from an
+origin read before the spawn — the next poll's when the parent holds a core,
+the wake-up's when it does not — not the child's own time, which no wait reports
 to a parent (`wait4` carries CPU times; Windows' `GetProcessTimes` carries
 an exit time and the fixture does not bind it). What remains is the window
 between that last poll's `try_wait` and the kill's system call: a parent
@@ -3495,22 +3495,38 @@ return `Err` without sending, asserted `try_wait()` still `Ok(None)` once the
 clock was recorded — the child alive after the alleged bound — and let it
 finish: fed back as 117 µs, the same collapse, `spawns=8 killed=7
 completions=1`, a pass. The same injection here, with an oracle in
-`KillBudget::completed` that the bound fed back does not precede the clock at
-which the child's status came in: at `8441c5fe` it fails on run 0 (a bound of
-105.6 µs for a child whose exit was established at 1.20 ms; 102.2 µs against
-966 µs the second time), and at this head the bound fed back is the wait's
-clock itself (the kill failed at 108.3 µs, the wait returned at 1.012 ms,
-1.012 ms fed back; 110.0 µs, 1.031 ms, 1.031 ms), the ladder follows a real
+`KillBudget::completed` that the value fed back does not precede the clock at
+which the child's status came in: at `8441c5fe` it fails on run 0 (105.6 µs
+fed back for a child whose exit was established at 1.20 ms; 102.2 µs against
+966 µs the second time), and at this head the value fed back is the wait's
+clock itself (the kill failed at 109.8 µs, the wait returned at 1.092 ms,
+1.092 ms fed back; 108.6 µs, 1.036 ms, 1.036 ms), the ladder follows a real
 pick and the run passes on kills inside it. The 20 ms pause, from `95eece1c`
-on, feeds run 0 back as the pause's own length — here 20.164 and 20.174 ms
-against a pause that ended at 20.159 and 20.170 ms, the bound asserted not to
+on, feeds run 0 back as the pause's own length — here 20.174 and 20.172 ms
+against a pause that ended at 20.169 and 20.167 ms, the value asserted not to
 precede it; at `2d3fa9d1` that assertion fails on the first kill — and the
 next two rungs, aimed at 4.5 and 6.7 ms, are past the pick and complete in
 1.1–2.1 ms, the median of the three is back at the pick and the later rungs
 are killed inside it (at `95eece1c`: runs 3 to 7 killed at 470–939 µs, four of
 them `Internal`, `spawns=8 killed=5 completions=3`, twice). A pause on every
 spawn refuses, having followed all sixteen completions: the vacuity floor is
-unchanged and still fires when no kill can land. What the budget follows is a
+unchanged and still fires when no kill can land. The clock's origin was the
+last of the three reads to move: until 2026-09-10 `KillableGitChild::spawn`
+read it once `Command::spawn` had returned, so a child could run, or finish,
+before the origin existed (the ultra review of `d1fef26d`, finding 1). A 20
+ms pause planted there on the first child — after the spawn had returned,
+before the origin was read — let run 0's pick complete during the pause; the
+first poll found it gone at 2.6–3.1 µs against a probe of 912–915 µs, that
+was fed back and clamped to the 200 µs floor, every later rung was aimed at
+22–178 µs, and the floor above refused, twice, with `none of the 15 kills in
+16 spawns landed while the pick was writing` — the whole second batch run,
+fifteen kills of children that had not begun: a red where the two earlier
+collapses had passed, and the red this change exists to remove. The origin is
+read before the spawn now, and the same pause feeds run 0 back as 20.1 ms
+against a pause of 20.05 ms, the value asserted not to be shorter than the
+pause the child was alive through; the next picks complete in 1.1–2.2 ms and
+the rest of the batch is killed inside the pick (#259's body, W4). What the
+budget follows is a
 median over however many of the last three completions exist — one completion
 sets the budget alone, of two the longer is taken, of three the middle — so a
 late observation is not corrected by the next pick: a late first observation
