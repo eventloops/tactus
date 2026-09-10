@@ -5,7 +5,7 @@ disposition: deferred
 category: security-trust
 pr: 5
 reviewed_sha:
-location: 
+location: src/workspace_manager/containment.rs:72
 provenance: undetermined
 first_bad:
 guard: PR6/PR7 implementer (the slice that next owns Windows containment)

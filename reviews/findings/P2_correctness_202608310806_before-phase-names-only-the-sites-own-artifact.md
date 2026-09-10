@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 3
 reviewed_sha:
-location: 
+location: src/topology/effects/residue_authority.rs:249
 provenance: undetermined
 first_bad:
 guard: PR7–PR10 implementer

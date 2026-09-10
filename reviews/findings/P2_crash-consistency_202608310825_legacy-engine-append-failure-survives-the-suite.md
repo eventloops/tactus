@@ -5,7 +5,7 @@ disposition: deferred
 category: crash-consistency
 pr: 5
 reviewed_sha:
-location: 
+location: src/engine/coordinator.rs:285
 provenance: undetermined
 first_bad:
 guard: PR7 implementer, or whichever lane plumbs an observer through engine::Harness
