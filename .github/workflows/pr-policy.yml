@@ -95,21 +95,31 @@ jobs:
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-body.sh "$title"
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-ledger-evidence.sh "$head"
 
-      # The branch vocabulary. Its findings listing is taken at the base and
-      # not at the head: repairing a finding deletes its file, so a fix-P*/
-      # pull request that has done its job carries no such file, and resolving
-      # the name against its own tree would fail exactly the ones that worked.
+      # The branch vocabulary. A fix-P*/ name resolves against reviews/findings/
+      # at BOTH ends, and either one is enough. Repairing a finding deletes its
+      # file, so a pull request that has done its job carries none at the head;
+      # a pull request that files the finding it repairs carries none at the
+      # base. Reading one end alone fails one of those two, and with fix/
+      # retired the second is the ordinary shape of a repair.
       - name: Validate the head branch name
         shell: bash
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
-          # The base commit, not a remote-tracking ref: `actions/checkout` only
-          # promises the fetched history, and the event carries this SHA on both
-          # triggers. An unresolvable base fails closed rather than skipping.
+          head_sha="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
+          # The base and head commits, not remote-tracking refs: `actions/checkout`
+          # only promises the fetched history, and the event carries both SHAs on
+          # both triggers. An end that will not resolve fails closed rather than
+          # being dropped, because dropping one is the looser rule of the two and
+          # nothing in the log would say it had happened.
           git rev-parse --verify --quiet "$BASE_SHA^{commit}" >/dev/null \
             || { echo "base commit $BASE_SHA is not in this checkout" >&2; exit 1; }
+          git rev-parse --verify --quiet "$head_sha^{commit}" >/dev/null \
+            || { echo "head commit $head_sha is not in this checkout" >&2; exit 1; }
           git ls-tree --name-only "$BASE_SHA" reviews/findings/ \
             | sed "s|.*/||" > "$RUNNER_TEMP/base-findings"
+          git ls-tree --name-only "$head_sha" reviews/findings/ \
+            | sed "s|.*/||" > "$RUNNER_TEMP/head-findings"
           bash .github/scripts/validate-pr-branch.sh \
-            "$(cat "$RUNNER_TEMP/pr-branch")" "$RUNNER_TEMP/base-findings"
+            "$(cat "$RUNNER_TEMP/pr-branch")" \
+            "$RUNNER_TEMP/base-findings" "$RUNNER_TEMP/head-findings"

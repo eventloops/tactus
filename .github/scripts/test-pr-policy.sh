@@ -50,19 +50,34 @@ expect_fail 'canonical table outside ledger section' "$header"$'\n'"$separator"$
 #
 # validate-pr-branch.sh is exercised here rather than in its own gate because it
 # is part of the pull-request policy and CI already runs this file. The findings
-# listing is a fixture, not the repository's own: these cases must not change
+# listings are fixtures, not the repository's own: these cases must not change
 # meaning when a finding is filed or repaired.
 
 branch_validator="$root/.github/scripts/validate-pr-branch.sh"
 fixture_dir="$(mktemp -d)"
 trap 'rm -rf "$fixture_dir"' EXIT
 
+# The base listing: what reviews/findings/ holds at the commit the branch was
+# cut from.
 cat > "$fixture_dir/findings.txt" <<'EOF'
 P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
 P2_docs-contract_202609051200_readme-claims-unperformed-migrations.md
 P3_liveness_202609061330_a-drain-that-never-returns.md
 P3_liveness_202609061331_twinned-description.md
 P3_liveness_202609071400_twinned-description.md
+P2_performance_202609061000_split-twin.md
+EOF
+
+# The head listing: the same directory in the pull request's own tree. It has
+# repaired the P1 and so DELETED its file, filed one finding of its own, and
+# replaced the split twin with a second one carrying the same description.
+cat > "$fixture_dir/head-findings.txt" <<'EOF'
+P2_docs-contract_202609051200_readme-claims-unperformed-migrations.md
+P3_liveness_202609061330_a-drain-that-never-returns.md
+P3_liveness_202609061331_twinned-description.md
+P3_liveness_202609071400_twinned-description.md
+P2_correctness_202609081500_filed-by-the-pull-request-that-repairs-it.md
+P2_performance_202609071000_split-twin.md
 EOF
 
 cat > "$fixture_dir/legacy.txt" <<'EOF'
@@ -72,6 +87,8 @@ codex/findings-p3-1a57a2730a12
 sweep/workspace-manager-fixture
 EOF
 
+# branch_pass / branch_fail resolve against the BASE listing alone, which is
+# what a caller that passes one listing gets.
 branch_pass() {
   local name="$1" branch="$2"
   if ! LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
@@ -90,6 +107,28 @@ branch_fail() {
   fi
 }
 
+# pair_pass / pair_fail resolve against BOTH ends, which is what the workflow
+# passes and what a real pull request is judged by.
+pair_pass() {
+  local name="$1" branch="$2"
+  if ! LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" "$branch" \
+    "$fixture_dir/findings.txt" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
+    echo "expected branch to pass against base and head: $name ($branch)" >&2
+    exit 1
+  fi
+}
+
+pair_fail() {
+  local name="$1" branch="$2"
+  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" "$branch" \
+    "$fixture_dir/findings.txt" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
+    echo "expected branch to fail against base and head: $name ($branch)" >&2
+    exit 1
+  fi
+}
+
 # Every prefix in the vocabulary, so removing one is a failing test and not a
 # silent loosening.
 branch_pass 'feature'   'feature/pr9-repair-execution'
@@ -98,8 +137,22 @@ branch_pass 'docs'      'docs/pr8-records-off-master'
 branch_pass 'standards' 'standards/w10-run-census'
 branch_pass 'ci'        'ci/pages-nojekyll'
 branch_pass 'gate'      'gate/g3'
-branch_pass 'fix'       'fix/audit-reviewer-identity'
+branch_pass 'findings'  'findings/pr8-review-round'
 branch_pass 'single digit slug word' 'feature/w10-census'
+
+# findings/<slug> is a prefix like any other after the slash, and it is for a
+# pull request that touches reviews/findings/ and nothing else. The validator
+# sees a name and not a diff, so that half is a review duty; the grammar is not.
+branch_fail 'findings empty name'  'findings/'
+branch_fail 'findings upper case'  'findings/PR8-Review'
+branch_fail 'findings underscore'  'findings/pr8_review_round'
+
+# fix/<slug> was retired when the finding was allowed to be filed by the pull
+# request that repairs it. These are the three branches open at the time it was
+# retired, and each must now fail rather than be silently accepted.
+branch_fail 'retired fix, #232' 'fix/audit-reviewer-identity'
+branch_fail 'retired fix, #139' 'fix/rundir-unreadable-is-not-empty'
+branch_fail 'retired fix, #145' 'fix/sampler-kill-and-inspection'
 
 # An unrecognised prefix must fail rather than fall into a lane. This is the
 # whole point of the validator: `feat/` is the near miss master's own history
@@ -131,6 +184,35 @@ branch_fail 'severity out of range' 'fix-P9/correctness_pid-identity-under-a-hos
 # an ambiguous claim is refused rather than resolved to whichever sorts first.
 branch_fail 'ambiguous description' 'fix-P3/liveness_twinned-description'
 
+# The finding is resolved at the base OR at the head, and each end admits a pull
+# request the other refuses.
+#
+# The base end: the pull request repaired the P1 and its file is gone from the
+# head, which is what every fix-P*/ pull request looks like once it has done its
+# job. Resolving at the head alone would fail exactly those.
+pair_pass 'repaired, gone from the head' 'fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter'
+# The head end: the finding was filed by this pull request, so it is at the head
+# and not at the base. Resolving at the base alone would force one pull request
+# to file it and a second to repair it, which is what retiring fix/ would
+# otherwise have cost.
+pair_pass 'filed by this pull request' 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it'
+branch_fail 'filed at the head is not at the base' 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it'
+# Untouched findings are at both ends. One filename in two listings is one
+# finding, not two, so the ordinary case must not read as ambiguous.
+pair_pass 'present at both ends'   'fix-P2/docs-contract_readme-claims-unperformed-migrations'
+pair_pass 'present at both ends 2' 'fix-P3/liveness_a-drain-that-never-returns'
+# The case that must still fail: named at neither end. This is the whole claim
+# the prefix makes, and loosening the resolution must not have dropped it.
+pair_fail 'named at neither end' 'fix-P2/correctness_never-filed-at-either-end'
+# The head is matched with the same strictness as the base, severity included.
+pair_fail 'wrong severity at the head' 'fix-P3/correctness_filed-by-the-pull-request-that-repairs-it'
+# Ambiguity is judged over the set and not over each end: one twin at the base
+# and a different one at the head resolve alone but not together, and a name
+# that could mean either finding is refused rather than picked.
+branch_pass 'split twin, base alone'  'fix-P2/performance_split-twin'
+pair_fail   'split twin across ends'  'fix-P2/performance_split-twin'
+pair_fail   'ambiguous at both ends'  'fix-P3/liveness_twinned-description'
+
 # bulk-fix-P<n>/ carries no finding, and never batches a severity that is
 # repaired one at a time.
 branch_pass 'bulk P3' 'bulk-fix-P3/docs-fixes'
@@ -145,6 +227,16 @@ branch_fail 'bulk upper case' 'bulk-fix-P3/Docs-Fixes'
 if ! LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
   "$BASH" "$branch_validator" 'fix-P1/correctness_never-filed' >/dev/null 2>&1; then
   echo 'expected the grammar alone to pass without a findings listing' >&2
+  exit 1
+fi
+
+# A listing that does not exist is a caller error, and it must be refused before
+# the resolution runs rather than read as a finding that was never filed. The
+# branch here needs no resolution at all, so only an eager check fails it.
+if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'feature/pr9-repair-execution' \
+  "$fixture_dir/no-such-listing" >/dev/null 2>&1; then
+  echo 'expected a findings listing that does not exist to fail' >&2
   exit 1
 fi
 
