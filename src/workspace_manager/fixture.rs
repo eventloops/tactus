@@ -389,12 +389,37 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
 /// [`Command`].
 pub(crate) struct KillableGitChild {
     child: std::process::Child,
-    /// Started once the spawn has returned, so what [`Self::kill`] reads
-    /// off it is time the child was left *running*.
-    spawned: std::time::Instant,
-    /// What the clock said when a kill fired at this child, or `None` if
-    /// none ever did. Written only by [`Self::kill`].
+    /// The origin of every clock below, read before `Command::spawn` is
+    /// called, so the child's run — the exec the parent never sees, the
+    /// pick, the exit — begins after it and ends before any reading below
+    /// that is taken once its exit was established; [`time_git`]'s probe is
+    /// timed from the same place. Until 2026-09-10 it was read once the
+    /// spawn had returned (the ultra review of `d1fef26d`, finding 1): a
+    /// parent paused 20 ms between the two let a 1.02 ms pick complete
+    /// before the origin existed, the poll found it gone at 4.5 µs, the
+    /// samplers fed that back, and every later rung was aimed at 22–178 µs,
+    /// under the pick's first write.
+    origin: std::time::Instant,
+    /// The clock once `Command::spawn` had returned: the spawn's own
+    /// latency, which every clock below includes, and during which the
+    /// child may already be running, or done. The two samplers of this
+    /// fixture aim from the origin and subtract nothing; the `T-ATTEMPT`
+    /// sampler sets its rungs as delays after the spawn's return and reads
+    /// its clocks from there ([`Self::spawned`]).
+    spawned: std::time::Duration,
+    /// The clock once a kill attempt at this child had returned, or `None`
+    /// if none was ever made. Written only by [`Self::kill`], read after
+    /// [`std::process::Child::kill`] returned, whatever it returned. It
+    /// orders the attempt against the child's clock and nothing more: it
+    /// does not say the signal was sent ([`Self::kill_error`] does), and it
+    /// does not say the child had exited ([`Self::reaped`] does).
     fired: Option<std::time::Duration>,
+    /// What [`std::process::Child::kill`] returned when it did not return
+    /// `Ok`: nothing was sent, and the child ran on.
+    kill_error: Option<std::io::Error>,
+    /// The clock once [`Self::wait`] had returned the child's status, or
+    /// `None` until it has.
+    reaped: Option<std::time::Duration>,
 }
 
 /// The `git` a sampled child runs, so that a kill of the child is a kill of
@@ -444,6 +469,7 @@ impl KillableGitChild {
     /// Spawn `git -C cwd <args>` with its streams discarded; [`sampled_git`]
     /// says which `git`.
     pub(crate) fn spawn(cwd: &Path, args: &[String]) -> Self {
+        let origin = std::time::Instant::now();
         let child = Command::new(sampled_git())
             .arg("-C")
             .arg(cwd)
@@ -454,50 +480,158 @@ impl KillableGitChild {
             .stderr(Stdio::null())
             .spawn()
             .expect("spawn the sampled git child");
+        let spawned = origin.elapsed();
         Self {
             child,
-            spawned: std::time::Instant::now(),
+            origin,
+            spawned,
             fired: None,
+            kill_error: None,
+            reaped: None,
         }
     }
 
-    /// Kill the child, recording when the kill fired.
+    /// Send the kill, recording the clock once the attempt has returned and
+    /// what it returned.
     ///
-    /// The clock is read at the instant of the kill and stored *after* the
-    /// kill returns, so deleting `self.child.kill()` leaves `outcome`
-    /// unbound and the module stops compiling.
+    /// Neither says the child has exited. `Child::kill` returns `Ok` once
+    /// the signal is sent, and also for a child that has already exited
+    /// (std documents that; on Windows `TerminateProcess` answers
+    /// `ERROR_ACCESS_DENIED` for a process that has ended or is ending, and
+    /// std reports that as `Ok`), and it returns `Err` when nothing was
+    /// sent at all and the child runs on. So the clock recorded here
+    /// orders the attempt and bounds nothing: a child that was still
+    /// running at a failed attempt, or that exited between the poll that
+    /// found it running and the system call, ends with a completion's
+    /// status, and what the samplers feed back for it is [`Self::reaped`],
+    /// read once [`Self::wait`] has returned that status.
+    /// Until 2026-09-10 the samplers fed such a child back as this clock:
+    /// first as the clock read *before* the call (the ultra review of
+    /// `2d3fa9d1`, finding 1: a 20 ms pause between the read and the call
+    /// fed a completed 1.09 ms pick back as 121 µs, below the pick and
+    /// clamped to [`KillBudget::FLOOR`], and seven kills of children that
+    /// had not begun were the evidence of a batch), then as the clock read
+    /// after it (the ultra review of `8441c5fe`, finding 1: an attempt made
+    /// to fail on the first kill fed a child still running at 117 µs back
+    /// as 117 µs, and the batch collapsed the same way).
     pub(crate) fn kill(&mut self) {
-        let fired = self.spawned.elapsed();
         let outcome = self.child.kill();
-        self.fired = Some(fired);
-        let _ = outcome;
+        self.fired = Some(self.origin.elapsed());
+        self.kill_error = outcome.err();
     }
 
-    /// Whether the child has exited on its own, and how long it took.
+    /// Whether the child has exited on its own, and when the parent saw it.
     ///
-    /// The sampler races a measured duration, and when its measurement is
-    /// wrong every kill lands after the child is already gone. Wall time
-    /// from spawn to reap cannot tell it so: that clock includes the
-    /// scheduled sleep, so an over-long schedule reports itself back as the
-    /// duration it should have been. This reports the child's **own** time,
-    /// which is the only number a recalibration can honestly use.
+    /// The duration is the clock at the poll that found the child gone, from
+    /// the origin read before its spawn: the parent's observation of the
+    /// exit, not the child's own time, which no platform hands a parent —
+    /// `wait4` carries a child's CPU times and no wall-clock exit, and
+    /// Windows' `GetProcessTimes`, which does, is not bound here. The poll
+    /// is the next one when the parent holds a core — at once while
+    /// [`Self::run_until`] spins, after a sleep of a millisecond before then
+    /// — and the one after the scheduler's wake-up when it does not, and
+    /// [`KillBudget`] follows the number as the poll read it.
     ///
     /// `None` while it is still running.
     pub(crate) fn exited(&mut self) -> Option<std::time::Duration> {
         match self.child.try_wait() {
-            Ok(Some(_)) => Some(self.spawned.elapsed()),
+            Ok(Some(_)) => Some(self.origin.elapsed()),
             _ => None,
         }
     }
 
-    /// Reap it. The wait status is the only thing a kill changes.
+    /// Reap it, recording the clock once its status is in. The wait status
+    /// is the only thing a kill changes.
     pub(crate) fn wait(&mut self) -> std::process::ExitStatus {
-        self.child.wait().expect("reap the sampled git child")
+        let status = self.child.wait().expect("reap the sampled git child");
+        self.reaped = Some(self.origin.elapsed());
+        status
     }
 
-    /// When a kill fired at this child, if one ever did.
+    /// Leave the child running until `aim` after its spawn or until it
+    /// exits on its own, and say which: `Some` with how long it ran, as the
+    /// parent saw it, if it exited first; `None` if it was still running at
+    /// the aim — and then **the kill has fired**, sent by the poll that found
+    /// it running there, and [`Self::fired`] says when.
+    ///
+    /// Polled, never slept through. `sleep(aim)` then `kill` reports nothing
+    /// about the child and wakes when the scheduler pleases, so on a loaded
+    /// host the kill is late by the wake-up and the sampler cannot tell a
+    /// child it missed from one it never aimed inside. Here [`Self::exited`]
+    /// is asked once a millisecond while the aim is far and continuously
+    /// once it is within [`Self::SPIN_WITHIN`], and the poll that reaches
+    /// the aim with the child still running sends the kill itself, with no
+    /// return to the caller between the two. What remains is the
+    /// platform's: between that poll's `try_wait` and the kill's own system
+    /// call the parent can be descheduled, and a child that exits in that
+    /// window is missed by the kill and ends on its own terms — its status
+    /// is a completion, not the kill's signature, and the samplers feed it
+    /// back like any completion, as [`Self::reaped`], the clock once
+    /// [`Self::wait`] has returned that status.
+    pub(crate) fn run_until(&mut self, aim: std::time::Duration) -> Option<std::time::Duration> {
+        let deadline = self.origin + aim;
+        loop {
+            if let Some(ran) = self.exited() {
+                return Some(ran);
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                self.kill();
+                return None;
+            }
+            if deadline - now > Self::SPIN_WITHIN {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+
+    /// How close to its aim [`Self::run_until`] stops sleeping and polls
+    /// continuously: wider than a loaded host's wake-up from a
+    /// one-millisecond sleep.
+    const SPIN_WITHIN: std::time::Duration = std::time::Duration::from_millis(4);
+
+    /// The clock once `Command::spawn` had returned, from the origin read
+    /// before it: the spawn's own latency, which [`Self::fired`],
+    /// [`Self::exited`] and [`Self::reaped`] all include. The two samplers
+    /// of this fixture aim from the origin, feed back from it and subtract
+    /// nothing. The `T-ATTEMPT` sampler (`engine::topology::attempt::tests`)
+    /// sets each rung as a delay after the spawn's return and asserts that
+    /// its kill fired no sooner than the rung, so it subtracts this from
+    /// `fired`, and from the clock `exited` read, to bring both to the
+    /// reference its rungs and its retry budget have. Read from the origin,
+    /// its `fired` counted the spawn's latency toward the rung: the ultra
+    /// review of `ec87d6ed` (finding 1) paused the spawn one second after
+    /// the origin and removed that sampler's deadline loop, and every kill,
+    /// fired the instant the spawn returned, read 1.0002 s against rungs of
+    /// 0.66–7.5 ms and passed.
+    pub(crate) fn spawned(&self) -> std::time::Duration {
+        self.spawned
+    }
+
+    /// The clock once a kill attempt at this child had returned, if one was
+    /// ever made — whatever it returned. It orders the attempt against the
+    /// child's clock and says nothing else: not that the signal was sent
+    /// ([`Self::kill_error`]), not that the child had exited
+    /// ([`Self::reaped`]).
     pub(crate) fn fired(&self) -> Option<std::time::Duration> {
         self.fired
+    }
+
+    /// What the kill attempt returned when it was not `Ok`: nothing was
+    /// sent, and the child ran on to an end of its own.
+    pub(crate) fn kill_error(&self) -> Option<&std::io::Error> {
+        self.kill_error.as_ref()
+    }
+
+    /// The clock once [`Self::wait`] had returned the child's status, if it
+    /// has, from the origin read before its spawn — whichever way the child
+    /// ended: killed, missed by the kill, or never reached by a failed
+    /// attempt. For a child that ended with a completion's status this is
+    /// what the samplers feed back.
+    pub(crate) fn reaped(&self) -> Option<std::time::Duration> {
+        self.reaped
     }
 }
 
@@ -567,4 +701,132 @@ pub(crate) fn time_git(cwd: &Path, args: &[String]) -> std::time::Duration {
         String::from_utf8_lossy(&output.stderr)
     );
     elapsed
+}
+
+/// A kill sampler's budget: how long an uninterrupted run of the sampled
+/// command takes on this machine, now.
+///
+/// A sampler aims its kills at fixed fractions of one duration, and every
+/// sampler in this tree that took that duration from a single measured run
+/// has been red on a hosted macOS runner with every kill landing after its
+/// child had already finished (`PR7-SAMPLER-SCHEDULES-FROM-A-COLD-PROBE`,
+/// `PR80-MACOS-WORKSPACE-SAMPLER-COLD-PROBE-RECURRENCE`,
+/// `RECOVER-CHERRY-PICK-SAMPLER-COLD-PROBE`,
+/// `G4B-O10-REPAIR-MATERIALIZE-SAMPLER-MACOS-KILL-FLOOR`). So the budget is
+/// never one number. It starts as the median of a probe's runs after a
+/// discarded warm-up, and it follows the sampled children themselves: a
+/// child that finished before its kill has measured the command under the
+/// sampler's own conditions, at that moment, and the next kill is aimed
+/// inside what it took. An inflated probe is corrected by the first child
+/// that outruns it; a host that drifts is tracked rung by rung.
+///
+/// It follows in both directions and is not capped at the probe: a host
+/// that slows after the probe needs rungs past it to reach the pick's
+/// writes, and a completion the parent saw late — woken after the exit, or
+/// a child the kill did not stop, fed back as the clock once its `wait` had
+/// returned — is followed as it was read, never as a ceiling. What the
+/// ladder follows is the median of the last [`KillBudget::RECENT`] such
+/// completions, over however many exist: the first sets the budget alone,
+/// of two the longer is taken, and from three on one late observation
+/// among three is outvoted by the other two while two are not — so a late
+/// first observation holds until two shorter completions follow it, and
+/// three late ones hold until two do ([`KillBudget::current`]).
+pub(crate) struct KillBudget {
+    probe: std::time::Duration,
+    /// The clock at which the parent established the exit of each child
+    /// that ended with a completion's status, from the origin read before
+    /// its spawn, oldest first.
+    completed: Vec<std::time::Duration>,
+}
+
+impl KillBudget {
+    /// No budget below this: a measurement that small is the clock's, not
+    /// the command's.
+    pub(crate) const FLOOR: std::time::Duration = std::time::Duration::from_micros(200);
+
+    /// How many of the most recent completions the budget follows: three,
+    /// so that once three exist one late observation among them is outvoted
+    /// by the other two, and so that the first completion replaces the probe
+    /// at once. Until three exist nothing is outvoted: one completion sets
+    /// the ladder alone, and of two the longer is taken.
+    pub(crate) const RECENT: usize = 3;
+
+    /// From a probe's uninterrupted runs, in order. The first is the
+    /// warm-up and is discarded — the first run in a fresh worktree pays
+    /// for cold caches and, on Windows, an antivirus pass — and the budget
+    /// is the median of the rest, because the failure mode of one
+    /// measurement is one outlier, which a median discards and a mean
+    /// keeps.
+    pub(crate) fn probed(runs: &[std::time::Duration]) -> Self {
+        assert!(
+            runs.len() > 1,
+            "a budget needs a warm-up run and at least one after it: {runs:?}"
+        );
+        let after_warm_up = runs.get(1..).unwrap_or_default();
+        Self {
+            probe: median(after_warm_up)
+                .unwrap_or(Self::FLOOR)
+                .max(Self::FLOOR),
+            completed: Vec::new(),
+        }
+    }
+
+    /// What the probe measured, for the record a red run carries.
+    pub(crate) fn probe(&self) -> std::time::Duration {
+        self.probe
+    }
+
+    /// The budget now: the median of the last [`Self::RECENT`] children
+    /// that finished before their kill, over however many have — one alone,
+    /// the longer of two, the middle of three — or the probe's while none
+    /// has. [`median`] takes the upper of an even count, so a late first
+    /// completion is not displaced by one shorter one; two are needed.
+    pub(crate) fn current(&self) -> std::time::Duration {
+        let recent: Vec<std::time::Duration> = self
+            .completed
+            .iter()
+            .rev()
+            .take(Self::RECENT)
+            .copied()
+            .collect();
+        median(&recent).unwrap_or(self.probe).max(Self::FLOOR)
+    }
+
+    /// Where the kill of rung `rung` (from zero) of `rungs` is aimed: the
+    /// ladder's fraction `(rung + 1) / (rungs + 1)` of the current budget,
+    /// so the rungs stay spread through the command and never reach its
+    /// measured end.
+    pub(crate) fn aim(&self, rung: u32, rungs: u32) -> std::time::Duration {
+        self.current()
+            .mul_f64(f64::from(rung + 1) / f64::from(rungs + 1))
+    }
+
+    /// A child ended with a completion's status: `clock` is the clock at
+    /// which the parent established its exit, from the origin read before
+    /// its spawn — the poll that found it gone, or, when the kill attempt
+    /// did not stop it, the return of the `wait` that reaped it. The two
+    /// differ in what the parent did, not in where the exit fell against
+    /// the aim, which the parent cannot see: on the first, no poll reached
+    /// the aim with the child running and no kill was sent — a parent
+    /// descheduled across the aim and the exit alike finds the child gone
+    /// at its next poll, whichever of the two came first; on the second, a
+    /// poll reached the aim with the child still running, and the kill sent
+    /// from there missed it, or was not sent at all
+    /// ([`KillableGitChild::kill_error`]). The budget follows what the child
+    /// took either way, as the parent read it.
+    pub(crate) fn completed(&mut self, clock: std::time::Duration) {
+        self.completed.push(clock);
+    }
+
+    /// How many children have moved the budget.
+    pub(crate) fn completions(&self) -> usize {
+        self.completed.len()
+    }
+}
+
+/// The median of `durations`; `None` of none.
+pub(crate) fn median(durations: &[std::time::Duration]) -> Option<std::time::Duration> {
+    let mut sorted = durations.to_vec();
+    sorted.sort_unstable();
+    sorted.get(sorted.len() / 2).copied()
 }

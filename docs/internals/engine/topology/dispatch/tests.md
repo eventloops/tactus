@@ -398,8 +398,84 @@ name still and is recorded, not changed
 (`PR249-KILL-SAMPLER-WINDOWS-WRAPPER`). The same run failed the kill-count
 floor on macOS with 6 kills in 32 spawns and 26 picks complete before their
 kill — four of the six mid-write — because the budget was one cold probe pick
-spread over a schedule most warm picks beat; the budget is now the shorter of
-two probe picks and `MAX_SPAWNS` is `8 × SAMPLING_N`.
+spread over a schedule most warm picks beat. The shorter of two probe picks
+and `MAX_SPAWNS = 8 × SAMPLING_N` answered it, and the answer was not enough.
+
+**The budget follows the picks it schedules.**
+`G4B-O10-REPAIR-MATERIALIZE-SAMPLER-MACOS-KILL-FLOOR` records 7 kills in 64
+spawns on `test (macos-latest)` at `c00c8638`, a Markdown-only pull request,
+and the merge-queue entry for #258 (run 34432439820) collected 5 in 64 —
+three before git's first write, two mid-write, and 59 picks complete before
+their kill, which places the lowest rung at the write window's start and the
+second past the pick's end: a budget some six times the picks it scheduled,
+taken from two probe picks in a row. So the budget is `fixture::KillBudget`:
+four probe picks in the probe worktree with `read-tree --reset -u HEAD`
+between them, the first discarded as the warm-up and the median of the other
+three taken; and it follows the samples — a child that completed before its
+kill has measured the pick under the sampler's own conditions, at that
+moment, and the next rung is aimed inside the median of the last three such
+completions, so an inflated probe is corrected by the first child that
+outruns it and a drifting host is tracked rung by rung. The kill itself is
+`KillableGitChild::run_until` rather than `sleep` then `kill`: the child is
+polled to the aim, once a millisecond while it is far and continuously
+through its last four, and the poll that reaches the aim with the child
+still running sends the kill, with no return to the caller between the two.
+A child that exits first is observed at the poll that finds it gone — the
+parent's clock, from an origin read before the spawn, not the child's own —
+and a child that finishes in the window between that last poll's `try_wait`
+and the kill's system call, the parent descheduled there, ends with a
+completion's status and is fed back, where until 2026-09-10 it was thrown away
+(the ultra review of `f837f4ca`, finding 2), as the clock at which the
+parent established the exit — `reaped`, read once `Child::wait` has returned
+the status. The kill's own clock is not that: `Child::kill` returns `Ok` once
+the signal is sent and also for a child that has already exited, and `Err`
+when nothing was sent, so the clock once it has returned orders the call and
+bounds no child. At `62f55943` that clock was read before the system call, and
+a parent paused there fed a completed pick back as the instant before the
+pause, below the pick and clamped to the floor (the ultra review of
+`2d3fa9d1`, finding 1); at `95eece1c` it was read after the call with its
+`Result` discarded, and a first kill made to return `Err` without sending fed
+a child still running at 83 µs back as 83 µs (the ultra review of `8441c5fe`,
+finding 1). This sampler's mid-write floor refuses the ladder that follows
+from either — at `2d3fa9d1` a 20 ms pause on the first kill fed sample 0 back
+as 83.7 µs, every later rung was aimed at 22–178 µs, and the run went red with
+`none of the 63 kills in 64 spawns landed while the pick was writing`; the
+failed kill at `8441c5fe` went red the same way — where the recover sampler's
+`>= 1` did not, and that sampler now carries the same floor (its notes). Here
+the failed kill's child is fed back as the wait's clock — the kill failed at
+95.3 µs, the wait returned at 769 µs, 769 µs fed back; 86.9 µs, 763 µs, 763 µs
+— the ladder follows a real pick and the floors are met; the same injection
+with the feedback reverted to the kill's clock is red twice with `none of the
+63 kills in 64 spawns`. The 20 ms pause, from `95eece1c` on, feeds sample 0
+back as the pause's own length (here 20.137 and 20.144 ms, against a pause
+that ended at 20.131 and 20.138 ms), the next two picks complete in 1.10–1.12
+ms, and the floors are met with `Internal` kills among the eight. The origin
+itself moved last: until 2026-09-10 it was read once `Command::spawn` had
+returned (the ultra review of `d1fef26d`, finding 1), and a 20 ms pause there
+on the first child let sample 0 complete before the origin existed, fed back
+as 2.2–2.3 µs against a probe of 706–724 µs, every later rung aimed at 22–178
+µs and this floor red twice with `none of the 63 kills in 64 spawns`; read
+before the spawn now, the same pause feeds sample 0 back as 20.1 ms against a
+20.05 ms pause, the next picks complete in 0.87–1.12 ms and the floors are met
+in 13 spawns (#259's body, W4). The window and a late observation remain. The budget is a median over however many of the last
+three completions exist — one alone, the longer of two, the middle of three
+— so a late observation holds until two shorter completions follow it, not
+until the next; the recover notes carry the build-box measurements, stated
+as the medians of separate populations they are, and macOS and Windows are
+reasoned, not measured. The floors are unchanged; each one's message now
+carries the probe, the number of completions the ladder followed and every
+spawn's aim and outcome — completed, in the poll's clock; killed, with the
+clock at which the kill returned; outran the kill, with that clock and the
+wait's; or outlived a kill that failed, with its error and the wait's clock. Measured on the build box at `81ee09ef`: the pick takes about
+0.77 ms in a fresh worktree and warm alike, its first write lands about 0.58
+ms in and `MERGE_MSG` at its end, so one cycle of the ladder lands six
+`None`, one `Internal` and one `After` without `MERGE_MSG` and the floors
+are met in eight spawns; 0 of 25 runs alone failed here before the change
+and 0 of 25 after it. Of the 155 hosted macOS runs that completed
+between 2026-09-07 and 2026-09-10, this floor was red on 3, by this message:
+34293462480 at `56ea88c9` (6 kills in 32 spawns), 34385164329 at `c00c8638`
+(7 in 64) and the merge-queue entry for #258, 34432439820 (5 in 64); the
+census names every run (#259's body). The leg's own evidence is CI's.
 
 ## `fn a_continuation_after_a_completed_pick_hands_the_worker_the_tree_one_pick_produces() {`
 

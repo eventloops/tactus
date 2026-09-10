@@ -10036,47 +10036,69 @@ fn remove_git_ref_lock_residue(git_dir: &Path) -> Vec<PathBuf> {
 
 #[test]
 fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
+    use crate::workspace_manager::fixture::{KillBudget, KillableGitChild, died_by_kill, time_git};
+
     const SAMPLING_N: u32 = 8;
+    /// One bounded retry: when the first `SAMPLING_N` all completed before
+    /// their kill, the ladder has been re-aimed inside what they took, and
+    /// `SAMPLING_N` more are sampled on it before the refusal below fires.
+    const MAX_SPAWNS: u32 = 2 * SAMPLING_N;
+    /// A warm-up the budget discards, then the three it takes the median of.
+    const PROBE_PICKS: usize = 4;
     let site = EffectSiteId::Object(ObjectSite::ProposalCherryPick);
 
     let two_tasks = || Damage {
         two_tasks: true,
         ..Damage::default()
     };
-    let budget = {
+    let mut budget = {
         let probe = Fixture::build("sample-probe", two_tasks());
         let (planted, head) = plant_stale_queued_candidate(&probe);
         let staging = plant_staging_worktree(&probe, 1, head.as_str());
-        let started = std::time::Instant::now();
-        let output = crate::workspace_manager::fixture::git_out(
-            &staging,
-            &["cherry-pick", planted.commit.as_str()],
-        );
-        assert!(
-            output.status.success(),
-            "the probe pick must really run: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        started.elapsed().max(Duration::from_micros(200))
+        let argv = vec!["cherry-pick".to_owned(), planted.commit.0.clone()];
+        let mut picks = Vec::with_capacity(PROBE_PICKS);
+        for _ in 0..PROBE_PICKS {
+            picks.push(time_git(&staging, &argv));
+            crate::workspace_manager::fixture::git(
+                &staging,
+                &["reset", "-q", "--hard", head.as_str()],
+            );
+        }
+        KillBudget::probed(&picks)
     };
 
     let mut observed = Vec::new();
     let mut refusals = Vec::new();
+    let mut timeline = Vec::new();
     let mut killed_while_running = 0_u32;
-    for run in 0..SAMPLING_N {
+    // Kills that found the pick's own state — its index lock, its sequencer
+    // state, an object written and not yet published (`Internal`): a kill
+    // after the pick's first write and before its publish, inside a pick
+    // under way, which is what a sample is advertised as evidence of. A
+    // kill that found nothing written (`None`) interrupted a child that had
+    // not begun, and one that found the commit published (`After`) a pick
+    // that had finished; both are kills, and the ultra reviews of
+    // `2d3fa9d1` and `8441c5fe` each passed this test on seven of the
+    // first kind alone.
+    let mut killed_while_writing = 0_u32;
+    let mut spawns = 0_u32;
+    let mut planned = SAMPLING_N;
+    while spawns < planned {
+        let run = spawns;
+        spawns += 1;
         let fixture = Fixture::build(&format!("sample-{run}"), two_tasks());
         let (planted, head) = plant_stale_queued_candidate(&fixture);
         let staging = plant_staging_worktree(&fixture, 1, head.as_str());
 
-        let mut child = crate::workspace_manager::fixture::KillableGitChild::spawn(
+        let aim = budget.aim(run % SAMPLING_N, SAMPLING_N);
+        let mut child = KillableGitChild::spawn(
             &staging,
             &["cherry-pick".to_owned(), planted.commit.0.clone()],
         );
-        std::thread::sleep(budget.mul_f64(f64::from(run + 1) / f64::from(SAMPLING_N + 1)));
-        let running_at_kill = child.exited().is_none();
-        child.kill();
+        let ran = child.run_until(aim);
+        let running_at_kill = ran.is_none();
         let status = child.wait();
-        let died_by_kill = crate::workspace_manager::fixture::died_by_kill(&status);
+        let died_by_kill = died_by_kill(&status);
         assert!(
             died_by_kill || status.success(),
             "run {run}: the child ended {status:?}, which is neither the kill's signature nor \
@@ -10090,14 +10112,49 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
                 "run {run}: the child was running when the kill fired and yet exited \
                  {status:?}"
             );
+            // A completed pick measured the pick, and what is fed back is the
+            // clock at which the parent established its exit: `ran`, the poll
+            // that found it gone, or, when the kill attempt did not stop it —
+            // it exited between the poll that found it running and the system
+            // call, or the attempt failed and sent nothing — the clock once
+            // `wait` had returned its status. The kill's own clock is neither
+            // (the ultra reviews of `2d3fa9d1` and `8441c5fe`, finding 1 of
+            // each).
+            if let Some(clock) = ran.or(child.reaped()) {
+                budget.completed(clock);
+            }
         }
+        let fired = child
+            .fired()
+            .map_or_else(|| "never".to_owned(), |fired| format!("{fired:?}"));
+        let reaped = child
+            .reaped()
+            .map_or_else(|| "never".to_owned(), |reaped| format!("{reaped:?}"));
+        timeline.push(format!(
+            "run {run}: aimed at {aim:?}, {}",
+            match (ran, child.kill_error()) {
+                (Some(ran), _) => format!("completed in {ran:?}"),
+                (None, _) if died_by_kill => format!("killed, the kill returned at {fired}"),
+                (None, None) => {
+                    format!("outran the kill, which returned at {fired}; exited by {reaped}")
+                }
+                (None, Some(error)) => format!(
+                    "outlived the kill, which failed at {fired} ({error}); exited by {reaped}"
+                ),
+            }
+        ));
         let _ = remove_git_ref_lock_residue(&fixture.git_dir);
 
         let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
             .at(&staging)
             .from_base(head.as_str());
         match crate::workspace_manager::classify_object_residue(site, &target) {
-            Ok(class) => observed.push((class, status)),
+            Ok(class) => {
+                if died_by_kill && class == crate::topology::effects::ObjectResidue::Internal {
+                    killed_while_writing += 1;
+                }
+                observed.push((class, status));
+            }
             Err(error) => refusals.push(format!("run {run}: {error}")),
         }
 
@@ -10118,24 +10175,50 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
             "run {run}: the candidate integrates after the reclaim under sequence 1: {:?}",
             driven.progress
         );
+
+        // The first batch is in. When no kill in it landed inside a writing
+        // pick — every child completed before its kill, or every kill found
+        // a child that had not begun or one that had finished — the ladder
+        // has by then been re-aimed inside every pick that completed, and a
+        // whole second batch is sampled on it, as the T-ATTEMPT sibling's is
+        // — not a second batch cut short at its first kill, which made one
+        // earliest-rung kill the evidence of eight.
+        if spawns == SAMPLING_N && killed_while_writing == 0 {
+            planned = MAX_SPAWNS;
+        }
     }
 
     assert!(
         refusals.is_empty(),
-        "the classifier refused {} of {SAMPLING_N} samples: {refusals:?}",
+        "the classifier refused {} of {spawns} samples: {refusals:?}",
         refusals.len()
     );
     assert_eq!(
         observed.len(),
-        SAMPLING_N as usize,
+        spawns as usize,
         "every sample was classified into one of the site's classes and recovered"
     );
     assert!(
         killed_while_running >= 1,
-        "no sample died by the kill: the ladder's first rung fires at one ninth of a measured \
-         pick, so a kill that reaches a running child cannot leave it exit 0, and a run in which \
-         every child exited cleanly is a run in which nothing was killed — the evidence of \
-         {SAMPLING_N} samples was of completed picks, not of kills: {observed:?}"
+        "no sample died by the kill: the ladder is aimed at fractions of the probe's median pick \
+         and re-aimed inside every pick that completed before its kill, and when the first \
+         {SAMPLING_N} samples all completed, {SAMPLING_N} more were sampled on the re-aimed \
+         ladder, so a kill that reaches a running child cannot leave it exit 0, and a run in \
+         which every child exited cleanly is a run in which nothing was killed — the evidence of \
+         {spawns} samples was of completed picks, not of kills: {observed:?}; the probe measured \
+         {:?}, and the ladder followed {} completion(s): {timeline:?}",
+        budget.probe(),
+        budget.completions()
+    );
+    assert!(
+        killed_while_writing >= 1,
+        "none of the {killed_while_running} kills in {spawns} spawns landed while the pick was \
+         writing — each found a child that had not begun (`None`, nothing written) or one \
+         that had published its commit (`After`) — so the sample interrupted no pick under \
+         way: {observed:?}; the probe measured {:?}, and the ladder followed {} \
+         completion(s): {timeline:?}",
+        budget.probe(),
+        budget.completions()
     );
 }
 
