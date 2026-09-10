@@ -10071,6 +10071,16 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
     let mut refusals = Vec::new();
     let mut timeline = Vec::new();
     let mut killed_while_running = 0_u32;
+    // Kills that found the pick's own state — its index lock, its sequencer
+    // state, an object written and not yet published (`Internal`): a kill
+    // after the pick's first write and before its publish, inside a pick
+    // under way, which is what a sample is advertised as evidence of. A
+    // kill that found nothing written (`None`) interrupted a child that had
+    // not begun, and one that found the commit published (`After`) a pick
+    // that had finished; both are kills, and the ultra reviews of
+    // `2d3fa9d1` and `8441c5fe` each passed this test on seven of the
+    // first kind alone.
+    let mut killed_while_writing = 0_u32;
     let mut spawns = 0_u32;
     let mut planned = SAMPLING_N;
     while spawns < planned {
@@ -10139,7 +10149,12 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
             .at(&staging)
             .from_base(head.as_str());
         match crate::workspace_manager::classify_object_residue(site, &target) {
-            Ok(class) => observed.push((class, status)),
+            Ok(class) => {
+                if died_by_kill && class == crate::topology::effects::ObjectResidue::Internal {
+                    killed_while_writing += 1;
+                }
+                observed.push((class, status));
+            }
             Err(error) => refusals.push(format!("run {run}: {error}")),
         }
 
@@ -10161,12 +10176,14 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
             driven.progress
         );
 
-        // The first batch is in. When every child of it completed before its
-        // kill, the ladder has been re-aimed inside what they took and a
+        // The first batch is in. When no kill in it landed inside a writing
+        // pick — every child completed before its kill, or every kill found
+        // a child that had not begun or one that had finished — the ladder
+        // has by then been re-aimed inside every pick that completed, and a
         // whole second batch is sampled on it, as the T-ATTEMPT sibling's is
         // — not a second batch cut short at its first kill, which made one
         // earliest-rung kill the evidence of eight.
-        if spawns == SAMPLING_N && killed_while_running == 0 {
+        if spawns == SAMPLING_N && killed_while_writing == 0 {
             planned = MAX_SPAWNS;
         }
     }
@@ -10190,6 +10207,16 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
          which every child exited cleanly is a run in which nothing was killed — the evidence of \
          {spawns} samples was of completed picks, not of kills: {observed:?}; the probe measured \
          {:?}, and the ladder followed {} completion(s): {timeline:?}",
+        budget.probe(),
+        budget.completions()
+    );
+    assert!(
+        killed_while_writing >= 1,
+        "none of the {killed_while_running} kills in {spawns} spawns landed while the pick was \
+         writing — each found a child that had not begun (`None`, nothing written) or one \
+         that had published its commit (`After`) — so the sample interrupted no pick under \
+         way: {observed:?}; the probe measured {:?}, and the ladder followed {} \
+         completion(s): {timeline:?}",
         budget.probe(),
         budget.completions()
     );
