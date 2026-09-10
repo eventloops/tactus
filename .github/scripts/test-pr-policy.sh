@@ -849,66 +849,76 @@ fi
 # fix-P2/correctness_<desc> at exit 0 on the very commit the workflow path
 # refused at exit 1. Two answers to one documented question is the defect, so
 # both paths are asserted on the same repository.
-repo_k="$fixture_dir/repo-symlink-not-a-finding"
-new_repo "$repo_k"
-echo seed > "$repo_k/seed.txt"
-git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m base
-k_base="$(git -C "$repo_k" rev-parse HEAD)"
-mkdir -p "$repo_k/reviews/findings"
-ln -s ../../seed.txt "$repo_k/reviews/findings/P2_correctness_202609101200_not-a-finding.md"
-# A real finding beside it, so the case proves a filter and not an empty tree.
-echo fixture > "$repo_k/reviews/findings/P3_liveness_202609101300_a-real-finding.md"
-git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m 'a symlink named like a finding'
-k_head="$(git -C "$repo_k" rev-parse HEAD)"
-if ! git -C "$repo_k" ls-tree "$k_head" reviews/findings/ | grep -q '^120000 blob '; then
-  echo 'the fixture was meant to commit a SYMLINK named like a finding' >&2
-  exit 1
-fi
-k_tree="$(verdict "$repo_k" "$k_base" "$k_head" 'fix-P2/correctness_not-a-finding')"
-if [[ "$k_tree" != 1 ]]; then
-  echo "a committed symlink named like a finding must not resolve a fix-P*/ branch; got $k_tree" >&2
-  exit 1
-fi
-# The same commit judged the documented by-hand way: that working tree's
-# reviews/findings/ handed straight in as the listing. This is the path that
-# accepted, and it must now agree with the one above.
-if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
-  "$repo_k/reviews/findings" >/dev/null 2>&1; then
-  echo 'a symlink named like a finding resolved when a directory was the listing' >&2
-  exit 1
-fi
-# The regular file beside it resolves both ways, so the filter is a filter and
-# not a listing read as empty.
-k_real="$(verdict "$repo_k" "$k_base" "$k_head" 'fix-P3/liveness_a-real-finding')"
-if [[ "$k_real" != 0 ]]; then
-  echo "the regular file beside the symlink must still resolve from the trees; got $k_real" >&2
-  exit 1
-fi
-if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
-  "$repo_k/reviews/findings" >/dev/null 2>&1; then
-  echo 'the regular file beside the symlink must still resolve from a directory listing' >&2
-  exit 1
-fi
-# A DANGLING link is a non-finding and not a read failure, which is what git
-# says about it too: a 120000 blob is one whether or not anything is at the
-# other end. Left as the only entry, the name is refused for naming no finding
-# rather than for a listing that could not be examined.
-dangling_dir="$fixture_dir/dangling-dir"
-mkdir -p "$dangling_dir"
-ln -s ./nothing-is-here "$dangling_dir/P2_correctness_202609101200_not-a-finding.md"
-dangling_rc=0
-dangling_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' "$dangling_dir" 2>&1)" \
-  || dangling_rc=$?
-if [[ "$dangling_rc" != 1 ]]; then
-  echo "a dangling symlink named like a finding must be refused; got $dangling_rc" >&2
-  exit 1
-fi
-if ! grep -q 'names no finding' <<< "$dangling_out"; then
-  echo 'a dangling symlink must read as no finding, not as a listing that cannot be examined' >&2
-  exit 1
+# The symlink cases need a filesystem that will make one. CI runs this gate on
+# ubuntu-latest alone, but the suite is run by hand on all three platforms the
+# project targets and Windows refuses a symlink without developer mode; a
+# printed skip says more than a red that is about the checkout rather than
+# about the gate.
+symlink_probe="$fixture_dir/symlink-probe"
+if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink_probe" ]]; then
+  repo_k="$fixture_dir/repo-symlink-not-a-finding"
+  new_repo "$repo_k"
+  echo seed > "$repo_k/seed.txt"
+  git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m base
+  k_base="$(git -C "$repo_k" rev-parse HEAD)"
+  mkdir -p "$repo_k/reviews/findings"
+  ln -s ../../seed.txt "$repo_k/reviews/findings/P2_correctness_202609101200_not-a-finding.md"
+  # A real finding beside it, so the case proves a filter and not an empty tree.
+  echo fixture > "$repo_k/reviews/findings/P3_liveness_202609101300_a-real-finding.md"
+  git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m 'a symlink named like a finding'
+  k_head="$(git -C "$repo_k" rev-parse HEAD)"
+  if ! git -C "$repo_k" ls-tree "$k_head" reviews/findings/ | grep -q '^120000 blob '; then
+    echo 'the fixture was meant to commit a SYMLINK named like a finding' >&2
+    exit 1
+  fi
+  k_tree="$(verdict "$repo_k" "$k_base" "$k_head" 'fix-P2/correctness_not-a-finding')"
+  if [[ "$k_tree" != 1 ]]; then
+    echo "a committed symlink named like a finding must not resolve a fix-P*/ branch; got $k_tree" >&2
+    exit 1
+  fi
+  # The same commit judged the documented by-hand way: that working tree's
+  # reviews/findings/ handed straight in as the listing. This is the path that
+  # accepted, and it must now agree with the one above.
+  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
+    "$repo_k/reviews/findings" >/dev/null 2>&1; then
+    echo 'a symlink named like a finding resolved when a directory was the listing' >&2
+    exit 1
+  fi
+  # The regular file beside it resolves both ways, so the filter is a filter and
+  # not a listing read as empty.
+  k_real="$(verdict "$repo_k" "$k_base" "$k_head" 'fix-P3/liveness_a-real-finding')"
+  if [[ "$k_real" != 0 ]]; then
+    echo "the regular file beside the symlink must still resolve from the trees; got $k_real" >&2
+    exit 1
+  fi
+  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+    "$repo_k/reviews/findings" >/dev/null 2>&1; then
+    echo 'the regular file beside the symlink must still resolve from a directory listing' >&2
+    exit 1
+  fi
+  # A DANGLING link is a non-finding and not a read failure, which is what git
+  # says about it too: a 120000 blob is one whether or not anything is at the
+  # other end. Left as the only entry, the name is refused for naming no finding
+  # rather than for a listing that could not be examined.
+  dangling_dir="$fixture_dir/dangling-dir"
+  mkdir -p "$dangling_dir"
+  ln -s ./nothing-is-here "$dangling_dir/P2_correctness_202609101200_not-a-finding.md"
+  dangling_rc=0
+  dangling_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' "$dangling_dir" 2>&1)" \
+    || dangling_rc=$?
+  if [[ "$dangling_rc" != 1 ]]; then
+    echo "a dangling symlink named like a finding must be refused; got $dangling_rc" >&2
+    exit 1
+  fi
+  if ! grep -q 'names no finding' <<< "$dangling_out"; then
+    echo 'a dangling symlink must read as no finding, not as a listing that cannot be examined' >&2
+    exit 1
+  fi
+else
+  echo 'note: skipping the symlink cases (this filesystem will not create one)' >&2
 fi
 
 # ---- the gate must not recommend a destructive migration ------------------------------------
