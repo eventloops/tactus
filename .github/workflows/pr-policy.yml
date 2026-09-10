@@ -96,11 +96,14 @@ jobs:
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-ledger-evidence.sh "$head"
 
       # The branch vocabulary. A fix-P*/ name resolves against reviews/findings/
-      # at BOTH ends, and either one is enough. Repairing a finding deletes its
-      # file, so a pull request that has done its job carries none at the head;
-      # a pull request that files the finding it repairs carries none at the
-      # base. Reading one end alone fails one of those two, and with fix/
-      # retired the second is the ordinary shape of a repair.
+      # anywhere in the pull request's RANGE, not at its two ends. Repairing a
+      # finding deletes its file, so a pull request that has done its job
+      # carries none at the head; a pull request that files the finding it
+      # repairs carries none at the base; and one that files it in one commit
+      # and repairs it in the next carries none at EITHER end, which is the
+      # single-pull-request path the retirement of fix/ depends on. The three
+      # listings below are one set: the base tree, the head tree, and every
+      # finding path the range's own commits touched.
       - name: Validate the head branch name
         shell: bash
         env:
@@ -120,6 +123,15 @@ jobs:
             | sed "s|.*/||" > "$RUNNER_TEMP/base-findings"
           git ls-tree --name-only "$head_sha" reviews/findings/ \
             | sed "s|.*/||" > "$RUNNER_TEMP/head-findings"
+          # The range. This is the only one of the three that holds a finding
+          # filed in one commit and deleted by its repair in the next, which is
+          # the whole point of resolving over the range. Blank lines are dropped
+          # with sed and not `grep -v`, because grep exits 1 when it filters
+          # everything out and this pipeline must fail only when git does.
+          git log --pretty=format: --name-only --no-renames \
+            "$BASE_SHA..$head_sha" -- reviews/findings/ \
+            | sed -e "s|.*/||" -e '/^$/d' > "$RUNNER_TEMP/range-findings"
           bash .github/scripts/validate-pr-branch.sh \
             "$(cat "$RUNNER_TEMP/pr-branch")" \
-            "$RUNNER_TEMP/base-findings" "$RUNNER_TEMP/head-findings"
+            "$RUNNER_TEMP/base-findings" "$RUNNER_TEMP/head-findings" \
+            "$RUNNER_TEMP/range-findings"

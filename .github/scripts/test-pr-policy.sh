@@ -80,6 +80,15 @@ P2_correctness_202609081500_filed-by-the-pull-request-that-repairs-it.md
 P2_performance_202609071000_split-twin.md
 EOF
 
+# The range: every finding path the pull request's own commits touched, which is
+# what `git log --name-only <base>..<head> -- reviews/findings/` reports. A
+# finding filed in one commit and deleted by its repair in the next appears here
+# TWICE, once for the add and once for the delete, and in NEITHER endpoint tree.
+cat > "$fixture_dir/range-findings.txt" <<'EOF'
+P2_correctness_202609101200_filed-and-repaired-in-one-range.md
+P2_correctness_202609101200_filed-and-repaired-in-one-range.md
+EOF
+
 cat > "$fixture_dir/legacy.txt" <<'EOF'
 # a comment, and a blank line, are not branches
 
@@ -125,6 +134,28 @@ pair_fail() {
     "$BASH" "$branch_validator" "$branch" \
     "$fixture_dir/findings.txt" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to fail against base and head: $name ($branch)" >&2
+    exit 1
+  fi
+}
+
+# triple_pass / triple_fail pass the base tree, the head tree and the range,
+# which is what the workflow passes and what a real pull request is judged by.
+triple_pass() {
+  local name="$1" branch="$2"
+  if ! LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" \
+    "$fixture_dir/head-findings.txt" "$fixture_dir/range-findings.txt" >/dev/null 2>&1; then
+    echo "expected branch to pass over the range: $name ($branch)" >&2
+    exit 1
+  fi
+}
+
+triple_fail() {
+  local name="$1" branch="$2"
+  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" \
+    "$fixture_dir/head-findings.txt" "$fixture_dir/range-findings.txt" >/dev/null 2>&1; then
+    echo "expected branch to fail over the range: $name ($branch)" >&2
     exit 1
   fi
 }
@@ -212,6 +243,79 @@ pair_fail 'wrong severity at the head' 'fix-P3/correctness_filed-by-the-pull-req
 branch_pass 'split twin, base alone'  'fix-P2/performance_split-twin'
 pair_fail   'split twin across ends'  'fix-P2/performance_split-twin'
 pair_fail   'ambiguous at both ends'  'fix-P3/liveness_twinned-description'
+
+# ---- the range, and not the two endpoints -------------------------------------------------
+#
+# The endpoints are not enough. A pull request that files a finding in one commit
+# and repairs it in the next -- deleting the file, as reviews/findings/README.md
+# requires -- has the finding at NEITHER end, and that is precisely the
+# single-pull-request path retiring fix/ depends on. Keeping the file to satisfy
+# the check is not an answer: it leaves finished work in the outstanding queue.
+triple_pass 'filed and repaired inside the range' 'fix-P2/correctness_filed-and-repaired-in-one-range'
+pair_fail   'the same name at the endpoints alone' 'fix-P2/correctness_filed-and-repaired-in-one-range'
+# The add and the delete are two lines naming ONE file. `sort -u` in the
+# validator is what keeps that one finding rather than two, so the pass above is
+# also the guard on it: without the dedup the range reads as ambiguous.
+#
+# Resolving over the range must not have become a rubber stamp.
+triple_fail 'in no tree and no commit'    'fix-P2/correctness_never-filed-at-all'
+triple_fail 'wrong severity in the range' 'fix-P3/correctness_filed-and-repaired-in-one-range'
+triple_fail 'wrong category in the range' 'fix-P2/liveness_filed-and-repaired-in-one-range'
+
+# ---- the legacy list is an exact line and never an option ---------------------------------
+#
+# The lookup passes the branch name to grep. Without `--`, a name that begins
+# with a dash is read as grep's own options: `-e<listed branch>` becomes `-e`
+# plus a LISTED pattern, so a name that is not in the file is granted the
+# exemption -- and the validator returns before the grammar is ever checked. The
+# list is an escape hatch the owner intends to delete; inheriting an entry
+# without being on it makes its contents meaningless.
+branch_fail 'legacy short option injection' '-ecodex/findings-p3-1a57a2730a12'
+branch_fail 'legacy long option injection'  '--regexp=codex/findings-p3-1a57a2730a12'
+
+# ---- a listing that cannot be read is a refusal, never an empty set -----------------------
+#
+# An unreadable listing read as "nothing here" NARROWS the candidate set, and a
+# narrowed set turns a refusal into an acceptance: two findings match a
+# description so the name is ambiguous, one listing goes unreadable, one match is
+# left and the name "conforms". Root can read anything, so the permission cases
+# only mean something as an ordinary user.
+unreadable="$fixture_dir/unreadable.txt"
+cp "$fixture_dir/head-findings.txt" "$unreadable"
+if [[ "$(id -u)" -ne 0 ]] && chmod 000 "$unreadable" 2>/dev/null && [[ ! -r "$unreadable" ]]; then
+  # The review's own reproduction: both listings readable is an ambiguous
+  # refusal, and making one unreadable must not leave a single match behind.
+  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
+    "$fixture_dir/findings.txt" "$unreadable" >/dev/null 2>&1; then
+    echo 'expected an unreadable second listing to refuse, not to conform' >&2
+    exit 1
+  fi
+  # And a failure on the FIRST listing must not be masked by a good second one
+  # that resolves the name on its own.
+  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it' \
+    "$unreadable" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
+    echo 'expected an unreadable first listing to refuse, not to be masked' >&2
+    exit 1
+  fi
+  chmod 644 "$unreadable"
+else
+  echo 'note: skipping the unreadable-listing cases (running as root, or chmod had no effect)' >&2
+fi
+
+# A listing that exists and is readable and is still not a listing. This one
+# holds whoever is running the suite, root included, and it is the case the
+# existence-and-permission checks cannot see: the refusal has to come from the
+# read itself.
+if [[ -c /dev/null ]]; then
+  if LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter' \
+    "$fixture_dir/findings.txt" /dev/null >/dev/null 2>&1; then
+    echo 'expected a listing that is neither a file nor a directory to refuse' >&2
+    exit 1
+  fi
+fi
 
 # bulk-fix-P<n>/ carries no finding, and never batches a severity that is
 # repaired one at a time.

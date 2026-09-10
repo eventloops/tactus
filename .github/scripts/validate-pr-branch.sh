@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate-pr-branch.sh <branch-name> [base-findings [head-findings]]
+# validate-pr-branch.sh <branch-name> [base-findings [head-findings [range-findings]]]
 #
 # Refuse a pull request whose head branch is not in the branch vocabulary.
 #
@@ -63,8 +63,11 @@
 # branches are not expected to open a pull request, but they are validated here
 # anyway because one may.
 #
-# THE FINDINGS ARE READ AT THE BASE AND AT THE HEAD, AND EITHER END SUFFICES.
-# Neither end alone is right, and each fails a different pull request:
+# THE FINDING IS LOOKED FOR ACROSS THE WHOLE RANGE, NOT AT ITS TWO ENDS.
+# The claim a fix-P*/ name makes is "this pull request repairs that finding".
+# The finding therefore has to have EXISTED somewhere in the pull request's
+# range; requiring it at an endpoint is a different, stricter claim, and both
+# endpoints refuse a pull request that is doing exactly the right thing:
 #
 #   The base alone fails the pull request that files its own finding. With no
 #   fix/ prefix, a bug that was never filed has to become a finding before it
@@ -75,17 +78,40 @@
 #   DELETES its file: master carries 69 such deletions. A fix-P*/ pull request
 #   that has landed its repair has no finding file left in its own tree.
 #
-# So the caller passes both listings and this script never looks at the working
-# tree. Each is a file of finding filenames, one per line, or a directory to
-# list when running by hand. The two are taken as one SET: a filename present at
-# both ends is one finding and not two, a name that resolves at either end
-# resolves, and a name that matches two distinct findings across them is still
-# ambiguous and still refused.
+#   BOTH ENDPOINTS TOGETHER STILL FAIL THE ONE PULL REQUEST THE PREFIX EXISTS
+#   FOR: one that files the finding in commit A and repairs it in commit B,
+#   deleting the file as reviews/findings/README.md requires. The base has no
+#   finding, the head has no finding, and the file existed only in between.
+#   Keeping the file to get past the check is not the answer either: that leaves
+#   finished work sitting in the outstanding queue, which the ledger forbids.
+#
+# So the caller passes the base tree, the head tree, and every finding path the
+# range's own commits touched, and this script never looks at the working tree.
+# Each is a file of finding filenames, one per line, or a directory to list when
+# running by hand. They are taken as one SET: a filename in more than one of
+# them is one finding and not two, a name that resolves in any of them resolves,
+# and a name that matches two distinct findings across them is still ambiguous
+# and still refused.
+#
+# WHY ALL THREE AND NOT JUST THE RANGE. A finding the pull request never touched
+# appears in no commit of the range, so the base tree is needed. The head tree
+# looks redundant next to base + range and very nearly is -- but `git log
+# --name-only` reports nothing for a MERGE commit, so a finding that entered
+# this branch through a merge rather than through a commit of its own is in the
+# head tree and in neither of the others. It costs one ls-tree, and the
+# expensive failure of this rule is a FALSE REFUSAL of a legitimate branch.
 #
 # With no listing at all only the grammar is checked, which is how the fixtures
 # exercise it without a repository. With one listing, that listing alone is the
 # set: a caller that has only the base gets the stricter rule and says so by
 # passing only the base.
+#
+# A LISTING THIS SCRIPT CANNOT READ IS A REFUSAL AND NEVER AN EMPTY SET. An
+# unreadable listing that read as "no findings here" would silently narrow the
+# set, and narrowing it can turn a refusal into an acceptance: two findings match
+# a description and the name is ambiguous, one listing goes unreadable, one match
+# is left and the name "conforms". Read failures are propagated, separately from
+# grep's ordinary no-match status.
 #
 # GRANDFATHERING. .github/legacy-branches.txt lists the branches that predate
 # this rule, one per line. It is a to-do list that shrinks: a listed branch is
@@ -105,6 +131,7 @@ legacy_file="${LEGACY_BRANCHES:-$script_dir/../legacy-branches.txt}"
 branch="${1:-}"
 base_findings="${2:-}"
 head_findings="${3:-}"
+range_findings="${4:-}"
 
 slug_re='[a-z0-9]+(-[a-z0-9]+)*'
 # Keep in step with .github/scripts/validate-pr-body.sh's category case.
@@ -133,10 +160,11 @@ compatibility, docs-contract, and a fix-P*/ branch names one finding:
   reviews/findings/P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
   fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter
 
-That finding is looked for at the base AND at the head, and either end is
-enough: a repair that deleted the file is resolved by the base, and a pull
-request that files the finding and repairs it in one go is resolved by its own
-head.
+That finding is looked for anywhere in this pull request's range, not just at
+its two ends: the base tree, the head tree, and every finding path the range's
+commits touched. A repair that deleted the file is resolved by the base; a pull
+request that files the finding and repairs it in one go is resolved by the
+range, whichever commit of it the file lived in.
 
 There is no fix/<slug> prefix. A bug worth a branch is worth a finding, so file
 the finding and branch fix-P<n>/ after it. findings/<slug> is for a pull request
@@ -160,44 +188,70 @@ fail() {
 
 # A listed legacy branch is accepted, loudly, so the exemption is visible in the
 # check's log rather than silent.
+#
+# `--` IS LOAD-BEARING. Without it a branch name beginning with a dash is read by
+# grep as its own options: `-ecodex/findings-p3-1a57a2730a12` becomes `-e` plus a
+# LISTED pattern, so a name that is not in the file is granted the exemption and
+# returns before the grammar is ever checked. The list is an escape hatch the
+# owner intends to delete; a way to inherit an entry without being on it makes
+# its contents meaningless.
 if [[ -f "$legacy_file" ]] \
-  && grep -v '^[[:space:]]*#' "$legacy_file" | grep -qxF "$branch"; then
+  && grep -v '^[[:space:]]*#' "$legacy_file" | grep -qxF -- "$branch"; then
   echo "branch-name-policy: '$branch' predates the branch vocabulary and is" >&2
   echo "  listed in ${legacy_file##*/}. Rename it when it next comes up for merge." >&2
   exit 0
 fi
 
-# A listing is checked here and not where it is read: `fail` inside the pipeline
-# below would exit that subshell alone, leave the match count at zero, and
-# report a listing that does not exist as a finding that was never filed.
+# A listing is checked here as well as where it is read: this catches a caller's
+# mistake even for a branch that needs no resolution at all, and it reports the
+# listing rather than leaving the reader to infer it from a missing finding.
 check_listing() {
-  if [[ -n "$1" && ! -e "$1" ]]; then
+  if [[ -z "$1" ]]; then
+    return 0
+  fi
+  if [[ ! -e "$1" ]]; then
     fail "findings listing '$1' is neither a file nor a directory"
+  fi
+  if [[ ! -r "$1" ]]; then
+    fail "findings listing '$1' cannot be read"
   fi
 }
 check_listing "$base_findings"
 check_listing "$head_findings"
+check_listing "$range_findings"
 
-# finding_names <listing>: the finding filenames in one listing, one per line,
-# from whichever form the caller passed.
-finding_names() {
-  local listing="$1"
+# read_listing <listing>: the finding filenames in one listing, one per line,
+# from whichever form the caller passed. A read that FAILS returns non-zero and
+# never an empty set; the existence test above cannot stand in for this, because
+# a listing can be readable when it is checked and unreadable when it is read,
+# and a directory can be readable and still not listable.
+read_listing() {
+  local listing="$1" out
   if [[ -d "$listing" ]]; then
-    ls -1 "$listing"
+    out="$(ls -1 -- "$listing")" || return 1
   elif [[ -f "$listing" ]]; then
-    cat "$listing"
+    out="$(cat -- "$listing")" || return 1
   else
-    fail "findings listing '$listing' is neither a file nor a directory"
+    echo "branch-name-policy: findings listing '$listing' is neither a file nor a directory" >&2
+    return 1
   fi
+  [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
-# candidate_names: the base and the head taken as one set. `sort -u` is what
-# makes a file that is present at both ends one finding rather than two, which
-# is every fix-P*/ pull request that has not touched reviews/findings/ yet.
+# candidate_names: the base, the head and the range taken as one set. `sort -u`
+# is what makes a file that appears in more than one listing one finding rather
+# than several, which is every fix-P*/ pull request that has not touched
+# reviews/findings/ yet.
+#
+# `|| exit 1` and not `|| return 1`: this block is the left-hand side of a
+# pipeline and so a subshell, and a bare `return` from the middle of it would
+# leave the LAST listing's status as the block's, hiding a failure on an earlier
+# one. `exit` ends the subshell there and `pipefail` carries it out.
 candidate_names() {
   {
-    if [[ -n "$base_findings" ]]; then finding_names "$base_findings"; fi
-    if [[ -n "$head_findings" ]]; then finding_names "$head_findings"; fi
+    if [[ -n "$base_findings" ]]; then read_listing "$base_findings" || exit 1; fi
+    if [[ -n "$head_findings" ]]; then read_listing "$head_findings" || exit 1; fi
+    if [[ -n "$range_findings" ]]; then read_listing "$range_findings" || exit 1; fi
   } | sort -u
 }
 
@@ -205,18 +259,28 @@ candidate_names() {
 # to repair one filed finding. Exactly one filename in that set must carry the
 # severity, category and description; the timestamp between them is free.
 resolve_finding() {
-  local n="$1" cat="$2" desc="$3" matches count
-  [[ -n "$base_findings$head_findings" ]] || return 0
-  matches="$(candidate_names | grep -E "^P${n}_${cat}_[0-9]+_${desc}\.md$" || true)"
+  local n="$1" cat="$2" desc="$3" names matches count
+  [[ -n "$base_findings$head_findings$range_findings" ]] || return 0
+  # The set is built FIRST, and a failure to build it refuses. Folding this into
+  # the `grep` pipeline below would put a read error and an ordinary no-match on
+  # the same footing, and `|| true` would then read an unreadable listing as a
+  # listing with nothing in it.
+  names="$(candidate_names)" \
+    || fail "'$branch' could not be checked: a findings listing could not be read.
+  The error is above. A gate that cannot see its input refuses rather than
+  deciding it saw nothing, because a narrowed set turns an ambiguous name into
+  an accepted one."
+  matches="$(grep -E "^P${n}_${cat}_[0-9]+_${desc}\.md$" <<< "$names" || true)"
   count="$(grep -c . <<< "${matches:-}" || true)"
   [[ -n "$matches" ]] || count=0
   case "$count" in
     1) return 0 ;;
-    0) fail "'$branch' names no finding, at the base or at the head: expected
-  exactly one P${n}_${cat}_<timestamp>_${desc}.md
+    0) fail "'$branch' names no finding anywhere in this pull request's range:
+  expected exactly one P${n}_${cat}_<timestamp>_${desc}.md
   A fix-P*/ branch repairs one filed finding and mirrors its severity, category
   and description. If this bug was never filed, file it in this pull request:
-  the head is read too, so filing and repairing together resolves the name." ;;
+  the whole range is read, so filing it in one commit and repairing it in the
+  next resolves the name even though the repair deletes the file again." ;;
     *) fail "'$branch' names $count findings, which is ambiguous:
 $(sed 's/^/  /' <<< "$matches")" ;;
   esac
