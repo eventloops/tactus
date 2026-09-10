@@ -10773,9 +10773,9 @@ fn prune_names(repository: &Path) -> Vec<String> {
         .collect()
 }
 
-/// [`temporary_object_files`] answers for exactly the files Git prunes as its
-/// own, in every place Git leaves one — and `git prune -n` itself is read
-/// beside every row, so the table is Git's and not this test's.
+/// [`temporary_object_files`] answers for the thirteen names planted below
+/// as `git prune -n` answers for them — the same `git prune -n` is read after
+/// each planting, so the table is Git's and not this test's.
 ///
 /// `resource_accounting[R27]` says "Git prunes temporary object files itself",
 /// so `git prune` is the authority on which files these are. Measured on
@@ -10786,8 +10786,8 @@ fn prune_names(repository: &Path) -> Vec<String> {
 /// marked `true` was named "Removing stale temporary file" — or "directory",
 /// for the one directory — and the rows marked `false` were not:
 /// `objects/ab/tmp_other_fanout` is reported as a *bad sha1 file* and counted
-/// in `garbage`, nothing under `objects/info` is touched at all, and
-/// `repack`'s `.tmp-<pid>-pack-*` is `repack`'s to clean, not `prune`'s. The
+/// in `garbage`, `objects/info/tmp_info` is left alone, and `repack`'s
+/// `.tmp-<pid>-pack-*` is not named. The
 /// same `git prune -n` is run here after each planting: a row the predicate
 /// and this git disagree on fails, so for the thirteen names planted below
 /// the table is this git's and not this test's
@@ -10818,11 +10818,10 @@ fn prune_names(repository: &Path) -> Vec<String> {
 fn temporary_object_files_answers_for_the_files_git_prunes_as_its_own() {
     let fixture = Fixture::new("temp-object-scan");
     let objects = object_directory(&fixture.base).expect("object directory");
-    // A fan-out directory exists only once Git first writes an object with
-    // that prefix; `pack` and `info` are created empty by `git init` itself
-    // (git 2.43.0, `32-r6-git-init-directories.log`). Every planting place
-    // is made to exist here whatever the fixture's history, and
-    // `create_dir_all` is a no-op for the ones already there.
+    // `pack` and `info` are created empty by `git init` itself (git 2.43.0,
+    // `32-r6-git-init-directories.log`). The planting places are made to
+    // exist here whatever the fixture's history, and `create_dir_all` is a
+    // no-op for the ones already there.
     for directory in ["pack", "info", "00", "ab", "ff"] {
         fs::create_dir_all(objects.join(directory)).expect("a store directory");
     }
@@ -10855,14 +10854,15 @@ fn temporary_object_files_answers_for_the_files_git_prunes_as_its_own() {
         ("00/tmp_obj_first", Planted::File, true),
         ("ab/tmp_obj_fanout", Planted::File, true),
         ("ff/tmp_obj_last", Planted::File, true),
-        // A fan-out name that is not `tmp_obj_` is Git's *garbage* — a bad
-        // sha1 file — and Git does not prune it, so it is not this element.
+        // A fan-out name that is not `tmp_obj_`: `git prune -n` reported the
+        // planted `ab/tmp_other_fanout` as a bad sha1 file, counted in
+        // `garbage`, and did not name it, so it is not this element.
         ("ab/tmp_other_fanout", Planted::File, false),
-        // `objects/info` holds no objects and Git prunes nothing in it.
+        // `git prune -n` left the planted `info/tmp_info` alone.
         ("info/tmp_info", Planted::File, false),
-        // `repack` names its in-flight pack `.tmp-<pid>-pack-*`; `prune`
-        // never names it, so R27's "Git prunes temporary object files
-        // itself" does not cover it and neither does this.
+        // `repack` names its in-flight pack `.tmp-<pid>-pack-*`; `git prune -n`
+        // did not name the two planted here, so R27's "Git prunes temporary
+        // object files itself" does not cover them and neither does this.
         (".tmp-1-pack-x.pack", Planted::File, false),
         ("pack/.tmp-1-pack-y.pack", Planted::File, false),
     ] {

@@ -753,7 +753,8 @@ fn step_env_complaints(
          folds case, which \
          `the_temporary_object_scan_resolves_case_aliases_as_the_filesystem_does` requires \
          its native branch under and observes without -- and the map is pinned whole: a \
-         dropped binding leaves the casefold P1 unguarded on the leg that declares it, a value \
+         dropped binding makes the leg observe the casefold branch instead of requiring it, so \
+         a temporary directory that stopped folding case would pass unreported; a value \
          other than `1` on a folding leg does the same, and any other key is a step-level \
          environment that can retarget the compile."
     )]
@@ -1699,8 +1700,11 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
         name: "MUT-TEST-CASEFOLD-DECLARATION-DROPPED",
         escape: "the hosted test step no longer declares that the macOS runner's temporary \
                  directory folds case, so the alias test observes its native branch there \
-                 instead of requiring it, and the casefold P1 is guarded by no gate on any leg \
-                 that GitHub hosts while every pin still matches",
+                 instead of requiring it: a folding temporary directory is no longer a \
+                 prerequisite of the leg, and on a temporary directory that does not fold \
+                 case the undeclared test passes with the branch unrun where the declared \
+                 one fails at the declaration (34-r6-casefold-declaration.log, ext4) -- while \
+                 every pin still matches",
         job: Some("test"),
         anchor: "        env:\n\
                  \x20         UPSTROKE_TEST_TEMP_FOLDS_CASE: ${{ matrix.os == 'macos-latest' && '1' || '' }}\n",
@@ -1720,7 +1724,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-TEST-STEP-RETARGETED-THROUGH-THE-ADMITTED-ENV",
-        escape: "the one step-level `env:` this contract admits gains a second key: \
+        escape: "the hosted test step's `env:`, one of the two step-level maps this contract \
+                 admits, gains a second key: \
                  `CARGO_BUILD_TARGET` retargets the compile the suite performs while the \
                  `run:` scalar and the declaration both still match -- \
                  `MUT-GATE-STEP-RETARGETED`'s shape on the step that now carries an \
@@ -1995,8 +2000,8 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-RUSTFLAGS-STEP-OVERRIDE",
-        escape: "the narrowing one level down, in the one step this contract allows an `env:` \
-                 at all -- the aggregate's. A step-level binding is the smallest form of the \
+        escape: "the narrowing one level down, in the aggregate's step, whose field set allows \
+                 an `env:`. A step-level binding is the smallest form of the \
                  same defect and the one a field-set equality cannot see, because the field is \
                  legal there.",
         job: Some("merge-gate"),
@@ -2181,8 +2186,7 @@ pub(super) const WORKFLOW_ESCAPES: &[WorkflowEscape] = &[
     },
     WorkflowEscape {
         name: "MUT-RUSTFLAGS-STEP-OVERRIDE-MIXED-CASE",
-        escape: "the same in mixed case, one level down, in the one step this contract allows \
-                 an `env:` at all",
+        escape: "the same in mixed case, one level down, in the aggregate's step",
         job: Some("merge-gate"),
         anchor: "          LINT_RESULT: ${{ needs.lint.result }}\n",
         replacement: "          LINT_RESULT: ${{ needs.lint.result }}\n\

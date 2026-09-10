@@ -4512,21 +4512,20 @@ pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError
 /// | `objects/00/tmp_obj_first`, `objects/ab/tmp_obj_fanout`, `objects/ff/tmp_obj_last` | a stale temporary file |
 /// | `objects/ab/tmp_other_fanout` | a bad sha1 file, left as garbage |
 /// | `objects/info/tmp_info` | nothing; left alone |
-/// | `objects/.tmp-1-pack-x.pack`, `objects/pack/.tmp-1-pack-y.pack` | nothing; `repack`'s to clean, not `prune`'s |
+/// | `objects/.tmp-1-pack-x.pack`, `objects/pack/.tmp-1-pack-y.pack` | nothing; not named |
 ///
-/// So: any `tmp_` name in the object root or in `pack`, and a `tmp_obj_` name
-/// in a fan-out directory. A `tmp_` name in a fan-out that is not `tmp_obj_`
-/// is Git's *garbage*, not its temporary file, and is deliberately not one of
-/// these; nor is `repack`'s `.tmp-<pid>-pack-*`, which `prune` never names
-/// and R27's sentence therefore does not cover. The root arm also matches
-/// `receive-pack`'s quarantine directory, `tmp_objdir-incoming-*`, which
-/// exists for the length of a push into the repository and which `prune`
-/// removes on the same terms; upstroke runs no `push`, `fetch`, `clone` or
-/// `receive-pack`, so only a person or another tool pushing into the
-/// repository during a run puts one there
+/// So this answers `true` for a `tmp_` name in the object root or in `pack`,
+/// and for a `tmp_obj_` name in a fan-out directory. A `tmp_` name in a
+/// fan-out that is not `tmp_obj_` is Git's *garbage*, not its temporary file,
+/// and is deliberately not one of these; nor is `repack`'s
+/// `.tmp-<pid>-pack-*`, which `prune -n` did not name and R27's sentence does
+/// not cover. The root arm reads names, not entry types, so it also matches a
+/// directory such as `receive-pack`'s quarantine, `tmp_objdir-incoming-*`,
+/// planted here by `mkdir` and named by `prune -n` a stale temporary
+/// directory; upstroke runs no `push`, `fetch`, `clone` or `receive-pack`
 /// (`PR258-ROOT-ARM-MATCHES-QUARANTINE-DIRECTORY`).
 ///
-/// **Git writes in all three places, which is why there are three arms.**
+/// **Git was traced writing in three places, which is why there are three arms.**
 /// Measured with `strace -f -e trace=openat,link,rename` on git 2.43.0
 /// (`02-strace-where-git-writes.log`,
 /// `20-r5-strace-git-writes-in-three-places.log`):
@@ -4534,8 +4533,8 @@ pub fn unreachable_objects(worktree: &Path) -> Result<Vec<String>, UpstrokeError
 /// - the common loose write goes to the **fan-out** the object's final name
 ///   will live in: `hash-object -w` opens `objects/20/tmp_obj_XybLdf` and
 ///   links it to `objects/20/f5eb9d…`, and `write-tree` opens
-///   `objects/65/tmp_obj_2Kql8B`. Neither of those two commands writes at
-///   the root;
+///   `objects/65/tmp_obj_2Kql8B`. Neither wrote at the root in those
+///   traces;
 /// - a **streamed** loose write — an object above `core.bigFileThreshold`,
 ///   whose oid, and so whose fan-out, is unknown until the stream ends —
 ///   goes to the **object root**: `unpack-objects` with the threshold at 512
@@ -4605,15 +4604,12 @@ pub fn temporary_object_files(worktree: &Path) -> Result<bool, UpstrokeError> {
 
 /// Whether `directory` holds an entry whose name starts with `prefix`.
 ///
-/// A directory that is not there holds nothing: a fan-out directory exists
-/// only once Git has first written an object with that prefix — it creates
-/// the directory on the `ENOENT` its first write meets
-/// (`02-strace-where-git-writes.log`) — and a missing `pack` is read the
-/// same way, not because a store without packs lacks one (`git init` on
-/// git 2.43.0 creates `pack` and `info` empty,
-/// `32-r6-git-init-directories.log`) but because absence is not an
-/// inspection failure. Every other failure — opening the directory, or
-/// listing it part-way through — is the caller's to see.
+/// A directory that is not there holds nothing: `NotFound` answers `false`,
+/// for a fan-out directory and for `pack` alike, because absence is not an
+/// inspection failure — not because a store without packs lacks a `pack`
+/// (`git init` on git 2.43.0 creates `pack` and `info` empty,
+/// `32-r6-git-init-directories.log`). Other failures — opening the
+/// directory, or listing it part-way through — are the caller's to see.
 fn directory_holds_name_prefixed(directory: &Path, prefix: &str) -> Result<bool, UpstrokeError> {
     let entries = match fs::read_dir(directory) {
         Ok(entries) => entries,
