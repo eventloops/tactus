@@ -25,14 +25,21 @@ no longer available. (os error 64)
 
 So one unreachable `PATH` entry aborts resolution of the whole `PATH`: **a program that is installed on a later entry is not found, and the failure is reported as a stat error rather than as an absence.** On this run the entry was a UNC path whose share does not exist, and Windows answered `os error 64` — "the specified network name is no longer available" — which is not `NotFound`. A stale mapped drive, an unreachable share, or a directory the process cannot read (`EACCES` on any platform) reaches the same early return; nothing about this is Windows-only, and Windows is only where an unreachable-by-construction `PATH` entry is routine.
 
-**Why it is intermittent, and it is intermittent by this project's own standard.** Whether the fixture's `\\server\share\bin` produces `Ok(false)` or an `Err` depends on which error the guest's SMB client returns for a host that does not resolve. The error that means "no such share" maps to `NotFound` and the walk completes, giving the `1 directory searched,` message the test asserts; `os error 64` does not, and the walk aborts. The identical source produced both colours within an hour:
+**Why it is intermittent, and it is intermittent by this project's own standard.** Whether the fixture's `\\server\share\bin` produces `Ok(false)` or an `Err` depends on which error the guest's SMB client returns for a host that does not resolve. The error that means "no such share" maps to `NotFound` and the walk completes, giving the `1 directory searched,` message the test asserts; `os error 64` does not, and the walk aborts. The identical source produced both colours:
 
 ```text
 e8fcbdd8  test (winguest)  success   2026-09-10T20:57:05Z
 5df9f7c0  test (winguest)  failure   2026-09-10T21:47:57Z   2362 passed, 1 failed, 41 ignored
+0d7a3b22  test (winguest)  success   2026-09-10T21:59:31Z   the head that carries this row
 ```
 
-**Not caused by the change in front of it.** PR #262's diff is confined to `reviews/findings/`; `git diff origin/master...HEAD -- src/ Cargo.toml Cargo.lock` is empty, so `src/` at `5df9f7c0` is byte-identical to `e8fcbdd8` and to `master`. Linux and macOS were green at the same head.
+The `src/` tree object is `cfd11655dc31` at all three: **one source, both colours, twice green and
+once red inside ninety minutes.** The green run at `0d7a3b22` is **not a retirement** — it is the
+second observation of the colour that does not fail, and the row exists because the third observation
+disagreed with it. Runs after `0d7a3b22` are not tracked here; a later green adds nothing this table
+does not already contain, and a later red should be recorded against this id rather than filed again.
+
+**Not caused by the change in front of it.** PR #262's diff is confined to `reviews/findings/`; `git diff origin/master...HEAD -- src/ Cargo.toml Cargo.lock` is empty, so the `src/` tree the table above pins is `master`'s. Linux and macOS were green at the red head.
 
 **The ledger carried no row with this fingerprint**: searching `reviews/findings/` for the test name, for `os error 64` and for the network-name wording returned nothing.
 
