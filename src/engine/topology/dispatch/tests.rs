@@ -1247,7 +1247,6 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
         let mut child = KillableGitChild::spawn(&worktree, &argv);
         let ran = child.run_until(aim);
         let running_at_kill = ran.is_none();
-        child.kill();
         let status = child.wait();
         let killed = died_by_kill(&status);
         assert!(
@@ -1261,10 +1260,17 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
                 "sample {sample}: the child was running when the kill fired and yet exited \
                  {status:?}"
             );
-            if let Some(ran) = ran {
-                budget.completed(ran);
+            // A completed pick measured the pick: within `ran` when it exited
+            // before its aim, and within the kill's own time when it exited
+            // between the poll that found it running and the kill — the
+            // completion a kill that missed used to throw away.
+            if let Some(within) = ran.or(child.fired()) {
+                budget.completed(within);
             }
         }
+        let fired = child
+            .fired()
+            .map_or_else(|| "never".to_owned(), |fired| format!("{fired:?}"));
 
         let target = ResidueTarget::new(&run.fixture.base).at(&worktree);
         let class = match classify_object_residue(MATERIALIZE, &target) {
@@ -1319,8 +1325,8 @@ fn sampled_repair_materialization_child_kills_every_residue_classified_and_recov
             "sample {sample}: aimed at {aim:?}, {}{}",
             match ran {
                 Some(ran) => format!("completed in {ran:?}"),
-                None if killed => "killed".to_owned(),
-                None => "outran the kill".to_owned(),
+                None if killed => format!("killed at {fired}"),
+                None => format!("outran the kill fired at {fired}"),
             },
             class.map_or_else(|| ", refused".to_owned(), |class| format!(", {class:?}"))
         ));

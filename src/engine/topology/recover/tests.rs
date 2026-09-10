@@ -10072,7 +10072,8 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
     let mut timeline = Vec::new();
     let mut killed_while_running = 0_u32;
     let mut spawns = 0_u32;
-    while spawns < SAMPLING_N || (killed_while_running == 0 && spawns < MAX_SPAWNS) {
+    let mut planned = SAMPLING_N;
+    while spawns < planned {
         let run = spawns;
         spawns += 1;
         let fixture = Fixture::build(&format!("sample-{run}"), two_tasks());
@@ -10086,7 +10087,6 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
         );
         let ran = child.run_until(aim);
         let running_at_kill = ran.is_none();
-        child.kill();
         let status = child.wait();
         let died_by_kill = died_by_kill(&status);
         assert!(
@@ -10102,16 +10102,23 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
                 "run {run}: the child was running when the kill fired and yet exited \
                  {status:?}"
             );
-            if let Some(ran) = ran {
-                budget.completed(ran);
+            // A completed pick measured the pick: within `ran` when it exited
+            // before its aim, and within the kill's own time when it exited
+            // between the poll that found it running and the kill — the
+            // completion a kill that missed used to throw away.
+            if let Some(within) = ran.or(child.fired()) {
+                budget.completed(within);
             }
         }
+        let fired = child
+            .fired()
+            .map_or_else(|| "never".to_owned(), |fired| format!("{fired:?}"));
         timeline.push(format!(
             "run {run}: aimed at {aim:?}, {}",
             match ran {
                 Some(ran) => format!("completed in {ran:?}"),
-                None if died_by_kill => "killed".to_owned(),
-                None => "outran the kill".to_owned(),
+                None if died_by_kill => format!("killed at {fired}"),
+                None => format!("outran the kill fired at {fired}"),
             }
         ));
         let _ = remove_git_ref_lock_residue(&fixture.git_dir);
@@ -10141,6 +10148,15 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
             "run {run}: the candidate integrates after the reclaim under sequence 1: {:?}",
             driven.progress
         );
+
+        // The first batch is in. When every child of it completed before its
+        // kill, the ladder has been re-aimed inside what they took and a
+        // whole second batch is sampled on it, as the T-ATTEMPT sibling's is
+        // — not a second batch cut short at its first kill, which made one
+        // earliest-rung kill the evidence of eight.
+        if spawns == SAMPLING_N && killed_while_running == 0 {
+            planned = MAX_SPAWNS;
+        }
     }
 
     assert!(

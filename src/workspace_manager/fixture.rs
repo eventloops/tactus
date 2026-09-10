@@ -473,14 +473,16 @@ impl KillableGitChild {
         let _ = outcome;
     }
 
-    /// Whether the child has exited on its own, and how long it took.
+    /// Whether the child has exited on its own, and when the parent saw it.
     ///
-    /// The sampler races a measured duration, and when its measurement is
-    /// wrong every kill lands after the child is already gone. Wall time
-    /// from spawn to reap cannot tell it so: that clock includes the
-    /// scheduled sleep, so an over-long schedule reports itself back as the
-    /// duration it should have been. This reports the child's **own** time,
-    /// which is the only number a recalibration can honestly use.
+    /// The duration is the clock at the poll that found the child gone: the
+    /// parent's observation of the exit, not the child's own time, which no
+    /// platform hands a parent — `wait4` carries a child's CPU times and no
+    /// wall-clock exit, and Windows' `GetProcessTimes`, which does, is not
+    /// bound here. So the number is an upper bound on the child's run,
+    /// tight by one poll while the parent holds a core and late by the
+    /// scheduler's wake-up when it does not, and [`KillBudget`] follows it
+    /// as the bound it is.
     ///
     /// `None` while it is still running.
     pub(crate) fn exited(&mut self) -> Option<std::time::Duration> {
@@ -496,17 +498,24 @@ impl KillableGitChild {
     }
 
     /// Leave the child running until `aim` after its spawn or until it
-    /// exits on its own, and say which: how long it ran if it exited, `None`
-    /// if it is still running at the aim, where a kill can reach it.
+    /// exits on its own, and say which: `Some` with how long it ran, as the
+    /// parent saw it, if it exited first; `None` if it was still running at
+    /// the aim — and then **the kill has fired**, sent by the poll that found
+    /// it running there, and [`Self::fired`] says when.
     ///
     /// Polled, never slept through. `sleep(aim)` then `kill` reports nothing
     /// about the child and wakes when the scheduler pleases, so on a loaded
     /// host the kill is late by the wake-up and the sampler cannot tell a
     /// child it missed from one it never aimed inside. Here [`Self::exited`]
-    /// is asked once a millisecond while the aim is far, and continuously
-    /// once it is within [`Self::SPIN_WITHIN`], so the kill fires within a
-    /// poll of its aim and the duration reported is the child's own, which
-    /// is the only number a recalibration can honestly use.
+    /// is asked once a millisecond while the aim is far and continuously
+    /// once it is within [`Self::SPIN_WITHIN`], and the poll that reaches
+    /// the aim with the child still running sends the kill itself, with no
+    /// return to the caller between the two. What remains is the
+    /// platform's: between that poll's `try_wait` and the kill's own system
+    /// call the parent can be descheduled, and a child that exits in that
+    /// window is missed by the kill and ends on its own terms — its status
+    /// is a completion, not the kill's signature, and [`Self::fired`] bounds
+    /// how long it ran, which the samplers feed back like any completion.
     pub(crate) fn run_until(&mut self, aim: std::time::Duration) -> Option<std::time::Duration> {
         let deadline = self.spawned + aim;
         loop {
@@ -515,6 +524,7 @@ impl KillableGitChild {
             }
             let now = std::time::Instant::now();
             if now >= deadline {
+                self.kill();
                 return None;
             }
             if deadline - now > Self::SPIN_WITHIN {
@@ -620,10 +630,16 @@ pub(crate) fn time_git(cwd: &Path, args: &[String]) -> std::time::Duration {
 /// sampler's own conditions, at that moment, and the next kill is aimed
 /// inside what it took. An inflated probe is corrected by the first child
 /// that outruns it; a host that drifts is tracked rung by rung.
+///
+/// It follows in both directions and is not capped at the probe: a host
+/// that slows after the probe needs rungs past it to reach the pick's
+/// writes, and a completion the parent saw late — woken after the exit, or
+/// a kill that missed — is an upper bound on the pick that the median of
+/// the last [`KillBudget::RECENT`] damps, never a ceiling.
 pub(crate) struct KillBudget {
     probe: std::time::Duration,
-    /// How long the children that finished before their kill ran, oldest
-    /// first.
+    /// Within how long of their spawn the children that completed before
+    /// their kill had exited, as the parent saw it, oldest first.
     completed: Vec<std::time::Duration>,
 }
 
@@ -684,10 +700,13 @@ impl KillBudget {
             .mul_f64(f64::from(rung + 1) / f64::from(rungs + 1))
     }
 
-    /// A child finished before its kill, having run for `ran`: the ladder
-    /// was aimed past it, and the budget follows what it measured.
-    pub(crate) fn completed(&mut self, ran: std::time::Duration) {
-        self.completed.push(ran);
+    /// A child completed before its kill, within `within` of its spawn: how
+    /// long it ran as the parent saw it exit, or, when it exited between the
+    /// poll that found it running and the kill, when the kill fired. Either
+    /// bounds the pick from above, the ladder was aimed past it, and the
+    /// budget follows what it measured.
+    pub(crate) fn completed(&mut self, within: std::time::Duration) {
+        self.completed.push(within);
     }
 
     /// How many children have moved the budget.
