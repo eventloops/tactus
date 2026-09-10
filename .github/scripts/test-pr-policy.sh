@@ -55,10 +55,12 @@ expect_fail 'canonical table outside ledger section' "$header"$'\n'"$separator"$
 
 branch_validator="$root/.github/scripts/validate-pr-branch.sh"
 fixture_dir="$(mktemp -d)"
-trap 'rm -rf "$fixture_dir"' EXIT
+# The permission cases leave a mode-600 directory behind when one of them
+# fails, and `rm -rf` cannot descend into it.
+trap 'chmod -R u+rwX "$fixture_dir" 2>/dev/null; rm -rf "$fixture_dir"' EXIT
 
-# The base listing: what reviews/findings/ holds at the commit the branch was
-# cut from.
+# The merge-base listing: what reviews/findings/ holds at the branch point --
+# the commit the branch was cut from, and NOT the target branch's current head.
 cat > "$fixture_dir/findings.txt" <<'EOF'
 P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
 P2_docs-contract_202609051200_readme-claims-unperformed-migrations.md
@@ -80,10 +82,10 @@ P2_correctness_202609081500_filed-by-the-pull-request-that-repairs-it.md
 P2_performance_202609071000_split-twin.md
 EOF
 
-# The range: every finding path the pull request's own commits touched, which is
-# what `git log --name-only <base>..<head> -- reviews/findings/` reports. A
-# finding filed in one commit and deleted by its repair in the next appears here
-# TWICE, once for the add and once for the delete, and in NEITHER endpoint tree.
+# The pull request's own commits: reviews/findings/ as each commit between the
+# merge base and the head left it. A finding filed in one commit and deleted by
+# its repair in the next appears here TWICE -- once for the commit that held it
+# and once for a second commit that did -- and in NEITHER endpoint tree.
 cat > "$fixture_dir/range-findings.txt" <<'EOF'
 P2_correctness_202609101200_filed-and-repaired-in-one-range.md
 P2_correctness_202609101200_filed-and-repaired-in-one-range.md
@@ -98,8 +100,8 @@ cat > "$fixture_dir/legacy.txt" <<'EOF'
 135 sweep/workspace-manager-fixture
 EOF
 
-# branch_pass / branch_fail resolve against the BASE listing alone, which is
-# what a caller that passes one listing gets.
+# branch_pass / branch_fail resolve against the MERGE-BASE listing alone, which
+# is what a caller that passes one listing gets.
 branch_pass() {
   local name="$1" branch="$2"
   if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
@@ -217,10 +219,10 @@ branch_fail 'severity out of range' 'fix-P9/correctness_pid-identity-under-a-hos
 # an ambiguous claim is refused rather than resolved to whichever sorts first.
 branch_fail 'ambiguous description' 'fix-P3/liveness_twinned-description'
 
-# The finding is resolved at the base OR at the head, and each end admits a pull
-# request the other refuses.
+# The finding is resolved at the merge base OR at the head, and each end admits
+# a pull request the other refuses.
 #
-# The base end: the pull request repaired the P1 and its file is gone from the
+# The merge-base end: the pull request repaired the P1 and its file is gone from the
 # head, which is what every fix-P*/ pull request looks like once it has done its
 # job. Resolving at the head alone would fail exactly those.
 pair_pass 'repaired, gone from the head' 'fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter'
@@ -229,7 +231,7 @@ pair_pass 'repaired, gone from the head' 'fix-P1/correctness_pid-identity-under-
 # to file it and a second to repair it, which is what retiring fix/ would
 # otherwise have cost.
 pair_pass 'filed by this pull request' 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it'
-branch_fail 'filed at the head is not at the base' 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it'
+branch_fail 'filed at the head is not at the merge base' 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it'
 # Untouched findings are at both ends. One filename in two listings is one
 # finding, not two, so the ordinary case must not read as ambiguous.
 pair_pass 'present at both ends'   'fix-P2/docs-contract_readme-claims-unperformed-migrations'
@@ -239,10 +241,10 @@ pair_pass 'present at both ends 2' 'fix-P3/liveness_a-drain-that-never-returns'
 pair_fail 'named at neither end' 'fix-P2/correctness_never-filed-at-either-end'
 # The head is matched with the same strictness as the base, severity included.
 pair_fail 'wrong severity at the head' 'fix-P3/correctness_filed-by-the-pull-request-that-repairs-it'
-# Ambiguity is judged over the set and not over each end: one twin at the base
-# and a different one at the head resolve alone but not together, and a name
-# that could mean either finding is refused rather than picked.
-branch_pass 'split twin, base alone'  'fix-P2/performance_split-twin'
+# Ambiguity is judged over the set and not over each end: one twin at the merge
+# base and a different one at the head resolve alone but not together, and a
+# name that could mean either finding is refused rather than picked.
+branch_pass 'split twin, merge base alone'  'fix-P2/performance_split-twin'
 pair_fail   'split twin across ends'  'fix-P2/performance_split-twin'
 pair_fail   'ambiguous at both ends'  'fix-P3/liveness_twinned-description'
 
@@ -412,9 +414,26 @@ commit_finding() {  # commit_finding <dir> <filename> <message>
   git -C "$1" commit -q -m "$3"
 }
 
-range_listing() {  # range_listing <dir> <base> <head> -> the range-findings lines
+range_listing() {  # range_listing <dir> <target> <head> -> the range-findings lines
   ( cd "$1" && "$BASH" "$range_script" "$2" "$3" "$1/out" >/dev/null 2>&1 ) || return 1
   cat "$1/out/range-findings"
+}
+
+# verdict <dir> <target> <head> <branch>: build the three listings from that
+# repository and print the validator's exit code. 99 means the listings could
+# not be built at all, so a construction failure can never read as a verdict.
+verdict() {
+  local dir="$1" target="$2" head="$3" branch="$4" out rc=0
+  out="$(mktemp -d "$fixture_dir/verdict-XXXXXX")"
+  if ! ( cd "$dir" && "$BASH" "$range_script" "$target" "$head" "$out" ) >/dev/null 2>&1; then
+    echo 99
+    return 0
+  fi
+  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" "$branch" \
+    "$out/merge-base-findings" "$out/head-findings" "$out/range-findings" \
+    >/dev/null 2>&1 || rc=$?
+  echo "$rc"
 }
 
 # A completed repair: commit A files the finding, commit B repairs it and
@@ -465,7 +484,7 @@ b_head="$(git -C "$repo_b" rev-parse HEAD)"
   || { echo 'findings-in-range.sh failed on the hidden-twin repository' >&2; exit 1; }
 if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
   "$BASH" "$branch_validator" 'fix-P2/correctness_a-new-bug' \
-  "$repo_b/out/base-findings" "$repo_b/out/head-findings" "$repo_b/out/range-findings" \
+  "$repo_b/out/merge-base-findings" "$repo_b/out/head-findings" "$repo_b/out/range-findings" \
   >/dev/null 2>&1; then
   echo 'a finding hidden on a merged side branch made an ambiguous name conform' >&2
   exit 1
@@ -504,8 +523,8 @@ if [[ "$got" != 'P2_correctness_202609101200_only-in-merges.md' ]]; then
   exit 1
 fi
 
-# The base tree is listed separately: `<base>..<head>` excludes the base, so a
-# finding this pull request never touched lives only there.
+# The merge-base tree is listed separately: the pull request's own commits
+# exclude it, so a finding this pull request never touched lives only there.
 repo_d="$fixture_dir/repo-untouched"
 new_repo "$repo_d"
 commit_finding "$repo_d" 'P1_liveness_202609010900_untouched-by-this-branch.md' 'base files a finding'
@@ -517,7 +536,7 @@ d_head="$(git -C "$repo_d" rev-parse HEAD)"
   || { echo 'findings-in-range.sh failed on the untouched-finding repository' >&2; exit 1; }
 if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
   "$BASH" "$branch_validator" 'fix-P1/liveness_untouched-by-this-branch' \
-  "$repo_d/out/base-findings" "$repo_d/out/head-findings" "$repo_d/out/range-findings" \
+  "$repo_d/out/merge-base-findings" "$repo_d/out/head-findings" "$repo_d/out/range-findings" \
   >/dev/null 2>&1; then
   echo 'a finding the branch never touched must still resolve, from the base tree' >&2
   exit 1
@@ -527,6 +546,210 @@ fi
 if ( cd "$repo_d" && "$BASH" "$range_script" \
   '0000000000000000000000000000000000000000' "$d_head" "$repo_d/out2" ) >/dev/null 2>&1; then
   echo 'expected a base commit that is not in the checkout to fail' >&2
+  exit 1
+fi
+
+# ---- nothing outside the pull request may change the verdict ------------------------------
+#
+# The listings were rooted at the EVENT'S BASE SHA, which is the target branch's
+# head at the moment of the event and moves for reasons that have nothing to do
+# with the pull request. Both repositories below are run twice against the SAME
+# HEAD -- once with the target at the branch point, once with it advanced -- and
+# the two verdicts must be equal. Rooted at the event's base they were not.
+#
+# The shape is a DIVERGENT BOUNDARY: a finding that exists at the branch point,
+# is repaired by the pull request, and is independently deleted on master. Once
+# master has moved, `<base>..<head>` no longer reaches the branch point and the
+# finding is in no listing at all.
+
+# One description, two findings, one of them repaired here and deleted there:
+# losing it leaves a single match and an AMBIGUOUS name conforms, which is the
+# acceptance this whole gate exists to prevent.
+repo_e="$fixture_dir/repo-divergent-ambiguous"
+new_repo "$repo_e"
+mkdir -p "$repo_e/reviews/findings"
+echo one > "$repo_e/reviews/findings/P2_correctness_202609010000_shared-name.md"
+echo two > "$repo_e/reviews/findings/P2_correctness_202609020000_shared-name.md"
+git -C "$repo_e" add -A && git -C "$repo_e" commit -q -m 'branch point: two findings share a description'
+e_branch_point="$(git -C "$repo_e" rev-parse HEAD)"
+git -C "$repo_e" checkout -q -b pr
+git -C "$repo_e" rm -q 'reviews/findings/P2_correctness_202609010000_shared-name.md'
+git -C "$repo_e" commit -q -m 'the pull request repairs the first, deleting the file'
+e_head="$(git -C "$repo_e" rev-parse HEAD)"
+git -C "$repo_e" checkout -q -B trunk "$e_branch_point"
+git -C "$repo_e" rm -q 'reviews/findings/P2_correctness_202609010000_shared-name.md'
+git -C "$repo_e" commit -q -m 'master deletes the same finding, independently'
+e_advanced="$(git -C "$repo_e" rev-parse HEAD)"
+
+e_before="$(verdict "$repo_e" "$e_branch_point" "$e_head" 'fix-P2/correctness_shared-name')"
+e_after="$(verdict "$repo_e" "$e_advanced" "$e_head" 'fix-P2/correctness_shared-name')"
+if [[ "$e_before" != "$e_after" ]]; then
+  echo "advancing the target changed the verdict on one head: $e_before then $e_after" >&2
+  exit 1
+fi
+if [[ "$e_before" != 1 ]]; then
+  echo "an ambiguous name must be refused at either target; got $e_before" >&2
+  exit 1
+fi
+
+# The same boundary, one finding rather than two: losing it is a false RED on a
+# pull request that did exactly the right thing.
+repo_f="$fixture_dir/repo-divergent-repair"
+new_repo "$repo_f"
+commit_finding "$repo_f" 'P2_correctness_202609010000_repaired-both-sides.md' 'branch point files it'
+f_branch_point="$(git -C "$repo_f" rev-parse HEAD)"
+git -C "$repo_f" checkout -q -b pr
+git -C "$repo_f" rm -q 'reviews/findings/P2_correctness_202609010000_repaired-both-sides.md'
+git -C "$repo_f" commit -q -m 'the pull request repairs it, deleting the file'
+f_head="$(git -C "$repo_f" rev-parse HEAD)"
+git -C "$repo_f" checkout -q -B trunk "$f_branch_point"
+git -C "$repo_f" rm -q 'reviews/findings/P2_correctness_202609010000_repaired-both-sides.md'
+git -C "$repo_f" commit -q -m 'master deletes it too'
+f_advanced="$(git -C "$repo_f" rev-parse HEAD)"
+
+f_before="$(verdict "$repo_f" "$f_branch_point" "$f_head" 'fix-P2/correctness_repaired-both-sides')"
+f_after="$(verdict "$repo_f" "$f_advanced" "$f_head" 'fix-P2/correctness_repaired-both-sides')"
+if [[ "$f_before" != "$f_after" ]]; then
+  echo "advancing the target changed the verdict on one head: $f_before then $f_after" >&2
+  exit 1
+fi
+if [[ "$f_before" != 0 ]]; then
+  echo "a repaired finding must resolve from the merge base at either target; got $f_before" >&2
+  exit 1
+fi
+
+# The merge base is also what keeps the pull request's OWN commits in view: the
+# filed-and-repaired finding is in neither endpoint tree, and a listing built
+# from the two-tree diff against the merge base is EMPTY for it, because the add
+# and the delete cancel. Measured here, not asserted.
+repo_g="$fixture_dir/repo-filed-and-repaired"
+new_repo "$repo_g"
+echo seed > "$repo_g/seed.txt"
+git -C "$repo_g" add -A && git -C "$repo_g" commit -q -m base
+g_base="$(git -C "$repo_g" rev-parse HEAD)"
+commit_finding "$repo_g" 'P2_correctness_202609101200_a-new-bug.md' 'A: file the finding'
+git -C "$repo_g" rm -q 'reviews/findings/P2_correctness_202609101200_a-new-bug.md'
+git -C "$repo_g" commit -q -m 'B: repair it and delete the finding'
+g_head="$(git -C "$repo_g" rev-parse HEAD)"
+if [[ -n "$(git -C "$repo_g" diff --name-only "$g_base" "$g_head" -- reviews/findings/)" ]]; then
+  echo 'the two-tree diff was expected to be empty for a filed-and-repaired finding' >&2
+  exit 1
+fi
+g_verdict="$(verdict "$repo_g" "$g_base" "$g_head" 'fix-P2/correctness_a-new-bug')"
+if [[ "$g_verdict" != 0 ]]; then
+  echo "a finding filed and repaired inside the pull request must resolve; got $g_verdict" >&2
+  exit 1
+fi
+
+# ---- a finding is a regular file, not a directory wearing its name -------------------------
+#
+# `git ls-tree --name-only` does not say whether an entry is a file or a tree,
+# so committing reviews/findings/P2_correctness_<ts>_<desc>.md/placeholder --
+# which creates a DIRECTORY and no finding -- satisfied fix-P2/correctness_<desc>
+# and all three workflow steps returned exit 0 with no finding in existence.
+repo_h="$fixture_dir/repo-directory-not-a-finding"
+new_repo "$repo_h"
+echo seed > "$repo_h/seed.txt"
+git -C "$repo_h" add -A && git -C "$repo_h" commit -q -m base
+h_base="$(git -C "$repo_h" rev-parse HEAD)"
+mkdir -p "$repo_h/reviews/findings/P2_correctness_202609101200_missing-repair.md"
+echo placeholder > "$repo_h/reviews/findings/P2_correctness_202609101200_missing-repair.md/placeholder"
+# A real finding beside it, so the case proves the filter and not an empty tree.
+echo fixture > "$repo_h/reviews/findings/P3_liveness_202609101300_a-real-finding.md"
+git -C "$repo_h" add -A && git -C "$repo_h" commit -q -m 'a directory named like a finding'
+h_head="$(git -C "$repo_h" rev-parse HEAD)"
+if ! git -C "$repo_h" ls-tree "$h_head" reviews/findings/ | grep -q '^040000 tree '; then
+  echo 'the fixture was meant to commit a TREE named like a finding' >&2
+  exit 1
+fi
+h_verdict="$(verdict "$repo_h" "$h_base" "$h_head" 'fix-P2/correctness_missing-repair')"
+if [[ "$h_verdict" != 1 ]]; then
+  echo "a directory named like a finding must not resolve a fix-P*/ branch; got $h_verdict" >&2
+  exit 1
+fi
+h_real="$(verdict "$repo_h" "$h_base" "$h_head" 'fix-P3/liveness_a-real-finding')"
+if [[ "$h_real" != 0 ]]; then
+  echo "the regular file beside it must still resolve; got $h_real" >&2
+  exit 1
+fi
+
+# The same filter where a DIRECTORY is handed in as the listing, which is how
+# the validator is run by hand against a working tree.
+dir_input="$fixture_dir/findings-dir"
+mkdir -p "$dir_input/P2_correctness_202609101200_missing-repair.md"
+echo placeholder > "$dir_input/P2_correctness_202609101200_missing-repair.md/placeholder"
+echo fixture > "$dir_input/P3_liveness_202609101300_a-real-finding.md"
+if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_missing-repair' "$dir_input" >/dev/null 2>&1; then
+  echo 'a subdirectory named like a finding must not resolve when a directory is the listing' >&2
+  exit 1
+fi
+if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' "$dir_input" >/dev/null 2>&1; then
+  echo 'a regular file in a directory listing must still resolve' >&2
+  exit 1
+fi
+
+# Filtering a directory down to its regular files must not become a NEW way to
+# read a listing as empty. `ls` names the entries of a directory that is
+# readable but not searchable, and every regular-file test on those names then
+# fails, so the listing narrows to nothing -- and a narrowed set is what turns
+# an ambiguous name into an accepted one. The shape is the twin: one match in a
+# file listing, the other in the directory. Root can search anything, so this
+# only means something as an ordinary user.
+twin_dir="$fixture_dir/twin-dir"
+mkdir -p "$twin_dir"
+echo fixture > "$twin_dir/P2_performance_202609071000_split-twin.md"
+if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
+  "$fixture_dir/findings.txt" "$twin_dir" >/dev/null 2>&1; then
+  : # both twins visible, so the name is ambiguous and refused, which is the control
+else
+  echo 'the twin across a file listing and a directory listing must be ambiguous' >&2
+  exit 1
+fi
+if [[ "$(id -u)" -ne 0 ]] && chmod 600 "$twin_dir" 2>/dev/null && [[ ! -x "$twin_dir" ]]; then
+  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
+    "$fixture_dir/findings.txt" "$twin_dir" >/dev/null 2>&1; then
+    echo 'an unsearchable directory listing narrowed an ambiguous name into a pass' >&2
+    exit 1
+  fi
+  chmod 700 "$twin_dir"
+else
+  echo 'note: skipping the unsearchable-directory case (running as root, or chmod had no effect)' >&2
+fi
+
+# ---- the gate must not recommend a destructive migration ------------------------------------
+#
+# Renaming a head branch CLOSES its pull request, measured on throwaway #264,
+# and the gate told every exempted pull request to do exactly that. The body and
+# MAINTAINING.md were corrected and the gate's own output was not, so the
+# instruction a maintainer actually reads is the one under test here.
+exempt_out="$(PR_NUMBER=222 LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'codex/findings-p3-1a57a2730a12' 2>&1)"
+if grep -Eqi '^[[:space:]]*rename[[:space:]]' <<< "$exempt_out"; then
+  echo 'the exemption message still tells the author to rename the branch' >&2
+  exit 1
+fi
+if ! grep -q 'DO NOT RENAME THE HEAD BRANCH' <<< "$exempt_out"; then
+  echo 'the exemption message must say renaming the head branch closes the pull request' >&2
+  exit 1
+fi
+if ! grep -q 'replacement pull request' <<< "$exempt_out"; then
+  echo 'the exemption message must name the route that is not destructive' >&2
+  exit 1
+fi
+
+# And the file the message points at says the same thing, because that is the
+# other place the instruction is read.
+legacy_shipped="$root/.github/legacy-branches.txt"
+if ! grep -q 'DO NOT RENAME A LISTED HEAD BRANCH' "$legacy_shipped"; then
+  echo 'legacy-branches.txt must warn that renaming a listed head branch closes it' >&2
+  exit 1
+fi
+if grep -q 'renamed as they come up for merge' "$legacy_shipped"; then
+  echo 'legacy-branches.txt still carries the rename-on-merge instruction' >&2
   exit 1
 fi
 

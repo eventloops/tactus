@@ -214,11 +214,13 @@ hyphens; `findings/` is for a pull request that touches `reviews/findings/` and 
 `reviews/findings/`, for `n` in 0–3. `bulk-fix-P<n>/` takes a hyphenated name and carries a batch of
 them, for `n` in 2–3; P0 and P1 are never batched. The two are separate prefixes so that each one's
 rule is exact: a single-finding branch resolves to its file and a batch names none. The finding is
-looked for **anywhere in the pull request's range** and not at its two ends: the base tree, the head
-tree, and every finding path the range's own commits touched. Repairing a finding deletes its file,
-so a pull request that has done its job carries none at the head; one that files the finding it
-repairs carries none at the base; and one that files it in one commit and repairs it in the next
-carries none at either end, which is the single-pull-request path the absence of `fix/` depends on.
+looked for **anywhere in the pull request** and not at its two ends: the **merge-base** tree, the
+head tree, and every commit between them, and only a regular file is a finding. Repairing a finding
+deletes its file, so a pull request that has done its job carries none at the head; one that files
+the finding it repairs carries none at the branch point; and one that files it in one commit and
+repairs it in the next carries none at either end, which is the single-pull-request path the absence
+of `fix/` depends on. The boundary is the merge base and **not the target branch's current head**,
+so advancing `master` cannot change a pull request's verdict on an unchanged head.
 
 There is no `fix/` prefix. A bug worth a branch is worth a finding, so a repair names the finding it
 closes, and a bug that is not filed yet is filed by the same pull request that repairs it — which is

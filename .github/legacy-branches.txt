@@ -2,8 +2,15 @@
 #
 # .github/scripts/validate-pr-branch.sh accepts a branch listed here, with a
 # warning, so introducing the rule did not turn most of the open pull requests
-# red at once. MAINTAINING.md states the rule binds new branches: these get
-# renamed as they come up for merge, not retrospectively.
+# red at once. MAINTAINING.md states the rule binds new branches: these are left
+# under the names they have, not renamed retrospectively.
+#
+# DO NOT RENAME A LISTED HEAD BRANCH. GitHub CLOSES a pull request when its head
+# branch is renamed, and it cannot be reopened until the old name is restored --
+# measured on throwaway #264, quoted in the pull request that created this file.
+# An entry leaves this list when its pull request MERGES, or by way of a
+# replacement pull request opened on a conforming name carrying the same head
+# commit and quoting the old number, its head SHA and its review verdicts.
 #
 # AN ENTRY IS THE PULL REQUEST, NOT THE NAME. Both fields must match. A bare
 # branch name would exempt anyone who typed it -- a fork can create
@@ -44,8 +51,8 @@
 242   codex/findings-p3-621f2a6cd705
 # Stranded by retiring fix/ in this same pull request. Both predate the
 # vocabulary exactly as the entries above do, and were left out only because
-# fix/ was still in it when the list was taken. Renaming a head branch CLOSES
-# its pull request -- measured, see the pull-request body -- so the alternative
-# is a replacement pull request each, and these two lines cost less.
+# fix/ was still in it when the list was taken. The alternative is a replacement
+# pull request each -- renaming is not one, see the header -- and these two
+# lines cost less than #145's four frontier passes.
 139   fix/rundir-unreadable-is-not-empty
 145   fix/sampler-kill-and-inspection

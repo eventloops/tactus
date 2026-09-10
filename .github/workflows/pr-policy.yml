@@ -101,36 +101,46 @@ jobs:
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-ledger-evidence.sh "$head"
 
       # The branch vocabulary. A fix-P*/ name resolves against reviews/findings/
-      # anywhere in the pull request's RANGE, not at its two ends. Repairing a
-      # finding deletes its file, so a pull request that has done its job
-      # carries none at the head; a pull request that files the finding it
-      # repairs carries none at the base; and one that files it in one commit
-      # and repairs it in the next carries none at EITHER end, which is the
-      # single-pull-request path the retirement of fix/ depends on. The three
-      # listings below are one set: the base tree, the head tree, and every
-      # finding path the range's own commits touched.
+      # anywhere in the PULL REQUEST, not at its two ends. Repairing a finding
+      # deletes its file, so a pull request that has done its job carries none
+      # at the branch point; a pull request that files the finding it repairs
+      # carries none at the branch point either; and one that files it in one
+      # commit and repairs it in the next carries none at EITHER end, which is
+      # the single-pull-request path the retirement of fix/ depends on. The
+      # three listings below are one set: the MERGE-BASE tree, the head tree,
+      # and every commit between them.
+      #
+      # The first listing is the merge base and NOT TARGET_SHA. The event's base
+      # SHA is the target branch's head at the moment of the event, and it moves
+      # for reasons outside this pull request: rooted there, an ambiguous name
+      # refused at exit 1 CONFORMED at exit 0 once master had advanced, on the
+      # same head. findings-in-range.sh takes the target SHA and resolves the
+      # merge base itself, so the resolution is a function of this pull request
+      # alone.
       - name: Validate the head branch name
         shell: bash
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          TARGET_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: |
-          # The base and head commits, not remote-tracking refs: `actions/checkout`
-          # only promises the fetched history, and the event carries both SHAs on
-          # both triggers. findings-in-range.sh fails closed on an end that will
-          # not resolve, rather than dropping it.
+          # The target and head commits, not remote-tracking refs:
+          # `actions/checkout` only promises the fetched history, and the event
+          # carries both SHAs on both triggers. findings-in-range.sh fails closed
+          # on an end that will not resolve, and on a pair with no merge base,
+          # rather than dropping either.
           head_sha="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
           # The three listings, built by .github/scripts/findings-in-range.sh
           # so that .github/scripts/test-pr-policy.sh can build real repositories
           # and check them. It was four lines here, and the fixtures could not
-          # reach it: two wrong ways of building the range each survived a
-          # frontier review because the suite only ever tested what the validator
-          # does with a listing, never whether the listing was right.
+          # reach it: three wrong ways of building the candidate set each
+          # survived a frontier review because the suite only ever tested what
+          # the validator does with a listing, never whether the listing was
+          # right.
           bash .github/scripts/findings-in-range.sh \
-            "$BASE_SHA" "$head_sha" "$RUNNER_TEMP/findings"
+            "$TARGET_SHA" "$head_sha" "$RUNNER_TEMP/findings"
           export PR_NUMBER
           PR_NUMBER="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-number")"
           bash .github/scripts/validate-pr-branch.sh \
             "$(cat "$RUNNER_TEMP/pr-branch")" \
-            "$RUNNER_TEMP/findings/base-findings" \
+            "$RUNNER_TEMP/findings/merge-base-findings" \
             "$RUNNER_TEMP/findings/head-findings" \
             "$RUNNER_TEMP/findings/range-findings"

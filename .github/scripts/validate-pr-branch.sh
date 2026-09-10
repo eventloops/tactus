@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# validate-pr-branch.sh <branch-name> [base-findings [head-findings [range-findings]]]
+# validate-pr-branch.sh <branch-name> [merge-base-findings [head-findings [range-findings]]]
 #
 # Refuse a pull request whose head branch is not in the branch vocabulary.
 #
@@ -40,9 +40,10 @@
 # named the finding it closed, a fix/ branch named nothing and left the reviewer
 # to work out what it was for. A bug worth a branch is worth a finding, so every
 # repair now goes through fix-P<n>/ and the finding exists: filed by an earlier
-# pull request, or filed by this one. The base-OR-head resolution below is what
-# makes the second case work, and without it retiring fix/ would have forced one
-# pull request to file a finding and a second to repair it.
+# pull request, or filed by this one. Resolving the name across the whole pull
+# request rather than at one end is what makes the second case work, and without
+# it retiring fix/ would have forced one pull request to file a finding and a
+# second to repair it.
 #
 # findings/<slug> IS NOT ITS REPLACEMENT. It is for a pull request that touches
 # reviews/findings/ and nothing else: filing what a review produced, or curating
@@ -63,16 +64,17 @@
 # branches are not expected to open a pull request, but they are validated here
 # anyway because one may.
 #
-# THE FINDING IS LOOKED FOR ACROSS THE WHOLE RANGE, NOT AT ITS TWO ENDS.
+# THE FINDING IS LOOKED FOR ACROSS THE WHOLE PULL REQUEST, NOT AT ITS TWO ENDS.
 # The claim a fix-P*/ name makes is "this pull request repairs that finding".
-# The finding therefore has to have EXISTED somewhere in the pull request's
-# range; requiring it at an endpoint is a different, stricter claim, and both
-# endpoints refuse a pull request that is doing exactly the right thing:
+# The finding therefore has to have EXISTED somewhere in the pull request;
+# requiring it at an endpoint is a different, stricter claim, and both endpoints
+# refuse a pull request that is doing exactly the right thing:
 #
-#   The base alone fails the pull request that files its own finding. With no
-#   fix/ prefix, a bug that was never filed has to become a finding before it
-#   can have a branch name, and a base-only rule means the finding has to be on
-#   master before the branch exists: one pull request to file, a second to fix.
+#   The branch point alone fails the pull request that files its own finding.
+#   With no fix/ prefix, a bug that was never filed has to become a finding
+#   before it can have a branch name, and a branch-point-only rule means the
+#   finding has to be on master before the branch exists: one pull request to
+#   file it, a second to fix it.
 #
 #   The head alone fails the pull request that did its job. Repairing a finding
 #   DELETES its file: master carries 69 such deletions. A fix-P*/ pull request
@@ -80,31 +82,47 @@
 #
 #   BOTH ENDPOINTS TOGETHER STILL FAIL THE ONE PULL REQUEST THE PREFIX EXISTS
 #   FOR: one that files the finding in commit A and repairs it in commit B,
-#   deleting the file as reviews/findings/README.md requires. The base has no
-#   finding, the head has no finding, and the file existed only in between.
-#   Keeping the file to get past the check is not the answer either: that leaves
-#   finished work sitting in the outstanding queue, which the ledger forbids.
+#   deleting the file as reviews/findings/README.md requires. The branch point
+#   has no finding, the head has no finding, and the file existed only in
+#   between. Keeping the file to get past the check is not the answer either:
+#   that leaves finished work sitting in the outstanding queue, which the ledger
+#   forbids.
 #
-# So the caller passes the base tree, the head tree, and every finding path the
-# range's own commits touched, and this script never looks at the working tree.
-# Each is a file of finding filenames, one per line, or a directory to list when
-# running by hand. They are taken as one SET: a filename in more than one of
-# them is one finding and not two, a name that resolves in any of them resolves,
-# and a name that matches two distinct findings across them is still ambiguous
-# and still refused.
+# So the caller passes the MERGE-BASE tree, the head tree, and the pull
+# request's own commits, and this script never looks at the working tree. Each
+# listing is a file of finding filenames, one per line, or a directory to list
+# when running by hand. They are taken as one SET: a filename in more than one
+# of them is one finding and not two, a name that resolves in any of them
+# resolves, and a name that matches two distinct findings across them is still
+# ambiguous and still refused.
 #
-# WHY ALL THREE AND NOT JUST THE RANGE. A finding the pull request never touched
-# appears in no commit of the range, so the base tree is needed. The head tree
-# looks redundant next to base + range and very nearly is -- but `git log
-# --name-only` reports nothing for a MERGE commit, so a finding that entered
-# this branch through a merge rather than through a commit of its own is in the
-# head tree and in neither of the others. It costs one ls-tree, and the
-# expensive failure of this rule is a FALSE REFUSAL of a legitimate branch.
+# THE FIRST LISTING IS THE MERGE BASE AND NOT THE TARGET BRANCH'S CURRENT HEAD.
+# Rooting it at the target's current head let something OUTSIDE the pull request
+# decide the verdict: two findings sharing a description at the branch point,
+# one repaired by the pull request and the same one independently deleted on
+# master, and an ambiguous name that was refused at exit 1 before master moved
+# CONFORMED at exit 0 after it -- same head, same diff. The merge base does not
+# move when master advances. .github/scripts/findings-in-range.sh builds the
+# three listings and states the whole argument.
+#
+# WHY ALL THREE AND NOT JUST THE PULL REQUEST'S COMMITS. A finding the pull
+# request never touched appears in none of its commits, so the merge-base tree
+# is needed. The head tree looks redundant next to merge-base + commits and very
+# nearly is -- but it is what a listing built from per-commit DIFFS would miss
+# for a finding that entered this branch through a merge rather than through a
+# commit of its own. It costs one ls-tree, and the expensive failure of this
+# rule is a FALSE REFUSAL of a legitimate branch.
+#
+# A FINDING IS A REGULAR FILE. A committed DIRECTORY named
+# reviews/findings/P2_correctness_<timestamp>_<description>.md/ is a tree and
+# not a finding, and it satisfied fix-P2/correctness_<description> with no
+# finding file in existence. findings-in-range.sh checks the mode; a directory
+# passed here as a listing is filtered the same way.
 #
 # With no listing at all only the grammar is checked, which is how the fixtures
 # exercise it without a repository. With one listing, that listing alone is the
-# set: a caller that has only the base gets the stricter rule and says so by
-# passing only the base.
+# set: a caller that has only the merge base gets the stricter rule and says so
+# by passing only the merge base.
 #
 # A LISTING THIS SCRIPT CANNOT READ IS A REFUSAL AND NEVER AN EMPTY SET. An
 # unreadable listing that read as "no findings here" would silently narrow the
@@ -141,7 +159,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 legacy_file="${LEGACY_BRANCHES:-$script_dir/../legacy-branches.txt}"
 
 branch="${1:-}"
-base_findings="${2:-}"
+merge_base_findings="${2:-}"
 head_findings="${3:-}"
 range_findings="${4:-}"
 
@@ -172,11 +190,12 @@ compatibility, docs-contract, and a fix-P*/ branch names one finding:
   reviews/findings/P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
   fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter
 
-That finding is looked for anywhere in this pull request's range, not just at
-its two ends: the base tree, the head tree, and every finding path the range's
-commits touched. A repair that deleted the file is resolved by the base; a pull
-request that files the finding and repairs it in one go is resolved by the
-range, whichever commit of it the file lived in.
+That finding is looked for anywhere in this pull request, not just at its two
+ends: the merge-base tree, the head tree, and every commit between them. A
+repair that deleted the file is resolved by the merge base; a pull request that
+files the finding and repairs it in one go is resolved by its own commits,
+whichever one the file lived in. Only a regular file is a finding: a directory
+carrying a finding's name is not one.
 
 There is no fix/<slug> prefix. A bug worth a branch is worth a finding, so file
 the finding and branch fix-P<n>/ after it. findings/<slug> is for a pull request
@@ -223,7 +242,13 @@ legacy_exempt() {
 if legacy_exempt; then
   echo "branch-name-policy: pull request #${PR_NUMBER} predates the branch" >&2
   echo "  vocabulary and is listed in ${legacy_file##*/} as '$branch'." >&2
-  echo "  Rename it when it next comes up for merge." >&2
+  echo "  DO NOT RENAME THE HEAD BRANCH. GitHub CLOSES a pull request when its" >&2
+  echo "  head branch is renamed, and it cannot be reopened until the old name" >&2
+  echo "  is restored -- at which point the branch is back under the name this" >&2
+  echo "  rule refuses. An entry leaves the list when its pull request merges," >&2
+  echo "  or by way of a replacement pull request opened on a conforming name" >&2
+  echo "  carrying the same head commit, quoting this number and its review" >&2
+  echo "  evidence. MAINTAINING.md states this." >&2
   exit 0
 fi
 
@@ -240,8 +265,13 @@ check_listing() {
   if [[ ! -r "$1" ]]; then
     fail "findings listing '$1' cannot be read"
   fi
+  # A directory also has to be SEARCHABLE, or every entry in it fails the
+  # regular-file test below and the listing narrows to nothing in silence.
+  if [[ -d "$1" && ! -x "$1" ]]; then
+    fail "findings listing '$1' is a directory that cannot be searched"
+  fi
 }
-check_listing "$base_findings"
+check_listing "$merge_base_findings"
 check_listing "$head_findings"
 check_listing "$range_findings"
 
@@ -250,10 +280,29 @@ check_listing "$range_findings"
 # never an empty set; the existence test above cannot stand in for this, because
 # a listing can be readable when it is checked and unreadable when it is read,
 # and a directory can be readable and still not listable.
+#
+# A DIRECTORY IS LISTED DOWN TO ITS REGULAR FILES. `ls -1` names a subdirectory
+# exactly as it names a file, so reviews/findings/P2_correctness_<ts>_<desc>.md/
+# -- a directory, holding no finding -- resolved fix-P2/correctness_<desc>. The
+# `ls` still runs, so an unlistable directory still fails rather than reading as
+# empty; each name is then kept only if it is a regular file.
 read_listing() {
-  local listing="$1" out
+  local listing="$1" out entry
   if [[ -d "$listing" ]]; then
     out="$(ls -1 -- "$listing")" || return 1
+    while IFS= read -r entry; do
+      [[ -n "$entry" ]] || continue
+      # An entry `ls` named and this cannot stat is a READ FAILURE and not a
+      # non-finding: a directory can be readable and still not searchable, and
+      # every name in it would otherwise be dropped in silence.
+      if [[ ! -e "$listing/$entry" ]]; then
+        echo "branch-name-policy: '$listing/$entry' is listed and cannot be examined" >&2
+        return 1
+      fi
+      [[ -f "$listing/$entry" ]] || continue
+      printf '%s\n' "$entry"
+    done <<< "$out"
+    return 0
   elif [[ -f "$listing" ]]; then
     out="$(cat -- "$listing")" || return 1
   else
@@ -263,10 +312,10 @@ read_listing() {
   [[ -z "$out" ]] || printf '%s\n' "$out"
 }
 
-# candidate_names: the base, the head and the range taken as one set. `sort -u`
-# is what makes a file that appears in more than one listing one finding rather
-# than several, which is every fix-P*/ pull request that has not touched
-# reviews/findings/ yet.
+# candidate_names: the merge base, the head and the pull request's own commits
+# taken as one set. `sort -u` is what makes a file that appears in more than one
+# listing one finding rather than several, which is every fix-P*/ pull request
+# that has not touched reviews/findings/ yet.
 #
 # `|| exit 1` and not `|| return 1`: this block is the left-hand side of a
 # pipeline and so a subshell, and a bare `return` from the middle of it would
@@ -274,7 +323,7 @@ read_listing() {
 # one. `exit` ends the subshell there and `pipefail` carries it out.
 candidate_names() {
   {
-    if [[ -n "$base_findings" ]]; then read_listing "$base_findings" || exit 1; fi
+    if [[ -n "$merge_base_findings" ]]; then read_listing "$merge_base_findings" || exit 1; fi
     if [[ -n "$head_findings" ]]; then read_listing "$head_findings" || exit 1; fi
     if [[ -n "$range_findings" ]]; then read_listing "$range_findings" || exit 1; fi
   } | sort -u
@@ -285,7 +334,7 @@ candidate_names() {
 # severity, category and description; the timestamp between them is free.
 resolve_finding() {
   local n="$1" cat="$2" desc="$3" names matches count
-  [[ -n "$base_findings$head_findings$range_findings" ]] || return 0
+  [[ -n "$merge_base_findings$head_findings$range_findings" ]] || return 0
   # The set is built FIRST, and a failure to build it refuses. Folding this into
   # the `grep` pipeline below would put a read error and an ordinary no-match on
   # the same footing, and `|| true` would then read an unreadable listing as a
@@ -300,11 +349,11 @@ resolve_finding() {
   [[ -n "$matches" ]] || count=0
   case "$count" in
     1) return 0 ;;
-    0) fail "'$branch' names no finding anywhere in this pull request's range:
-  expected exactly one P${n}_${cat}_<timestamp>_${desc}.md
+    0) fail "'$branch' names no finding anywhere in this pull request:
+  expected exactly one P${n}_${cat}_<timestamp>_${desc}.md, as a regular file
   A fix-P*/ branch repairs one filed finding and mirrors its severity, category
   and description. If this bug was never filed, file it in this pull request:
-  the whole range is read, so filing it in one commit and repairing it in the
+  every commit of it is read, so filing it in one commit and repairing it in the
   next resolves the name even though the repair deletes the file again." ;;
     *) fail "'$branch' names $count findings, which is ambiguous:
 $(sed 's/^/  /' <<< "$matches")" ;;
@@ -337,8 +386,9 @@ case "$branch" in
     # known prefix" would send its author looking for a typo.
     fail "'fix/' was retired from the vocabulary: a repair names the finding it
   closes. File the finding under reviews/findings/ if it is not filed already,
-  and branch fix-P<n>/<category>_<description> after it. The listing is read at
-  the base AND at the head, so filing and repairing in one pull request works.
+  and branch fix-P<n>/<category>_<description> after it. The finding is looked
+  for at the merge base, at the head AND in this pull request's own commits, so
+  filing and repairing it in one pull request works.
   A pull request that only files or curates findings is findings/<slug>."
     ;;
   feature/*|refactor/*|docs/*|standards/*|ci/*|gate/*|findings/*)
