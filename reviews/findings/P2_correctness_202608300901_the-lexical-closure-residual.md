@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 73
 reviewed_sha: 0f05b456
-location: src/agent/proc/test_support/readiness.rs:120
+location: src/agent/proc/test_support/readiness.rs:120, src/effects/tests.rs:246, src/runner/container/tests.rs:3018
 provenance: pre_existing
 first_bad: 
 guard: the project owner — the deferral carries a named backstop restriction until it is repaired

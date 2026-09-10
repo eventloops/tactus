@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 
 reviewed_sha:
-location: src/review.rs:552
+location: src/review.rs:552, src/engine/topology/attempt.rs:871
 provenance: undetermined
 first_bad:
 guard: project owner, if the residual is worth a row of its own

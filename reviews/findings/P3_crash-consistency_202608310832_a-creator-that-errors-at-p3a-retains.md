@@ -5,7 +5,7 @@ disposition: accepted-risk
 category: crash-consistency
 pr: 7
 reviewed_sha:
-location: src/engine/topology/create.rs:1410
+location: src/engine/topology/create.rs:1410, src/rundir/ownership.rs:64
 provenance: undetermined
 first_bad:
 guard: PR7/PR12 implementer
