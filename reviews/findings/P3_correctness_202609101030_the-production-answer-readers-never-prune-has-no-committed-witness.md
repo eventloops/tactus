@@ -14,10 +14,12 @@ guard: the round that makes `an_answer_published_into_the_run_directory_is_inges
 ## Failure sequence
 
 R21 and the T-ANSWER row say the answer file is persistent run-directory content in every case:
-ingestion is a **read**, never a take. The rundir layer has a witness —
-`a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion` reads the published
-file after `rundir::ingest_answer`. The layer the loop actually calls, `EventLogAnswers::poll` and
-`resolve` in `src/interaction.rs` — the production `AnswerSource` — has none.
+ingestion is a **read**, never a take. The rundir layer has a witness, and a strong one — opened
+here, `a_staged_partial_is_never_ingested_and_a_published_answer_survives_ingestion`
+(`src/rundir/tests.rs`) reads the published bytes, calls `rundir::ingest_answer`, then asserts the
+file is still present **and** that `fs::read` of it equals the bytes taken before, and that a second
+ingestion returns the same answer. The layer the loop actually calls, `EventLogAnswers::poll` and
+`resolve` in `src/interaction.rs` — the production `AnswerSource` — has none of that.
 
     G4 run-3 mutation MR1: `EventLogAnswers::poll` removes `answers/<qid>.json` after reading it
     -> the full library suite passes; every committed test that ingests through EventLogAnswers

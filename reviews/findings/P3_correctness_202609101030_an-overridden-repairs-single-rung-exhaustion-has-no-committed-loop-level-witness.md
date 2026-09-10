@@ -27,16 +27,34 @@ rung"* — and lists no proof test for it, and none is committed.
        it, where the design says a person is asked — and no committed test says so
 
 What this run observed at `7e0110a1`, with the fixture's fixed-id question source replaced by a
-counting one (gate report §6.3): the override is recorded, the first two gate failures settle
-`Closed{Retry}` on the one rung, and the exhausted attempt settles `Parked` with a **fresh**
-`Unblock` question:
+counting one (gate report §6.3), read off the trace event by event rather than summarised:
 
-    G4C3 after: repair=Some(AwaitingInput) alpha=Some(AwaitingRepair) rung=Some(0)
-      attempts_on_rung=Some(3) generations=Some(["g0:Closed:attempts1", "g1:Closed:attempts1",
-      "g2:Closed:attempts1"]) open_questions=[("g4r3-q-2", 2, Unblock)] override=true answers=2
-    G4C3 replay_twice_equal=true events=25 outcome=Ending(Parked)
+    #14 question_answered k2 q=q-park-fixed  answer carries binding_override{claude-code/…/High}
+    #15-#17 g0 attempt 1 -> attempt_finished failure=GateFailed
+            settlement=Closed { transition: Retry, lease: LineageHeld }
+    #18-#20 g1 attempt 1 -> attempt_finished failure=GateFailed
+            settlement=Closed { transition: Parked { question g4r3-q-1, kind Unblock,
+              context "2 attempt(s) across 1 rung(s) all failed, and the escalation chain is spent" },
+              lease: LineageHeld }
+    #21     question_answered k2 q=g4r3-q-1  (option 0, "retry this task"), no binding override
+    #22-#24 g2 attempt 1 -> attempt_finished failure=GateFailed
+            settlement=Closed { transition: Parked { question g4r3-q-2, "3 attempt(s) …" },
+              lease: LineageHeld }
+    after: repair=AwaitingInput rung=Some(0) attempts_on_rung=Some(3)
+      generations=["g0:Closed:attempts1", "g1:Closed:attempts1", "g2:Closed:attempts1"]
+      open_questions=[("g4r3-q-2", 2, Unblock)] override=true answers=2 outcome=Ending(Parked)
 
-That is the claimed behaviour, executed at the loop; it lives only in the gate's scratch files.
+**So the escalation happens at the *second* failure, not the third, and a person authorises what
+follows it.** With `attempts_per = 2` on the one rung, the first failure settles `Closed{Retry}` and
+the second exhausts the rung and settles `Parked` with a fresh `Unblock` question — the human rung.
+The third attempt exists only because `g4r3-q-1` was answered at `#21`; its failure parks again on
+`g4r3-q-2`, which is still open at the end. An earlier version of this file said "the first two gate
+failures settle `Closed{Retry}` … and the exhausted attempt settles `Parked`", which is one failure
+out and omits the intervening authorisation; corrected here against
+`measurements/by-tag/G4C3.txt`.
+
+That is the claimed behaviour — a single-rung ladder exhausting to the human rung rather than to
+`Failed` — executed at the loop; it lives only in the gate's scratch files.
 
 **Why the committed suite cannot see it, unchanged in this range**: the driven recover fixture's
 question-id source (`FixedIds`, `src/engine/topology/recover/tests.rs`) answers every
