@@ -93,6 +93,16 @@
 #   MUT-FINDING-SYMLINK-AS-FILE  the candidate listing dropped the mode git records, so a
 #                                `120000` symlink was read as a file and its TARGET STRING as
 #                                that file's frontmatter
+#   MUT-PROSE-VERDICT-SALVAGE    a verdict token that failed the whole-token check was handed to
+#                                a fallback that stripped the leading colons and asterisks off
+#                                it, so `VERDICT: ::PASS` -- rejected one line earlier -- came
+#                                back out of the rejecting branch as `PASS`
+#   MUT-HERESTRING-FAILURE-AS-ANSWER  a value was fed to a command through `<<<`, which spills to
+#                                a temporary file once it outgrows a pipe buffer: a file bash
+#                                cannot create is a redirection that failed, the command never
+#                                runs, and the shell returns 1 -- `grep`'s "no match". A compound
+#                                command is skipped outright, where neither a captured status nor
+#                                `set -e` can see it
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -361,6 +371,20 @@ while IFS= read -r line; do
   [[ "$line" == *'="$('* ]] && continue
   error "MUT-FAIL-OPEN-SHAPE: a gh or git command is piped where its failure cannot be told from the pipeline's answer: [$line]"
 done < <(code_lines | join_continuations)
+
+# A fifth shape, one layer down: how a value is handed to a command. `<<<` is a here-document,
+# and bash writes one to a TEMPORARY FILE once it outgrows a pipe buffer; a temporary file it
+# cannot create is a redirection that failed, so the command never runs and the shell returns 1.
+# For `grep` that 1 is "no match" -- an answer -- and the two become one. For a compound command
+# it is worse still: `while ... done <<< "$x"` is skipped silently, with a status of 0, which
+# neither a captured status nor `set -e` can see. Both shapes have been live in this file: one
+# lost the only P1 in a 40,000-character review and printed END over it, the other would have
+# dropped a findings list whole. Whole-line matching is done by expansion instead, and a read
+# that needs a file is given a real one whose write is checked.
+expect MUT-HERESTRING-FAILURE-AS-ANSWER \
+  "$(code_lines | grep -E '\bgrep\b.*<<<' | sed 's/^[[:space:]]*//' | tr '\n' ';')" ''
+expect MUT-HERESTRING-FAILURE-AS-ANSWER \
+  "$(code_lines | grep -E '\bdone[[:space:]]*<<<' | sed 's/^[[:space:]]*//' | tr '\n' ';')" ''
 
 # --- the option parser, through main -------------------------------------------------------------
 # `main` is what these exercise: the defect was in its argument loop and no call on a helper can
@@ -755,10 +779,11 @@ expect MUT-QUOTED-JSON-IS-JSON "$(review_kind "$tmp/quoted.md")" prose
 # `[A-Z_]` inside a grep is whatever the locale's collating order says it is: under en_US.utf8 the
 # grep carried `FAIL\xc3\x89PASS` through and the check took the clean `PASS` off its end, so a
 # review that says FAIL approved the change -- while the same file under `C` blocked. One answer
-# everywhere, and the token that is not a verdict is carried whole so the blocker names it.
+# everywhere, and the token that is not a verdict is carried whole -- `VERDICT:` and all, because
+# a prefix stripped off a refused token is the salvage step below -- so the blocker names it.
 printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\nVERDICT: FAIL\xc3\x89PASS\n' \
   c3a6665000000000000000000000000000000003 > "$tmp/prose-suffix.md"
-suffix_want="$(printf 'META|c3a6665000000000000000000000000000000003|FAIL\xc3\x89PASS|-\nEND|-|0')"
+suffix_want="$(printf 'META|c3a6665000000000000000000000000000000003|VERDICT: FAIL\xc3\x89PASS|-\nEND|-|0')"
 # The ambient locale, and then `$locales` -- `C` and every UTF-8 locale this machine has, built
 # for the login check above. The defect is a disagreement between them, so one alone cannot see it.
 expect MUT-PROSE-VERDICT-SUFFIX "$(parse_prose_review "$tmp/prose-suffix.md" | tr '\t' '|')" "$suffix_want"
@@ -784,6 +809,74 @@ for loc in "${locales[@]}"; do
   got="$(LC_ALL="$loc" parse_prose_review "$tmp/prose-head.md" | tr '\t' '|')"
   expect "MUT-PROSE-HEAD-NOT-FIRST under $loc" "${got%%$'\n'*}" 'META|-|-|-'
 done
+
+# --- a check that failed is the answer, not the input to another attempt --------------------------
+# The whole-token check refuses `VERDICT: ::PASS`, and the branch it falls into used to strip the
+# leading colons and asterisks off what it had just refused -- so the rejecting branch minted the
+# `PASS` the check exists to withhold. Nothing is stripped now: the whole matched run stands, and
+# because every one of these begins with `VERDICT:` it cannot be the token the audit lets through.
+# `**VERDICT: PASS**`, the form the reviews are actually written in, is pinned above and stays.
+for junk in ': ::PASS' ': :PASS' ': **PASS' ': *PASS'; do
+  printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\nVERDICT%s\n' \
+    c3a6665000000000000000000000000000000003 "$junk" > "$tmp/prose-salvage.md"
+  got="$(parse_prose_review "$tmp/prose-salvage.md" | tr '\t' '|')"
+  [[ "$got" == *'|PASS|'* ]] \
+    && error "MUT-PROSE-VERDICT-SALVAGE: [VERDICT$junk] was salvaged into PASS, got [$got]"
+  contains MUT-PROSE-VERDICT-SALVAGE "$got" 'META|c3a6665000000000000000000000000000000003|VERDICT'
+  for loc in "${locales[@]}"; do
+    got="$(LC_ALL="$loc" parse_prose_review "$tmp/prose-salvage.md" | tr '\t' '|')"
+    [[ "$got" == *'|PASS|'* ]] \
+      && error "MUT-PROSE-VERDICT-SALVAGE under $loc: [VERDICT$junk] was salvaged into PASS, got [$got]"
+  done
+done
+
+# --- a here-string bash could not write, read as "nothing matched" -------------------------------
+# `<<<` is a here-document: over a pipe buffer's worth of data bash writes it to a TEMPORARY FILE,
+# and a temporary file it cannot create is a redirection that failed -- the command never runs and
+# the shell returns 1. `ulimit -f` denies exactly that file and nothing else: 512 bytes is more
+# than any fixture below needs written legitimately and far less than either here-document. SIGXFSZ
+# is ignored so the failure arrives as a status rather than a signal, which is the shape an ENOSPC
+# on the temp directory has. Both fixtures are also parsed with no limit at all, so what is under
+# test is the denied write and not the fixture.
+#
+# The stray-token read: a review carrying the head, a PASS and one standalone `P1`, padded past the
+# buffer. The P1 is a MANUAL blocker. Fed through `<<<`, the failed spill returned grep's 1, the
+# token was dropped and `END` printed over it: a clean PASS, which is READY.
+{ printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\nVERDICT: PASS\n\n' \
+    c3a6665000000000000000000000000000000003
+  for _ in $(seq 1 400); do printf '\xc3\xa9%.0s' $(seq 1 100); printf '\n'; done
+  printf '\nA standalone P1 in running text.\n'; } > "$tmp/prose-big-stray.md"
+expect MUT-HERESTRING-FAILURE-AS-ANSWER "$(parse_prose_review "$tmp/prose-big-stray.md" | tr '\t' '|')" \
+  'META|c3a6665000000000000000000000000000000003|PASS|-
+STRAY|P1|0
+END|-|0'
+big_status=0
+got="$(trap '' XFSZ; ulimit -f 1; parse_prose_review "$tmp/prose-big-stray.md" 2>/dev/null)" || big_status=$?
+((big_status != 0)) \
+  || error "MUT-HERESTRING-FAILURE-AS-ANSWER: a parser whose token read could not be written reported success"
+[[ "$got" == *END* ]] \
+  && error "MUT-HERESTRING-FAILURE-AS-ANSWER: END was printed over a read that never happened, got [$got]"
+# and the finding itself: it is in the parse, or the parse refuses. What it may not be is missing
+# from a parse that reports success, which is a MANUAL blocker the audit never raises.
+[[ "$got" == *STRAY* || "$big_status" != 0 ]] \
+  || error "MUT-HERESTRING-FAILURE-AS-ANSWER: the standalone P1 went missing from a parse that reported success, got [$got]"
+
+# The numbered-finding read, where the here-string fed a COMPOUND command: bash skips the loop
+# body, the status is 0, and `set -e` sees nothing. Every finding in the review is then missing
+# from a parse that says it finished -- a PASS carrying 8000 deferrable findings, audited as a
+# PASS carrying none.
+{ printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n' \
+    c3a6665000000000000000000000000000000003
+  for i in $(seq 1 8000); do printf '%d. **P3 - a deferrable thing.** Detail.\n' "$i"; done
+  printf '\nVERDICT: PASS\n'; } > "$tmp/prose-many-findings.md"
+many_status=0
+got="$(trap '' XFSZ; ulimit -f 1; parse_prose_review "$tmp/prose-many-findings.md" 2>/dev/null)" || many_status=$?
+expect MUT-HERESTRING-FAILURE-AS-ANSWER "$many_status" 0
+expect MUT-HERESTRING-FAILURE-AS-ANSWER "$(grep -c '^P3' <<< "$got")" 8000
+expect MUT-HERESTRING-FAILURE-AS-ANSWER "$(tail -1 <<< "$got" | tr '\t' '|')" 'END|-|0'
+# and the same fixture with no limit, so the count above is the review's and not the limit's.
+expect MUT-HERESTRING-FAILURE-AS-ANSWER \
+  "$(parse_prose_review "$tmp/prose-many-findings.md" | grep -c '^P3')" 8000
 
 # --- the frontmatter id match ------------------------------------------------------------------
 printf -- '---\nid: OTHER-ID\nseverity: P2\n---\n\nThe prose below repeats a line.\nid: TARGET-ID\n' > "$tmp/prose-id.md"

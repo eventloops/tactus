@@ -101,6 +101,15 @@
 # BEHIND blocker; an empty `--reviewer` moved trust to the repository's owner. Each was one line,
 # and each called merge.
 #
+# The same rule reaches down to how data is handed to a command. `<<<` spills to a temporary file
+# once it outgrows a pipe buffer, and a temporary file bash cannot create is a redirection that
+# failed: the command never runs and the shell returns 1. That 1 is `grep`'s "no match", so the
+# two are one answer -- and for a compound command (`while ... done <<< "$x"`) the body is simply
+# skipped, which neither a captured status nor `set -e` can see. So nothing in this file feeds
+# `grep` through `<<<` and no compound command is fed through one either; whole-line matching is
+# done by expansion, and a read that needs a file gets a real one whose write is checked. The
+# gate holds both shapes.
+#
 # Other states: NEEDS-ATTEST (the head moved past the reviewed commit by more than clean merges
 # and ledger pushes: a repair-only push the owner reads and attests under step 5, a merge commit
 # that is not git's own merge of its parents, or a new change that needs another pass), MANUAL
@@ -271,6 +280,25 @@ PY
 # is reached only when there were none. grep's 1 is "no match" and is an answer; 2 and above,
 # and a death by signal, are not.
 #
+# A FAILED CHECK IS THE ANSWER, NEVER THE INPUT TO ANOTHER ATTEMPT. Every defect this parser has
+# had is one shape: a check failed, the failure was handed to a fallback that salvaged what it
+# could, and the salvage read as approval. `VERDICT: ::PASS` fails the whole-token check below;
+# stripping the colons off the rejected token produced `PASS`, so the branch that exists to
+# refuse a malformed verdict approved one. Nothing here retries, trims or strips after a check
+# has failed: the value stands exactly as it was read, or the parse refuses.
+#
+# A HERE-STRING IS A FILE BASH MAY NOT BE ABLE TO WRITE, and that is the same rule one layer
+# down. Over a pipe buffer's worth of data `<<<` spills to a temporary file, and one it cannot
+# create is a redirection that failed: the command never runs and the shell returns 1. For
+# `grep` that 1 is "no match" -- an answer -- so a review of 40,000 `é` characters with one
+# standalone `P1` in it, its temp file denied, lost the P1 and parsed clean. For a compound
+# command it is worse: `while ... done <<< "$raw"` is SKIPPED, and the skip is invisible to a
+# captured status and to `set -e` alike, so the findings list simply came up short and nothing
+# said so. Lines are therefore walked by expansion, which has no redirection to fail; the token
+# read is given a real file whose write is checked, because `printf` has no "nothing matched"
+# answer for a 1 to be mistaken for; and the one `<<<` left feeds `sort`, where every non-zero
+# status refuses the parse and none of them means "no match".
+#
 # The second stage of each read is bash's own regex rather than another command in the pipe. A
 # pipeline's status under `pipefail` is its rightmost non-zero one, so `grep(2) | sed | grep(1)`
 # reports 1 -- the failure hidden behind the ordinary "no match" of a later stage, which is the
@@ -290,10 +318,11 @@ PY
 # `FAILÉPASS` and says PASS, which is a new way to approve a change; `($hex{40})` unanchored
 # searches every line the grep returned, so a first marker with a bad character in it was skipped
 # over and a LATER line's commit came back as "the first". What does not validate whole is never
-# trimmed to the part that does: a head becomes `-`, which blocks, and a verdict is carried
-# through as written, which is not PASS and names itself in the blocker.
+# trimmed to the part that does: a head becomes `-`, which blocks, and a verdict keeps every
+# character the grep matched, `VERDICT:` included -- so it cannot be PASS, and it names itself in
+# the blocker.
 parse_prose_review() {
-  local f="$1" head="" verdict="" stray="" raw line status=0
+  local f="$1" head="" verdict="" stray="" raw rest line scratch status=0
   local hex='[0123456789abcdef]'
   local upper='[ABCDEFGHIJKLMNOPQRSTUVWXYZ_]'
   local sev='P[0123]'
@@ -316,40 +345,53 @@ parse_prose_review() {
   # follows a good token is in hand to be judged rather than left off the end of the match.
   raw="$(grep -oE 'VERDICT:\**:? *[^[:space:]]*' "$f")" || status=$?
   ((status <= 1)) || return 1
-  while IFS= read -r line; do                                   # the last, as `tail -1` took
-    [[ -n "$line" ]] || continue                                # no VERDICT: `<<<` still feeds one
+  line="${raw##*$'\n'}"                                         # the last, as `tail -1` took
+  if [[ -n "$line" ]]; then                                     # empty only when there is no VERDICT
     if [[ "$line" =~ ^VERDICT:[*]*:?\ *($upper+)[*]*$ ]]; then
       verdict="${BASH_REMATCH[1]}"
     else
-      # Not a verdict token. Carried whole -- prefix stripped by expansion, which has no regex
-      # and no locale in it -- so it cannot be mistaken for the clean word inside it.
-      verdict="${line#VERDICT:}"
-      while [[ "$verdict" == " "* || "$verdict" == ":"* || "$verdict" == "*"* ]]; do
-        verdict="${verdict#?}"
-      done
+      # The check failed, and the failed check is the answer. Not one character is stripped off
+      # this token and nothing is tried again on it: the whole matched run stands as the verdict,
+      # `VERDICT:` and all, so it is not PASS, cannot be turned into PASS, and names itself where
+      # the audit prints the blocker. Salvaging the clean word out of `VERDICT: ::PASS` was a new
+      # way to approve a change, minted by the branch that had just rejected it.
+      verdict="$line"
     fi
-  done <<< "$raw"
+  fi
 
   printf 'META\t%s\t%s\t-\n' "${head:-"-"}" "${verdict:-"-"}"
 
   status=0
   raw="$(grep -oE '^[0-9]+\. \*\*P[0-3]' "$f")" || status=$?
   ((status <= 1)) || return 1
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue                                # no findings: `<<<` still feeds one
+  rest="$raw"
+  while [[ -n "$rest" ]]; do                                    # walked by expansion, not fed by `<<<`
+    line="${rest%%$'\n'*}"
+    if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
+    [[ -n "$line" ]] || continue
     # A line the grep returned and this cannot read is a finding, and a finding this does not
     # print is a blocker the audit never raises. It refuses rather than skipping it.
     [[ "$line" =~ ^[0123456789]+\.\ \*\*($sev)$ ]] || return 1
     printf '%s\t-\t0\n' "${BASH_REMATCH[1]}"
-  done <<< "$raw"
+  done
 
   status=0
   raw="$(grep -vE '^[0-9]+\. \*\*P[0-3]' "$f")" || status=$?
   ((status <= 1)) || return 1
+  # The token read wants its input in a file and is given a real one, not a here-document bash
+  # may or may not be able to spill to disk. `printf` has no "nothing matched" answer, so a
+  # non-zero status from the write is unambiguously a write that failed; grep's own 1 is then the
+  # file's emptiness and its 2 a file it could not read. Fed through `<<<`, the failed spill and
+  # the empty answer were one status, and the review that lost its only P1 that way parsed clean.
+  scratch="$(mktemp)" || return 1
+  printf '%s\n' "$raw" > "$scratch" || { rm -f "$scratch"; return 1; }
   status=0
-  raw="$(grep -oE '\bP[0-3]\b|\bMUST\b' <<< "$raw")" || status=$?
+  raw="$(grep -oE '\bP[0-3]\b|\bMUST\b' "$scratch")" || status=$?
+  rm -f "$scratch"
   ((status <= 1)) || return 1
   status=0
+  # `sort` keeps its here-string: it has no "no match" status for a failed redirection to hide
+  # behind, and the check below refuses the parse on every non-zero one.
   stray="$(sort -u <<< "$raw" | tr '\n' '/')" || status=$?
   ((status == 0)) || return 1
   stray="${stray%/}"
@@ -473,7 +515,10 @@ ensure_labels() {
   local existing
   existing="$(gh api "repos/$repo/labels?per_page=100" --paginate --jq '.[].name')"
   create() {
-    grep -qxF "$1" <<< "$existing" \
+    # `[[ ]]` rather than `grep -qxF <<< "$existing"`: a whole-line fixed-string match is an
+    # expansion, and an expansion has no here-document to spill and no "no match" status for a
+    # spill that failed to be read as.
+    [[ $'\n'"$existing"$'\n' == *$'\n'"$1"$'\n'* ]] \
       || gh label create "$1" --repo "$repo" --color "$2" --description "$3" >/dev/null
   }
   create lane:feature 0e8a16 "feature or sweep work: fix P0-P1, file P2-P3"
@@ -501,8 +546,12 @@ ruleset_state() {
     --jq '.[] | select(.enforcement == "active") | .id')" || return 1
   for id in $ids; do
     rules="$(gh api "repos/$repo/rulesets/$id" --jq '.rules[] | "\(.type)=\(.parameters.strict_required_status_checks_policy // "")"')" || return 1
-    grep -q '^merge_queue=' <<< "$rules" && queue=1
-    grep -q '^required_status_checks=true$' <<< "$rules" && strict=1
+    # Matched by expansion for the reason `create` above is: `grep`'s 1 is "this ruleset carries
+    # no such rule", a here-string bash could not write returns 1 with grep never run, and the
+    # two answers here are `strict=0` -- which drops the BEHIND blocker for every pull request in
+    # the run -- and a read that failed.
+    [[ $'\n'"$rules" == *$'\n'merge_queue=* ]] && queue=1
+    [[ $'\n'"$rules"$'\n' == *$'\n'required_status_checks=true$'\n'* ]] && strict=1
   done
   echo "$strict $queue"
 }
@@ -907,7 +956,7 @@ audit_one() {
       # resolution or a third parent is a new change that `--no-merges` below would hide), the
       # branch's diff against its base is byte-identical before and after the merge, and the pull
       # request edits no gate. Anything wider is reviewed again.
-      local merge_edits="" merges m expected before after touched
+      local merge_edits="" merges m expected before after touched t rest outside
       merges="$(git rev-list --merges "$reviewed..$head" --not "origin/$base")"
       for m in $merges; do
         local parents
@@ -940,10 +989,26 @@ audit_one() {
         moved="merge-edits:${merge_edits:0:7}"
       elif [[ -z "$touched" ]]; then
         moved="merges-only"
-      elif ! grep -vE '^reviews/(findings/|FINDINGS\.md$)' <<< "$touched" >/dev/null; then
-        moved="ledger-only"
       else
-        moved="repairs"
+        # Which side of the ledger each touched path falls on, walked by expansion. Written as
+        # `! grep -vE ... <<< "$touched"` this was the exemption granted by a read that did not
+        # happen: grep's 1 is "every path is in the ledger", which keeps the review across the
+        # push, and a here-string bash could not spill to a temporary file returns that same 1
+        # with grep never run -- so a head moved by repairs, which is NEEDS-ATTEST, would have
+        # audited as ledger-only, which is READY.
+        outside=0
+        rest="$touched"
+        while [[ -n "$rest" ]]; do
+          t="${rest%%$'\n'*}"
+          if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
+          # An empty path is not a ledger path. `grep -v` returned a blank line as a line outside
+          # the ledger and this must agree with it: the rewrite is here to stop a failed read
+          # granting the exemption, not to widen who gets it.
+          [[ "$t" == reviews/findings/* || "$t" == reviews/FINDINGS.md ]] && continue
+          outside=1
+          break
+        done
+        if ((outside)); then moved="repairs"; else moved="ledger-only"; fi
       fi
     fi
   fi
