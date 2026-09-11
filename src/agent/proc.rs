@@ -6920,6 +6920,76 @@ mod termination {
             }
         }
 
+        #[cfg(target_os = "linux")]
+        fn assert_no_child_left_asking_for_no_status(after: &str) {
+            // SAFETY: `siginfo_t` is a plain C aggregate whose all-zero bit
+            // pattern is the one `waitid` is documented to be handed.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` is live for the call, which reaches none but this
+            // process's own children and, with `WNOHANG`, blocks on none.
+            let looked =
+                unsafe { libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG) };
+            let errno = last_errno();
+            assert!(
+                looked < 0 && errno == libc::ECHILD,
+                "{after} left a child behind: waitid(P_ALL) answered {looked} with errno {errno}"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn identity_call_set_helper() {
+            let Some(shape) = fixture_variable("UPSTROKE_IDENTITY_CALL_SET_HELPER") else {
+                return;
+            };
+            assert!(
+                helper_identity_path_on(),
+                "this fixture is about the path on"
+            );
+            // Every wait by number, whatever its arguments, and the descriptor
+            // call the earlier rounds probed with: the path on makes neither.
+            answer_call_with(libc::SYS_wait4, libc::SECCOMP_RET_KILL_PROCESS);
+            answer_call_with(libc::SYS_pidfd_open, libc::SECCOMP_RET_KILL_PROCESS);
+            match shape.as_str() {
+                "launch" => {
+                    let reaper = spawn_reaper().expect("spawn private reaper");
+                    reaper.cancel();
+                    let guard = spawn_guard(quiet_signal_policy()).expect("spawn private guard");
+                    guard.abort_setup();
+                }
+                "ready-failure" => {
+                    for (prefix, message) in launch_failures_before_ready() {
+                        assert!(
+                            message.contains(
+                                "ending it: SIGKILL was delivered through the helper's identity, \
+                                 and the wait through it collected it, having already exited \
+                                 with status 7"
+                            ),
+                            "the {prefix}'s end was not answered through its identity: {message}"
+                        );
+                    }
+                }
+                other => panic!("unknown shape {other}"),
+            }
+            assert_eq!(PENDING_TERMINATION.load(Ordering::SeqCst), 0);
+            assert_no_child_left_asking_for_no_status(&format!("the {shape} shape"));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn the_path_on_makes_no_wait_by_number_and_opens_no_descriptor_after_the_fork() {
+            for (shape, extra) in [
+                ("launch", None),
+                ("ready-failure", Some(EXIT_BEFORE_READY_WITH_SEVEN)),
+            ] {
+                let mut vars = vec![("UPSTROKE_IDENTITY_CALL_SET_HELPER", shape), IDENTITY_ON];
+                vars.extend(extra);
+                let output = run_fixture("identity_call_set_helper", &vars);
+                assert_fixture_succeeded(&format!("identity call-set helper ({shape})"), &output);
+            }
+        }
+
         #[test]
         fn a_helper_ending_through_its_identity_is_described_as_such() {
             let killed_by_nine = 9;

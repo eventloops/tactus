@@ -1551,6 +1551,7 @@ not_an_effect = [
     "POLLIN",
     "POLLNVAL",
     "PROC_PIDT_SHORTBSDINFO",
+    "P_ALL",
     "P_PID",
     "P_PIDFD",
     "RLIMIT_CORE",
