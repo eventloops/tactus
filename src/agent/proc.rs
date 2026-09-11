@@ -1428,20 +1428,6 @@ mod termination {
     static PROBE_PID: AtomicI32 = AtomicI32::new(-1);
     static HANDLED_TERMINATION_MASK: AtomicU8 = AtomicU8::new(0);
     static STATE: OnceLock<Result<Arc<Mutex<State>>, String>> = OnceLock::new();
-    /// What a probe in a forked child found this host's identity system calls
-    /// answering, and zero until one has run.
-    ///
-    /// A syscall policy can make `pidfd_open` fatal rather than refuse it --
-    /// `SECCOMP_RET_KILL_PROCESS` is the disposition a disallowed call draws by
-    /// default under systemd's `SystemCallFilter=`, and it ends the process
-    /// before there is an errno to read -- and a policy can write `ESRCH` or
-    /// `ECHILD` itself, which are the two answers this module otherwise reads
-    /// as facts about a helper. Neither can be told from inside the call, so
-    /// the calls are made once where being killed for making them is
-    /// survivable, and what they answered there is what the calls made here are
-    /// read against.
-    #[cfg(target_os = "linux")]
-    static IDENTITY_CALLS: AtomicU8 = AtomicU8::new(0);
 
     const GUARD_READY: u8 = 0x91;
     const GUARD_ARM: u8 = 0xa1;
@@ -1469,25 +1455,6 @@ mod termination {
     const SETUP_FAILURE_FRAME_LEN: usize = 7;
 
     const HELPER_READY_BUDGET: Duration = Duration::from_secs(2);
-
-    /// A probe reported, so none of the identity system calls ended the process
-    /// that made them. Carried by every reported answer, so that an answer
-    /// holding no other bit is still an answer and not "no probe has run".
-    #[cfg(target_os = "linux")]
-    const IDENTITY_PROBED: u8 = 1 << 0;
-    /// `pidfd_open` answered with a descriptor for a process that was there.
-    #[cfg(target_os = "linux")]
-    const IDENTITY_NAMES: u8 = 1 << 1;
-    /// `pidfd_send_signal(..., SIGKILL, ...)` answered zero through a
-    /// descriptor naming a process that was there, so an `ESRCH` from it is the
-    /// kernel answering about a helper and not a policy writing an errno.
-    #[cfg(target_os = "linux")]
-    const IDENTITY_SIGNALS: u8 = 1 << 2;
-    /// `waitid(P_PIDFD, ..., WEXITED)` collected that process, so an `ECHILD`
-    /// from it is the kernel answering about a helper and not a policy writing
-    /// an errno.
-    #[cfg(target_os = "linux")]
-    const IDENTITY_COLLECTS: u8 = 1 << 3;
 
     #[derive(Clone, Copy)]
     struct SignalPolicy {
@@ -2425,11 +2392,11 @@ mod termination {
                 for fd in [command[0], command[1], ack[0], ack[1]] {
                     close_fd(fd);
                 }
-                collect_unnamed_helper(pid);
+                let end = describe_unnamed_end(collect_unnamed_helper(pid));
                 return Err(format!(
                     "taking an identity for the Unix cleanup reaper: {}; it was left to end on \
-                     its closed command pipe and collected by number, because a helper this \
-                     launch cannot name is not one it may signal by number",
+                     its closed command pipe and was {end}, because a helper this launch cannot \
+                     name is not one it may signal by number",
                     std::io::Error::from_raw_os_error(errno)
                 ));
             }
@@ -2786,209 +2753,37 @@ mod termination {
     #[cfg(target_os = "linux")]
     const HELPER_IDENTITY_ENDED: libc::c_int = -2;
 
-    /// The probe's report: what the calls answered, and the errno of a step
-    /// that could not be performed at all.
-    #[cfg(target_os = "linux")]
-    const IDENTITY_REPORT_LEN: usize = 2;
-
-    /// What this host's identity system calls answered where being killed for
-    /// asking was survivable, remembered for the life of the process.
+    /// The environment variable that turns the identity path on, and the only
+    /// value that turns it on.
     ///
-    /// `Err(errno)` is a probe this process could not run or complete: no
-    /// descriptor for its report pipe, no child to run it in, no descriptor for
-    /// the call under test, no way to take an inherited `SIGCHLD` handler off
-    /// the child. Every one of those is a resource or a state of this process
-    /// and none is an answer about the host, so none is remembered and the
-    /// launch asking fails on it exactly as it fails on any other shortage.
+    /// Off is the default, and off is a host upstroke makes none of these
+    /// system calls on. A syscall policy may *kill* the caller of one rather
+    /// than refuse it -- `SECCOMP_RET_KILL_PROCESS` is the disposition a
+    /// disallowed call draws by default under systemd's `SystemCallFilter=` --
+    /// and a process ended by a system call has no branch left to take, so no
+    /// answer this process can read establishes that making the call is
+    /// survivable. Setting this asserts that the host's syscall policy permits
+    /// `pidfd_open`, `pidfd_send_signal` and `waitid(P_PIDFD, ...)`; it is the
+    /// embedder's assertion about its own deployment, which is the one place
+    /// that fact is known. DESIGN §15 states it as part of the trust boundary.
     #[cfg(target_os = "linux")]
-    fn established_identity_calls() -> Result<u8, libc::c_int> {
-        let remembered = IDENTITY_CALLS.load(Ordering::SeqCst);
-        if remembered != 0 {
-            return Ok(remembered);
-        }
-        let answered = probe_identity_calls()?;
-        IDENTITY_CALLS.store(answered, Ordering::SeqCst);
-        Ok(answered)
-    }
+    const HELPER_IDENTITY_SWITCH: &str = "UPSTROKE_HELPER_IDENTITY";
 
-    /// Whether the probe found this host answering `what` for a process whose
-    /// state it already knew. A call made before any probe has run answers
-    /// nothing, which is the reading that keeps an errno from standing as a
-    /// fact on its own.
+    /// The value `HELPER_IDENTITY_SWITCH` must hold. Anything else, and an
+    /// unset variable, leave the identity path off.
     #[cfg(target_os = "linux")]
-    fn identity_calls_answer(what: u8) -> bool {
-        IDENTITY_CALLS.load(Ordering::SeqCst) & what != 0
-    }
+    const HELPER_IDENTITY_ON: &str = "1";
 
-    /// Make every identity system call once, in a forked child, against a
-    /// process of that child's own.
+    /// Whether the embedder has turned the identity path on.
     ///
-    /// A policy that kills on one of the calls kills the child, and the parent
-    /// reads the end of the report pipe rather than dying itself: no report is
-    /// a child that never reached its write, and this process then makes none
-    /// of the calls at all. A policy that answers one of them falsely is caught
-    /// by the answer disagreeing with a fate the child arranged: the target is
-    /// the child's own and it is there, so a truthful `pidfd_open` names it, a
-    /// truthful `pidfd_send_signal` returns zero, and a truthful `waitid`
-    /// collects it. The arguments are the teardown's own, because a filter
-    /// selects on arguments.
+    /// Read where it is used and never remembered. A seccomp filter can be
+    /// installed at any point in a process's life, including from another
+    /// thread between two launches, so nothing this process learned from an
+    /// earlier call stays true for a later one -- which is why there is no
+    /// cached answer here to be wrong.
     #[cfg(target_os = "linux")]
-    fn probe_identity_calls() -> Result<u8, libc::c_int> {
-        let report =
-            create_cloexec_pipe().map_err(|error| error.raw_os_error().unwrap_or(libc::EIO))?;
-        // SAFETY: the child makes system calls and `_exit` only. It never
-        // returns to the multithreaded Rust runtime.
-        let child = unsafe { libc::fork() };
-        if child < 0 {
-            let errno = last_errno();
-            close_fd(report[0]);
-            close_fd(report[1]);
-            return Err(errno);
-        }
-        if child == 0 {
-            close_fd(report[0]);
-            report_identity_calls(report[1]);
-        }
-        close_fd(report[1]);
-        let mut reported = [0_u8; IDENTITY_REPORT_LEN];
-        let heard = read_raw_exact(report[0], &mut reported);
-        close_fd(report[0]);
-        collect_unnamed_helper(child);
-        let [answered, blocked] = reported;
-        if heard && blocked != 0 {
-            return Err(libc::c_int::from(blocked));
-        }
-        Ok(if heard {
-            answered | IDENTITY_PROBED
-        } else {
-            IDENTITY_PROBED
-        })
-    }
-
-    /// The probe itself, in a child of this process. Everything here is a
-    /// system call or `_exit`, as in every other helper this module forks.
-    #[cfg(target_os = "linux")]
-    fn report_identity_calls(report_fd: libc::c_int) -> ! {
-        let mut report = [0_u8; IDENTITY_REPORT_LEN];
-        // An embedding host's `SIGCHLD` disposition is inherited across a fork,
-        // and a handler that waits for any child -- or `SIG_IGN`, or
-        // `SA_NOCLDWAIT` -- would collect this probe's own target before the
-        // collecting call under test reached it, which is the very thing being
-        // measured. It comes off this child first.
-        if default_child_disposition() {
-            // SAFETY: the forked child calls only `_exit`.
-            let target = unsafe { libc::fork() };
-            if target == 0 {
-                // SAFETY: leave the forked child without running destructors.
-                unsafe { libc::_exit(0) };
-            }
-            if target < 0 {
-                report[1] = blocked_by(last_errno());
-            } else {
-                report = identity_calls_against(target);
-            }
-        } else {
-            report[1] = blocked_by(last_errno());
-        }
-        let _ = write_raw(report_fd, &report);
-        // SAFETY: leave the probe without running destructors.
-        unsafe { libc::_exit(0) };
-    }
-
-    /// Put `SIGCHLD` back to its default disposition, dropping whatever handler
-    /// and flags this process inherited.
-    #[cfg(target_os = "linux")]
-    fn default_child_disposition() -> bool {
-        // SAFETY: `sigaction` is a plain C aggregate whose all-zero bit pattern
-        // is the one the kernel is documented to be handed. `sigemptyset` and
-        // `sigaction` read and write through pointers live for their calls, and
-        // the null third argument asks for no previous disposition back.
-        unsafe {
-            let mut action: libc::sigaction = std::mem::zeroed();
-            action.sa_sigaction = libc::SIG_DFL;
-            action.sa_flags = 0;
-            libc::sigemptyset(&mut action.sa_mask) == 0
-                && libc::sigaction(libc::SIGCHLD, &action, std::ptr::null_mut()) == 0
-        }
-    }
-
-    /// The three calls, in the order a launch and its teardown make them,
-    /// against `target`: a child of this probe that nothing here has collected,
-    /// so each call has a process to answer about and the truthful answer to
-    /// each is known before it is made.
-    #[cfg(target_os = "linux")]
-    fn identity_calls_against(target: libc::pid_t) -> [u8; IDENTITY_REPORT_LEN] {
-        let mut answered = 0_u8;
-        let mut blocked = 0_u8;
-        let named = libc::c_long::from(target);
-        let flags: libc::c_long = 0;
-        // SAFETY: as in `open_helper_identity`.
-        let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, named, flags) };
-        let identity = libc::c_int::try_from(opened).unwrap_or(-1);
-        if identity < 0 {
-            blocked = blocked_by_shortage(last_errno());
-        } else {
-            answered |= IDENTITY_NAMES;
-            let held = libc::c_long::from(identity);
-            let number = libc::c_long::from(libc::SIGKILL);
-            // SAFETY: as in `signal_helper`, with the signal and the null
-            // `siginfo_t` pointer a teardown sends.
-            let sent = unsafe {
-                libc::syscall(
-                    libc::SYS_pidfd_send_signal,
-                    held,
-                    number,
-                    std::ptr::null_mut::<libc::siginfo_t>(),
-                    flags,
-                )
-            };
-            if sent == 0 {
-                answered |= IDENTITY_SIGNALS;
-            }
-            if let Ok(id) = libc::id_t::try_from(identity) {
-                let mut status = 0;
-                if collect_through_identity(id, &mut status) >= 0 {
-                    answered |= IDENTITY_COLLECTS;
-                }
-            }
-            close_fd(identity);
-        }
-        if answered & IDENTITY_COLLECTS == 0 {
-            // Nothing collected the target through a descriptor, so it is still
-            // this probe's own uncollected child and its number is still its
-            // own. The wait by number is the one call left that can end it.
-            collect_unnamed_helper(target);
-        }
-        [answered, blocked]
-    }
-
-    /// A step of the probe that could not be performed at all -- no child to
-    /// run the calls against, no way to take an inherited `SIGCHLD`
-    /// disposition off this one. That is a state of this process and never an
-    /// answer about the host, so it is always reported, whatever errno it
-    /// left: an errno wider than a byte, and a step that left none, are
-    /// reported as a blocked probe rather than recorded as a fact.
-    #[cfg(target_os = "linux")]
-    fn blocked_by(errno: libc::c_int) -> u8 {
-        match u8::try_from(errno) {
-            Ok(0) | Err(_) => u8::MAX,
-            Ok(byte) => byte,
-        }
-    }
-
-    /// A `pidfd_open` that failed, told apart the way `open_helper_identity`
-    /// tells its own apart: a resource this process ran out of is this process
-    /// being short and blocks the probe, and every other errno is an answer
-    /// about the host -- `ENOSYS`, `ENODEV`, `EINVAL`, `EPERM` and `EACCES`
-    /// say it does not offer the call, and an `ESRCH` for a process the probe
-    /// knows is there says a policy wrote it. An answer leaves the bit clear
-    /// rather than failing the launch.
-    #[cfg(target_os = "linux")]
-    fn blocked_by_shortage(errno: libc::c_int) -> u8 {
-        match errno {
-            libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::EAGAIN => blocked_by(errno),
-            _ => 0,
-        }
+    fn helper_identity_path_on() -> bool {
+        std::env::var_os(HELPER_IDENTITY_SWITCH).is_some_and(|value| value == HELPER_IDENTITY_ON)
     }
 
     /// `Err(errno)` is an acquisition that failed for a reason which is not
@@ -3000,17 +2795,14 @@ mod termination {
     fn open_helper_identity(pid: libc::pid_t) -> Result<libc::c_int, libc::c_int> {
         #[cfg(target_os = "linux")]
         {
-            // Asked before this process makes the call itself, because a policy
-            // can make `pidfd_open` fatal rather than refuse it and a process
-            // killed for a system call has no branch left to take. What a child
-            // established about the three calls decides whether the first of
-            // them is made here at all, and what the answers below are worth.
-            let established = established_identity_calls()?;
-            if established & IDENTITY_NAMES == 0 {
-                // Where it was safe to try, the call named nothing: this host
-                // does not offer it, or a policy refuses it, or it ended the
-                // child that made it. That is the platform row DESIGN §15
-                // names, and the number is its documented fallback.
+            // Asked before this process makes the call, and asked of the
+            // embedder rather than of the host: a policy can make `pidfd_open`
+            // fatal rather than refuse it, and a process killed for a system
+            // call has no branch left to take. Off, this makes none of the
+            // three calls at all and the number is the end a helper gets --
+            // the platform row DESIGN §15 names, reached here by policy
+            // instead of by kernel.
+            if !helper_identity_path_on() {
                 return Ok(NO_HELPER_IDENTITY);
             }
             let target = libc::c_long::from(pid);
@@ -3024,10 +2816,9 @@ mod termination {
                 return match errno {
                     // The kernel answering about this helper: it has ended and
                     // been collected, so its number is free and is exactly what
-                    // must not be signalled. Read as the kernel's answer only
-                    // because the probe found this call naming a process that
-                    // was there; a host where it does not is one this statement
-                    // is never reached on.
+                    // must not be signalled. There is no descriptor here to ask
+                    // a second question through, so this reading is the one
+                    // turning the path on asserts -- see DESIGN §15.
                     libc::ESRCH => Ok(HELPER_IDENTITY_ENDED),
                     // The call is not one this host offers. A kernel older than
                     // 5.3 answers `ENOSYS`, a kernel without the anonymous inode
@@ -3047,26 +2838,14 @@ mod termination {
                 // licence to use the number either.
                 return Err(libc::EBADF);
             };
-            // The probes choose which path to prefer, never whether the number
-            // is safe: `pidfd_open` landed in Linux 5.3, `P_PIDFD` in 5.4, and
-            // `pidfd_send_signal` is a separate call a policy can refuse on its
-            // own, so a host that cannot use a descriptor for all three is
-            // better off not holding one. What the teardown may do is decided
-            // by what the teardown's own call answers, in `signal_helper` and
-            // `collect_helper`, because a filter selects on arguments and these
-            // are not the arguments a teardown passes.
-            let probes = [
-                identity_can_collect(identity),
-                identity_can_signal(identity),
-            ];
-            if probes.contains(&IdentityProbe::Refused) {
-                close_fd(identity);
-                return Ok(if probes.contains(&IdentityProbe::HelperEnded) {
-                    HELPER_IDENTITY_ENDED
-                } else {
-                    NO_HELPER_IDENTITY
-                });
-            }
+            // The descriptor is kept whatever this host will let the teardown
+            // do with it. Nothing here predicts the teardown's own calls: a
+            // filter selects on arguments, so a call made now with a launch's
+            // arguments establishes nothing about a call made later with a
+            // teardown's, and a refusal answered here would have to be answered
+            // by handing back the number -- the one thing a descriptor exists
+            // to keep out of the teardown's reach. `signal_helper` and
+            // `collect_helper` answer for their own calls, where they are made.
             Ok(identity)
         }
         #[cfg(not(target_os = "linux"))]
@@ -3076,18 +2855,34 @@ mod termination {
         }
     }
 
+    /// What one call through a helper's own descriptor says about whether the
+    /// helper is still there.
+    ///
+    /// A descriptor names one process and can never name another, so these are
+    /// answers about the helper and about nothing else. They are asked in one
+    /// place only: when the teardown's own call has answered with the errno
+    /// that would mean the helper has ended and been collected, and that claim
+    /// needs a second call to agree with it before it is acted on.
     #[cfg(target_os = "linux")]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum IdentityProbe {
-        Available,
-        HelperEnded,
-        Refused,
+    enum HelperFate {
+        /// The call answered for a process that is still there -- running, or
+        /// an uncollected zombie. Either way it has not been collected.
+        Present,
+        /// The call answered that nothing of that descriptor is left to reach:
+        /// the helper has ended and something has collected it.
+        Ended,
+        /// The call was refused, so it says nothing about the helper.
+        Unanswered,
     }
 
+    /// The helper's fate as `waitid(P_PIDFD, ...)` sees it, asked with
+    /// `WNOHANG | WNOWAIT` so that it collects nothing and leaves the helper in
+    /// whatever state it is in.
     #[cfg(target_os = "linux")]
-    fn identity_can_collect(identity: libc::c_int) -> IdentityProbe {
+    fn helper_fate_by_wait(identity: libc::c_int) -> HelperFate {
         let Ok(id) = libc::id_t::try_from(identity) else {
-            return IdentityProbe::Refused;
+            return HelperFate::Unanswered;
         };
         // SAFETY: `siginfo_t` is a plain C aggregate whose all-zero bit pattern
         // is the one `waitid` is documented to be handed.
@@ -3104,16 +2899,18 @@ mod termination {
             )
         };
         if answered == 0 {
-            IdentityProbe::Available
+            HelperFate::Present
         } else if last_errno() == libc::ECHILD {
-            IdentityProbe::HelperEnded
+            HelperFate::Ended
         } else {
-            IdentityProbe::Refused
+            HelperFate::Unanswered
         }
     }
 
+    /// The helper's fate as `pidfd_send_signal` sees it, asked with signal `0`,
+    /// which runs the kernel's permission check and delivers nothing.
     #[cfg(target_os = "linux")]
-    fn identity_can_signal(identity: libc::c_int) -> IdentityProbe {
+    fn helper_fate_by_signal(identity: libc::c_int) -> HelperFate {
         let target = libc::c_long::from(identity);
         let number: libc::c_long = 0;
         let flags: libc::c_long = 0;
@@ -3129,11 +2926,11 @@ mod termination {
             )
         };
         if sent == 0 {
-            IdentityProbe::Available
+            HelperFate::Present
         } else if last_errno() == libc::ESRCH {
-            IdentityProbe::HelperEnded
+            HelperFate::Ended
         } else {
-            IdentityProbe::Refused
+            HelperFate::Unanswered
         }
     }
 
@@ -3166,15 +2963,18 @@ mod termination {
             }
             // The call was made and something answered it. `ESRCH` is the
             // answer about this helper -- it has ended and been collected --
-            // and the number that named it is another process's now, but only
-            // where the probe found this host returning zero from this call for
-            // a process that was there. A policy can write `ESRCH` itself, and
-            // on a host where it does, this call establishes nothing. Anything
-            // else is the call refused for these arguments, which a policy may
-            // do for `SIGKILL` while permitting the signal `0` the acquisition
-            // probe sent. Either way that leaves this host where a host with no
-            // identity at all stands, and the number is what it has.
-            if last_errno() == libc::ESRCH && identity_calls_answer(IDENTITY_SIGNALS) {
+            // and the number that named it is another process's now. A policy
+            // can write that errno itself, so it is not acted on until a second
+            // call through the same descriptor agrees: a helper that has been
+            // collected cannot also be a process `waitid` still has to report
+            // on. Where the two disagree, or where the second call is refused
+            // too, nothing about this helper has been established and the
+            // number is what is left. Anything other than `ESRCH` is the call
+            // refused for these arguments, which a policy may do for `SIGKILL`
+            // while permitting another signal. Either way that leaves this host
+            // where a host with no identity at all stands.
+            if last_errno() == libc::ESRCH && helper_fate_by_wait(identity) == HelperFate::Ended {
+                set_errno(libc::ESRCH);
                 return -1;
             }
         }
@@ -3202,19 +3002,24 @@ mod termination {
                 if collected >= 0 {
                     return collected;
                 }
-                // As in `signal_helper`: `ECHILD` is the kernel answering about
-                // this helper where the probe found this host collecting
-                // through a descriptor at all, and `EINTR` is this call to make
-                // again -- both are answers, and the number stays out of reach.
-                // Anything else is the consuming wait refused for these
-                // arguments, which a policy may do while permitting the
-                // `WNOHANG | WNOWAIT` the acquisition probe passed, or an
-                // `ECHILD` a policy wrote itself; the number is then all there
-                // is to collect the helper by.
+                // `EINTR` is this call to make again, and every caller here
+                // loops on it, so it is answered before anything else is asked.
                 let errno = last_errno();
-                if errno == libc::EINTR
-                    || (errno == libc::ECHILD && identity_calls_answer(IDENTITY_COLLECTS))
-                {
+                if errno == libc::EINTR {
+                    return -1;
+                }
+                // As in `signal_helper`: `ECHILD` is the kernel answering about
+                // this helper, and a policy can write it just as well, so it is
+                // acted on only where a second call through the same descriptor
+                // agrees -- a helper that has been collected cannot also be a
+                // process a signal can still reach. Where they disagree, or the
+                // second call is refused, nothing has been established.
+                // Anything else is the consuming wait refused for these
+                // arguments, which a policy may do while permitting a wait that
+                // collects nothing. The number is then all there is to collect
+                // the helper by.
+                if errno == libc::ECHILD && helper_fate_by_signal(identity) == HelperFate::Ended {
+                    set_errno(libc::ECHILD);
                     return -1;
                 }
             }
@@ -3226,8 +3031,22 @@ mod termination {
         unsafe { libc::waitpid(pid, status, 0) }
     }
 
-    /// Collect a helper this launch could not name, by number, after its
-    /// command pipe has been closed and it has been left to end on that.
+    /// What the bounded wait for a helper this launch could not name answered.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum UnnamedEnd {
+        /// The wait collected the helper.
+        Collected,
+        /// The wait answered that this process has no such child left, so
+        /// something else collected it first.
+        AlreadyCollected,
+        /// The budget ran out with the helper still this process's uncollected
+        /// child.
+        StillRunning,
+    }
+
+    /// Collect a helper this launch could not name, by number and within
+    /// `HELPER_READY_BUDGET`, after its command pipe has been closed and it has
+    /// been left to end on that.
     ///
     /// Closing the pipe lets the helper exit; it does not collect it, and a
     /// child nothing collects is one this process keeps for the rest of its
@@ -3238,15 +3057,50 @@ mod termination {
     /// wildcard wait got there first, it answers `ECHILD` and collects nothing.
     /// Nothing between the two forks a child of this process, so there is no
     /// statement here at which the number could come back as another one.
-    fn collect_unnamed_helper(pid: libc::pid_t) -> libc::pid_t {
+    ///
+    /// **The wait is bounded, because closing the pipe is not a release.** A
+    /// helper still inside its own startup may be blocked in a call that no
+    /// close can reach -- an `open` on the cleanup lease, which is a FIFO whose
+    /// writer may never arrive -- and a blocking wait here then never returns.
+    /// That is worse than the zombie it is trying to avoid: the base this
+    /// branch changed bounded its own end of a helper at this same budget and
+    /// reported what it found, and an embedder can get past a launch that
+    /// failed while it cannot get past one that never returned. So the budget
+    /// is the helper's own startup budget, and what the wait answered goes into
+    /// the failure rather than being waited out.
+    fn collect_unnamed_helper(pid: libc::pid_t) -> UnnamedEnd {
+        let began = std::time::Instant::now();
         let mut status = 0;
         loop {
             // SAFETY: `status` is writable for a `c_int`, and `pid` names a
             // child of this process that nothing here has collected.
-            let waited = unsafe { libc::waitpid(pid, &mut status, 0) };
-            if waited >= 0 || !last_errno_is_interrupted() {
-                return waited;
+            // `WNOHANG` is what makes the loop above it a bounded one.
+            let waited = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+            if waited > 0 {
+                return UnnamedEnd::Collected;
             }
+            if waited < 0 && !last_errno_is_interrupted() {
+                return UnnamedEnd::AlreadyCollected;
+            }
+            if began.elapsed() >= HELPER_READY_BUDGET {
+                return UnnamedEnd::StillRunning;
+            }
+            raw_sleep_10ms();
+        }
+    }
+
+    /// The words a launch's failure carries for what became of the helper it
+    /// could not name.
+    fn describe_unnamed_end(end: UnnamedEnd) -> String {
+        match end {
+            UnnamedEnd::Collected => "collected by number".to_owned(),
+            UnnamedEnd::AlreadyCollected => {
+                "already collected, by something that is not this launch".to_owned()
+            }
+            UnnamedEnd::StillRunning => format!(
+                "still running and still uncollected after {HELPER_READY_BUDGET:?}, which is \
+                 where the wait for it stops"
+            ),
         }
     }
 
@@ -3770,11 +3624,11 @@ mod termination {
                 for fd in [command[0], command[1], ack[0]] {
                     close_fd(fd);
                 }
-                collect_unnamed_helper(pid);
+                let end = describe_unnamed_end(collect_unnamed_helper(pid));
                 return Err(format!(
                     "taking an identity for the Unix job-control guard: {}; it was left to end \
-                     on its closed command pipe and was collected by number, because a helper \
-                     this launch cannot name is not one it may signal by number",
+                     on its closed command pipe and was {end}, because a helper this launch \
+                     cannot name is not one it may signal by number",
                     std::io::Error::from_raw_os_error(errno)
                 ));
             }
@@ -6209,14 +6063,14 @@ mod termination {
                 "the wildcard wait collected something other than the second helper"
             );
             assert_eq!(
-                identity_can_collect(identity),
-                IdentityProbe::HelperEnded,
+                helper_fate_by_wait(identity),
+                HelperFate::Ended,
                 "a helper the host collected reads as a kernel that will not collect through \
                  a descriptor, and the descriptor naming it is discarded"
             );
             assert_eq!(
-                identity_can_signal(identity),
-                IdentityProbe::HelperEnded,
+                helper_fate_by_signal(identity),
+                HelperFate::Ended,
                 "a helper the host collected reads as a kernel that will not signal through \
                  a descriptor, and the descriptor naming it is discarded"
             );
@@ -6476,13 +6330,13 @@ mod termination {
                 std::io::Error::last_os_error()
             );
             assert_eq!(
-                identity_can_collect(witness),
-                IdentityProbe::Available,
+                helper_fate_by_wait(witness),
+                HelperFate::Present,
                 "the policy refused the wait, so what follows would not be about the signal"
             );
             assert_eq!(
-                identity_can_signal(witness),
-                IdentityProbe::Refused,
+                helper_fate_by_signal(witness),
+                HelperFate::Unanswered,
                 "the policy did not refuse the signal syscall"
             );
             close_fd(witness);
@@ -6699,13 +6553,13 @@ mod termination {
             let (helper, helper_lifetime) = spawn_sigchld_target();
             let witness = identity_by_hand(helper);
             assert_eq!(
-                identity_can_collect(witness),
-                IdentityProbe::Available,
+                helper_fate_by_wait(witness),
+                HelperFate::Present,
                 "the policy refused the wait, so what follows would not be about the signal"
             );
             assert_eq!(
-                identity_can_signal(witness),
-                IdentityProbe::Available,
+                helper_fate_by_signal(witness),
+                HelperFate::Present,
                 "the policy refused the signal `0` the probe sends, so the probe would have \
                  caught it and this is not the argument-sensitive case"
             );
@@ -6818,8 +6672,8 @@ mod termination {
             let (helper, helper_lifetime) = spawn_sigchld_target();
             let witness = identity_by_hand(helper);
             assert_eq!(
-                identity_can_collect(witness),
-                IdentityProbe::Available,
+                helper_fate_by_wait(witness),
+                HelperFate::Present,
                 "the policy refused the probe's own wait, so the probe would have caught it \
                  and this is not the argument-sensitive case"
             );
@@ -6908,46 +6762,6 @@ mod termination {
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
-            );
-        }
-
-        /// The probe is what every reading of an identity errno below now
-        /// rests on, and a probe that reported nothing would leave every one of
-        /// those readings false without failing a single test about a policy:
-        /// each would simply fall back to the number, which is what they assert
-        /// under a policy anyway. So this asserts the other direction, on a host
-        /// with no policy at all.
-        #[cfg(target_os = "linux")]
-        #[test]
-        fn the_identity_calls_this_host_offers_are_established_before_one_is_made() {
-            let established = established_identity_calls().expect("this host answered the probe");
-            for (call, what) in [
-                (IDENTITY_PROBED, "a child reported at all"),
-                (
-                    IDENTITY_NAMES,
-                    "`pidfd_open` named a process that was there",
-                ),
-                (
-                    IDENTITY_SIGNALS,
-                    "`pidfd_send_signal(..., SIGKILL, ...)` answered for one",
-                ),
-                (
-                    IDENTITY_COLLECTS,
-                    "`waitid(P_PIDFD, ..., WEXITED)` collected one",
-                ),
-            ] {
-                assert_ne!(
-                    established & call,
-                    0,
-                    "this Linux host offers the identity calls and the probe did not find that \
-                     {what}: every errno read below would fall back to the number, which is \
-                     what a policy test asserts too",
-                );
-            }
-            assert_eq!(
-                established,
-                IDENTITY_CALLS.load(Ordering::SeqCst),
-                "the answer was not remembered for the calls that follow it"
             );
         }
 
@@ -7295,13 +7109,13 @@ mod termination {
             let (helper, helper_lifetime) = spawn_sigchld_target();
             let witness = identity_by_hand(helper);
             assert_eq!(
-                identity_can_collect(witness),
-                IdentityProbe::Available,
+                helper_fate_by_wait(witness),
+                HelperFate::Present,
                 "the policy answered the wait, so what follows would not be about the signal"
             );
             assert_eq!(
-                identity_can_signal(witness),
-                IdentityProbe::Available,
+                helper_fate_by_signal(witness),
+                HelperFate::Present,
                 "the policy answered the signal `0` the probe sends, so this is not the \
                  argument-sensitive case"
             );
