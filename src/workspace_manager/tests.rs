@@ -5967,24 +5967,88 @@ fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
         .expect("Snapshot.Remove + Snapshot.RemoveIntent");
 }
 
+/// Where [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`]
+/// tells its helper to do the work.
+///
+/// Guarded by a variable for the reason [`abort_probe_helper`] is: the item is
+/// `#[ignore]`, and a run with `--include-ignored` would otherwise execute the
+/// body in a process that still carries `GIT_NO_REPLACE_OBJECTS`, which is the
+/// one environment this witness must never be measured in.
+const QUIESCENCE_REPLACEMENT: &str = "UPSTROKE_PR271_QUIESCENCE_REPLACEMENT";
+
+/// Run this test binary again at `test`, `--exact --ignored`, with
+/// [`NO_REPLACEMENT_OBJECTS`]'s key **removed** from the child's environment,
+/// and return its exit status.
+///
+/// [`run_kill_child`] sets variables; this one unsets the single variable that
+/// would make its witness pass for the wrong reason. `Command` inherits the
+/// parent's environment, so a suite run under an exported
+/// `GIT_NO_REPLACE_OBJECTS=1` -- which is what this pull request makes upstroke's
+/// own gates supply -- would hand the child the protection the child exists to
+/// prove the code installs. `env_remove` is the only call here that matters;
+/// everything else is [`run_kill_child`]'s shape.
+fn run_child_without_replacement_isolation(test: &str) -> std::process::ExitStatus {
+    Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", test, "--ignored", "--nocapture"])
+        .env(QUIESCENCE_REPLACEMENT, "1")
+        .env_remove(NO_REPLACEMENT_OBJECTS.0)
+        .status()
+        .expect("spawn the witness child")
+}
+
 /// Quiescence answers about the tree the worktree holds, not about whatever
 /// `git replace` points that tree at (PR #130, pass 3's P1).
 ///
-/// `quiescence` reaches Git through the free [`read_only_git`], which is
-/// outside [`WorkspaceManager::command`] and so was outside the isolation the
-/// manager's own commands had. `Quiescence::HoldsTree` is answered by
-/// `diff-index --cached --quiet <tree>`, and Git resolves `<tree>` through
-/// `refs/replace/*` like any other name: measured on git 2.43, that exit code
-/// moves from 0 to 1 the moment a replacement of the recorded tree is
-/// installed, and an untouched worktree becomes a `TreeMismatch` that routes to
-/// forced removal and a fresh add.
+/// **The work is in a child process, and the child is why this test exists in
+/// this shape** (PR #271, round 1's blocking finding). `quiescence` reaches Git
+/// through the free [`read_only_git`], whose child inherits this process's
+/// environment; run in-process, the body below passes with the `.env` call
+/// removed from [`read_only_git`] whenever the suite itself was started under
+/// `GIT_NO_REPLACE_OBJECTS=1` -- measured, exit `0` and all six
+/// replacement-focused tests green against unrepaired code. That is the
+/// environment this pull request makes both runners supply to gates, so the
+/// witness would have false-greened in upstroke's own CI from here on. The child
+/// is spawned with the variable *removed*, so its verdict is about what
+/// `read_only_git` installs and never about what the machine exported.
 ///
-/// Witnessed failing with the pair removed from `read_only_git`:
-/// `Err(TreeMismatch { expected: "6640fb01...", difference: "1 path(s) differ:
-/// b.txt" })` over a worktree nothing had written to -- `b.txt` being what the
-/// seed tree the replacement points at does not carry.
+/// `Quiescence::HoldsTree` is answered by `diff-index --cached --quiet <tree>`,
+/// and Git resolves `<tree>` through `refs/replace/*` like any other name:
+/// measured on git 2.43, that exit code moves from 0 to 1 the moment a
+/// replacement of the recorded tree is installed, and an untouched worktree
+/// becomes a `TreeMismatch` that routes to forced removal and a fresh add.
+///
+/// Witnessed failing with the pair removed from `read_only_git`, **with
+/// `GIT_NO_REPLACE_OBJECTS=1` exported into this parent**: the child exited
+/// `101` on `Err(TreeMismatch { expected: "6640fb01...", difference: "1 path(s)
+/// differ: b.txt" })` over a worktree nothing had written to -- `b.txt` being
+/// what the seed tree the replacement points at does not carry.
 #[test]
 fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
+    let status = run_child_without_replacement_isolation(
+        "workspace_manager::tests::quiescence_replacement_helper",
+    );
+    assert!(
+        status.success(),
+        "the child witnesses quiescence over a replaced tree with \
+         `{}` absent from its own environment, and ended {status:?}",
+        NO_REPLACEMENT_OBJECTS.0
+    );
+}
+
+/// Spawned by [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`].
+#[test]
+#[ignore = "subprocess helper"]
+fn quiescence_replacement_helper() {
+    if std::env::var_os(QUIESCENCE_REPLACEMENT).is_none() {
+        return;
+    }
+    assert!(
+        std::env::var_os(NO_REPLACEMENT_OBJECTS.0).is_none(),
+        "the parent must remove `{}` before spawning this child, or the reads \
+         below inherit the protection they are here to witness",
+        NO_REPLACEMENT_OBJECTS.0
+    );
+
     let fixture = Fixture::created("replace-quiescence");
     let slot = fixture.add_task(&mut NoHooks, "q", 1);
     let path = fixture
