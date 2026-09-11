@@ -429,11 +429,42 @@ output-equivalent to deleting it, because [`Self::reserved_values`]
 reads its values back out of the same base.
 
 [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs) last, after the
-overlay, for the reason `host-v1` states in its own notes. The Git view a
-container receives carries the repository's refs, `refs/replace/*` among them,
-so a container gate is exposed to exactly the rewriting a host gate is; and the
-base here is an image's `ENV`, which this runner did not write, so an image
-declaring the key is one more reason the runner's own write comes last.
+overlay, for the reason `host-v1` states in its own notes. The base here is an
+image's `ENV`, which this runner did not write, so an image declaring the key is
+one more reason the runner's own write comes last.
+
+**The Git view a container receives carries no `refs/replace/*` — and no refs at
+all** (PR #271, round 2's P3; the claim that stood here said the opposite).
+`RoleGitView::project` writes `HEAD`, `config`, `index`,
+`objects/info/alternates`, `objects/pack`, the worktree gitfile, and **empty**
+`refs/heads` and `refs/tags` directories; `packed-refs` is in
+`WITHHELD_ENTRIES`. Measured through production `RoleGitView::materialize`, with
+one `refs/replace/<HEAD> -> <HEAD~1>` installed in the source and raw `git`
+children at both ends: the source enumerates that ref and answers `git show
+HEAD:second.txt` with `128`, `fatal: path 'second.txt' exists on disk, but not
+in 'HEAD'`; through the projection `for-each-ref` returns nothing at all — for
+`refs/replace/` and for every namespace — and the same read answers `0`,
+`two\n`. `the_role_view_carries_no_engine_refs_and_no_link_back_into_the_repository`
+in `src/runner/container/view.rs` is that boundary's own guard.
+
+So the isolation composed here is not what stops a container role reading a
+replacement today; the projection is. It is composed anyway because the two are
+independent facts with independent reasons. This one states **which object graph
+a schema-4 role reads**, and it is the same sentence `design/15` writes for the
+host; the projection's ref list is a *containment* decision — nothing that links
+back into the engine's repository — taken for a different reason and free to
+change without this one changing. Resting the object-graph guarantee on it would
+mean the day a namespace is projected, or `packed-refs` stops being withheld, the
+isolation is silently gone and nothing says so. The objects themselves are
+reachable either way: `objects/info/alternates` points at the repository's own
+store, so what a replacement would point *at* is already in scope; only the ref
+that would activate it is not.
+
+The pair also outranks a relocated namespace, so no second key is owed here:
+`GIT_REPLACE_REF_BASE` moves where Git looks for replacements, and with
+`GIT_NO_REPLACE_OBJECTS` set Git does not look (measured on git 2.43.0 —
+`GIT_REPLACE_REF_BASE=refs/elsewhere/` alone reads the replacing blob, and with
+the pair it reads the recorded one).
 
 ### Errors
 

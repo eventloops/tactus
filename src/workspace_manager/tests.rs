@@ -6023,14 +6023,16 @@ fn run_child_without_replacement_isolation(test: &str) -> std::process::ExitStat
 ///
 /// Witnessed failing with the pair removed from `read_only_git`, once under
 /// **each** ambient control the parent neutralises, every one of them exported
-/// into that parent: `GIT_NO_REPLACE_OBJECTS=1`, `GIT_CONFIG_COUNT` +
-/// `GIT_CONFIG_KEY_0`/`VALUE_0`, `GIT_CONFIG_KEY_0`/`VALUE_0` with no count,
-/// `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, a
-/// `HOME`/`XDG_CONFIG_HOME` carrying `core.useReplaceRefs = false`, and
-/// `GIT_REPLACE_REF_BASE`. All eleven exited `101` on
-/// `Err(TreeMismatch { expected: "...", difference: "1 path(s) differ: b.txt" })`
-/// over a worktree nothing had written to -- `b.txt` being what the seed tree
-/// the replacement points at does not carry.
+/// into that parent: a clean environment; `GIT_NO_REPLACE_OBJECTS=1`;
+/// `GIT_CONFIG_COUNT` with `GIT_CONFIG_KEY_0`/`VALUE_0`; those two with no
+/// count; `GIT_CONFIG_PARAMETERS`; `GIT_CONFIG_GLOBAL`; `GIT_CONFIG_SYSTEM`; a
+/// `GIT_CONFIG_GLOBAL` reaching the same value through `include.path`;
+/// `GIT_CONFIG`; a `HOME` carrying `~/.gitconfig`; an `XDG_CONFIG_HOME`
+/// carrying `git/config`; and `GIT_REPLACE_REF_BASE`. All twelve exited `101`
+/// on `Err(TreeMismatch { expected: "6640fb01...", difference: "1 path(s)
+/// differ: b.txt" })` over a worktree nothing had written to -- `b.txt` being
+/// what the seed tree the replacement points at does not carry. The same twelve
+/// exit `0` against the repaired code.
 #[test]
 fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
     let status = run_child_without_replacement_isolation(
