@@ -114,6 +114,15 @@
 # `fix-P2/correctness_<desc>` with no finding in existence. The mode is checked:
 # 100644 and 100755 are findings, a tree is not, and neither is a symlink or a
 # submodule.
+#
+# AND NO ENTRY NAME HERE TRAVERSES A SYMLINK, which is the half of the two-API
+# equivalence this end supplies. `ls-tree -- reviews/findings/` lists the entries
+# git RECORDS under that path; where `reviews`, or `reviews/findings` itself, is a
+# committed symlink it is a `120000 blob` and nothing is recorded under it, so
+# this listing is empty however many findings sit at the end of the link. The
+# other way in -- handing validate-pr-branch.sh a working tree's directory --
+# followed the link and answered out of files no ledger holds at that path, which
+# is why it now refuses a path reached through one. Same commit, same answer.
 
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"

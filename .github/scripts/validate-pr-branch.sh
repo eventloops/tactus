@@ -257,6 +257,68 @@
 # is not judging a pull request, and the safe answer to an unidentified caller
 # is the rule itself.
 
+#
+# EVERY FALSE ACCEPTANCE THIS FILE HAS GIVEN WAS A FAILED PROBE ANSWERED AS AN
+# ABSENCE, AND THAT IS WHY THERE ARE NOW EXACTLY TWO WAYS OUT OF IT. Four review
+# rounds each found more of one defect than the round before -- a git command or
+# a file read whose status was discarded, and whose failure was then read as
+# "nothing there", "empty" or "end of input", every one of which CONFORMS. The
+# shapes were all different and the class was one:
+#
+#   `nul=$?` inside `{ ...; nul=$?; }` makes the GROUP succeed, so the `||` that
+#   was meant to catch a failed open never ran and every non-zero read status
+#   became end-of-file: `/proc/self/mem` as a listing was exit 0 `conforms`.
+#
+#   A process substitution's status is not the command's, so `done < <(git
+#   ls-files …)` followed by `return 0` read an unreadable `.git/index` as "git
+#   records nothing at this path". The filesystem then decided, a committed
+#   symlink materialised as a regular file was read as a FILE LISTING, and the
+#   link's target text was resolved as a finding NOBODY HAS FILED.
+#
+#   And testing that `.git/.` is accessible says nothing about the metadata
+#   inside it, so `chmod 000 .git/HEAD` -- or `.git/objects`, or `.git/refs` --
+#   made both discovery probes exit 128, "no repository" was inferred, and the
+#   filesystem fallback conformed with empty stderr.
+#
+# Armouring each call site produced another crop each round, so the call sites
+# are gone. `git_probe` is the only place this file runs git and `read_file` is
+# the only place it opens a file, both are a dozen lines long, and
+# .github/scripts/test-pr-policy.sh FAILS THE BUILD if a bare `git` or a bare
+# `<` redirection appears anywhere outside them. A gate can only test the
+# instances somebody imagined; a shape rule refuses the ones nobody did.
+#
+# `git_probe`'s contract is the part that matters: the caller ENUMERATES the exit
+# statuses it is prepared to read as answers, and any other status refuses the
+# whole run. "There is no repository here" is an answer at a call site that says
+# so; 128 from metadata git could not read never is, and the two are the same
+# status. Distinguishing them is the caller's job and this makes the caller do
+# it, because a helper that returned "no records" for both is the defect above.
+#
+# `read_file`'s contract is the other half: the caller's path is OPENED ONCE, by
+# this shell, and copied to a private file whose read status is taken from the
+# copying command rather than from a builtin that reports end-of-input and a
+# read error with the same 1. Nothing parses the caller's path a second time --
+# a path is not a value and can hold different bytes at every open -- and the
+# copy is in a directory this script made, so no rename can land between the
+# check and the parse.
+#
+# A PATH IS NORMALISED BEFORE IT IS JUDGED, AND EVERY RECORDED COMPONENT OF IT
+# COUNTS, NOT JUST THE LAST. `reviews/findings`, `reviews/findings/`,
+# `reviews/findings/.`, `reviews//findings` and `reviews/./findings` are one
+# listing, and they answered differently: appending `/.` moved the question from
+# `findings` to `.`, and a committed symlink at `reviews/findings` that the plain
+# spelling refused at exit 1 conformed at exit 0 with three characters added. And
+# asking git from the listing's PARENT already follows a link one level up: with
+# `reviews -> elsewhere` COMMITTED and the finding under `elsewhere/`, `git -C
+# reviews` answered for `elsewhere`, and the directory listing resolved at exit 0
+# a name the tree listings refuse at exit 1. So the spelling is reduced to
+# components first, and EVERY component is looked at -- with `-L`, which sees a
+# link rather than following it -- before git is asked from any of them. A
+# component inside a work tree that is a link makes the path one no tree entry
+# and no index entry can name, and a path like that is not the ledger's findings
+# directory. A link ABOVE the work tree is not one of these and is walked past:
+# `/tmp` is a symlink on macOS and every by-hand listing there goes through it,
+# and nothing above a work tree is recorded anywhere to disagree.
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 
@@ -343,14 +405,242 @@ fail() {
 
 [[ -n "$branch" ]] || fail 'no branch name was given'
 
+# ==== AUDITED HELPERS BEGIN ===================================================
+#
+# The only two places in this file that run git or open a file for reading.
+# .github/scripts/test-pr-policy.sh asserts that, over the rest of the file, by
+# shape and not by case: a bare `git`, a `<` redirection from a path, a `<(...)`
+# or a `cat` with an input anywhere below AUDITED HELPERS END fails the gate.
+# Keep this region small enough to read in one sitting; that is the whole of its
+# value.
+
+# Where a probe's output goes. It is this script's own directory, mode 700 from
+# mktemp, so a copy taken here cannot be replaced by anybody between the check
+# and the parse -- which is the defect a caller's path carries and a private file
+# does not.
+probe_dir=''
+remove_probe_dir() {
+  [[ -z "$probe_dir" ]] || rm -rf -- "$probe_dir"
+}
+trap remove_probe_dir EXIT
+probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/branch-name-policy.XXXXXX")" || {
+  echo "branch-name-policy: no writable temporary directory, so git's output and" >&2
+  echo "  a listing's bytes cannot be captured with their statuses. Refusing" >&2
+  echo "  rather than deciding '$branch' from probes whose failures cannot be" >&2
+  echo "  separated from their answers." >&2
+  exit 1
+}
+
+# git_probe's answers. `probe_status` is git's exit status and one the caller
+# enumerated; `probe_records` is its stdout split on NUL, which is the one byte
+# no pathname holds; `probe_text` is the first record with its line ending
+# removed, for the probes that answer in one word; `probe_stderr` is what git
+# said, kept so a refusal can QUOTE it without any decision being taken from it.
+probe_status=0
+probe_text=''
+probe_stderr=''
+probe_records=()
+
+# git_probe <expected-statuses> -- <git arguments>...
+#
+# <expected-statuses> is a comma-separated list of the exit statuses THIS CALLER
+# READS AS ANSWERS. Any other status refuses the whole run: a status nobody
+# enumerated is not an absence, an empty set or an end of input, and reading it
+# as one of those is every wrong acceptance this gate has given.
+#
+# Stdout goes to a FILE and the status is taken from git itself. Neither
+# `$(...)` -- which discards the NUL that delimits `-z` records, so two names
+# arrive as one -- nor `<(...)`, whose status is not the command's and is what
+# made an unreadable index read as an empty index.
+git_probe() {
+  local expected="$1" record
+  shift
+  [[ "${1:-}" == -- ]] || {
+    echo "branch-name-policy: internal error: git_probe was called without --" >&2
+    exit 1
+  }
+  shift
+  probe_status=0
+  probe_text=''
+  probe_stderr=''
+  probe_records=()
+  command -v git >/dev/null 2>&1 || {
+    echo "branch-name-policy: git is not on PATH, so what it records for a listing" >&2
+    echo "  cannot be read at all. That is refused rather than judged by the" >&2
+    echo "  filesystem, which cannot see a recorded mode. '$branch' was not judged." >&2
+    exit 1
+  }
+  git "$@" > "$probe_dir/git.out" 2> "$probe_dir/git.err" || probe_status=$?
+  # Both files are this script's own, written by the command that just finished,
+  # so reading them cannot be a caller's path changing under the read.
+  IFS= read -r -d '' probe_stderr < "$probe_dir/git.err" || true
+  probe_stderr="${probe_stderr%$'\n'}"
+  record=''
+  while IFS= read -r -d '' record || [[ -n "$record" ]]; do
+    probe_records[${#probe_records[@]}]="$record"
+    record=''
+  done < "$probe_dir/git.out"
+  if (( ${#probe_records[@]} > 0 )); then
+    probe_text="${probe_records[0]}"
+    probe_text="${probe_text%$'\n'}"
+  fi
+  case ",$expected," in
+    *",$probe_status,"*) return 0 ;;
+  esac
+  echo "branch-name-policy: git exited $probe_status, which this call does not read" >&2
+  echo "  as an answer. It reads $expected and nothing else." >&2
+  echo "    git $*" >&2
+  echo "  A status nobody enumerated is refused rather than read as 'nothing" >&2
+  echo "  recorded': that reading is what let an unreadable index, an unreadable" >&2
+  echo "  config and an unreadable HEAD each conform. '$branch' was not judged." >&2
+  if [[ -n "$probe_stderr" ]]; then
+    printf '%s\n' "$probe_stderr" | sed 's/^/  /' >&2
+  fi
+  exit 1
+}
+
+# read_file's answers, valid until the next call: `file_bytes` is the whole file
+# with its final line ending kept, and `file_has_nul` says a NUL was found --
+# which is a refusal at every call site, because no filename holds one and no
+# line ending is one.
+file_bytes=''
+file_has_nul=0
+file_error=''
+
+# read_file <path>: 0 the whole file was read, 1 it could not be read to the end,
+# 2 it could not be opened.
+#
+# ONE OPEN OF THE CALLER'S PATH, BY THIS SHELL, and everything parsed afterwards
+# is the private copy. A path is not a value: it can hold different bytes at
+# every open, and a check on bytes that are then re-read is a check on bytes
+# nobody parsed -- measured on a listing replaced by rename between the two.
+#
+# AND END-OF-INPUT IS SEPARATED FROM A READ ERROR, which bash's `read` reports
+# with the same status 1. So the copy is made by a command whose exit status says
+# which happened -- `cat` from the descriptor this shell already opened, opening
+# nothing itself -- and the refusal comes from that status. `/proc/self/mem` is
+# the case: openable, readable to `-r`, and every read of it fails. Read through
+# `read`'s status alone it was an empty listing, which NARROWS the candidate set,
+# and a narrowed set turns an ambiguous name into an accepted one.
+read_file() {
+  local path="$1" copy_status=0 nul=1
+  file_bytes=''
+  file_has_nul=0
+  file_error=''
+  { exec 9< "$path"; } 2>/dev/null || return 2
+  cat <&9 > "$probe_dir/slurp" 2> "$probe_dir/slurp.err" || copy_status=$?
+  exec 9<&-
+  if (( copy_status != 0 )); then
+    IFS= read -r -d '' file_error < "$probe_dir/slurp.err" || true
+    file_error="${file_error%$'\n'}"
+    return 1
+  fi
+  # `|| nul=$?` and never `{ read; nul=$?; }`: the group's status is the
+  # ASSIGNMENT's, which always succeeds, so the `||` that was meant to catch a
+  # failed read never ran. Here `nul` is 0 only when the delimiter was FOUND.
+  nul=0
+  IFS= read -r -d '' file_bytes < "$probe_dir/slurp" || nul=$?
+  if (( nul == 0 )); then
+    file_has_nul=1
+  fi
+  return 0
+}
+# ==== AUDITED HELPERS END =====================================================
+
+# normalise_listing_path <path>: the same path written one way, in
+# `normalised_listing`. Empty components, `.` components and a trailing separator
+# are removed, because `reviews/findings`, `reviews/findings/`,
+# `reviews/findings/.`, `reviews//findings` and `reviews/./findings` are one
+# listing and gave two answers: the last component decides what the path IS, and
+# with `/.` appended the last component was `.`, so a committed symlink at
+# `reviews/findings` conformed at exit 0 where the plain spelling refused it at
+# exit 1.
+#
+# A `..` is NOT collapsed and is refused where it could matter. `a/b/..` is `a`
+# only when `b` is a directory; when `b` is a symlink it is the link's parent, so
+# reducing it lexically would answer about a path the caller did not name and
+# resolving it on the filesystem would follow the link this rule exists to
+# refuse. A LEADING run of `..` is kept and allowed: it names the starting
+# directory, which is above every component this judges.
+normalised_listing=''
+normalise_listing_path() {
+  local path="$1" prefix='' parts='' component named=0
+  normalised_listing=''
+  [[ -n "$path" ]] || return 0
+  if [[ "$path" == /* ]]; then
+    prefix='/'
+  fi
+  while [[ -n "$path" ]]; do
+    component="${path%%/*}"
+    if [[ "$component" == "$path" ]]; then
+      path=''
+    else
+      path="${path#*/}"
+    fi
+    case "$component" in
+      ''|'.')
+        continue
+        ;;
+      '..')
+        if (( named )); then
+          fail "findings listing '$1' holds a '..' after a named component.
+  What that path names depends on whether the component before it is a
+  directory or a symlink, so it is refused rather than guessed at: give the
+  listing without '..', or as a path that begins with it."
+        fi
+        ;;
+      *)
+        named=1
+        ;;
+    esac
+    if [[ -n "$parts" ]]; then
+      parts="$parts/$component"
+    else
+      parts="$component"
+    fi
+  done
+  if [[ -z "$parts" ]]; then
+    if [[ -n "$prefix" ]]; then
+      normalised_listing='/'
+    else
+      normalised_listing='.'
+    fi
+    return 0
+  fi
+  normalised_listing="$prefix$parts"
+}
+
+normalise_listing_path "$merge_base_findings"
+merge_base_findings="$normalised_listing"
+normalise_listing_path "$head_findings"
+head_findings="$normalised_listing"
+normalise_listing_path "$range_findings"
+range_findings="$normalised_listing"
+
 # legacy_exempt: is THIS pull request one the migration list names? Both the
 # number and the branch must match the same line. The fields are compared with
 # `==` and never handed to a pattern matcher, so a name beginning with a dash is
 # a name and not a set of options.
+#
+# The list goes through read_file like every other file: a migration list that
+# cannot be read is a refusal and not an empty list. Failing closed here refuses
+# a pull request that IS exempt rather than exempting one that is not, so the
+# wrong answer is cheap -- but it is still the wrong answer, and "the file was
+# there and unreadable" is not "the file lists nobody".
 legacy_exempt() {
-  local pr="${PR_NUMBER:-}" listed_pr listed_branch
+  local pr="${PR_NUMBER:-}" listed_pr listed_branch read_status=0
   [[ -f "$legacy_file" ]] || return 1
   [[ "$pr" =~ ^[0-9]+$ ]] || return 1
+  read_file "$legacy_file" || read_status=$?
+  if (( read_status != 0 )); then
+    fail "the migration list '$legacy_file' could not be read, so whether pull
+  request #$pr is exempt from the branch vocabulary is not known. A gate that
+  cannot see its input refuses rather than deciding it saw nothing."
+  fi
+  if (( file_has_nul )); then
+    fail "the migration list '$legacy_file' holds a NUL byte, so its lines cannot
+  be read as '<pull-request number> <head branch>' records."
+  fi
   while read -r listed_pr listed_branch _; do
     listed_branch="${listed_branch%$'\r'}"
     if [[ -z "$listed_pr" || "$listed_pr" == \#* ]]; then
@@ -359,7 +649,7 @@ legacy_exempt() {
     if [[ "$listed_pr" == "$pr" && "$listed_branch" == "$branch" ]]; then
       return 0
     fi
-  done < "$legacy_file"
+  done <<< "$file_bytes"
   return 1
 }
 
@@ -401,25 +691,188 @@ check_listing "$merge_base_findings"
 check_listing "$head_findings"
 check_listing "$range_findings"
 
-# git_index_entries <directory>: `<mode> <object> <stage><TAB><name>` for every
-# entry git RECORDS in that directory, one per line, and NOTHING AT ALL when the
-# directory is not inside a work tree -- which is every by-hand listing that is
-# not a checkout, and where the filesystem is all there is to go on.
+# The `.git` the walk below could not look at, named so the refusal can quote
+# it. Set only on the way out at status 2, and read only there.
+unexaminable_git=''
+
+# gitdir_shaped <directory>: does it hold any of the three things a repository
+# keeps and an empty directory named `.git` does not? This is asked only where
+# git has ALREADY REFUSED to resolve the path, and it is what separates "there
+# was nothing here to read" from "there is a repository here and its metadata
+# cannot be read". `chmod 000 .git/HEAD` -- or `.git/objects`, or `.git/refs` --
+# fails both discovery probes with the same 128 git uses for a directory that is
+# not a repository at all, and the old test, that `.git/.` was accessible, was
+# true throughout: the walk concluded "no repository", the filesystem fallback
+# decided the entry, and a commit refused at exit 1 with readable metadata
+# conformed at exit 0 without it. An entry is looked for with `-e` OR `-L`, so a
+# file this cannot read and a link with nothing at the end of it both count as
+# there.
+gitdir_shaped() {
+  local dir="$1" entry
+  for entry in HEAD objects refs; do
+    if [[ -e "$dir/$entry" || -L "$dir/$entry" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# gitdir_pointer <bytes>: the path out of a `.git` FILE's `gitdir: <path>` line,
+# or nothing when the file is not one. A carriage return is a line ending here
+# for the same reason it is one everywhere else in this file.
+gitdir_pointer() {
+  local first="${1%%$'\n'*}"
+  first="${first%$'\r'}"
+  case "$first" in
+    'gitdir: '*) printf '%s\n' "${first#gitdir: }" ;;
+    *) ;;
+  esac
+}
+
+# repository_above <directory>: is there a repository for git to have failed
+# ABOUT? A `.git` at that directory or at any ancestor, and `git rev-parse
+# --resolve-git-dir` -- which answers by EXIT STATUS, prints what this never
+# reads, and needs no config, so it still says yes for the repository whose
+# config git could not read -- deciding whether each one is a repository at all.
+# Asking git rather than `[[ -e ]]` is what keeps an empty directory named
+# `.git` from being one: a stray /tmp/.git would otherwise refuse every by-hand
+# listing under /tmp, and that is a false red on a legitimate branch.
 #
-# A failure INSIDE a work tree is propagated: an index this cannot read is the
-# same refusal as a listing it cannot read, and for the same reason.
+# THE ANSWER IS ONE OF THREE AND NEVER ONE OF TWO: 0 a repository, 1 none, and
+# 2 "there is a repository here and this cannot examine it". Treating every
+# unsuccessful resolution as an absence is the discarded read failure one level
+# up, one level down, and it has now been measured three ways: an unreadable
+# `.git` FILE on a linked worktree, an unreadable `.git` DIRECTORY, and an
+# unreadable `HEAD`, `objects` or `refs` INSIDE a `.git` directory this can enter
+# perfectly well. Metadata that is MISSING may fall back; metadata that CANNOT BE
+# EXAMINED must refuse.
 #
-# AND SO IS A FAILURE OF DISCOVERY ITSELF. "There is no repository here" and
-# "git could not tell me" are different answers, and only the first may fall
-# back to the filesystem. Suppressing git's status made them one answer and the
-# answer was the fallback: with `.git/config` unreadable, discovery exits 128,
-# that read as "no repository", and a committed symlink materialised as a
-# regular file -- the exact case the recorded mode was added to catch --
-# conformed at exit 0 with no diagnostic at all, on the commit the tree listings
-# refuse at exit 1. AN UNREADABLE REPOSITORY IS NOT PERMISSION TO DISREGARD ITS
-# RECORDED MODES. Where git's own discovery cannot separate the two it says "not
-# a git repository" -- an unreadable `.git` DIRECTORY reads that way to git
-# itself -- and this script has nothing available to it that git has not.
+# WHICH OF THOSE THREE IT IS, IS NOT READ OUT OF GIT'S MESSAGE. Every failure
+# here is exit 128 whatever the reason -- `not a gitdir` for a nonexistent
+# `.git`, for an empty directory named `.git`, for an unreadable `.git` DIRECTORY
+# and for a `.git` whose HEAD cannot be read alike -- and git's words quote the
+# caller's own pathname, which is how an earlier repair was defeated. So the
+# third answer comes from THIS asking the filesystem the two questions it can
+# answer for itself: can the thing named `.git` be looked into or read at all,
+# and if it can, does it hold what a repository holds?
+#
+# A GIT_DIR or GIT_WORK_TREE in the environment points git at an index this walk
+# cannot reach, so it counts as a repository in play and the answer is yes.
+repository_above() {
+  local dir="$1" gitdir pointer target
+  [[ -z "${GIT_DIR:-}" && -z "${GIT_WORK_TREE:-}" ]] || return 0
+  # The physical path, which is the one git's own discovery walks. A directory
+  # this cannot even enter is not one to answer "no repository" about.
+  dir="$(CDPATH= cd -P -- "$dir" 2>/dev/null && pwd)" || return 0
+  while :; do
+    git_probe '0,128' -- rev-parse --resolve-git-dir "$dir/.git"
+    if (( probe_status == 0 )); then
+      return 0
+    fi
+    # Git said no. This level is an ABSENCE only where this can see that there
+    # was nothing to read; a `.git` it cannot examine, and a `.git` that holds a
+    # repository's own files, each leave the question open, and an open question
+    # is not an absence. The tests are attempts and not permission bits: `-e
+    # <dir>/.` needs search on the directory, and the open needs read on the
+    # file, which is what git needed and did not get.
+    gitdir="$dir/.git"
+    if [[ -d "$gitdir" ]]; then
+      if [[ ! -e "$gitdir/." ]]; then
+        unexaminable_git="$gitdir"
+        return 2
+      fi
+      if gitdir_shaped "$gitdir"; then
+        unexaminable_git="$gitdir"
+        return 2
+      fi
+    elif [[ -f "$gitdir" ]]; then
+      if ! read_file "$gitdir"; then
+        unexaminable_git="$gitdir"
+        return 2
+      fi
+      # A readable `.git` FILE that git would not resolve either names no gitdir
+      # at all -- garbage, and nothing to examine -- or names one this must look
+      # at before calling the level empty. Same rule, one indirection along.
+      pointer="$(gitdir_pointer "$file_bytes")"
+      if [[ -n "$pointer" ]]; then
+        case "$pointer" in
+          /*) target="$pointer" ;;
+          *) target="$dir/$pointer" ;;
+        esac
+        if [[ -d "$target" ]]; then
+          if [[ ! -e "$target/." ]] || gitdir_shaped "$target"; then
+            unexaminable_git="$target"
+            return 2
+          fi
+        fi
+      fi
+    fi
+    if [[ "$dir" == / ]]; then
+      return 1
+    fi
+    dir="${dir%/*}"
+    [[ -n "$dir" ]] || dir=/
+  done
+}
+
+# repository_state <directory>: `work-tree` when git says that directory is
+# inside one, `none` when there is no repository over it, and a REFUSAL at
+# status 1 when git could not say which -- the three answers, never two.
+#
+# THE ANSWER IS GIT'S EXIT STATUS AND NEVER THE TEXT OF A MESSAGE: git's
+# diagnostics quote the caller's own pathname, and a repository whose path holds
+# the string `not a git repository` read as "there is no repository here" and
+# fell straight through to the filesystem at exit 0. Git failing is permission to
+# judge by the filesystem in exactly one case: there is no repository here, so
+# there is no index it could have read and no recorded mode to disregard.
+# Anything else -- a config it cannot read, a repository it will not touch, a
+# `.git` this cannot examine either -- is a refusal, whatever it said.
+repo_state=none
+repository_state() {
+  local dir="$1" said above=0
+  repo_state=none
+  git_probe '0,128' -- -C "$dir" rev-parse --is-inside-work-tree
+  if (( probe_status != 0 )); then
+    # git_probe is about to be called again and its answers are one set, so
+    # git's words are kept here or lost.
+    said="$probe_stderr"
+    repository_above "$dir" || above=$?
+    if (( above == 1 )); then
+      return 0
+    fi
+    echo "branch-name-policy: git could not say what it records for '$dir':" >&2
+    if [[ -n "$said" ]]; then
+      printf '%s\n' "$said" | sed 's/^/  /' >&2
+    fi
+    if (( above == 2 )); then
+      echo "  '$unexaminable_git' is there and cannot be examined, so whether this" >&2
+      echo "  listing is inside a repository is not known either. Metadata that" >&2
+      echo "  cannot be read is refused rather than read as metadata that is not" >&2
+      echo "  there, because only the second may be judged by the filesystem --" >&2
+      echo "  which cannot see a recorded mode at all." >&2
+    else
+      echo "  A listing inside a repository this cannot read is refused rather than" >&2
+      echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
+    fi
+    return 1
+  fi
+  # Stdout alone, so the answer is `true` or `false` and nothing else: a warning
+  # about some other file git could not read is on stderr and is not an answer.
+  [[ "$probe_text" == true ]] || return 0
+  repo_state=work-tree
+}
+
+# index_entries_of <directory>: `<mode> <object> <stage><TAB><name>` for every
+# entry git RECORDS in that directory, one per line in `index_entry_lines`, and
+# NOTHING AT ALL when the directory is not inside a work tree -- which is every
+# by-hand listing that is not a checkout, and where the filesystem is all there
+# is to go on. A failure is a refusal at status 1: an index this cannot read is
+# the same refusal as a listing it cannot read, and for the same reason.
+#
+# `ls-files` is enumerated as answering 0 AND NOTHING ELSE, because by here git
+# has already said this directory is inside a work tree: a 128 after that is an
+# index it could not read, never an absence, and the two were one answer while
+# the status was discarded.
 #
 # `-z` so a name is never quoted or escaped, and the records are READ as
 # NUL-delimited records rather than CONVERTED to lines. A newline is legal in a
@@ -439,140 +892,100 @@ check_listing "$range_findings"
 # An entry below a subdirectory comes out as `sub/name` and matches no name in
 # the listing, which is the right answer twice over: the subdirectory is not a
 # finding whatever it holds, and what it holds is not in this listing.
-
-# The `.git` the walk below could not look at, named so the refusal can quote
-# it. Set only on the way out at status 2, and read only there.
-unexaminable_git=''
-
-# repository_above <directory>: is there a repository for git to have failed
-# ABOUT? A `.git` at that directory or at any ancestor, and `git rev-parse
-# --resolve-git-dir` -- which answers by EXIT STATUS, prints what this never
-# reads, and needs no config, so it still says yes for the repository whose
-# config git could not read -- deciding whether each one is a repository at all.
-# Asking git rather than `[[ -e ]]` is what keeps an empty directory named
-# `.git` from being one: a stray /tmp/.git would otherwise refuse every by-hand
-# listing under /tmp, and that is a false red on a legitimate branch.
-#
-# THE ANSWER IS ONE OF THREE AND NEVER ONE OF TWO: 0 a repository, 1 none, and
-# 2 "there is a `.git` here and this cannot look at it". Treating every
-# unsuccessful resolution as an absence is the discarded read failure one level
-# up, one level down: `git rev-parse --resolve-git-dir` fails with `error
-# opening '.../.git': Permission denied` on a LINKED WORKTREE whose `.git` FILE
-# is unreadable, that read as "no repository", and the filesystem fallback
-# answered `conforms` at exit 0 with empty stderr on a checkout this refuses at
-# exit 1 when the file is readable. Metadata that is MISSING may fall back;
-# metadata that CANNOT BE EXAMINED must refuse. Measured: the same fixture is
-# exit 1, `names 2 findings`, at ee37d4e7 and at this commit, and exit 0 in
-# between.
-#
-# WHICH OF THOSE THREE IT IS, IS NOT READ OUT OF GIT'S MESSAGE. Every failure
-# here is exit 128 whatever the reason -- `not a gitdir` for a nonexistent
-# `.git`, for an empty directory named `.git` and for an unreadable `.git`
-# DIRECTORY alike, `error opening` for an unreadable `.git` file -- and git's
-# words quote the caller's own pathname, which is how the last repair was
-# defeated. So the third answer comes from THIS asking the filesystem the one
-# question it can answer for itself: is there something named `.git` here that
-# it cannot look inside or read? A directory is looked INTO rather than listed,
-# because looking inside is what git does with one; a `.git` that is neither a
-# directory nor a regular file is nothing git would resolve and is left to the
-# walk. An unreadable `.git` DIRECTORY is the case git itself reports as no
-# repository, and the test below is what separates it from an empty one.
-#
-# A GIT_DIR or GIT_WORK_TREE in the environment points git at an index this walk
-# cannot reach, so it counts as a repository in play and the answer is yes.
-repository_above() {
-  local dir="$1"
-  [[ -z "${GIT_DIR:-}" && -z "${GIT_WORK_TREE:-}" ]] || return 0
-  # The physical path, which is the one git's own discovery walks. A directory
-  # this cannot even enter is not one to answer "no repository" about.
-  dir="$(CDPATH= cd -P -- "$dir" 2>/dev/null && pwd)" || return 0
-  while :; do
-    if git rev-parse --resolve-git-dir "$dir/.git" >/dev/null 2>&1; then
-      return 0
-    fi
-    # Git said no. This level is an ABSENCE only where this can see that there
-    # was nothing to read; a `.git` it cannot examine leaves the question open,
-    # and an open question is not an absence. The tests are attempts and not
-    # permission bits: `-e <dir>/.` needs search on the directory, and the open
-    # needs read on the file, which is what git needed and did not get.
-    if [[ -d "$dir/.git" ]]; then
-      if [[ ! -e "$dir/.git/." ]]; then
-        unexaminable_git="$dir/.git"
-        return 2
-      fi
-    elif [[ -f "$dir/.git" ]]; then
-      if ! { : < "$dir/.git"; } 2>/dev/null; then
-        unexaminable_git="$dir/.git"
-        return 2
-      fi
-    fi
-    if [[ "$dir" == / ]]; then
-      return 1
-    fi
-    dir="${dir%/*}"
-    [[ -n "$dir" ]] || dir=/
-  done
-}
-
-git_index_entries() {
-  local dir="$1" answer status=0 record above=0
-  command -v git >/dev/null 2>&1 || return 0
-  # THE ANSWER IS GIT'S STDOUT AND ITS EXIT STATUS, AND NEVER THE TEXT OF A
-  # MESSAGE: git's diagnostics quote the caller's own pathname, and a repository
-  # whose path holds the string `not a git repository` read as "there is no
-  # repository here" and fell straight through to the filesystem at exit 0.
-  answer="$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null)" || status=$?
-  if [[ "$status" -ne 0 ]]; then
-    # Git failing is permission to judge by the filesystem in exactly one case:
-    # there is no repository here, so there is no index it could have read and
-    # no recorded mode to disregard. Anything else -- a config it cannot read, a
-    # repository it will not touch, a `.git` this cannot examine either -- is a
-    # refusal, whatever it said. THREE ANSWERS AND NOT TWO, because collapsing
-    # the third into the second is how the filesystem fallback came back twice.
-    repository_above "$dir" || above=$?
-    if [[ "$above" -eq 1 ]]; then
-      return 0
-    fi
-    echo "branch-name-policy: git could not say what it records for '$dir':" >&2
-    # Re-asked for the REPORT alone, the decision already taken, so that git's
-    # own words reach the reader without deciding anything. `|| true` because
-    # under `pipefail` this pipeline's failure is git's and it is expected: the
-    # refusal is two lines below and must not be pre-empted by `set -e`.
-    { git -C "$dir" rev-parse --is-inside-work-tree 2>&1 >/dev/null || true; } \
-      | sed 's/^/  /' >&2
-    if [[ "$above" -eq 2 ]]; then
-      echo "  '$unexaminable_git' is there and cannot be examined, so whether this" >&2
-      echo "  listing is inside a repository is not known either. Metadata that" >&2
-      echo "  cannot be read is refused rather than read as metadata that is not" >&2
-      echo "  there, because only the second may be judged by the filesystem --" >&2
-      echo "  which cannot see a recorded mode at all." >&2
-    else
-      echo "  A listing inside a repository this cannot read is refused rather than" >&2
-      echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
-    fi
-    return 1
+index_entry_lines=''
+index_entries_of() {
+  local dir="$1" record
+  index_entry_lines=''
+  repository_state "$dir" || return 1
+  [[ "$repo_state" == work-tree ]] || return 0
+  git_probe '0' -- -C "$dir" ls-files -sz -- .
+  if (( ${#probe_records[@]} > 0 )); then
+    for record in "${probe_records[@]}"; do
+      case "${record#*$'\t'}" in
+        *$'\n'*) continue ;;
+      esac
+      index_entry_lines="$index_entry_lines$record"$'\n'
+    done
   fi
-  # Stdout alone, so the answer is `true` or `false` and nothing else: a warning
-  # about some other file git could not read is on stderr and is not an answer.
-  [[ "$answer" == true ]] || return 0
-  # `pipefail` is what carries a failed `ls-files` out of this pipeline, so the
-  # loop costs nothing by running in its subshell: it only prints.
-  git -C "$dir" ls-files -sz -- . | while IFS= read -r -d '' record; do
-    case "${record#*$'\t'}" in
-      *$'\n'*) continue ;;
-    esac
-    printf '%s\n' "$record"
-  done
 }
 
-# recorded_path_mode <path>: what git RECORDS AT THAT PATH ITSELF -- a mode for
-# a blob, `tree` for a path it records things under, and nothing at all for a
-# path it records nothing about, which is an untracked one or no repository.
+# path_through_symlink <normalised path>: did this path reach its destination
+# through a symlink INSIDE a work tree? 0 yes, with the component in
+# `symlink_ancestor`; 1 no; 2 the question could not be answered and the run is
+# refused.
+#
+# THIS IS THE ANCESTOR HALF OF THE SAME RULE, AND IT IS WHY THE LAST COMPONENT IS
+# NOT ENOUGH. Asking the index from the listing's PARENT is already a traversal:
+# `git -C reviews` chdirs, and where `reviews` is a COMMITTED SYMLINK to
+# `elsewhere` it answers for `elsewhere` -- so a finding under `elsewhere/`
+# resolved `reviews/findings` at exit 0 while the tree listings, where no index
+# entry's name traverses a link, refused the same commit at exit 1. The listing
+# path's own recorded type was innocent; the path above it was not.
+#
+# EVERY component is lstatted, top down, and only a `-L` costs anything: in the
+# ordinary case this is a handful of stats and no probe at all. Where one IS a
+# link, the question asked of git is about its PARENT, which the walk has already
+# established holds no link, so that probe cannot be following anything either.
+#
+# A LINK ABOVE THE WORK TREE IS NOT ONE OF THESE, and the walk goes past it. On
+# macOS `/tmp` and `/var` are both symlinks and `mktemp -d` hands back a path
+# through them, so a blanket "no symlink anywhere above" would answer the empty
+# set for every by-hand listing on that platform -- a false refusal of a
+# legitimate branch, which is the expensive failure of this rule. Nothing above a
+# work tree is recorded anywhere, so nothing above one can disagree with a tree
+# listing. Inside one, a component that is a link makes the path unnameable by
+# any tree entry whether or not git tracks the link itself, and the tree listings
+# hold no finding for it either way: the two APIs agree at the empty set.
+symlink_ancestor=''
+path_through_symlink() {
+  local path="$1" prefix='' rest component parent
+  symlink_ancestor=''
+  if [[ "$path" == /* ]]; then
+    prefix='/'
+    rest="${path#/}"
+  else
+    rest="$path"
+  fi
+  while [[ "$rest" == */* ]]; do
+    component="${rest%%/*}"
+    rest="${rest#*/}"
+    if [[ -z "$prefix" ]]; then
+      prefix="$component"
+    elif [[ "$prefix" == / ]]; then
+      prefix="/$component"
+    else
+      prefix="$prefix/$component"
+    fi
+    [[ -L "$prefix" ]] || continue
+    parent="${prefix%/*}"
+    if [[ "$parent" == "$prefix" ]]; then
+      parent='.'
+    elif [[ -z "$parent" ]]; then
+      parent=/
+    fi
+    repository_state "$parent" || return 2
+    if [[ "$repo_state" == work-tree ]]; then
+      symlink_ancestor="$prefix"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# recorded_path_mode <path>: what git RECORDS AT THAT PATH ITSELF, in
+# `recorded_mode` -- a mode for a blob, `tree` for a path it records things
+# under, and nothing at all for a path it records nothing about, which is an
+# untracked one or no repository. `reached_through_symlink` is 1 when the path
+# reached its destination through a link inside the work tree, in which case git
+# records nothing at the path that was NAMED and no mode is asked for.
 #
 # The index is asked from the path's PARENT with the last component as the
 # pathspec, because asking from INSIDE the path is already following it: `git -C
-# <symlink> ls-files` answers for wherever the link points, which is the whole
-# defect. One `ls-files` answers both questions: a record whose name is exactly
+# <symlink> ls-files` answers for wherever the link points. Whether the parent
+# ITSELF holds a link is path_through_symlink's question, and it is asked FIRST,
+# because a record read through a link is a record about somebody else's path.
+#
+# One `ls-files` answers both remaining questions: a record whose name is exactly
 # the last component is a blob AT the path, and a record named `<base>/...` is
 # something recorded UNDER it, so the path is a directory in the ledger. The
 # exact name sorts before anything under it, so a blob is seen first.
@@ -582,29 +995,41 @@ git_index_entries() {
 # plain `-- ':weird'` matched nothing at all where the literal form matches the
 # path -- a listing silently read as recording nothing, which is the narrowing
 # every rule here refuses.
+recorded_mode=''
+reached_through_symlink=0
 recorded_path_mode() {
-  local path="$1" parent base record name
-  command -v git >/dev/null 2>&1 || return 0
-  while [[ "$path" == */ && "$path" != / ]]; do
-    path="${path%/}"
-  done
+  local path="$1" parent base record name through=0
+  recorded_mode=''
+  reached_through_symlink=0
   base="${path##*/}"
   [[ -n "$base" ]] || return 0
   parent="${path%/*}"
   [[ "$parent" != "$path" ]] || parent='.'
   [[ -n "$parent" ]] || parent=/
-  while IFS= read -r -d '' record; do
-    name="${record#*$'\t'}"
-    if [[ "$name" == "$base" ]]; then
-      printf '%s\n' "${record%% *}"
-      return 0
-    fi
-    if [[ "$name" == "$base"/* ]]; then
-      printf 'tree\n'
-      return 0
-    fi
-  done < <(git -C "$parent" ls-files -sz -- ":(literal)$base" 2>/dev/null)
-  return 0
+  path_through_symlink "$path" || through=$?
+  if (( through == 2 )); then
+    return 1
+  fi
+  if (( through == 0 )); then
+    reached_through_symlink=1
+    return 0
+  fi
+  repository_state "$parent" || return 1
+  [[ "$repo_state" == work-tree ]] || return 0
+  git_probe '0' -- -C "$parent" ls-files -sz -- ":(literal)$base"
+  if (( ${#probe_records[@]} > 0 )); then
+    for record in "${probe_records[@]}"; do
+      name="${record#*$'\t'}"
+      if [[ "$name" == "$base" ]]; then
+        recorded_mode="${record%% *}"
+        return 0
+      fi
+      if [[ "$name" == "$base"/* ]]; then
+        recorded_mode=tree
+        return 0
+      fi
+    done
+  fi
 }
 
 # read_listing <listing>: the finding filenames in one listing, one per line,
@@ -629,23 +1054,29 @@ recorded_path_mode() {
 # answering for one. Both skip a name beginning with a dot, and both are right
 # to: a finding's name begins with `P`.
 #
-# AND THE LISTING'S OWN RECORDED TYPE IS READ BEFORE THE PATH IS FOLLOWED. The
-# entries were already decided by the mode git records; the DIRECTORY ITSELF was
-# not, and it is a tracked entry like any other. With `reviews/findings` a
-# committed symlink to a sibling directory -- a `120000 blob`, a clean checkout,
-# `git status` empty -- the tree listings hold no finding under reviews/findings/
-# and refuse at exit 1, while handing that path straight in FOLLOWED the link and
-# resolved a name out of files no ledger holds, at exit 0. It is the same rule
-# one level up: a symlink is not a finding, and a symlink is not the findings
-# directory either. The answer is the EMPTY SET and not a refusal, because the
-# empty set is what the tree listings give for that commit -- a refusal here
-# would part the two APIs again, the other way round, wherever another listing
-# resolves the name.
+# AND THE LISTING'S OWN RECORDED TYPE IS READ BEFORE THE PATH IS FOLLOWED, AND SO
+# IS EVERY RECORDED COMPONENT ABOVE IT. The entries were already decided by the
+# mode git records; the DIRECTORY ITSELF was not, and it is a tracked entry like
+# any other. With `reviews/findings` a committed symlink to a sibling directory --
+# a `120000 blob`, a clean checkout, `git status` empty -- the tree listings hold
+# no finding under reviews/findings/ and refuse at exit 1, while handing that path
+# straight in FOLLOWED the link and resolved a name out of files no ledger holds,
+# at exit 0. With `reviews` the committed symlink instead, the same thing happened
+# one level up and the listing path's own recorded type was innocent: git was
+# ASKED FROM inside the link. It is one rule at every level: a symlink is not a
+# finding, a symlink is not the findings directory, and a path that reached the
+# findings directory through a symlink is not the findings directory either.
+#
+# The answer is the EMPTY SET and not a refusal, because the empty set is what
+# the tree listings give for that commit -- a refusal here would part the two
+# APIs again, the other way round, wherever another listing resolves the name.
 #
 # Under core.symlinks=false the same commit materialises that link as a REGULAR
 # FILE holding `../elsewhere`, which is not a directory at all and would be read
-# as a file listing naming one absent finding. The recorded mode catches both,
-# because it is the same 120000 either way.
+# as a file listing naming one absent finding -- or, where the link's target text
+# is itself a finding's filename, as a file listing RESOLVING a finding nobody
+# has filed. The recorded mode catches both, because it is the same 120000 either
+# way, and that is why a failure to read it is a refusal and not a shrug.
 #
 # The other way round -- git records a DIRECTORY and the checkout holds a link
 # or a file in its place -- is a listing this cannot read rather than one that
@@ -653,17 +1084,13 @@ recorded_path_mode() {
 # what the checkout put there is not the ledger. It refuses and says so, which
 # is the one answer that is neither a false green nor a silent narrowing.
 read_listing() {
-  local listing="$1" out='' entry path recorded record mode name recorded_regular recorded_other
-  local nul listing_mode
+  local listing="$1" out='' entry path record mode name recorded_regular recorded_other
+  local read_status=0
   # A failure here is a refusal and never "git records nothing about it": read
   # as nothing, an unreadable index would put the listing back on the
   # filesystem, which is the fallback every rule above refuses.
-  listing_mode="$(recorded_path_mode "$listing")" || {
-    echo "branch-name-policy: git could not report what it records for the listing" >&2
-    echo "  path '$listing' itself" >&2
-    return 1
-  }
-  case "$listing_mode" in
+  recorded_path_mode "$listing" || return 1
+  case "$recorded_mode" in
     100644|100755) ;;
     tree)
       # Git records a DIRECTORY here, so the ledger's findings are the entries
@@ -681,19 +1108,28 @@ read_listing() {
       fi
       ;;
     '')
-      # Git records nothing at this path: an untracked one, or no repository at
-      # all. The filesystem is then the only witness, and it is asked the same
-      # question the recorded mode answers above -- with `-L`, and never `-e`
-      # or `-d`, which FOLLOW a link rather than seeing one.
+      # Git records nothing at this path: an untracked one, a path that reached
+      # its destination through a link, or no repository at all. A link is asked
+      # about with `-L`, and never `-e` or `-d`, which FOLLOW one rather than
+      # seeing it.
       if [[ -L "$listing" ]]; then
         echo "branch-name-policy: findings listing '$listing' is a symlink, so it is" >&2
         echo "  not a findings directory and holds no finding of its own. A tree" >&2
         echo "  listing of the same commit holds none for it either." >&2
         return 0
       fi
+      if (( reached_through_symlink )) && [[ -d "$listing" ]]; then
+        echo "branch-name-policy: findings listing '$listing' is reached through a" >&2
+        echo "  symlink inside the repository, so no index entry and no tree entry is" >&2
+        echo "  named by that path: what is at the end of the link is recorded" >&2
+        echo "  somewhere else and is not this directory's ledger. It holds no" >&2
+        echo "  finding, which is what a tree listing of the same commit gives for" >&2
+        echo "  it too." >&2
+        return 0
+      fi
       ;;
     *)
-      echo "branch-name-policy: git records '$listing' as mode $listing_mode, which is" >&2
+      echo "branch-name-policy: git records '$listing' as mode $recorded_mode, which is" >&2
       echo "  neither a regular file nor a directory: it is not a findings listing," >&2
       echo "  and it holds no finding. A tree listing of the same commit holds none" >&2
       echo "  for it either." >&2
@@ -708,7 +1144,11 @@ read_listing() {
     # checked out as a REGULAR FILE holding the link target -- `git status`
     # empty, recorded mode still 120000 -- so -L sees nothing, and the very
     # commit the tree listings refused at exit 1 conformed here at exit 0.
-    recorded="$(git_index_entries "$listing")" || {
+    #
+    # The directory is asked from INSIDE itself, which is safe only because
+    # everything above has already established that this path is a real
+    # directory that no link was followed to reach.
+    index_entries_of "$listing" || {
       echo "branch-name-policy: git could not report what it records for '$listing'" >&2
       return 1
     }
@@ -716,7 +1156,7 @@ read_listing() {
     # and this file runs wherever the suite is run by hand. A name is wrapped in
     # newlines on both sides, so a membership test is exact and not a prefix --
     # WHICH HOLDS ONLY BECAUSE NO NAME IN EITHER SET CARRIES A NEWLINE, and
-    # git_index_entries drops the ones that do. A recorded symlink named
+    # index_entries_of drops the ones that do. A recorded symlink named
     # `noise<LF>P2_<category>_<ts>_<desc>.md` would otherwise put that wrapped
     # newline inside a set member, and the real finding of the second name would
     # test as a member of the NON-regular set and be dropped: one twin gone, an
@@ -737,7 +1177,7 @@ read_listing() {
         100644|100755) recorded_regular+="$name"$'\n' ;;
         *) recorded_other+="$name"$'\n' ;;
       esac
-    done <<< "$recorded"
+    done <<< "$index_entry_lines"
     # THE CANDIDATE NAMES ARE THE INDEX'S AND THE DIRECTORY'S TOGETHER, and this
     # is the index's half. A TRACKED finding need not be in the checkout at all:
     # a SPARSE checkout leaves `git status` empty with the index still recording
@@ -762,7 +1202,7 @@ read_listing() {
         continue
       fi
       printf '%s\n' "$name"
-    done <<< "$recorded"
+    done <<< "$index_entry_lines"
     # And the directory's half, which is the only half for an entry git does not
     # track -- and the whole of it where there is no repository at all.
     for path in "$listing"/*; do
@@ -819,40 +1259,52 @@ read_listing() {
     done
     return 0
   elif [[ -f "$listing" ]]; then
-    # THE FILE IS READ ONCE, AND WHAT IS CHECKED IS WHAT IS PARSED. A caller's
-    # path is not a value: it can hold different bytes at every open, and a
-    # check on bytes that are then re-read is a check on bytes nobody parsed.
-    # Measured on this listing: the NUL check counted the file twice and `cat`
-    # read it a third time, a replacement landed in the window between the
-    # counts and the read -- atomically, by rename -- and the ambiguous name
-    # conformed at exit 0 over `warning: command substitution: ignored null
-    # byte in input`, where the unreplaced file refuses it at exit 1. One open
-    # cannot disagree with itself, and the rule that follows from it is the
-    # whole repair: NEVER READ A CALLER-SUPPLIED PATH MORE THAN ONCE.
+    # THE FILE IS READ ONCE, AND WHAT IS CHECKED IS WHAT IS PARSED -- read_file
+    # opens the caller's path exactly once and everything below parses the
+    # private copy it made. Measured on this listing: the NUL check counted the
+    # file twice and `cat` read it a third time, a replacement landed in the
+    # window between the counts and the read -- atomically, by rename -- and the
+    # ambiguous name conformed at exit 0 over `warning: command substitution:
+    # ignored null byte in input`, where the unreplaced file refuses it at exit 1.
     #
-    # `read -d ''` is that one open, and it is also how the NUL is seen. A NUL
-    # is not a separator and not part of a name, and no bash variable can hold
-    # one, so it is read AS the delimiter: FINDING it is the refusal, and not
-    # finding it -- the end of the file -- is the whole file in `out`. `$(cat
-    # …)` instead DISCARDED a NUL and concatenated the records either side
+    # AND A READ THAT FAILED IS NOT THE END OF THE FILE. `read -d ''` reports
+    # end-of-input and an I/O error with the same status 1, and the group that
+    # was meant to catch the second -- `{ read …; nul=$?; }` -- always succeeds,
+    # because a group's status is the last ASSIGNMENT's. So `/proc/self/mem`,
+    # which exists, is readable to `-r`, and fails every read, was an EMPTY
+    # LISTING at exit 0: the candidate set silently narrowed, and a narrowed set
+    # turns an ambiguous name into an accepted one. read_file takes the status
+    # from the command that copied the bytes, which distinguishes the two.
+    read_file "$listing" || read_status=$?
+    if (( read_status == 2 )); then
+      echo "branch-name-policy: findings listing '$listing' could not be opened" >&2
+      return 1
+    fi
+    if (( read_status != 0 )); then
+      echo "branch-name-policy: findings listing '$listing' could not be read to the" >&2
+      echo "  end, so the names in it are not known. That is refused rather than read" >&2
+      echo "  as a listing with nothing in it: a narrowed candidate set turns an" >&2
+      echo "  ambiguous name into an accepted one." >&2
+      if [[ -n "$file_error" ]]; then
+        printf '%s\n' "$file_error" | sed 's/^/  /' >&2
+      fi
+      return 1
+    fi
+    # A NUL IS NOT A SEPARATOR AND NOT PART OF A NAME, so a listing holding one
+    # is a caller who wrote records where lines were asked for. `$(cat …)`
+    # DISCARDED it and concatenated the records either side
     # (`P2_…_shared-name.md<NUL>README.md` read as one name ending
     # `.mdREADME.md`), so a twin stopped matching, one match was left, and an
     # ambiguous name conformed at exit 0 where the same two names LF-delimited
-    # refused it at exit 1. A read that fails part-way through the file cannot
-    # be told from the end of one here; that is the cost of the single open,
-    # and it is a smaller cost than measuring one file and parsing another.
-    nul=1
-    { IFS= read -r -d '' out; nul=$?; } < "$listing" || {
-      echo "branch-name-policy: findings listing '$listing' could not be opened" >&2
-      return 1
-    }
-    if (( nul == 0 )); then
+    # refused it at exit 1.
+    if (( file_has_nul )); then
       echo "branch-name-policy: findings listing '$listing' holds a NUL byte, which" >&2
       echo "  no filename can contain and no line ending is, so its records cannot be" >&2
       echo "  read as names. Write it with LF or CRLF line endings, one finding" >&2
       echo "  filename per line." >&2
       return 1
     fi
+    out="$file_bytes"
     # CRLF IS A LINE ENDING HERE AND NEVER PART OF A NAME. A listing written on
     # Windows leaves a carriage return on the end of every name, none of them
     # matches a finding, and the set NARROWS IN SILENCE -- which is precisely
@@ -860,8 +1312,8 @@ read_listing() {
     # naming one description: exit 1 `names 2 findings` with LF throughout, exit
     # 0 `conforms` with the second listing converted to CRLF, the twin gone and
     # nothing said. So a CRLF listing is the same listing, as
-    # .github/legacy-branches.txt is already read either way above. The capture
-    # keeps the LAST line's ending, where `$(...)` used to eat it, so the pairs
+    # .github/legacy-branches.txt is already read either way above. The bytes
+    # keep the LAST line's ending, where `$(...)` used to eat it, so the pairs
     # are converted first and the final newline goes after them; a blank line
     # left anywhere is a name no finding has and matches nothing.
     out="${out//$'\r\n'/$'\n'}"

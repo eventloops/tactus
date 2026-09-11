@@ -227,6 +227,36 @@ is the right answer rather than a hole: whether a description picks out one find
 property of **the ledger**, which other pull requests legitimately change, and what the check
 answers is whether the name resolves to exactly one filed finding in the listings it is handed.
 
+**A check that cannot see its input refuses; it never decides that it saw nothing.** The listings
+the check is handed are the merge-base tree, the head tree and the pull request's own commits, and a
+maintainer running it by hand may hand it a working tree's `reviews/findings/` directory instead.
+Whichever form, an input that cannot be read — an unreadable file, a stream that fails part-way, a
+directory that cannot be listed, an index or a repository git cannot read — is a **refusal** and
+never an empty set, because a candidate set that silently narrows turns an ambiguous name into an
+accepted one. Only "there is no repository here" falls back to the filesystem: metadata that is
+missing is not metadata that cannot be examined. Every external probe and every file read in
+`validate-pr-branch.sh` goes through two audited helpers, the first of which refuses any exit status
+its caller has not enumerated as an answer, and `test-pr-policy.sh` fails the build if a bare `git`
+or a bare read appears outside them — a shape rule rather than a list of cases, because four review
+rounds of closing those cases one at a time produced more of them each round.
+
+**Only a regular file git records is a finding, and a path that reaches the findings directory
+through a symlink is not the findings directory.** The mode git records decides a tracked entry, not
+what the checkout materialised: under `core.symlinks=false` a committed symlink is checked out as a
+regular file holding the link target, and reading that as a listing has both refused a real finding
+and invented one that nobody filed. The rule holds at every level of the path — a symlink named like
+a finding, a symlink standing in for `reviews/findings`, and a committed symlink at any component
+above it, all of which the tree listings hold no finding for. A listing path is reduced to its
+components before it is judged, so `reviews/findings`, `reviews/findings/`, `reviews/findings/.`,
+`reviews//findings` and `reviews/./findings` are one listing and answer alike; a `..` after a named
+component is refused rather than guessed at, since what it names depends on whether the component
+before it is a directory or a link. **The property is that the two ways in agree**: for one commit,
+the three tree listings and the working tree's directory give the same answer, and the fixture suite
+checks that as a property over repositories and branch names rather than case by case. The one
+remaining disagreement is disclosed and deliberate: a finding its author has written and not yet
+committed is a candidate through the directory and is in no tree listing, and closing it would make
+a by-hand run refuse the file on the author's disk.
+
 There is no `fix/` prefix. A bug worth a branch is worth a finding, so a repair names the finding it
 closes, and a bug that is not filed yet is filed by the same pull request that repairs it — which is
 what reading the whole range is for, since the repair deletes the file again in the same range.
