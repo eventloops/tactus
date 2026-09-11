@@ -5993,7 +5993,10 @@ fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
         .expect("the worktree path");
 
     let held = git(&path, &["rev-parse", "HEAD^{tree}"]);
-    let other = git(&fixture.base, &["rev-parse", &format!("{}^{{tree}}", fixture.seed)]);
+    let other = git(
+        &fixture.base,
+        &["rev-parse", &format!("{}^{{tree}}", fixture.seed)],
+    );
     assert_ne!(held, other, "two distinct trees");
 
     assert!(

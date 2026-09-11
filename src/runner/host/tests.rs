@@ -289,7 +289,11 @@ fn every_composed_environment_disables_replacement_objects() {
             }
         }
     }
-    assert_eq!(rows, 5 * 2 * KeyCase::ALL.len(), "every role, both overlays");
+    assert_eq!(
+        rows,
+        5 * 2 * KeyCase::ALL.len(),
+        "every role, both overlays"
+    );
 }
 
 #[test]
