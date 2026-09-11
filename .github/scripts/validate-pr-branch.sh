@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
-# validate-pr-branch.sh <branch-name> [merge-base-findings [head-findings [range-findings]]]
+# validate-pr-branch.sh <branch-name> [merge-base-findings [head-findings [range-findings
+#                        [changed-paths [added-findings]]]]]
 #
 # Refuse a pull request whose head branch is not in the branch vocabulary.
 #
 # WHY A BRANCH NAME IS POLICY AND NOT TASTE. The prefix already decides two
-# things that bind a merge: the effort the frontier review is run at
-# (review-poller.sh's lane_of and effort_for_lane) and the severities the pull
-# request must fix before it is ready (scripts/pr-ready-audit.sh's lane_for and
-# must_fix_for, the rule MAINTAINING.md states). Until this validator existed
+# things that bind a merge: the effort the frontier review is run at and the
+# severities the pull request must fix before it is ready. Both come from ONE
+# table, scripts/lane.sh, which scripts/pr-ready-audit.sh and the review tooling
+# each source; MAINTAINING.md states the rule. Until this validator existed
 # every prefix outside two `codex/` shapes fell into a `feature` catch-all, so a
 # branch nobody had thought about was silently assigned the most expensive
 # review and the loosest fix set, and nothing said so. An unrecognised prefix
 # must fail here rather than default; that refusal is the point of this file,
-# and the vocabulary below is the part that has to stay true.
+# and the vocabulary below is the part that has to stay true. The vocabulary
+# here and the table there are the same thirteen prefixes and must stay so: a
+# prefix this file admits and that table does not know has no lane at all.
 #
 # A lane:* label is an OUTPUT of that rule and never an input. Nothing may read
 # a label to decide effort or must-fix: a label is not bound to a commit, so
@@ -257,10 +260,53 @@
 # The PR_NUMBER that carried a listed entry's identity, and the file it was
 # matched against, went with it.
 #
+# THE findings/ LIMIT IS WHAT MAKES ITS CHEAP REVIEW SAFE. `findings/<slug>` is
+# reviewed at low effort (scripts/lane.sh) because a pull request on it files or
+# curates findings and repairs no code. That is a claim about the DIFF and not
+# about the name, so the diff is checked: a `findings/` branch whose changed
+# paths include anything outside `reviews/findings/` is refused, and the
+# offending paths are named. Without it the prefix is a way to have code
+# reviewed at the cheapest setting there is by choosing a branch name.
+#
+# AND EVERY FINDING IT FILES CARRIES A SEVERITY THE LADDER KNOWS. A file the
+# pull request ADDS OR RENAMES under `reviews/findings/` whose name does not
+# start `P0_`, `P1_`, `P2_` or `P3_`, or whose frontmatter `severity:` is
+# outside P0-P3, is refused. Severity leads a finding's filename because the
+# directory sorts worst-first (reviews/findings/README.md), the lane table reads
+# the severity, and the audit's must-fix set is written in those four tokens; a
+# fifth severity is a finding nothing can act on.
+#
+# ONLY WHAT THE DIFF ADDS OR RENAMES IS CHECKED, AND THAT IS THE WHOLE POINT.
+# A rule over the directory as it stands would turn every open pull request red
+# the day a badly named file landed on master -- including the pull request that
+# was going to fix it. What a pull request may be held to is what it does.
+#
+# NEITHER INPUT IS BUILT HERE. Nothing below the AUDITED HELPERS END marker may
+# run a command that is not a shell builtin or redirect from a path, so this
+# file cannot run `git diff` or read a blob, and .github/scripts/test-pr-policy.sh
+# fails the build if it tries. .github/scripts/changed-in-range.sh builds both,
+# the workflow calls it, the fixtures call it too, and they arrive here as
+# LISTINGS read through `read_file` exactly as the three finding listings are.
+# That is the precedent findings-in-range.sh set and the reason it exists.
+#
+#   changed-paths    one path per line, as `git diff --name-only` spells it.
+#   added-findings   `<severity><TAB><path>` per file the diff adds or renames
+#                    under reviews/findings/; `-` where the frontmatter carries
+#                    no severity line.
+#
+# A LISTING THAT CANNOT BE READ IS A REFUSAL HERE TOO, and an EMPTY changed-path
+# listing is a refusal for a `findings/` branch specifically: a pull request that
+# changes nothing is not one that files or curates a finding, and "the list was
+# empty" is the shape every false acceptance this file has given was wearing. An
+# argument that is NOT GIVEN is a different thing from a listing that is empty --
+# with no listings at all only the grammar is checked, which is how the fixtures
+# and a by-hand run work -- and the workflow gives both.
+#
 # So this file answers the one narrow question it was written to answer: is the
-# NAME in the vocabulary, and -- for a fix-P*/ name -- does it resolve to
-# exactly one filed finding in the listings handed over. Nothing else about the
-# pull request carrying that name is read here.
+# NAME in the vocabulary, does it resolve -- for a fix-P*/ name -- to exactly one
+# filed finding in the listings handed over, and is what the pull request DID
+# what its prefix claims. Nothing else about the pull request carrying that name
+# is read here.
 #
 # EVERY FALSE ACCEPTANCE THIS FILE HAS GIVEN WAS A FAILED PROBE ANSWERED AS AN
 # ABSENCE, AND THAT IS WHY THERE IS NOW EXACTLY ONE WAY OUT OF IT. Six review
@@ -362,9 +408,16 @@ branch="${1:-}"
 merge_base_findings="${2:-}"
 head_findings="${3:-}"
 range_findings="${4:-}"
+# The two diff listings. They are always FILES a caller built, never a directory to enumerate, so
+# they are not put through normalise_listing_path -- which exists because `reviews/findings` and
+# `reviews/findings/.` are one DIRECTORY and answered differently, a question a file does not raise.
+changed_paths="${5:-}"
+added_findings="${6:-}"
 
 slug_re='[a-z0-9]+(-[a-z0-9]+)*'
-# Keep in step with .github/scripts/validate-pr-body.sh's category case.
+# The eight categories, and the THIRD copy of this list: .github/scripts/validate-pr-body.sh's
+# category case and scripts/lane.sh's effort_for hold the other two, and all three move
+# together. Each of them says so.
 category_re='(correctness|crash-consistency|security-trust|portability|liveness|performance|compatibility|docs-contract)'
 
 # The vocabulary is held in a variable rather than written by `cat`, which is an
@@ -404,7 +457,14 @@ file the checkout holds and the index does not.
 There is no fix/<slug> prefix. A bug worth a branch is worth a finding, so file
 the finding and branch fix-P<n>/ after it. findings/<slug> is for a pull request
 that touches reviews/findings/ and nothing else; it is not somewhere to put a
-repair.
+repair. That limit is checked against the pull request's own diff, not taken on
+trust: a findings/ branch changing a path outside reviews/findings/ is refused,
+and the paths are named. It is what makes that prefix's cheap review safe.
+
+A file this pull request ADDS OR RENAMES under reviews/findings/ is a finding:
+its name starts P0_, P1_, P2_ or P3_, and its frontmatter severity: is one of
+P0, P1, P2 and P3. Files the diff leaves alone are not checked, so a name
+already on master never turns another pull request red.
 
 There is deliberately no prefix for a `test`, `chore`, `perf`, `security` or
 `build` change even though those are valid title types. If you need one, that is
@@ -1484,6 +1544,140 @@ read_listing() {
 }
 
 
+# ---- what the pull request DID, as two listings a caller built ------------------------------
+#
+# listing_text <path> <what>: the text of one of those listings, in `listing_bytes`, with CRLF taken
+# as a line ending and the trailing newline removed. Non-zero, with the reason on stderr, for
+# anything that could not be read WHOLE.
+#
+# This is the finding listings' file branch, held to the same four rules and for the same reasons,
+# which are argued where read_file is: an unopenable listing and an unreadable one are not an empty
+# listing; a NUL is a caller who wrote records where lines were asked for; and CRLF is a line ending
+# and never part of a path, because a listing written on Windows otherwise leaves a carriage return
+# on every line and every one of them stops matching -- which for THESE listings would drop a path
+# outside reviews/findings/ out of the set, and dropping one is an acceptance.
+listing_bytes=''
+listing_text() {
+  local path="$1" what="$2" status=0
+  listing_bytes=''
+  read_file "$path" || status=$?
+  case "$status" in
+    0) ;;
+    2)
+      echo "branch-name-policy: the $what listing '$path' could not be opened" >&2
+      return 1
+      ;;
+    3)
+      echo "branch-name-policy: the $what listing '$path' holds a NUL byte, which no path can" >&2
+      echo "  contain and no line ending is, so its records cannot be read as paths." >&2
+      return 1
+      ;;
+    *)
+      echo "branch-name-policy: the $what listing '$path' could not be read to the end, so what" >&2
+      echo "  this pull request changed is not known. That is refused rather than read as a pull" >&2
+      echo "  request that changed nothing." >&2
+      if [[ -n "$file_error" ]]; then
+        indent "$file_error"
+      fi
+      return 1
+      ;;
+  esac
+  listing_bytes="${file_bytes//$'\r\n'/$'\n'}"
+  listing_bytes="${listing_bytes%$'\n'}"
+  if [[ "$listing_bytes" == *$'\r'* ]]; then
+    echo "branch-name-policy: the $what listing '$path' holds a carriage return that is not a" >&2
+    echo "  CRLF line ending, so its paths cannot be read. Write it with LF or CRLF line" >&2
+    echo "  endings, one record per line." >&2
+    return 1
+  fi
+  return 0
+}
+
+# check_added_findings <listing text>: every file the pull request adds or renames under
+# reviews/findings/ is a finding -- P0_ to P3_ in the name, P0 to P3 in the frontmatter.
+#
+# EVERY BAD FILE IS NAMED, not the first one: a refusal that stops at one turns a fix into a queue
+# of pushes. A record this cannot read at all is a different thing and refuses at once, because a
+# listing half of which is unreadable is a set that has silently narrowed, and a narrowed set here
+# is a file that goes unchecked.
+check_added_findings() {
+  local text="$1" line sev path name bad=''
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    [[ "$line" == *$'\t'* ]] \
+      || fail "the added-findings listing holds a record with no tab in it, so its severity and
+  its path cannot be told apart. Each record is <severity><TAB><path>:
+    $line"
+    sev="${line%%$'\t'*}"
+    path="${line#*$'\t'}"
+    # The listing's own contract, checked rather than assumed. A record naming a path somewhere
+    # else is a listing built wrongly, and judging finding names by it would refuse files that are
+    # not findings at all.
+    case "$path" in
+      reviews/findings/?*) ;;
+      *) fail "the added-findings listing names a path outside reviews/findings/, which is not
+  what it carries. It holds the files this pull request adds or renames under that directory:
+    $path" ;;
+    esac
+    name="${path##*/}"
+    case "$name" in
+      P[0-3]_*) ;;
+      *)
+        # ONE APPEND PER LINE, because a double-quoted string that spans lines and is followed by
+        # anything other than a separator defeats the shape scan in test-pr-policy.sh: it reads the
+        # `$'...'` after the closing quote as a command in command position. The scan is a text
+        # scan, so what it can read is a constraint on what may be written here.
+        bad="$bad  $path"$'\n'
+        bad="$bad      its name does not start P0_, P1_, P2_ or P3_"$'\n'
+        continue
+        ;;
+    esac
+    case "$sev" in
+      P[0-3]) ;;
+      *)
+        bad="$bad  $path"$'\n'
+        bad="$bad      its frontmatter severity is [$sev]"$'\n'
+        ;;
+    esac
+  done <<< "$text"
+  [[ -z "$bad" ]] || fail "this pull request files something under reviews/findings/ that is not a
+  finding. A finding is P<n>_<category>_<timestamp>_<description>.md with a matching frontmatter
+  severity, for n in 0..3 (reviews/findings/README.md). A file whose frontmatter carries no
+  severity: line at all is reported as [-]. Only the files this pull request ADDS or RENAMES are
+  checked, so a name already on master never turns another pull request red:
+${bad%$'\n'}"
+}
+
+# check_findings_confined <listing text>: a findings/ branch changes reviews/findings/ and nothing
+# else.
+#
+# AN EMPTY LISTING IS A REFUSAL HERE. Everything else in this file treats "no records" as a set with
+# nothing in it, which is the right answer for a ledger that holds no finding; a pull request that
+# changes NO PATH AT ALL is not a pull request that files or curates a finding, and accepting it
+# would make "the listing was empty" a way through -- which is what every false acceptance this file
+# has given looked like from the outside.
+check_findings_confined() {
+  local text="$1" line outside=''
+  [[ -n "$text" ]] || fail "'$branch' changes no path at all, so there is nothing here to file or
+  curate. A findings/ branch carries work under reviews/findings/; a pull request that changes
+  nothing is refused rather than accepted on an empty list of changed paths."
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    case "$line" in
+      reviews/findings/?*) continue ;;
+    esac
+    outside="$outside  $line"$'\n'
+  done <<< "$text"
+  [[ -z "$outside" ]] || fail "'$branch' changes paths outside reviews/findings/:
+${outside%$'\n'}
+  A findings/ branch files or curates findings and repairs no code, which is why it is reviewed at
+  the lowest effort there is. Work that touches anything else belongs on the prefix that names it:
+  a repair on fix-P<n>/ or bulk-fix-P<n>/, and everything else on feature/, refactor/, docs/,
+  standards/, ci/ or gate/. A path git C-quotes -- one holding a control character or a byte
+  outside ASCII -- does not begin reviews/findings/ and is reported here; a finding's name is
+  ASCII throughout."
+}
+
 # collect_candidates: the merge base, the head and the pull request's own
 # commits taken as one set. A filename in more than one of them is one finding
 # and not several, which is every fix-P*/ pull request that has not touched
@@ -1516,6 +1710,29 @@ if [[ -n "$merge_base_findings$head_findings$range_findings" ]]; then
   The error is above. A gate that cannot see its input refuses rather than
   deciding it saw nothing, because a narrowed set turns an ambiguous name into
   an accepted one."
+fi
+
+# BOTH DIFF LISTINGS ARE READ FOR EVERY BRANCH AND READ EXACTLY ONCE, for the reason the three
+# finding listings are: reading a listing the prefix does not need costs one pass and catches a
+# caller's mistake whatever the prefix is, and a path is not a value -- re-opening one is a second
+# chance for it to hold different bytes. A read that failed refuses here and never reaches the
+# rules below with a listing that has quietly narrowed.
+changed_paths_text=''
+added_findings_text=''
+if [[ -n "$changed_paths" ]]; then
+  listing_text "$changed_paths" changed-paths \
+    || fail "'$branch' could not be checked: the changed-paths listing could not be read.
+  The error is above. What this pull request changed is what decides whether its prefix is
+  telling the truth, so a listing that cannot be read is a refusal and never a pull request
+  that changed nothing."
+  changed_paths_text="$listing_bytes"
+fi
+if [[ -n "$added_findings" ]]; then
+  listing_text "$added_findings" added-findings \
+    || fail "'$branch' could not be checked: the added-findings listing could not be read.
+  The error is above. A listing read in part is a file this pull request files and nothing
+  checks, so it is refused rather than read as a pull request that files nothing."
+  added_findings_text="$listing_bytes"
 fi
 
 # resolve_finding <severity-digit> <category> <description>: the branch claims
@@ -1598,6 +1815,25 @@ case "$branch" in
     ;;
   *)
     fail "'${branch%%/*}/' is not a known branch prefix"
+    ;;
+esac
+
+# THE NAME IS JUDGED ABOVE AND THE DIFF BELOW, and they are kept apart deliberately: everything
+# above this line is a question about the branch's NAME, which is what this file was written to
+# answer, and the two rules below are the only questions it asks about what the pull request DID.
+# A branch outside the vocabulary has already been refused, so these run on a name that is in it.
+#
+# What a pull request files under reviews/findings/ is checked whatever its prefix, because a
+# finding with a severity nothing can act on is the same defect on every branch.
+if [[ -n "$added_findings" ]]; then
+  check_added_findings "$added_findings_text"
+fi
+# The findings/ limit, which is what makes that prefix's low-effort review safe.
+case "$branch" in
+  findings/*)
+    if [[ -n "$changed_paths" ]]; then
+      check_findings_confined "$changed_paths_text"
+    fi
     ;;
 esac
 

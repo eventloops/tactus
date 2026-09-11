@@ -2836,6 +2836,484 @@ if (( equivalence_pairs < 42 )); then
   exit 1
 fi
 
+# ---- what the pull request DID: the findings/ limit and the P0-P3 severity check ---------------
+#
+# Two rules about the DIFF rather than the name, and two listings they are judged from. They are
+# built by .github/scripts/changed-in-range.sh -- the validator may run no command and open no file
+# outside its audited helpers -- so these build REAL REPOSITORIES and call that script, for the
+# reason the listing-construction fixtures above exist: a suite that feeds the validator listings it
+# wrote itself proves what the validator does with a listing and nothing about whether the listing
+# was right, and three wrong ways of building one each survived a frontier review.
+
+changed_script="$root/.github/scripts/changed-in-range.sh"
+
+# diff_verdict <dir> <target> <head> <branch>: build both listings from that repository and print the
+# validator's exit code. 99 means the listings could not be built at all, so a construction failure
+# can never read as a verdict.
+diff_verdict() {
+  local dir="$1" target="$2" head="$3" branch="$4" out rc=0
+  out="$(mktemp -d "$fixture_dir/changed-XXXXXX")"
+  if ! ( cd "$dir" && "$BASH" "$changed_script" "$target" "$head" "$out" ) >/dev/null 2>&1; then
+    echo 99
+    return 0
+  fi
+  "$BASH" "$branch_validator" "$branch" '' '' '' \
+    "$out/changed-paths" "$out/added-findings" >/dev/null 2>&1 || rc=$?
+  echo "$rc"
+}
+
+# diff_message <dir> <target> <head> <branch>: the same run's output, so a refusal can be checked for
+# NAMING THE PATH it refused over. A refusal that does not say which path is a refusal somebody has
+# to reproduce locally to act on.
+diff_message() {
+  local dir="$1" target="$2" head="$3" branch="$4" out
+  out="$(mktemp -d "$fixture_dir/changed-XXXXXX")"
+  if ! ( cd "$dir" && "$BASH" "$changed_script" "$target" "$head" "$out" ) >/dev/null 2>&1; then
+    echo 'THE LISTINGS COULD NOT BE BUILT'
+    return 0
+  fi
+  "$BASH" "$branch_validator" "$branch" '' '' '' \
+    "$out/changed-paths" "$out/added-findings" 2>&1 || true
+}
+
+diff_case() {  # diff_case <label> <dir> <target> <head> <branch> <want-exit>
+  local label="$1" got
+  got="$(diff_verdict "$2" "$3" "$4" "$5")"
+  if [[ "$got" != "$6" ]]; then
+    echo "$label ($5): answered $got, and $6 was expected" >&2
+    exit 1
+  fi
+}
+
+diff_says() {  # diff_says <label> <dir> <target> <head> <branch> <substring>
+  local label="$1" got
+  got="$(diff_message "$2" "$3" "$4" "$5")"
+  if [[ "$got" != *"$6"* ]]; then
+    echo "$label ($5): the refusal did not name [$6]:" >&2
+    printf '%s\n' "$got" >&2
+    exit 1
+  fi
+}
+
+finding_body() {  # finding_body <severity> -> a finding file's bytes, frontmatter first
+  printf -- '---\nid: FIXTURE-1\nseverity: %s\ndisposition: deferred\n---\n\n## Failure sequence\n' "$1"
+}
+
+# A repository whose BASE ALREADY CARRIES A BADLY NAMED FILE under reviews/findings/. Every case
+# below branches from it, so every one of them also asserts the rule that matters most here: a name
+# already on master must never turn somebody else's pull request red. A rule over the directory as it
+# stands would refuse every open pull request the day such a file landed -- including the pull
+# request that was going to fix it.
+repo_diff="$fixture_dir/repo-diff-rules"
+new_repo "$repo_diff"
+mkdir -p "$repo_diff/reviews/findings" "$repo_diff/src"
+echo seed > "$repo_diff/seed.txt"
+echo 'fn main() {}' > "$repo_diff/src/engine.rs"
+# A source file with enough content for git to CALL a move of it a rename. `fn main() {}` moved
+# under reviews/findings/ with frontmatter bolted on is too dissimilar to be detected as one, and
+# case 10 is about what happens when detection fires.
+awk 'BEGIN { for (i = 0; i < 200; i++) print "pub fn archived_" i "() { let _ = " i "; }" }' \
+  > "$repo_diff/src/archive-me.rs"
+finding_body P9 > "$repo_diff/reviews/findings/P9_correctness_202609010000_already-here.md"
+finding_body P2 > "$repo_diff/reviews/findings/NOT-A-FINDING.md"
+finding_body P2 > "$repo_diff/reviews/findings/P2_correctness_202609010001_to-be-renamed.md"
+git -C "$repo_diff" add -A
+git -C "$repo_diff" commit -q -m base
+diff_base="$(git -C "$repo_diff" rev-parse HEAD)"
+
+branch_from() {  # branch_from <name>: a branch off the base, checked out
+  git -C "$repo_diff" checkout -q -B "$1" "$diff_base"
+}
+
+# 1. A findings/ pull request confined to reviews/findings/, with two badly named files sitting in
+#    the directory it never touches.
+branch_from confined
+finding_body P3 > "$repo_diff/reviews/findings/P3_liveness_202609110000_a-new-one.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding'
+diff_confined="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a findings/ branch confined to the ledger' \
+  "$repo_diff" "$diff_base" "$diff_confined" findings/file-a-new-one 0
+
+# 2. The same pull request with one file outside the ledger. THE PATH IS NAMED.
+branch_from outside
+finding_body P3 > "$repo_diff/reviews/findings/P3_liveness_202609110000_a-new-one.md"
+echo '// repaired' >> "$repo_diff/src/engine.rs"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding and repair it'
+diff_outside="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a findings/ branch that repairs code' \
+  "$repo_diff" "$diff_base" "$diff_outside" findings/file-a-new-one 1
+diff_says 'a findings/ branch that repairs code' \
+  "$repo_diff" "$diff_base" "$diff_outside" findings/file-a-new-one 'src/engine.rs'
+# and it is the PREFIX'S limit and not a rule about repairs: the same diff on a prefix that admits
+# code is exactly what that prefix is for.
+diff_case 'the same diff on a prefix that admits code' \
+  "$repo_diff" "$diff_base" "$diff_outside" fix-P3/liveness_a-new-one 0
+# A PATH THAT MERELY CONTAINS `reviews/findings/` IS NOT UNDER IT. The test is the start of the
+# path and not a substring of it: matched anywhere, `src/reviews/findings/sneaky.rs` is inside the
+# ledger and a findings/ branch may carry any code that sits under a directory of that name.
+branch_from outside-lookalike
+mkdir -p "$repo_diff/src/reviews/findings" "$repo_diff/reviews/findings-archive"
+echo 'fn sneaky() {}' > "$repo_diff/src/reviews/findings/sneaky.rs"
+echo archived > "$repo_diff/reviews/findings-archive/old.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'paths that look like the ledger'
+diff_lookalike="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a findings/ branch adding a path that only looks like the ledger' \
+  "$repo_diff" "$diff_base" "$diff_lookalike" findings/tidy-up 1
+diff_says 'a findings/ branch adding a path that only looks like the ledger' \
+  "$repo_diff" "$diff_base" "$diff_lookalike" findings/tidy-up 'src/reviews/findings/sneaky.rs'
+diff_says 'a findings/ branch adding a sibling of the ledger directory' \
+  "$repo_diff" "$diff_base" "$diff_lookalike" findings/tidy-up 'reviews/findings-archive/old.md'
+
+# A DELETION outside the ledger is a path this pull request touches too. `--name-only` lists it, and
+# a limit that only saw additions would let a findings/ branch remove a gate.
+branch_from outside-delete
+git -C "$repo_diff" rm -q src/engine.rs
+# AND A FILE UNDER THE LEDGER, so the listing is not empty. Without it the deletion is the whole of
+# the diff, an implementation that dropped deletions would hand over an EMPTY listing, and the empty
+# rule would refuse the pull request for a reason that has nothing to do with the deletion -- a
+# fixture passing for the wrong reason, and one that would not notice deletions going missing.
+finding_body P3 > "$repo_diff/reviews/findings/P3_liveness_202609110006_alongside.md"
+git -C "$repo_diff" add -A
+git -C "$repo_diff" commit -q -m 'delete a source file and file a finding'
+diff_outside_delete="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a findings/ branch that deletes a source file' \
+  "$repo_diff" "$diff_base" "$diff_outside_delete" findings/tidy-up 1
+
+# 3. A finding whose NAME carries a severity the ladder does not have. Its frontmatter is P3, so the
+#    refusal is about the name alone.
+branch_from p4-name
+finding_body P3 > "$repo_diff/reviews/findings/P4_correctness_202609110001_out-of-range.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a P4'
+diff_p4_name="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'an added finding named P4_' \
+  "$repo_diff" "$diff_base" "$diff_p4_name" findings/file-a-p4 1
+diff_says 'an added finding named P4_' \
+  "$repo_diff" "$diff_base" "$diff_p4_name" findings/file-a-p4 'P4_correctness_202609110001_out-of-range.md'
+# EVERY PREFIX, not just findings/. A finding nothing can act on is the same defect on any branch.
+diff_case 'an added finding named P4_ on a docs/ branch' \
+  "$repo_diff" "$diff_base" "$diff_p4_name" docs/a-slug 1
+
+# 4. A finding whose NAME is fine and whose FRONTMATTER severity is not.
+branch_from p4-severity
+finding_body P4 > "$repo_diff/reviews/findings/P3_correctness_202609110002_mismatched.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a mismatched severity'
+diff_p4_sev="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'an added finding whose frontmatter severity is P4' \
+  "$repo_diff" "$diff_base" "$diff_p4_sev" findings/file-a-mismatch 1
+diff_says 'an added finding whose frontmatter severity is P4' \
+  "$repo_diff" "$diff_base" "$diff_p4_sev" findings/file-a-mismatch 'its frontmatter severity is [P4]'
+# A file under the ledger with no frontmatter at all is not a finding either, and says so as [-].
+# THE BODY IS NOT THE FRONTMATTER, which is the same distinction scripts/pr-ready-audit.sh makes for
+# the `id:` line and for the same reason: this file carries `severity: P2` in its prose, and a
+# severity read from anywhere in the file would make it a P2 finding.
+branch_from no-frontmatter
+printf 'no frontmatter here\n\nseverity: P2\n' \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110003_bare.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a bare file'
+diff_bare="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'an added file with no frontmatter' \
+  "$repo_diff" "$diff_base" "$diff_bare" findings/file-a-bare-one 1
+diff_says 'an added file with no frontmatter' \
+  "$repo_diff" "$diff_base" "$diff_bare" findings/file-a-bare-one 'its frontmatter severity is [-]'
+# A SECOND severity LINE INSIDE THE BLOCK DOES NOT OVERWRITE THE FIRST. Two `severity:` keys is not
+# YAML anybody meant to write, and the two readings disagree about what it says: first-wins reads the
+# P4 this file opens with, last-wins reads the P3 appended under it, and last-wins is a way to
+# launder a severity past this check by adding a line.
+branch_from two-severities
+{ printf -- '---\nid: FIXTURE-2\nseverity: P4\nseverity: P3\n---\n\n## Failure sequence\n'; } \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110008_twice.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding with two severities'
+diff_twice="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'an added finding with two frontmatter severities' \
+  "$repo_diff" "$diff_base" "$diff_twice" findings/file-a-double 1
+diff_says 'an added finding with two frontmatter severities' \
+  "$repo_diff" "$diff_base" "$diff_twice" findings/file-a-double 'its frontmatter severity is [P4]'
+
+# And the frontmatter's OWN first severity line wins: this file's block says P4 and its body says
+# P3, and the block is what the ladder reads.
+branch_from severity-in-the-body
+{ finding_body P4; printf '\nA quoted row: severity: P3\n'; } \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110007_quoting.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding quoting a severity'
+diff_quoting="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'an added finding whose body quotes another severity' \
+  "$repo_diff" "$diff_base" "$diff_quoting" findings/file-a-quoting-one 1
+diff_says 'an added finding whose body quotes another severity' \
+  "$repo_diff" "$diff_base" "$diff_quoting" findings/file-a-quoting-one 'its frontmatter severity is [P4]'
+
+# 5. A RENAME is checked, and it is checked at the name it leaves behind. Renaming a finding is how
+#    a reviewer reclassifies one (reviews/findings/README.md), so this is the live path into a bad
+#    name and not a hypothetical.
+branch_from rename-into-range
+git -C "$repo_diff" mv reviews/findings/P2_correctness_202609010001_to-be-renamed.md \
+  reviews/findings/P3_correctness_202609010001_to-be-renamed.md
+finding_body P3 > "$repo_diff/reviews/findings/P3_correctness_202609010001_to-be-renamed.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'reclassify P2 as P3'
+diff_rename_ok="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a reclassifying rename inside P0-P3' \
+  "$repo_diff" "$diff_base" "$diff_rename_ok" findings/reclassify-a-finding 0
+branch_from rename-out-of-range
+git -C "$repo_diff" mv reviews/findings/P2_correctness_202609010001_to-be-renamed.md \
+  reviews/findings/P4_correctness_202609010001_to-be-renamed.md
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'reclassify P2 as P4'
+diff_rename_bad="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a rename out of P0-P3' \
+  "$repo_diff" "$diff_base" "$diff_rename_bad" findings/reclassify-a-finding 1
+diff_says 'a rename out of P0-P3' \
+  "$repo_diff" "$diff_base" "$diff_rename_bad" findings/reclassify-a-finding \
+  'P4_correctness_202609010001_to-be-renamed.md'
+# The file it was renamed FROM is not reported: what a pull request leaves behind is what it is held
+# to, and the old name is gone.
+got_rename="$(diff_message "$repo_diff" "$diff_base" "$diff_rename_bad" findings/reclassify-a-finding)"
+if [[ "$got_rename" == *'P2_correctness_202609010001_to-be-renamed.md'* ]]; then
+  echo 'a rename out of P0-P3: the refusal named the path the file was renamed FROM' >&2
+  exit 1
+fi
+
+# 6. AND THE FILES THE DIFF DOES NOT TOUCH ARE NOT CHECKED, which is what every case above has been
+#    quietly asserting: the base carries `P9_correctness_...md` and `NOT-A-FINDING.md`, and the
+#    confined case passed. Asserted directly too, because it is the property most easily lost.
+diff_case 'a pull request that touches no finding at all' \
+  "$repo_diff" "$diff_base" "$diff_confined" docs/a-slug 0
+branch_from untouched-ledger
+echo '// unrelated' >> "$repo_diff/src/engine.rs"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'change code only'
+diff_code_only="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a code-only pull request beside two badly named files' \
+  "$repo_diff" "$diff_base" "$diff_code_only" feature/a-slug 0
+# A file ADDED AND DELETED inside the pull request is in neither the diff nor the listing: what the
+# pull request leaves behind is nothing, and there is nothing to hold it to.
+branch_from added-then-deleted
+finding_body P3 > "$repo_diff/reviews/findings/P4_correctness_202609110004_transient.md"
+finding_body P3 > "$repo_diff/reviews/findings/P3_liveness_202609110005_the-real-one.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a P4 and a P3'
+git -C "$repo_diff" rm -q reviews/findings/P4_correctness_202609110004_transient.md
+git -C "$repo_diff" commit -q -m 'and take the P4 away again'
+diff_transient="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a badly named file added and deleted inside the pull request' \
+  "$repo_diff" "$diff_base" "$diff_transient" findings/think-again 0
+
+# 7. THE BOUNDARY IS THE MERGE BASE AND NOT THE TARGET'S CURRENT HEAD, which is the argument
+#    findings-in-range.sh makes at length and which costs more here: rooted at the target's head,
+#    every path MASTER has changed since the branch point is reported as a path this pull request
+#    changed, and a findings/ branch confined to the ledger goes red because somebody else touched
+#    `src/`. A false red on a pull request that is doing exactly the right thing.
+#    It costs the same on the other listing and in the other direction: master DELETES a badly named
+#    file that is still present at this branch's head, and rooted at the target that deletion reads
+#    as this pull request ADDING the file -- so a pull request that has never been near
+#    reviews/findings/ is refused over a name somebody else wrote and somebody else removed.
+git -C "$repo_diff" checkout -q -B trunk-advanced "$diff_base"
+echo '// master moved on' >> "$repo_diff/src/engine.rs"
+echo 'more' > "$repo_diff/src/other.rs"
+git -C "$repo_diff" rm -q reviews/findings/NOT-A-FINDING.md
+git -C "$repo_diff" add -A
+git -C "$repo_diff" commit -q -m 'master advances over src/ and tidies the ledger'
+diff_advanced="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a confined findings/ branch after master advanced over src/' \
+  "$repo_diff" "$diff_advanced" "$diff_confined" findings/file-a-new-one 0
+# and the same pair still refuses the branch that really does change code, so the case above is
+# about the boundary and not about the check having stopped working.
+diff_case 'a findings/ branch that repairs code, after master advanced' \
+  "$repo_diff" "$diff_advanced" "$diff_outside" findings/file-a-new-one 1
+
+# 8. AN END THAT WILL NOT RESOLVE FAILS CLOSED IN THE BUILDER. A listing that could not be built is
+#    not a listing with nothing in it, and the workflow step dies on it rather than handing the
+#    validator a pair of empty files -- which for a findings/ branch is a pull request that changed
+#    nothing and for every branch is a pull request that filed nothing.
+empty_tree="$(git -C "$repo_diff" hash-object -t tree -w /dev/null)"
+unrelated_commit="$(git -C "$repo_diff" commit-tree "$empty_tree" -m 'an unrelated history')"
+builder_refuses() {  # builder_refuses <label> <target> <head> <expected substring>
+  local said
+  if said="$( cd "$repo_diff" && "$BASH" "$changed_script" "$2" "$3" "$fixture_dir/never-built" 2>&1 )"; then
+    echo "changed-in-range.sh built listings for $1" >&2
+    exit 1
+  fi
+  # AND IT SAYS WHICH END, because a step that goes red with git's own `fatal:` and nothing else
+  # sends its reader to the wrong file. The refusal is the behaviour; naming the end is the half
+  # that makes it actionable.
+  if [[ "$said" != *"$4"* ]]; then
+    echo "changed-in-range.sh refused $1 without saying so: [$said]" >&2
+    exit 1
+  fi
+}
+builder_refuses 'a head that is not in the checkout' \
+  "$diff_base" 0000000000000000000000000000000000000000 'head commit 0000000'
+builder_refuses 'a target that is not in the checkout' \
+  0000000000000000000000000000000000000000 "$diff_confined" 'target commit 0000000'
+builder_refuses 'two ends with no merge base' "$unrelated_commit" "$diff_confined" 'no merge base'
+# A NAME THAT CANNOT BE HELD ON A LINE IS REFUSED RATHER THAN WRITTEN OUT. A newline is legal in a
+# filename and it is the separator both listings are built from, so a record carrying one would
+# arrive at the validator as two -- and the validator refuses a record with no tab in it, which is
+# the second line of defence and not this one. This is the first: the builder does not write it.
+newline_branch="$repo_diff/reviews/findings/$(printf 'P2_correctness_202609110009_a\nb.md')"
+branch_from newline-in-a-name
+finding_body P2 > "$newline_branch"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding whose name has a newline'
+diff_newline="$(git -C "$repo_diff" rev-parse HEAD)"
+builder_refuses 'an added path holding a newline' "$diff_base" "$diff_newline" 'holds a newline'
+branch_from after-the-newline
+# and the same builder still writes both listings for a pair that resolves, so the three above are
+# about the ends and not about the builder.
+if ! ( cd "$repo_diff" && "$BASH" "$changed_script" "$diff_base" "$diff_confined" \
+  "$fixture_dir/built" ) >/dev/null 2>&1; then
+  echo 'changed-in-range.sh refused a pair of commits that both resolve' >&2
+  exit 1
+fi
+for built in changed-paths added-findings; do
+  [[ -s "$fixture_dir/built/$built" ]] \
+    || { echo "changed-in-range.sh wrote no $built for a pull request that has one" >&2; exit 1; }
+done
+
+# 9. A LISTING THIS CANNOT READ IS A REFUSAL, NEVER AN EMPTY SET, and an EMPTY changed-path listing
+#    is a refusal for a findings/ branch: a pull request that changes nothing files nothing, and
+#    "the list was empty" is the shape every false acceptance this file has given wore.
+missing_listing="$fixture_dir/no-such-listing"
+present_listing="$fixture_dir/empty-listing"
+: > "$present_listing"
+unreadable_verdict() {  # unreadable_verdict <branch> <changed-paths> <added-findings>
+  local rc=0
+  "$BASH" "$branch_validator" "$1" '' '' '' "$2" "$3" >/dev/null 2>&1 || rc=$?
+  echo "$rc"
+}
+if [[ "$(unreadable_verdict findings/a-slug "$missing_listing" "$present_listing")" != 1 ]]; then
+  echo 'a changed-paths listing that could not be opened was not a refusal' >&2
+  exit 1
+fi
+if [[ "$(unreadable_verdict docs/a-slug "$present_listing" "$missing_listing")" != 1 ]]; then
+  echo 'an added-findings listing that could not be opened was not a refusal' >&2
+  exit 1
+fi
+if [[ "$(unreadable_verdict findings/a-slug "$present_listing" "$present_listing")" != 1 ]]; then
+  echo 'an empty changed-paths listing was accepted for a findings/ branch' >&2
+  exit 1
+fi
+# An empty one is fine everywhere else -- a pull request that adds no finding adds no finding -- and
+# with NO listings at all only the grammar is checked, which is how the fixtures above run.
+if [[ "$(unreadable_verdict docs/a-slug "$present_listing" "$present_listing")" != 0 ]]; then
+  echo 'an empty pair of listings was refused for a branch the limit does not apply to' >&2
+  exit 1
+fi
+if [[ "$(unreadable_verdict findings/a-slug '' '')" != 0 ]]; then
+  echo 'a findings/ branch with no listings at all was refused' >&2
+  exit 1
+fi
+
+# 10. WHAT ROUND 1 OF THIS PULL REQUEST'S REVIEW FOUND, one case per finding. Each was measured
+#     against the unrepaired builder before the repair and each failed there; they are here so the
+#     suite, and not only a review, refuses the next one.
+#
+#     A RENAME INTO THE LEDGER IS A PATH OUTSIDE THE LEDGER TOO. `git diff --name-only` detects
+#     renames by default and prints ONLY THE DESTINATION, so `git mv src/archive-me.rs
+#     reviews/findings/P3_<...>.md` with frontmatter added arrived as a changed-path listing holding
+#     one path under reviews/findings/ and nothing else -- and the confinement limit, which is the
+#     whole of what makes the findings/ lane's low review safe, accepted a pull request that
+#     deletes a source file. No push access is needed to open one: anyone can, from a fork.
+branch_from rename-into-the-ledger
+git -C "$repo_diff" mv src/archive-me.rs reviews/findings/P3_correctness_202609110012_archived.md
+{ finding_body P3
+  cat "$repo_diff/reviews/findings/P3_correctness_202609110012_archived.md"
+} > "$fixture_dir/archived.md"
+cp -- "$fixture_dir/archived.md" "$repo_diff/reviews/findings/P3_correctness_202609110012_archived.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'archive a source file as a finding'
+diff_rename_in="$(git -C "$repo_diff" rev-parse HEAD)"
+# THE PRECONDITION IS ASSERTED, because without it this case passes for the wrong reason: if the
+# two files were too dissimilar git would report an add and a delete, `src/archive-me.rs` would be
+# listed by any implementation, and the case would say nothing about rename detection at all.
+rename_status="$(git -C "$repo_diff" diff --name-status -M "$diff_base" "$diff_rename_in")"
+case "$rename_status" in
+  R*) ;;
+  *) echo "the rename fixture is not a rename git detects, so it proves nothing: [$rename_status]" >&2
+     exit 1 ;;
+esac
+diff_case 'a findings/ branch that renames a source file into the ledger' \
+  "$repo_diff" "$diff_base" "$diff_rename_in" findings/archive-the-engine 1
+diff_says 'a findings/ branch that renames a source file into the ledger' \
+  "$repo_diff" "$diff_base" "$diff_rename_in" findings/archive-the-engine 'src/archive-me.rs'
+# and the destination is still judged as an added finding, so turning detection off on the
+# changed-path listing did not cost the other listing its rename handling.
+diff_case 'the same rename on a prefix that admits code' \
+  "$repo_diff" "$diff_base" "$diff_rename_in" ci/archive-the-engine 0
+
+#     A SEVERITY HOLDING THE FIELD DELIMITER FORGES THE RECORD. added-findings is
+#     `<severity><TAB><path>` and the severity is whatever the frontmatter said, so a block reading
+#     `severity: P3<TAB>reviews/findings/forged` emitted three fields: the validator read severity
+#     `P3`, took the injected text as the path, and the real file's severity was never judged.
+#     Measured on the unrepaired builder: accepted, rc=0, on three payloads.
+for forged_tail in 'reviews/findings/forged' \
+                   'reviews/findings/P3_correctness_202609110009_forged.md' \
+                   'reviews/findings/P3_correctness_202609110013_forged.md'; do
+  branch_from severity-holding-a-tab
+  # The injected severity is P3 -- a value the validator ACCEPTS -- which is what makes this the
+  # exploit and not a refusal for some other reason: read back, the record says P3 and names a
+  # path of the author's choosing, while the file's real severity is the whole injected string
+  # and is judged by nothing.
+  printf -- '---\nid: FIXTURE-6\nseverity: P3\t%s\ndisposition: deferred\n---\n' "$forged_tail" \
+    > "$repo_diff/reviews/findings/P3_correctness_202609110013_forged.md"
+  git -C "$repo_diff" add -A
+  git -C "$repo_diff" commit -q -m 'file a finding whose severity holds a tab'
+  diff_forged="$(git -C "$repo_diff" rev-parse HEAD)"
+  builder_refuses "a frontmatter severity holding a tab [$forged_tail]" \
+    "$diff_base" "$diff_forged" 'holds a tab or a line ending'
+done
+# A LINE ENDING IN THE VALUE SPLITS THE RECORD, and is refused for the reason a newline in a PATH
+# is: one record per line is what this listing promises.
+branch_from severity-holding-a-carriage-return
+printf -- '---\nid: FIXTURE-6\nseverity: P3\rP3\ndisposition: deferred\n---\n' \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110015_split.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding whose severity holds a CR'
+diff_split="$(git -C "$repo_diff" rev-parse HEAD)"
+builder_refuses 'a frontmatter severity holding a carriage return' \
+  "$diff_base" "$diff_split" 'holds a tab or a line ending'
+
+#     A LARGE FINDING IS STILL A FINDING. `git cat-file blob | awk` with an `exit` at the closing
+#     fence left git writing into a pipe nobody was reading: SIGPIPE, status 141, and under
+#     `pipefail` the builder exited 1 as soon as a finding outgrew a pipe buffer -- on EVERY branch
+#     prefix, since the builder runs for all of them. The padding is well over 64 KB on purpose.
+branch_from a-large-finding
+{ finding_body P3
+  awk 'BEGIN { for (i = 0; i < 4000; i++) print "padding padding padding padding padding padding" }'
+} > "$repo_diff/reviews/findings/P3_liveness_202609110014_large.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a large finding'
+diff_large="$(git -C "$repo_diff" rev-parse HEAD)"
+large_bytes="$(wc -c < "$repo_diff/reviews/findings/P3_liveness_202609110014_large.md")"
+(( large_bytes > 100000 )) \
+  || { echo "the large-finding fixture is only $large_bytes bytes, which is not comfortably past a pipe buffer" >&2; exit 1; }
+diff_case 'a findings/ branch filing a finding larger than a pipe buffer' \
+  "$repo_diff" "$diff_base" "$diff_large" findings/file-a-large-one 0
+# and its severity is READ, not merely survived: the same file named P3_ with a P4 block is
+# refused, which a builder that answered `-` for everything large would not do.
+branch_from a-large-mismatched-finding
+{ finding_body P4
+  awk 'BEGIN { for (i = 0; i < 4000; i++) print "padding padding padding padding padding padding" }'
+} > "$repo_diff/reviews/findings/P3_liveness_202609110016_large-mismatch.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a large mismatched finding'
+diff_large_bad="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_says 'a large finding whose frontmatter severity is P4' \
+  "$repo_diff" "$diff_base" "$diff_large_bad" findings/file-a-large-one 'its frontmatter severity is [P4]'
+
+#     CRLF IS A LINE ENDING HERE TOO. The opening fence was compared exactly, so a file authored on
+#     Windows opens `---\r`, matched nothing, and every CRLF finding read as having no frontmatter
+#     at all -- refused at rc=1 for the line endings it was written with. validate-pr-branch.sh
+#     already takes CRLF as a line ending in every listing it reads and this reader has to agree.
+branch_from crlf-frontmatter
+printf -- '---\r\nid: FIXTURE-7\r\nseverity: P3\r\ndisposition: deferred\r\n---\r\n' \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110017_crlf.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a CRLF finding'
+diff_crlf="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a findings/ branch filing a CRLF-authored finding' \
+  "$repo_diff" "$diff_base" "$diff_crlf" findings/file-a-crlf-one 0
+# and the value is read, not defaulted: the same file with a P4 block is refused AS A P4, which a
+# reader that answered `-` for every CRLF file would report as [-].
+branch_from crlf-frontmatter-mismatched
+printf -- '---\r\nid: FIXTURE-7\r\nseverity: P4\r\ndisposition: deferred\r\n---\r\n' \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110018_crlf-bad.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a mismatched CRLF finding'
+diff_crlf_bad="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_says 'a CRLF-authored finding whose frontmatter severity is P4' \
+  "$repo_diff" "$diff_base" "$diff_crlf_bad" findings/file-a-crlf-one 'its frontmatter severity is [P4]'
+
+echo 'diff-rule fixtures passed'
+
 # ---- the shape rule: the unsafe call must be impossible to WRITE, not just absent -------------
 #
 # Five rounds of finding these one at a time produced more of them each round,

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # pr-ready-audit.sh: decide, per open pull request, whether it is ready to enqueue for merge
-# under the three-lane finding policy, and optionally maintain the lane and ready labels.
+# under the lane policy of scripts/lane.sh, and optionally maintain the lane and ready labels.
 #
 #   scripts/pr-ready-audit.sh [--apply] [--enqueue] [--ready-label NAME] [--reviewer LOGIN] [PR ...]
 #
@@ -50,11 +50,24 @@
 # are and let `-h` through; consuming an option both misnames the value and silently switches
 # off the flag it swallowed.
 #
-# Lanes, decided by the branch prefix and nothing else (a lane:* label is output, never input;
-# a wrong one is corrected by --apply and reported as lane-label-mismatch):
-#   lane:findings-p3     codex/findings-p3-*   must fix everything; ready only on a PASS verdict
-#   lane:findings-p1p2   codex/findings-*      must fix P0-P2; P3 may be filed and deferred
-#   lane:feature         everything else       must fix P0-P1; P2-P3 may be filed and deferred
+# Lanes, decided by the branch prefix and nothing else, from ONE TABLE: scripts/lane.sh, sourced
+# below and also sourced by the box's review-poller.sh and make-fix-brief.sh. It held three copies
+# before, each reading `codex/findings-p3-*`, `codex/findings-*` and a catch-all, and the branch
+# vocabulary has thirteen prefixes and none of them is `codex/` -- so every real branch fell into
+# the catch-all, which is the loosest fix set, and nothing said so. Eleven lanes, eleven `lane:*`
+# labels, and the label list and both reconciliation loops below are driven from `lane_list` so
+# they cannot drift from the table again.
+#
+# A lane:* label is an OUTPUT and never an input; a wrong one is corrected by --apply and reported
+# as lane-label-mismatch. A BRANCH OUTSIDE THE VOCABULARY HAS NO LANE: `lane_for` refuses it, and
+# the pull request carrying it is reported NOT-READY with `branch-prefix-unknown`. It is not given
+# a default lane, and it does not stop the run -- the other pull requests are still audited.
+#
+# The P3 rule (owner, 2026-09-08) replaces `verdict-not-pass`, which is gone: a P3 lane is ready
+# when its review carries no P0, P1 or P2 and three P3s or fewer. A P3 carrying a witness is fixed
+# whatever the count -- that is the `witnessed:` blocker below, which fires in every lane -- so the
+# tolerance is three UNWITNESSED P3s, and a fourth blocks as `unwitnessed-p3s`. Nothing loops
+# reviews to reach a PASS any more.
 #
 # A pull request is READY when all of these hold on its current head and base:
 #   - not a draft; GitHub reports it mergeable: DIRTY, UNKNOWN and BLOCKED fail closed, and
@@ -165,10 +178,11 @@
 # branch diff byte-identical before and after, no gate edited by the pull request, and no branch
 # commit outside the ledger.
 #
-# The pure parts (lane, severity sets, the parser call and the reader for its result, the
-# frontmatter id match, the newest-check-run choice) are functions, exercised by
+# The pure parts (the lane table, the parser call and the reader for its result, the frontmatter id
+# match, the newest-check-run choice) are functions, exercised by
 # .github/scripts/test-pr-ready-audit.sh along with `scripts/pr-review-parse.py` itself; sourcing
-# this file with PR_READY_AUDIT_LIBRARY=1 defines them without running the audit.
+# this file with PR_READY_AUDIT_LIBRARY=1 defines them, and `scripts/lane.sh`'s with them, without
+# running the audit.
 #
 # Needs: bash, git (a checkout with `origin` pointing at the repository), gh (its built-in --jq
 # does the API-side JSON work), and python3 or python, which now reads BOTH review forms and the
@@ -176,35 +190,33 @@
 
 set -euo pipefail
 
-# ---- pure helpers -------------------------------------------------------------------------------
+# ---- the lane table -------------------------------------------------------------------------
 
-lane_for() {
-  case "$1" in
-    codex/findings-p3-*) echo findings-p3 ;;
-    codex/findings-*) echo findings-p1p2 ;;
-    *) echo feature ;;
-  esac
-}
+# Where this script's neighbours are. Settled once, at load, from this file's own location, so that
+# a run from any directory finds them beside the audit rather than beside the caller.
+audit_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
-must_fix_for() {
-  case "$1" in
-    findings-p3) echo "P0 P1 P2 P3" ;;
-    findings-p1p2) echo "P0 P1 P2" ;;
-    feature) echo "P0 P1" ;;
-    # A lane this does not know is not a lane with nothing to fix in it. An empty must-fix set
-    # makes EVERY severity deferrable -- `[[ "  " == *" P1 "* ]]` is false -- which is the
-    # permissive answer, and the permissive answer has to be said rather than fallen into. The
-    # three above are everything `lane_for` returns; anything else is a caller that cannot be
-    # answered, and the run stops rather than auditing with no severity to fix.
-    *) return 1 ;;
-  esac
-}
+# `lane_for`, `lane_list`, `must_fix_for` and `effort_for`, from the one table. Sourced rather than
+# copied: the copy in this file, the copy in review-poller.sh and the copy in make-fix-brief.sh all
+# read `codex/` prefixes that the branch vocabulary does not contain, and all three disagreed. A
+# table that cannot be read is not a table with no lanes in it, so a failure here refuses the whole
+# run -- an audit with no severity to fix defers everything.
+if ! source "$audit_dir/lane.sh"; then
+  echo "refusing: $audit_dir/lane.sh could not be sourced, so no pull request has a lane." >&2
+  exit 2
+fi
+
+# THE P3 RULE'S TOLERANCE (owner, 2026-09-08). A P3 lane is ready when its review carries no P0, P1
+# or P2 and three P3s or fewer. A P3 carrying a failing test, reproduction or mutation witness is
+# fixed whatever the count -- that is the `witnessed:` blocker below, and it fires in every lane and
+# at every severity -- so what is counted here is the P3s with no witness. It is a count and not a
+# severity, which is why it is not in `must_fix_for`'s answer; scripts/lane.sh states the rule and
+# this is the only place it is applied.
+p3_tolerance=3
 
 # ---- the one parser ------------------------------------------------------------------------------
 
-# Where the parser is, and what runs it. Settled once, at load, from this file's own location, so
-# that a run from any directory finds the parser beside the audit rather than beside the caller.
-audit_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# What runs the parser.
 review_parser="$audit_dir/pr-review-parse.py"
 review_python="$(command -v python3 || command -v python || true)"
 
@@ -428,9 +440,26 @@ ensure_labels() {
     [[ $'\n'"$existing"$'\n' == *$'\n'"$1"$'\n'* ]] \
       || gh label create "$1" --repo "$repo" --color "$2" --description "$3" >/dev/null
   }
-  create lane:feature 0e8a16 "feature or sweep work: fix P0-P1, file P2-P3"
-  create lane:findings-p1p2 fbca04 "P1/P2 findings workflow: fix P0-P2, file P3"
-  create lane:findings-p3 d93f0b "P3 findings workflow: ready only on PASS"
+  # ONE LABEL PER LANE, FROM `lane_list` AND NOT FROM A LIST WRITTEN HERE. The three names that used
+  # to be written here were `lane:feature`, `lane:findings-p1p2` and `lane:findings-p3`, and two of
+  # them were lanes the branch vocabulary cannot produce. Walked by expansion for the reason every
+  # other list in this file is: `for l in $(lane_list)` and `< <(lane_list)` both run zero times
+  # whether the table is empty or the read failed, and zero lanes is a run that creates no label and
+  # says nothing.
+  local rest_lanes one_lane
+  rest_lanes="$(lane_list)"
+  while [[ -n "$rest_lanes" ]]; do
+    one_lane="${rest_lanes%%$'\n'*}"
+    if [[ "$rest_lanes" == *$'\n'* ]]; then rest_lanes="${rest_lanes#*$'\n'}"; else rest_lanes=""; fi
+    [[ -n "$one_lane" ]] || continue
+    # THE DESCRIPTION POINTS AT THE TABLE RATHER THAN RESTATING IT. `create` writes a label only
+    # when the repository has none of that name, so a description spelling out the lane's effort and
+    # fix set is a snapshot taken the day the label was created and never corrected -- which is how
+    # `lane:feature` still reads "fix P0-P1, file P2-P3" from a table that has since changed twice.
+    # That existing label keeps its name, its colour and its wording; these words are for the ones
+    # created from here on.
+    create "lane:$one_lane" 0e8a16 "branch lane $one_lane: scripts/lane.sh decides it from the prefix"
+  done
   create "$ready_label" 5319e7 "audit passed: enqueue for merge"
 }
 
@@ -765,9 +794,27 @@ main() {
   done
 }
 
+# has_label <name>: that label is on the pull request now being audited, compared WHOLE. Reads
+# `pr_labels`, which audit_one fills; there is one pull request in flight at a time.
+#
+# `[[ " $labels " == *" $name "* ]]` over a space-joined string was not this test: a single label
+# `a ready-to-merge b` answered yes for `ready-to-merge`, and `lane:x y` answered no for `lane:x y`.
+has_label() {
+  local want="$1" i
+  for ((i = 0; i < ${#pr_labels[@]}; i++)); do
+    [[ "${pr_labels[i]}" == "$want" ]] && return 0
+  done
+  return 1
+}
+
 audit_one() {
   local pr="$1"
-  local meta meta_raw meta_status branch head draft merge_state labels base base_oid attempt
+  local meta meta_raw meta_status branch head draft merge_state base base_oid attempt
+  # pr_labels is the pull request's labels, ONE ARRAY ELEMENT PER LABEL, and every test and every
+  # removal below goes through it. `labels` was one space-joined string and every reader of it
+  # split on whitespace, which is not where a label's boundaries are.
+  local label_count label_index
+  local -a pr_labels
   # GitHub computes mergeability lazily and answers UNKNOWN until it has; asking again after a
   # pause usually settles it, and an UNKNOWN that survives three asks fails closed below. A read
   # that fails outright gets the same three attempts and then says so: read through `< <(...)` its
@@ -778,9 +825,18 @@ audit_one() {
     meta_status=0
     # One field per line, read with mapfile: a tab-separated read would collapse an empty field
     # (no labels) and shift every field after it.
+    #
+    # A LABEL NAME MAY HOLD A SPACE, so the labels are the LAST thing on the wire and take a line
+    # each rather than being joined into one field. Joined with a space and split on whitespace,
+    # `lane:legacy docs` was collected as `lane:legacy`: the real label was never identified, the
+    # removal of a label that does not exist failed, and the run died there with every pull request
+    # after it unaudited -- so "every lane:* label is swept" did not hold. A label name cannot hold
+    # a newline, and that is CHECKED rather than assumed: the count comes over the wire ahead of
+    # the names and a mismatch is a read this cannot trust, which is reported as a failed lookup
+    # below rather than acted on.
     meta_raw="$(gh pr view "$pr" --repo "$repo" \
       --json headRefName,headRefOid,isDraft,mergeStateStatus,labels,baseRefName,baseRefOid \
-      --jq '.headRefName, .headRefOid, (.isDraft|tostring), .mergeStateStatus, ([.labels[].name]|join(" ")), .baseRefName, .baseRefOid')" \
+      --jq '.headRefName, .headRefOid, (.isDraft|tostring), .mergeStateStatus, .baseRefName, .baseRefOid, ([.labels[].name]|length), (.labels[].name)')" \
       || meta_status=$?
     # Walked by expansion, for the reason the listing above is: a `mapfile` that never ran leaves
     # `meta` empty, and empty fields are what this loop exists to stop being audited.
@@ -793,7 +849,19 @@ audit_one() {
       done
     fi
     branch="${meta[0]:-}"; head="${meta[1]:-}"; draft="${meta[2]:-}"; merge_state="${meta[3]:-}"
-    labels="${meta[4]:-}"; base="${meta[5]:-}"; base_oid="${meta[6]:-}"
+    base="${meta[4]:-}"; base_oid="${meta[5]:-}"; label_count="${meta[6]:-}"
+    pr_labels=()
+    for ((label_index = 7; label_index < ${#meta[@]}; label_index++)); do
+      pr_labels+=("${meta[label_index]}")
+    done
+    # The count the read declared against the number of lines it produced. They disagree only if a
+    # label carried a line ending, which would have split one label into two -- and a half of a
+    # `lane:` name is a label this would report and try to remove.
+    case "$label_count" in
+      '' | *[!0-9]*) meta_status=$(( meta_status == 0 ? 90 : meta_status )) ;;
+      *) (( ${#pr_labels[@]} == label_count )) \
+           || meta_status=$(( meta_status == 0 ? 90 : meta_status )) ;;
+    esac
     [[ ( "$merge_state" == UNKNOWN || $meta_status -ne 0 ) && $attempt -lt 3 ]] || break
     sleep 3
   done
@@ -804,7 +872,15 @@ audit_one() {
     return 0
   fi
   local lane must_fix state
-  lane="$(lane_for "$branch")"
+  # A BRANCH OUTSIDE THE VOCABULARY HAS NO LANE, AND IS NOT GIVEN ONE. The catch-all this replaces
+  # is the defect: it handed a prefix nobody had thought about the loosest fix set in silence.
+  # `lane_for` refuses it and prints the table; this pull request is reported unaudited, and the
+  # ones after it are still audited, because one unknown name is not a reason to stop the run.
+  if ! lane="$(lane_for "$branch")"; then
+    printf '%-5s %-14s %-8s %-13s %s\n' "#$pr" "-" "${head:0:7}" NOT-READY \
+      "blockers=branch-prefix-unknown:${branch%%/*}"
+    return 0
+  fi
   must_fix="$(must_fix_for "$lane")"
   blockers=()
   state=READY
@@ -909,7 +985,6 @@ audit_one() {
       "") blockers+=("no-verdict") ;;
       *) blockers+=("verdict:$verdict") ;;
     esac
-    [[ "$lane" == findings-p3 && "$verdict" != PASS ]] && blockers+=("verdict-not-pass")
     [[ "$verdict" == PASS && ${#finding_sev[@]} -gt 0 ]] && blockers+=("pass-with-findings")
     [[ "$verdict" == CHANGES_REQUIRED && ${#finding_sev[@]} -eq 0 ]] && blockers+=("findings-unparsed:changes-required-lists-none")
 
@@ -1042,10 +1117,13 @@ audit_one() {
   fi
   rm -f "$body_file" "$ledger_file"
 
-  local sev id wit
+  local sev id wit unwitnessed_p3=0
   for ((k = 0; k < ${#finding_sev[@]}; k++)); do
     sev="${finding_sev[k]}"; id="${finding_id[k]}"; wit="${finding_flags[k]}"
     [[ "$id" == "-" ]] && id=""   # "-" is how the parser says the finding recorded no id
+    # Counted before any `continue` below, and with an explicit comparison rather than `(( wit & 1 ))`
+    # as a statement: bit 1 clear is status 1, which `set -e` would read as a failure.
+    if [[ "$sev" == P3 ]] && (( (wit & 1) == 0 )); then unwitnessed_p3=$((unwitnessed_p3 + 1)); fi
     if [[ "$sev" == ERR ]]; then
       blockers+=("findings-unparsed:$id")
       continue
@@ -1093,22 +1171,51 @@ audit_one() {
     esac
   done
 
+  # THE P3 RULE, and the whole of what `verdict-not-pass` used to be. That blocker demanded a PASS
+  # from a lane whose reviews file P3s, so it could only be reached by looping reviews until one
+  # returned nothing; it is deleted. A witnessed P3 is already blocked above, in every lane, so the
+  # tolerance below is over the UNWITNESSED ones alone.
+  if [[ "$lane" == fix-p3 ]] && ((unwitnessed_p3 > p3_tolerance)); then
+    blockers+=("unwitnessed-p3s:$unwitnessed_p3-over-$p3_tolerance")
+  fi
+
   audit_state "$moved"
 
-  local detail l
+  local detail
   detail="verdict=${verdict:-none} reviewed=${reviewed:0:7}${moved:+ moved=$moved}"
   [[ "$base" != master ]] && detail+=" base=$base"
-  for l in lane:feature lane:findings-p1p2 lane:findings-p3; do
-    [[ "$l" != "lane:$lane" && " $labels " == *" $l "* ]] && detail+=" lane-label-mismatch=$l"
+  # EVERY `lane:*` LABEL ON THE PULL REQUEST THAT IS NOT THIS LANE'S. It was a list of lane names
+  # written out here, and the list named the three lanes of 2026-09-06 -- two of which no branch in
+  # the vocabulary can produce -- so a `lane:findings-p3` left behind by the old audit would be
+  # neither reported nor removed. The lane `lane_list` gives is the one label that may stay; `lane:`
+  # is reserved for this audit's output, which is why --ready-label refuses a name in it.
+  #
+  # Taken from `pr_labels`, WHERE ONE ELEMENT IS ONE LABEL, and never by splitting a joined string:
+  # the string was split on spaces, and a space is legal in a label name, so `lane:legacy docs` was
+  # collected as `lane:legacy`. The real label went unreported, and the removal below then asked
+  # GitHub to take a label off that the pull request does not carry -- which fails, and under
+  # `set -e` ends the run with every pull request after this one unaudited.
+  #
+  # Never `for l in $labels`, which GLOBS as well as splitting: a label carrying `*` or `?` would be
+  # expanded against the working directory, and one that matched nothing would come back as the
+  # pattern. Collected once into an array, because the same set is reported below and removed
+  # further down, and re-splitting twice is two chances to split it differently.
+  local stale_lanes=() one_label
+  for ((j = 0; j < ${#pr_labels[@]}; j++)); do
+    one_label="${pr_labels[j]}"
+    [[ "$one_label" == lane:* && "$one_label" != "lane:$lane" ]] && stale_lanes+=("$one_label")
+  done
+  for ((j = 0; j < ${#stale_lanes[@]}; j++)); do
+    detail+=" lane-label-mismatch=${stale_lanes[j]}"
   done
   ((${#blockers[@]})) && detail+=" blockers=$(IFS=,; echo "${blockers[*]}")"
   printf '%-5s %-14s %-8s %-13s %s\n' "#$pr" "$lane" "${head:0:7}" "$state" "$detail"
 
   if ((apply)); then
-    for l in lane:feature lane:findings-p1p2 lane:findings-p3; do
-      [[ "$l" != "lane:$lane" && " $labels " == *" $l "* ]] && gh pr edit "$pr" --repo "$repo" --remove-label "$l" >/dev/null
+    for ((j = 0; j < ${#stale_lanes[@]}; j++)); do
+      gh pr edit "$pr" --repo "$repo" --remove-label "${stale_lanes[j]}" >/dev/null
     done
-    [[ " $labels " != *" lane:$lane "* ]] && gh pr edit "$pr" --repo "$repo" --add-label "lane:$lane" >/dev/null
+    has_label "lane:$lane" || gh pr edit "$pr" --repo "$repo" --add-label "lane:$lane" >/dev/null
     # The ready label is a report of this audit at $head, not an authorisation: GitHub labels are
     # not bound to a commit, so a push can always land between the audit and the label write.
     # The head is read again before the write and again after it, and a label written across a
@@ -1124,7 +1231,7 @@ audit_one() {
       fi
     fi
     if [[ "$state" == READY ]]; then
-      [[ " $labels " != *" $ready_label "* ]] && gh pr edit "$pr" --repo "$repo" --add-label "$ready_label" >/dev/null
+      has_label "$ready_label" || gh pr edit "$pr" --repo "$repo" --add-label "$ready_label" >/dev/null
       after_write="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)"
       if [[ "$after_write" != "$head" ]]; then
         gh pr edit "$pr" --repo "$repo" --remove-label "$ready_label" >/dev/null
@@ -1165,7 +1272,7 @@ audit_one() {
         fi
       fi
     else
-      [[ " $labels " == *" $ready_label "* ]] && gh pr edit "$pr" --repo "$repo" --remove-label "$ready_label" >/dev/null
+      has_label "$ready_label" && gh pr edit "$pr" --repo "$repo" --remove-label "$ready_label" >/dev/null
     fi
   fi
   return 0
