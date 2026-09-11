@@ -1551,6 +1551,7 @@ mod termination {
         ack_fd: libc::c_int,
         _command_keepalive_fd: libc::c_int,
         pid: libc::pid_t,
+        identity: libc::c_int,
     }
 
     #[derive(Clone, Copy)]
@@ -1559,6 +1560,8 @@ mod termination {
         ack_fd: libc::c_int,
         _command_keepalive_fd: libc::c_int,
         pid: libc::pid_t,
+        #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+        identity: libc::c_int,
     }
 
     enum Phase {
@@ -2232,12 +2235,21 @@ mod termination {
                 close_fd(self.command_fd);
                 close_fd(self.ack_fd);
                 close_fd(self._command_keepalive_fd);
+                close_fd(self.identity);
                 return;
             }
             self.close_and_wait();
         }
 
         fn abandon(self) -> HelperEnd {
+            #[cfg(target_os = "linux")]
+            if self.identity >= 0 {
+                let end = end_helper_through_identity(self.identity);
+                close_fd(self.command_fd);
+                close_fd(self.ack_fd);
+                close_fd(self._command_keepalive_fd);
+                return end;
+            }
             // SAFETY: `pid` is the unreaped reaper this process forked. It is
             // the only member of its own process group and holds nothing but
             // its shared cleanup lease, which its exit releases.
@@ -2249,6 +2261,7 @@ mod termination {
                 waited,
                 wait_errno,
                 status,
+                through_identity: false,
             }
         }
 
@@ -2260,6 +2273,12 @@ mod termination {
             close_fd(self.command_fd);
             close_fd(self.ack_fd);
             close_fd(self._command_keepalive_fd);
+            #[cfg(target_os = "linux")]
+            if self.identity >= 0 {
+                let answered = wait_through_identity(self.identity);
+                close_fd(self.identity);
+                return answered;
+            }
             let mut status = 0;
             loop {
                 let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
@@ -2328,18 +2347,15 @@ mod termination {
                 ));
             }
         };
-        // SAFETY: the child immediately enters a fixed-storage syscall-only
-        // loop. It never returns to the multithreaded Rust runtime.
-        let pid = unsafe { libc::fork() };
-        if pid < 0 {
-            for fd in [command[0], command[1], ack[0], ack[1]] {
-                close_fd(fd);
+        let (pid, identity) = match fork_helper() {
+            Ok(forked) => forked,
+            Err(error) => {
+                for fd in [command[0], command[1], ack[0], ack[1]] {
+                    close_fd(fd);
+                }
+                return Err(format!("starting Unix cleanup reaper: {error}"));
             }
-            return Err(format!(
-                "starting Unix cleanup reaper: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        };
         if pid == 0 {
             if !install_reaper_dispositions() {
                 report_setup_failure_and_exit(
@@ -2383,6 +2399,7 @@ mod termination {
             ack_fd: ack[0],
             _command_keepalive_fd: command[0],
             pid,
+            identity,
         };
         let ready_wait_began = std::time::Instant::now();
         let wait = await_ready(ack[0], REAPER_READY, HELPER_READY_BUDGET);
@@ -2687,6 +2704,11 @@ mod termination {
             for fd in [self.command_fd, self.ack_fd, self._command_keepalive_fd] {
                 close_fd(fd);
             }
+            #[cfg(target_os = "linux")]
+            if self.identity >= 0 {
+                let _ = end_helper_through_identity(self.identity);
+                return;
+            }
             // SAFETY: `pid` is the unreaped child returned by `fork`. Killing
             // the guard closes its probe pipe, so the descriptor-scrubbed
             // grandchild exits as well.
@@ -2732,38 +2754,213 @@ mod termination {
         waited: libc::pid_t,
         wait_errno: libc::c_int,
         status: libc::c_int,
+        through_identity: bool,
     }
 
     fn describe_helper_end(end: HelperEnd) -> String {
+        let (by, wait) = if end.through_identity {
+            (" through the helper's identity", "the wait through it")
+        } else {
+            ("", "the wait")
+        };
         let signalled = match end.kill_errno {
-            0 => "SIGKILL was delivered".to_owned(),
+            0 => format!("SIGKILL was delivered{by}"),
+            libc::ESRCH if end.through_identity => {
+                "SIGKILL answered ESRCH through the helper's identity, so nothing it named was \
+                 there"
+                    .to_owned()
+            }
             libc::ESRCH => "SIGKILL answered ESRCH, so nothing of that number was there".to_owned(),
             errno => format!(
-                "SIGKILL failed: {}",
+                "SIGKILL{by} failed: {}",
                 std::io::Error::from_raw_os_error(errno)
             ),
         };
         let reaped = if end.waited > 0 {
             if libc::WIFSIGNALED(end.status) {
                 format!(
-                    "and the wait collected it, killed by signal {}",
+                    "and {wait} collected it, killed by signal {}",
                     libc::WTERMSIG(end.status)
                 )
             } else if libc::WIFEXITED(end.status) {
                 format!(
-                    "and the wait collected it, having already exited with status {}",
+                    "and {wait} collected it, having already exited with status {}",
                     libc::WEXITSTATUS(end.status)
                 )
             } else {
-                format!("and the wait collected it with raw status {}", end.status)
+                format!("and {wait} collected it with raw status {}", end.status)
             }
+        } else if end.through_identity && end.wait_errno == 0 {
+            "and nothing was waited for, because the signal was not delivered".to_owned()
         } else {
             format!(
-                "and the wait collected nothing: {}",
+                "and {wait} collected nothing: {}",
                 std::io::Error::from_raw_os_error(end.wait_errno)
             )
         };
         format!("{signalled}, {reaped}")
+    }
+
+    const NO_HELPER_IDENTITY: libc::c_int = -1;
+
+    #[cfg(target_os = "linux")]
+    const HELPER_IDENTITY_SWITCH: &str = "UPSTROKE_HELPER_IDENTITY";
+
+    #[cfg(target_os = "linux")]
+    const HELPER_IDENTITY_ON: &str = "1";
+
+    #[cfg(target_os = "linux")]
+    fn helper_identity_path_on() -> bool {
+        std::env::var_os(HELPER_IDENTITY_SWITCH).is_some_and(|value| value == HELPER_IDENTITY_ON)
+    }
+
+    fn fork_helper() -> Result<(libc::pid_t, libc::c_int), String> {
+        #[cfg(target_os = "linux")]
+        if helper_identity_path_on() {
+            return clone_helper_with_identity();
+        }
+        // SAFETY: both callers' children immediately enter a fixed-storage
+        // syscall-only loop and never return to the multithreaded Rust
+        // runtime.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        Ok((pid, NO_HELPER_IDENTITY))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[repr(C)]
+    struct CloneArgs {
+        flags: u64,
+        pidfd: u64,
+        child_tid: u64,
+        parent_tid: u64,
+        exit_signal: u64,
+        stack: u64,
+        stack_size: u64,
+        tls: u64,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn clone_helper_with_identity() -> Result<(libc::pid_t, libc::c_int), String> {
+        let mut identity: libc::c_int = NO_HELPER_IDENTITY;
+        let Ok(identity_slot) = u64::try_from(std::ptr::from_mut(&mut identity).addr()) else {
+            return Err(
+                "clone3 with CLONE_PIDFD: the descriptor slot's address exceeds u64".to_owned(),
+            );
+        };
+        let mut args = CloneArgs {
+            flags: u64::from(libc::CLONE_PIDFD.unsigned_abs()),
+            pidfd: identity_slot,
+            child_tid: 0,
+            parent_tid: 0,
+            exit_signal: u64::from(libc::SIGCHLD.unsigned_abs()),
+            stack: 0,
+            stack_size: 0,
+            tls: 0,
+        };
+        // SAFETY: `args` is a live `struct clone_args` in the kernel's first
+        // layout (`linux/sched.h`, `CLONE_ARGS_SIZE_VER0`), and its size is
+        // passed with it. `pidfd` is the address of `identity`, which is live
+        // for the call and is written by the kernel in the parent only. No
+        // `CLONE_VM`, `stack` or `tls` is given, so the child runs on a copy
+        // of this address space exactly as it does after `fork`, and both
+        // callers' children immediately enter a fixed-storage syscall-only
+        // loop and never return to the multithreaded Rust runtime, which is
+        // the discipline `fork` asked of them as well.
+        let cloned = unsafe {
+            libc::syscall(
+                libc::SYS_clone3,
+                std::ptr::from_mut(&mut args),
+                std::mem::size_of::<CloneArgs>(),
+            )
+        };
+        if cloned < 0 {
+            return Err(format!(
+                "clone3 with CLONE_PIDFD, which {HELPER_IDENTITY_SWITCH}={HELPER_IDENTITY_ON} \
+                 asks for, answered: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        if cloned == 0 {
+            return Ok((0, NO_HELPER_IDENTITY));
+        }
+        let Ok(pid) = libc::pid_t::try_from(cloned) else {
+            return Err(format!(
+                "clone3 with CLONE_PIDFD answered a pid that does not fit pid_t: {cloned}"
+            ));
+        };
+        Ok((pid, identity))
+    }
+
+    #[cfg(target_os = "linux")]
+    fn end_helper_through_identity(identity: libc::c_int) -> HelperEnd {
+        let flags: libc::c_long = 0;
+        // SAFETY: `pidfd_send_signal` takes the descriptor, the signal and the
+        // flags by value; the null `siginfo_t` pointer is the form the kernel
+        // documents as "as if from kill(2)", and is the only pointer it has.
+        let sent = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                libc::c_long::from(identity),
+                libc::c_long::from(libc::SIGKILL),
+                std::ptr::null_mut::<libc::siginfo_t>(),
+                flags,
+            )
+        };
+        let kill_errno = if sent == 0 { 0 } else { last_errno() };
+        let (waited, wait_errno, status) = if sent == 0 {
+            wait_through_identity(identity)
+        } else {
+            (-1, 0, 0)
+        };
+        close_fd(identity);
+        HelperEnd {
+            kill_errno,
+            waited,
+            wait_errno,
+            status,
+            through_identity: true,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_through_identity(identity: libc::c_int) -> (libc::pid_t, libc::c_int, libc::c_int) {
+        let Ok(id) = libc::id_t::try_from(identity) else {
+            return (-1, libc::EBADF, 0);
+        };
+        loop {
+            // SAFETY: `siginfo_t` is a plain C aggregate whose all-zero bit
+            // pattern is the one `waitid` is documented to be handed.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `id` is the descriptor taken at this helper's fork and
+            // `info` is live for the call, which blocks until the process the
+            // descriptor names has ended and collects it.
+            let collected = unsafe { libc::waitid(libc::P_PIDFD, id, &mut info, libc::WEXITED) };
+            if collected == 0 {
+                // SAFETY: `waitid` returned zero for a `WEXITED` change, so
+                // the SIGCHLD arm of the union `info` carries is the live one.
+                let (value, collected_pid) = unsafe { (info.si_status(), info.si_pid()) };
+                return (collected_pid, 0, wait_status_of(info.si_code, value));
+            }
+            if !last_errno_is_interrupted() {
+                return (-1, last_errno(), 0);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_status_of(code: libc::c_int, value: libc::c_int) -> libc::c_int {
+        const EXIT_SHIFT: libc::c_int = 8;
+        const EXIT_MASK: libc::c_int = 0xff;
+        const SIGNAL_MASK: libc::c_int = 0x7f;
+        const CORE_FLAG: libc::c_int = 0x80;
+        match code {
+            libc::CLD_EXITED => (value & EXIT_MASK) << EXIT_SHIFT,
+            libc::CLD_DUMPED => (value & SIGNAL_MASK) | CORE_FLAG,
+            _ => value & SIGNAL_MASK,
+        }
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3151,22 +3348,18 @@ mod termination {
         }
         GUARD_WAKE_FD.store(wake[1], Ordering::SeqCst);
 
-        // SAFETY: the child enters `guard_loop` immediately, which uses only
-        // libc syscalls and lock-free atomics after fork. It closes every
-        // inherited descriptor except its two pipes before doing any work.
-        let pid = unsafe { libc::fork() };
-        if pid < 0 {
-            GUARD_WAKE_FD.store(-1, Ordering::SeqCst);
-            for fd in [
-                command[0], command[1], ack[0], ack[1], wake[0], wake[1], probe[0], probe[1],
-            ] {
-                close_fd(fd);
+        let (pid, identity) = match fork_helper() {
+            Ok(forked) => forked,
+            Err(error) => {
+                GUARD_WAKE_FD.store(-1, Ordering::SeqCst);
+                for fd in [
+                    command[0], command[1], ack[0], ack[1], wake[0], wake[1], probe[0], probe[1],
+                ] {
+                    close_fd(fd);
+                }
+                return Err(format!("starting Unix job-control guard: {error}"));
             }
-            return Err(format!(
-                "starting Unix job-control guard: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
+        };
         if pid == 0 {
             if !install_guard_dispositions(policy) {
                 report_setup_failure_and_exit(
@@ -3210,6 +3403,11 @@ mod termination {
             for fd in [command[0], command[1], ack[0]] {
                 close_fd(fd);
             }
+            #[cfg(target_os = "linux")]
+            if identity >= 0 {
+                let _ = end_helper_through_identity(identity);
+                return Err("configuring Unix job-control guard descriptors".to_owned());
+            }
             unsafe {
                 let _ = libc::kill(pid, libc::SIGKILL);
                 let _ = libc::waitpid(pid, std::ptr::null_mut(), 0);
@@ -3221,6 +3419,7 @@ mod termination {
             ack_fd: ack[0],
             _command_keepalive_fd: command[0],
             pid,
+            identity,
         };
         let ready_wait_began = std::time::Instant::now();
         let mut probe_pid_bytes = [0_u8; 4];
@@ -3238,21 +3437,7 @@ mod termination {
             for fd in [command[0], command[1], ack[0]] {
                 close_fd(fd);
             }
-            // SAFETY: `pid` is the child returned by fork and has not been
-            // reaped. A failed setup acknowledgement must not leave it alive.
-            // The calls and their order are master's; only their answers are
-            // kept, for the message below.
-            let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
-            let kill_errno = if killed == 0 { 0 } else { last_errno() };
-            let mut status = 0;
-            // SAFETY: as above.
-            let waited_pid = unsafe { libc::waitpid(pid, &mut status, 0) };
-            let end = describe_helper_end(HelperEnd {
-                kill_errno,
-                waited: waited_pid,
-                wait_errno: if waited_pid < 0 { last_errno() } else { 0 },
-                status: if waited_pid > 0 { status } else { 0 },
-            });
+            let end = describe_helper_end(end_unready_guard(pid, identity));
             return Err(format!(
                 "Unix job-control guard did not initialize; waited {waited:?} of \
                  {HELPER_READY_BUDGET:?}; descriptor ceiling {open_max}; {how}; ending it: {end}"
@@ -3261,6 +3446,31 @@ mod termination {
         PROBE_PID.store(i32::from_ne_bytes(probe_pid_bytes), Ordering::SeqCst);
         GUARD_COMMAND_FD.store(command[1], Ordering::SeqCst);
         Ok(guard)
+    }
+
+    fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int) -> HelperEnd {
+        #[cfg(target_os = "linux")]
+        if identity >= 0 {
+            return end_helper_through_identity(identity);
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = identity;
+        // SAFETY: `pid` is the child returned by fork and has not been
+        // reaped. A failed setup acknowledgement must not leave it alive.
+        // The calls and their order are master's; only their answers are
+        // kept, for the message below.
+        let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
+        let kill_errno = if killed == 0 { 0 } else { last_errno() };
+        let mut status = 0;
+        // SAFETY: as above.
+        let waited_pid = unsafe { libc::waitpid(pid, &mut status, 0) };
+        HelperEnd {
+            kill_errno,
+            waited: waited_pid,
+            wait_errno: if waited_pid < 0 { last_errno() } else { 0 },
+            status: if waited_pid > 0 { status } else { 0 },
+            through_identity: false,
+        }
     }
 
     fn guard_loop(
@@ -4780,6 +4990,7 @@ mod termination {
                 ack_fd: ack[0],
                 _command_keepalive_fd: command[0],
                 pid,
+                identity: NO_HELPER_IDENTITY,
             }
             .cancel();
             assert!(
@@ -4888,6 +5099,7 @@ mod termination {
                     ack_fd: -1,
                     _command_keepalive_fd: -1,
                     pid: -1,
+                    identity: NO_HELPER_IDENTITY,
                 },
             }));
             let (groups, _) = begin_suspend(&state).expect("begin suspend transition");
@@ -4934,6 +5146,7 @@ mod termination {
                     ack_fd: -1,
                     _command_keepalive_fd: -1,
                     pid: -1,
+                    identity: NO_HELPER_IDENTITY,
                 },
             }));
             let snapshot = groups_when_registered(&state, false).expect("group snapshot");
@@ -5270,6 +5483,7 @@ mod termination {
                     waited: 4321,
                     wait_errno: 0,
                     status: exited_one,
+                    through_identity: false,
                 }),
                 "SIGKILL was delivered, and the wait collected it, having already exited with \
                  status 1",
@@ -5281,6 +5495,7 @@ mod termination {
                     waited: 4321,
                     wait_errno: 0,
                     status: killed_by_nine,
+                    through_identity: false,
                 }),
                 "SIGKILL was delivered, and the wait collected it, killed by signal 9",
                 "a helper that was still there when the parent gave up"
@@ -5290,6 +5505,7 @@ mod termination {
                 waited: -1,
                 wait_errno: libc::ECHILD,
                 status: 0,
+                through_identity: false,
             });
             assert!(
                 gone.contains("SIGKILL answered ESRCH, so nothing of that number was there")
@@ -5301,6 +5517,7 @@ mod termination {
                 waited: -1,
                 wait_errno: libc::ECHILD,
                 status: 0,
+                through_identity: false,
             });
             assert!(
                 refused.starts_with("SIGKILL failed:") && !refused.contains("ESRCH"),
