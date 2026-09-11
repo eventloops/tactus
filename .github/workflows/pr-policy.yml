@@ -153,6 +153,13 @@ jobs:
           # survived a frontier review because the suite only ever tested what
           # the validator does with a listing, never whether the listing was
           # right.
+          #
+          # They are built in RUNNER_TEMP, outside the checkout, and that is a
+          # convention rather than a requirement: a file handed in as a listing
+          # is a list of names the caller wrote and is read wherever it lives,
+          # tracked or not. It is the DIRECTORY form -- a working tree's
+          # reviews/findings/, which this workflow never passes -- that is
+          # answered out of git's records instead of out of the checkout.
           bash .github/scripts/findings-in-range.sh \
             "$TARGET_SHA" "$head_sha" "$RUNNER_TEMP/findings"
           export PR_NUMBER

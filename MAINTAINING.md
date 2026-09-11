@@ -234,28 +234,47 @@ Whichever form, an input that cannot be read — an unreadable file, a stream th
 directory that cannot be listed, an index or a repository git cannot read — is a **refusal** and
 never an empty set, because a candidate set that silently narrows turns an ambiguous name into an
 accepted one. Only "there is no repository here" falls back to the filesystem: metadata that is
-missing is not metadata that cannot be examined. Every external probe and every file read in
-`validate-pr-branch.sh` goes through two audited helpers, the first of which refuses any exit status
-its caller has not enumerated as an answer, and `test-pr-policy.sh` fails the build if a bare `git`
-or a bare read appears outside them — a shape rule rather than a list of cases, because four review
-rounds of closing those cases one at a time produced more of them each round.
+missing is not metadata that cannot be examined, and a `.git` file that names a gitdir git will not
+resolve is the second of those. Every external probe, every file read and every directory listing in
+`validate-pr-branch.sh` goes through three audited helpers: the first refuses any exit status its
+caller has not enumerated as an answer, and each of them checks that the private copy it wrote was
+read back whole, because owning a file establishes nothing about reading it. `test-pr-policy.sh`
+holds the rest of the file to an **allowlist** — below the audited region a command may only be a
+shell builtin from a short list or a function the file defines, and nothing may redirect from a path
+— because five rounds of closing unsafe calls one at a time produced more of them each round, and
+the ban list that replaced those cases was itself walked past by an assignment prefix, a `command
+--`, and a reader it did not name. That check is a text scan over one file: it bounds what is
+written in the validator, not what bash can be made to do, and what it buys is that **the reviewed
+surface is the audited region**, which the gate caps at 200 lines.
 
-**Only a regular file git records is a finding, and a path that reaches the findings directory
-through a symlink is not the findings directory.** The mode git records decides a tracked entry, not
-what the checkout materialised: under `core.symlinks=false` a committed symlink is checked out as a
-regular file holding the link target, and reading that as a listing has both refused a real finding
-and invented one that nobody filed. The rule holds at every level of the path — a symlink named like
-a finding, a symlink standing in for `reviews/findings`, and a committed symlink at any component
-above it, all of which the tree listings hold no finding for. A listing path is reduced to its
-components before it is judged, so `reviews/findings`, `reviews/findings/`, `reviews/findings/.`,
-`reviews//findings` and `reviews/./findings` are one listing and answer alike; a `..` after a named
-component is refused rather than guessed at, since what it names depends on whether the component
-before it is a directory or a link. **The property is that the two ways in agree**: for one commit,
-the three tree listings and the working tree's directory give the same answer, and the fixture suite
-checks that as a property over repositories and branch names rather than case by case. The one
-remaining disagreement is disclosed and deliberate: a finding its author has written and not yet
-committed is a candidate through the directory and is in no tree listing, and closing it would make
-a by-hand run refuse the file on the author's disk.
+**A directory handed in as a listing is answered out of git's records, not out of the checkout.**
+The directory form locates the repository and the path within it and then reads `git ls-files -s`
+alone: which names are there, and what each one is. Nothing about the working tree is consulted for a
+path git records anything at, under or above — not `-d`, not `-e`, not `-L`, not a glob, and never
+the bytes of a file the checkout materialised. That is what makes the two ways in one code path from
+the index down, so the equivalence below holds by construction: a committed symlink named like a
+finding is a `120000 blob` to both; a sparse checkout's excluded finding is an index entry and a tree
+entry; a `reviews` the checkout renamed and replaced with a link is still the directory the index
+records; and a link materialised under `core.symlinks=false` — git's own setting, and what it uses
+wherever a link cannot be made — is never read as a listing, which is how one was made to invent a
+finding nobody had filed. A listing path is reduced to its components before it is judged, so
+`reviews/findings`, `reviews/findings/`, `reviews/findings/.`, `reviews//findings` and
+`reviews/./findings` are one listing and answer alike, and the path the index is asked about is built
+from **those** components and never from where the filesystem takes them; a `..` after a named
+component is refused rather than guessed at. The filesystem is the whole of the evidence in one
+place only: a listing with no repository over it, which is how the validator is run against a scratch
+directory, and a path inside a work tree that git records nothing at, under **or above** — an
+ordinary untracked scratch directory, and the temporary files a caller builds the three listings in.
+
+**The property is that the two ways in agree**: for one commit, the three tree listings and the
+working tree's `reviews/findings/` give the same answer, and the fixture suite checks that as a
+property over repositories and branch names rather than case by case. It costs one thing and gains
+another, both deliberate. An **untracked** finding file inside a tracked `reviews/findings/` no
+longer counts for the directory form — the ledger is what is committed, a merge gate decides about
+commits and never about a work tree, and the answer for a finding an author has written and not yet
+added is `git add`. And where git records a **directory** at the listing path and the checkout holds
+a link or a file in its place, the directory form now **resolves** the name from the index instead of
+refusing: that is a loosening, and it is the point, because the trees resolve it too.
 
 There is no `fix/` prefix. A bug worth a branch is worth a finding, so a repair names the finding it
 closes, and a bug that is not filed yet is filed by the same pull request that repairs it — which is

@@ -119,10 +119,20 @@
 # equivalence this end supplies. `ls-tree -- reviews/findings/` lists the entries
 # git RECORDS under that path; where `reviews`, or `reviews/findings` itself, is a
 # committed symlink it is a `120000 blob` and nothing is recorded under it, so
-# this listing is empty however many findings sit at the end of the link. The
-# other way in -- handing validate-pr-branch.sh a working tree's directory --
-# followed the link and answered out of files no ledger holds at that path, which
-# is why it now refuses a path reached through one. Same commit, same answer.
+# this listing is empty however many findings sit at the end of the link. That is
+# a property of NAMES IN A TREE and needs no filesystem to hold.
+#
+# The other way in -- handing validate-pr-branch.sh a working tree's directory --
+# used to answer from the filesystem with git as a cross-check, and every review
+# round found another spelling of the same disagreement: a link followed by `-d`,
+# the same link materialised as a regular file where `-L` had nothing to see, a
+# sparse checkout the index outlived, a `reviews` renamed out from under an
+# unchanged index. It now locates the repository and the path within it and reads
+# `git ls-files -s` alone, which is the same question this file asks of the same
+# ledger one layer along -- names recorded under a path, filtered by recorded
+# mode. Same commit, same answer, and now by construction rather than by fixture.
+# The cost is stated in MAINTAINING.md: an untracked file in the working tree's
+# reviews/findings/ counts for neither end.
 
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"

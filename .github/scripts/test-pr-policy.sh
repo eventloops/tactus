@@ -1298,32 +1298,31 @@ if [[ -L "$symlink_probe" ]]; then
       "$repo_p" "$p_base" "$p_head" 'fix-P2/correctness_no-ledger-entry' 1
   fi
 
-  # AND THE OTHER WAY ROUND IS A REFUSAL AND NOT AN EMPTY SET. Where git records
-  # a DIRECTORY and the checkout holds a link in its place, the findings are the
-  # entries the index records under that path and the link is not the directory:
-  # reading it would answer out of somebody else's files, and reading it as
-  # empty would narrow the set in silence. This is the one case here where the
-  # two APIs deliberately differ -- the tree listings resolve the name at exit 0
-  # from the commit, and the directory listing refuses at exit 1 saying it
-  # cannot be read -- because a refusal is neither a false green nor a silent
-  # narrowing, and the checkout it needs is one `git checkout` away.
+  # AND THE OTHER WAY ROUND IS THE LEDGER'S DIRECTORY STILL. Where git records a
+  # DIRECTORY at the listing path and the checkout holds a link in its place, the
+  # findings are the entries the INDEX records under that path: what the link
+  # points at is recorded somewhere else, and reading it would answer out of
+  # somebody else's files. This used to refuse at exit 1 while the tree listings
+  # resolved the name at exit 0, and that was the one disagreement between the
+  # two APIs this gate kept on purpose. It is gone: the records answer both ways
+  # in, so the commit gets one verdict and the mangled checkout changes nothing.
+  # Both names are asserted, because "the records decide" has to mean the ledger
+  # RESOLVES and the link's own contents do NOT.
   mkdir -p "$repo_q/elsewhere"
   echo fixture > "$repo_q/elsewhere/P3_liveness_202609100009_not-in-the-ledger.md"
   rm -rf "$repo_q/reviews/findings"
   ln -s ../elsewhere "$repo_q/reviews/findings"
-  replaced_case() {  # replaced_case <branch>
-    local rc=0 out
-    out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" "$1" "$repo_q/reviews/findings" 2>&1)" || rc=$?
-    if [[ "$rc" != 1 ]] || ! grep -q 'checkout does not hold one there' <<< "$out"; then
-      echo "a tracked findings directory replaced by a link must refuse, saying so: $1 (got $rc)" >&2
-      exit 1
-    fi
-  }
-  # Neither the ledger's own name -- which is no longer readable from that path
-  # -- nor the name at the end of the link, which no ledger holds.
-  replaced_case 'fix-P2/correctness_no-ledger-entry'
-  replaced_case 'fix-P3/liveness_not-in-the-ledger' 
+  if [[ "$(git -C "$repo_q" ls-files -- reviews/findings/ | wc -l)" != 1 ]]; then
+    echo 'the fixture was meant to leave the findings directory in the index' >&2
+    exit 1
+  fi
+  both_apis 'a findings directory the checkout replaced with a link is the index directory still' \
+    "$repo_q" "$q_base" "$q_head" 'fix-P2/correctness_no-ledger-entry' 0
+  both_apis 'and the name at the end of that link is in no ledger' \
+    "$repo_q" "$q_base" "$q_head" 'fix-P3/liveness_not-in-the-ledger' 1
+  # Every spelling of it, because appending `/.` used to move the question.
+  spelling_case 'a replaced findings directory, every spelling' \
+    'fix-P2/correctness_no-ledger-entry' 0 "$repo_q/reviews/findings"
 else
   echo 'note: skipping the symlinked-findings-directory cases (this filesystem will not create one)' >&2
 fi
@@ -2079,6 +2078,406 @@ if ! ( cd "$spelling_repo/reviews" && PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/l
   exit 1
 fi
 
+# ---- the records answer, and the checkout is not consulted where they do -----------------------
+#
+# The directory input used to answer from the filesystem with git as a
+# cross-check, and five rounds each found another spelling of the same
+# disagreement. It now LOCATES the repository and the path within it and then
+# answers from `git ls-files -s` alone. These are the shapes that closed it, each
+# with the control beside it, and each was executed against the parent revision
+# first.
+
+# A CHECKOUT DIRECTORY RENAMED AND REPLACED BY A LINK IS STILL THE INDEX'S
+# DIRECTORY. `mv reviews saved-reviews; ln -s saved-reviews reviews` leaves the
+# index recording `reviews/findings/<twin>.md` and leaves `git ls-tree` holding
+# it too -- and the ancestor rule that used to see the link returned the EMPTY
+# SET before looking at what the index records, so the twin vanished and an
+# ambiguous name conformed at exit 0 where the parent refuses at exit 1. The
+# names come from the records now, so the rename changes nothing.
+if [[ -L "$symlink_probe" ]]; then
+  renamed_repo="$fixture_dir/repo-renamed-reviews"
+  new_repo "$renamed_repo"
+  echo seed > "$renamed_repo/seed.txt"
+  git -C "$renamed_repo" add -A && git -C "$renamed_repo" commit -q -m base
+  mkdir -p "$renamed_repo/reviews/findings"
+  echo two > "$renamed_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+  git -C "$renamed_repo" add -A && git -C "$renamed_repo" commit -q -m 'one twin, committed'
+  printf 'P2_correctness_202609100001_shared-name.md\n' > "$fixture_dir/renamed-twin-a.txt"
+  renamed_verdict() {
+    PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+      "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+      "$fixture_dir/renamed-twin-a.txt" "$renamed_repo/reviews/findings" 2>&1
+  }
+  renamed_control_rc=0
+  renamed_control_out="$(renamed_verdict)" || renamed_control_rc=$?
+  if [[ "$renamed_control_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$renamed_control_out"; then
+    echo "the control was meant to refuse an ambiguous name; got $renamed_control_rc" >&2
+    exit 1
+  fi
+  mv "$renamed_repo/reviews" "$renamed_repo/saved-reviews"
+  ln -s saved-reviews "$renamed_repo/reviews"
+  # The point of the fixture is that the INDEX did not move.
+  if [[ "$(git -C "$renamed_repo" ls-files -- reviews/findings/ | wc -l)" != 1 ]]; then
+    echo 'the fixture was meant to leave the index recording the finding' >&2
+    exit 1
+  fi
+  renamed_rc=0
+  renamed_out="$(renamed_verdict)" || renamed_rc=$?
+  if [[ "$renamed_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$renamed_out"; then
+    echo "a checkout rename must not drop a finding the index records; got $renamed_rc" >&2
+    printf '%s\n' "$renamed_out" >&2
+    exit 1
+  fi
+
+  # A MATERIALISED LINK BEHIND ANOTHER LINK INVENTED A FINDING ON A CLEAN
+  # CHECKOUT. `reviews -> elsewhere` and `elsewhere/findings -> <finding>.md`
+  # are both committed; under core.symlinks=false the second is materialised as
+  # a REGULAR FILE holding that filename, `git status` stays empty, and
+  # `reviews/findings` was read as a FILE LISTING naming a finding nobody has
+  # filed -- exit 0 on a commit whose trees refuse at exit 1. No index entry and
+  # no tree entry is named `reviews/findings` at all: `reviews` is a 120000
+  # blob, so the path is unnameable and holds nothing, whatever the checkout put
+  # at the end of it.
+  behind_repo="$fixture_dir/repo-materialised-behind-a-link"
+  new_repo "$behind_repo"
+  echo seed > "$behind_repo/seed.txt"
+  git -C "$behind_repo" add -A && git -C "$behind_repo" commit -q -m base
+  behind_base="$(git -C "$behind_repo" rev-parse HEAD)"
+  mkdir -p "$behind_repo/elsewhere"
+  ln -s elsewhere "$behind_repo/reviews"
+  ln -s P2_correctness_202609100001_shared-name.md "$behind_repo/elsewhere/findings"
+  git -C "$behind_repo" add -A \
+    && git -C "$behind_repo" commit -q -m 'a findings path that is a link behind a link'
+  behind_head="$(git -C "$behind_repo" rev-parse HEAD)"
+  git -C "$behind_repo" config core.symlinks false
+  rm "$behind_repo/elsewhere/findings"
+  git -C "$behind_repo" checkout -- elsewhere/findings
+  if [[ -L "$behind_repo/elsewhere/findings" ]] || [[ ! -f "$behind_repo/elsewhere/findings" ]] \
+    || [[ -n "$(git -C "$behind_repo" status --porcelain)" ]]; then
+    echo 'note: skipping the link-behind-a-link case (this git left the link a link)' >&2
+  else
+    both_apis 'a materialised link behind a link invents no finding' \
+      "$behind_repo" "$behind_base" "$behind_head" 'fix-P2/correctness_shared-name' 1
+    spelling_case 'a materialised link behind a link, every spelling' \
+      'fix-P2/correctness_shared-name' 1 "$behind_repo/reviews/findings"
+    # And the path the link itself names is a 120000 blob, which is not a
+    # listing either: the two ways of asking are one answer.
+    behind_direct_rc=0
+    behind_direct_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+      "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+      "$behind_repo/elsewhere/findings" 2>&1)" || behind_direct_rc=$?
+    if [[ "$behind_direct_rc" != 1 ]] || ! grep -q 'as mode 120000' <<< "$behind_direct_out"; then
+      echo "the link's own path must be refused on its recorded mode; got $behind_direct_rc" >&2
+      exit 1
+    fi
+  fi
+fi
+
+# A `.git` FILE THAT READS PERFECTLY AND NAMES A GITDIR NOBODY MAY STAT. The
+# linked worktree's `.git` is readable, its `gitdir:` line is readable, and with
+# the MAIN repository's `.git/worktrees` unsearchable `[[ -d <target> ]]` is
+# FALSE -- not because the target is absent but because nothing may stat through
+# the directory above it. Both git probes exit 128, the level was called empty,
+# the walk concluded "no repository", and the twin the index records and the
+# checkout lacks was gone: exit 0 `conforms` with empty stderr on the checkout
+# that is exit 1 `names 2 findings` when the directory is searchable. Git
+# resolves a healthy `.git` file, so a refusal on one that names a gitdir is a
+# repository this cannot read and never an absence. Root can read anything, so
+# the permission cases only mean something as an ordinary user.
+worktrees_repo="$fixture_dir/repo-unsearchable-worktrees"
+worktrees_wt="$fixture_dir/unsearchable-worktrees-checkout"
+new_repo "$worktrees_repo"
+echo seed > "$worktrees_repo/seed.txt"
+git -C "$worktrees_repo" add -A && git -C "$worktrees_repo" commit -q -m base
+mkdir -p "$worktrees_repo/reviews/findings"
+echo one > "$worktrees_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$worktrees_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+git -C "$worktrees_repo" add -A \
+  && git -C "$worktrees_repo" commit -q -m 'two findings share a description'
+worktrees_verdict() {
+  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$worktrees_wt/reviews/findings" 2>&1
+}
+if ! git -C "$worktrees_repo" worktree add -q --detach "$worktrees_wt" HEAD 2>/dev/null \
+  || [[ ! -d "$worktrees_repo/.git/worktrees" ]]; then
+  echo 'note: skipping the unsearchable-worktrees case (this git made no linked worktree)' >&2
+else
+  # The twin leaves the linked worktree's CHECKOUT and stays in its index, so the
+  # filesystem fallback -- which cannot see an index at all -- answers `conforms`
+  # here rather than merely answering for some other reason.
+  rm "$worktrees_wt/reviews/findings/P2_correctness_202609100002_shared-name.md"
+  worktrees_control_rc=0
+  worktrees_control_out="$(worktrees_verdict)" || worktrees_control_rc=$?
+  if [[ "$worktrees_control_rc" != 1 ]] \
+    || ! grep -q 'names 2 findings' <<< "$worktrees_control_out"; then
+    echo "the control was meant to refuse an ambiguous name; got $worktrees_control_rc" >&2
+    exit 1
+  fi
+  if [[ "$(id -u)" -eq 0 ]] || ! chmod 000 "$worktrees_repo/.git/worktrees" 2>/dev/null \
+    || git -C "$worktrees_wt/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    chmod 755 "$worktrees_repo/.git/worktrees" 2>/dev/null || true
+    echo 'note: skipping the unsearchable-worktrees case (running as root, or chmod had no effect)' >&2
+  else
+    # The `.git` FILE is readable throughout, which is what made this case
+    # survive the repair that closed the unreadable one.
+    if [[ ! -r "$worktrees_wt/.git" ]]; then
+      chmod 755 "$worktrees_repo/.git/worktrees"
+      echo 'note: skipping the unsearchable-worktrees case (the .git file went unreadable)' >&2
+    else
+      worktrees_rc=0
+      worktrees_out="$(worktrees_verdict)" || worktrees_rc=$?
+      chmod 755 "$worktrees_repo/.git/worktrees"
+      if [[ "$worktrees_rc" == 0 ]]; then
+        echo 'an unsearchable .git/worktrees conformed, which is the filesystem fallback again' >&2
+        exit 1
+      fi
+      if ! grep -q 'cannot be examined' <<< "$worktrees_out"; then
+        echo 'an unexaminable pointed gitdir must refuse SAYING SO, not silently' >&2
+        printf '%s\n' "$worktrees_out" >&2
+        exit 1
+      fi
+      worktrees_back_rc=0
+      worktrees_back_out="$(worktrees_verdict)" || worktrees_back_rc=$?
+      if [[ "$worktrees_back_rc" != 1 ]] \
+        || ! grep -q 'names 2 findings' <<< "$worktrees_back_out"; then
+        echo "restoring .git/worktrees must restore the verdict; got $worktrees_back_rc" >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
+
+# ---- a private copy is not evidence that it was READ ------------------------------------------
+#
+# The helpers written to end the swallowed-status class swallowed one of their
+# own. After the real `cat` had copied a listing -- exit 0, captured -- taking
+# READ PERMISSION off the private copy left `read … < copy` failing to OPEN,
+# reporting the same 1 it reports at end of input, and the helper returning
+# SUCCESS WITH EMPTY BYTES: the twin was gone, and the ambiguous name conformed
+# at exit 0 where the control refuses at exit 1. The same injection on
+# `git_probe`'s `git.out`, after git returned 0, conformed on a materialised
+# symlink. Owning a file establishes nothing about reading it.
+#
+# THE INJECTION IS AN EXPORTED SHELL FUNCTION, which is the reviewer's fault
+# injection with nothing to install: it runs the real command, and then takes
+# the permission off the private file the validator is about to read back. TMPDIR
+# is moved so the hook can only see the run under test. Root can read anything,
+# so this only means something as an ordinary user.
+inject_dir="$fixture_dir/inject"
+mkdir -p "$inject_dir"
+printf 'P2_correctness_202609100001_shared-name.md\n' > "$fixture_dir/inject-twin-a.txt"
+printf 'P2_correctness_202609100002_shared-name.md\n' > "$fixture_dir/inject-twin-b.txt"
+inject_symlink_repo=''
+if [[ -L "$symlink_probe" ]]; then
+  inject_symlink_repo="$fixture_dir/repo-injected-record"
+  new_repo "$inject_symlink_repo"
+  mkdir -p "$inject_symlink_repo/reviews"
+  ln -s P2_correctness_202609100001_invented-by-a-lost-record.md \
+    "$inject_symlink_repo/reviews/findings"
+  git -C "$inject_symlink_repo" add -A \
+    && git -C "$inject_symlink_repo" commit -q -m 'a findings path that is a symlink naming a finding'
+  git -C "$inject_symlink_repo" config core.symlinks false
+  rm "$inject_symlink_repo/reviews/findings"
+  git -C "$inject_symlink_repo" checkout -- reviews/findings
+  if [[ -L "$inject_symlink_repo/reviews/findings" ]] \
+    || [[ ! -f "$inject_symlink_repo/reviews/findings" ]]; then
+    inject_symlink_repo=''
+    echo 'note: skipping the injected-record case (this git left the link a link)' >&2
+  fi
+fi
+inject_probe="$fixture_dir/inject-probe.sh"
+cat > "$inject_probe" <<'INJECT'
+# inject-probe.sh <hooked-command> <private-file> <trigger> <validator> <branch> <listing>...
+# Runs the validator with <hooked-command> wrapped so that, ONCE THE PRIVATE FILE
+# HOLDS <trigger>, it loses read permission. The trigger is what makes this the
+# reviewer's injection and not a blunt one: the copy of the FIRST listing is left
+# alone, the copy of the second goes unreadable after the real command wrote it
+# at exit 0, and a helper that reads that as an empty listing drops one twin and
+# conforms.
+hooked="$1"; private="$2"; trigger="$3"; shift 3
+eval "$hooked"'() {
+  command '"$hooked"' "$@"
+  local rc=$? d
+  for d in "${TMPDIR:-/tmp}"/branch-name-policy.*; do
+    if [[ -r "$d/'"$private"'" ]] \
+      && command grep -q -- "'"$trigger"'" "$d/'"$private"'" 2>/dev/null; then
+      chmod 000 "$d/'"$private"'" 2>/dev/null
+    fi
+  done
+  return $rc
+}'
+export -f "$hooked"
+rc=0
+out="$("$BASH" "$@" 2>&1)" || rc=$?
+printf '%s\n' "$rc"
+printf '%s\n' "$out"
+INJECT
+inject_case() {  # inject_case <hooked> <private-file> <trigger> <label> <branch> <listing>...
+  local hooked="$1" private="$2" trigger="$3" label="$4" out rc
+  shift 4
+  out="$(TMPDIR="$inject_dir" PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" BASH="$BASH" \
+    "$BASH" "$inject_probe" "$hooked" "$private" "$trigger" "$branch_validator" "$@" 2>&1)"
+  rc="${out%%$'\n'*}"
+  if [[ "$rc" == 0 ]]; then
+    echo "$label: a private copy that could not be read back conformed at exit 0" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+  fi
+}
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo 'note: skipping the injected-read cases (running as root)' >&2
+else
+  # The controls first: both listings answer, and the answer is a refusal for
+  # the RIGHT reason, so a refusal under injection is not the same refusal.
+  inject_control_rc=0
+  inject_control_out="$(TMPDIR="$inject_dir" PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$fixture_dir/inject-twin-a.txt" "$fixture_dir/inject-twin-b.txt" 2>&1)" || inject_control_rc=$?
+  if [[ "$inject_control_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$inject_control_out"; then
+    echo "the injection control was meant to refuse an ambiguous name; got $inject_control_rc" >&2
+    exit 1
+  fi
+  inject_case cat slurp 202609100002 'read_file' 'fix-P2/correctness_shared-name' \
+    "$fixture_dir/inject-twin-a.txt" "$fixture_dir/inject-twin-b.txt"
+  # git's own output, on the shape where losing it INVENTS a finding rather than
+  # merely dropping one: reviews/findings is a committed symlink whose target
+  # text is a finding's filename, materialised by core.symlinks=false as a
+  # regular file holding that name. Read the recorded mode and it is a 120000
+  # blob and no listing; lose it and the file's BYTES resolve a fix-P*/ branch.
+  if [[ -n "$inject_symlink_repo" ]]; then
+    inject_case git git.out 120000 'git_probe' 'fix-P2/correctness_invented-by-a-lost-record' \
+      "$inject_symlink_repo/reviews/findings"
+  fi
+fi
+
+# ---- the cost of answering from the records, asserted rather than described -------------------
+#
+# An UNTRACKED finding file inside a tracked reviews/findings/ no longer counts:
+# the ledger is what is committed, and a merge gate decides about commits and
+# never about a work tree. That is a deliberate loosening and this is where it
+# is pinned, because a silent return to counting it would part the two APIs
+# again -- the other way round, which is how it used to be: an untracked twin
+# beside a committed finding was exit 1 `names 2 findings` through the directory
+# and exit 0 `conforms` through the trees.
+untracked_repo="$fixture_dir/repo-untracked-twin"
+new_repo "$untracked_repo"
+echo seed > "$untracked_repo/seed.txt"
+git -C "$untracked_repo" add -A && git -C "$untracked_repo" commit -q -m base
+untracked_base="$(git -C "$untracked_repo" rev-parse HEAD)"
+commit_finding "$untracked_repo" 'P2_correctness_202609100001_shared-name.md' 'one filed finding'
+untracked_head="$(git -C "$untracked_repo" rev-parse HEAD)"
+both_apis 'the control: one filed finding resolves' \
+  "$untracked_repo" "$untracked_base" "$untracked_head" 'fix-P2/correctness_shared-name' 0
+echo twin > "$untracked_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+if [[ -z "$(git -C "$untracked_repo" status --porcelain)" ]]; then
+  echo 'the fixture was meant to leave an UNTRACKED file in the findings directory' >&2
+  exit 1
+fi
+both_apis 'and an untracked twin beside it changes nothing' \
+  "$untracked_repo" "$untracked_base" "$untracked_head" 'fix-P2/correctness_shared-name' 0
+
+# AND AN UNTRACKED FINDINGS DIRECTORY IS THE EMPTY SET, which is the same rule
+# one level up and the one that would otherwise be the whole disagreement back
+# again: nothing under reviews/findings/ is committed, a finding file sits there
+# untracked, and the trees hold none. Both ends must say none.
+bare_untracked="$fixture_dir/repo-untracked-findings-dir"
+new_repo "$bare_untracked"
+echo seed > "$bare_untracked/seed.txt"
+git -C "$bare_untracked" add -A && git -C "$bare_untracked" commit -q -m base
+bare_untracked_base="$(git -C "$bare_untracked" rev-parse HEAD)"
+echo more > "$bare_untracked/other.txt"
+git -C "$bare_untracked" add -A && git -C "$bare_untracked" commit -q -m 'nothing to do with findings'
+bare_untracked_head="$(git -C "$bare_untracked" rev-parse HEAD)"
+mkdir -p "$bare_untracked/reviews/findings"
+echo fixture > "$bare_untracked/reviews/findings/P2_correctness_202609100011_never-committed.md"
+both_apis 'an untracked findings directory holds no filed finding' \
+  "$bare_untracked" "$bare_untracked_base" "$bare_untracked_head" \
+  'fix-P2/correctness_never-committed' 1
+
+# AND AN UNTRACKED SYMLINK STANDING IN FOR IT IS NOT A FINDINGS DIRECTORY. `-d`
+# follows a link, so a listing path that git records nothing about and that
+# points at a directory of finding files would resolve names out of somebody
+# else's directory while the trees hold none.
+if [[ -L "$symlink_probe" ]]; then
+  link_untracked="$fixture_dir/repo-untracked-findings-link"
+  new_repo "$link_untracked"
+  echo seed > "$link_untracked/seed.txt"
+  git -C "$link_untracked" add -A && git -C "$link_untracked" commit -q -m base
+  link_untracked_base="$(git -C "$link_untracked" rev-parse HEAD)"
+  echo more > "$link_untracked/other.txt"
+  git -C "$link_untracked" add -A && git -C "$link_untracked" commit -q -m 'nothing to do with findings'
+  link_untracked_head="$(git -C "$link_untracked" rev-parse HEAD)"
+  mkdir -p "$link_untracked/elsewhere" "$link_untracked/reviews"
+  echo fixture > "$link_untracked/elsewhere/P2_correctness_202609100012_at-the-end-of-a-link.md"
+  ln -s ../elsewhere "$link_untracked/reviews/findings"
+  both_apis 'an untracked symlink is not a findings directory' \
+    "$link_untracked" "$link_untracked_base" "$link_untracked_head" \
+    'fix-P2/correctness_at-the-end-of-a-link' 1
+fi
+
+# AND A TRACKED FILE LISTING THE CHECKOUT REPLACED WITH A LINK IS A REFUSAL. The
+# bytes of whatever the checkout put there are not the file git records, and a
+# link's target text read as a listing is how a finding nobody filed was invented
+# at the other end of this rule.
+if [[ -L "$symlink_probe" ]]; then
+  tracked_listing_repo="$fixture_dir/repo-tracked-file-listing"
+  new_repo "$tracked_listing_repo"
+  printf 'P3_liveness_202609100013_named-by-a-tracked-listing.md\n' > "$tracked_listing_repo/listing.txt"
+  git -C "$tracked_listing_repo" add -A \
+    && git -C "$tracked_listing_repo" commit -q -m 'a tracked file listing'
+  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P3/liveness_named-by-a-tracked-listing' \
+    "$tracked_listing_repo/listing.txt" >/dev/null 2>&1; then
+    echo 'a tracked regular file must still be read as a file listing' >&2
+    exit 1
+  fi
+  echo decoy > "$tracked_listing_repo/decoy.txt"
+  rm "$tracked_listing_repo/listing.txt"
+  ln -s decoy.txt "$tracked_listing_repo/listing.txt"
+  tracked_listing_rc=0
+  tracked_listing_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P3/liveness_named-by-a-tracked-listing' \
+    "$tracked_listing_repo/listing.txt" 2>&1)" || tracked_listing_rc=$?
+  if [[ "$tracked_listing_rc" != 1 ]] \
+    || ! grep -q 'checkout does not hold one there' <<< "$tracked_listing_out"; then
+    echo "a tracked file listing replaced by a link must refuse; got $tracked_listing_rc" >&2
+    exit 1
+  fi
+fi
+
+# AND THE LONG WAY ROUND IS THE SAME PATH. The work tree's root is matched
+# against the caller's own components, and a spelling that passes the root on
+# the way down and comes back to it -- `../../<repo>/reviews/findings` from
+# inside `<repo>/reviews` -- must be named `reviews/findings` in the index and
+# not `../<repo>/reviews/findings`, which is no index entry and which git refuses
+# as a pathspec leaving the work tree.
+long_way_repo="$fixture_dir/repo-long-way-round"
+new_repo "$long_way_repo"
+commit_finding "$long_way_repo" 'P3_liveness_202609100014_spelled-the-long-way.md' 'a real finding'
+if ! ( cd "$long_way_repo/reviews" && PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P3/liveness_spelled-the-long-way' \
+  '../../repo-long-way-round/reviews/findings' >/dev/null 2>&1 ); then
+  echo 'a path that passes the work tree root on the way down must still resolve' >&2
+  exit 1
+fi
+
+# AND AN UNTRACKED FILE IS STILL A FILE LISTING. The three listings the workflow
+# builds are files a caller wrote, and a caller may write them anywhere --
+# $RUNNER_TEMP in the workflow, a scratch directory inside the checkout by hand.
+# A file listing is not the ledger's directory and is read wherever it lives; it
+# is only a path git records something at, under or ABOVE that is answered from
+# the records.
+untracked_listing="$untracked_repo/scratch/listing.txt"
+mkdir -p "$untracked_repo/scratch"
+printf 'P3_liveness_202609100003_written-into-the-checkout.md\n' > "$untracked_listing"
+if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P3/liveness_written-into-the-checkout' \
+  "$untracked_listing" >/dev/null 2>&1; then
+  echo 'an untracked file listing inside a work tree must still be read as a listing' >&2
+  exit 1
+fi
+
 # ---- the equivalence, as a property rather than a list of cases -------------------------------
 #
 # Three of the four P1s in this pull request's reviews were the two documented
@@ -2146,12 +2545,26 @@ echo real > "$eq_subdir/reviews/findings/P3_liveness_202609100003_a-real-finding
 git -C "$eq_subdir" add -A && git -C "$eq_subdir" commit -q -m 'a directory wearing a finding name'
 register_equivalence "$eq_subdir" "$eq_subdir_base" "$(git -C "$eq_subdir" rev-parse HEAD)"
 
+# The path the ledger records nothing about: an untracked findings directory,
+# and a tracked one with an untracked file beside the filed finding. These are
+# where the filesystem and the index part company without anybody doing anything
+# exotic, and the property is that the two ways in do not.
+register_equivalence "$bare_untracked" "$bare_untracked_base" "$bare_untracked_head"
+register_equivalence "$untracked_repo" "$untracked_base" "$untracked_head"
+
 if [[ -L "$symlink_probe" ]]; then
   # The findings directory itself a committed symlink, and an ancestor of it a
-  # committed symlink: the two shapes the last round's P1s were.
+  # committed symlink: the two shapes an earlier round's P1s were. The link
+  # behind a link, materialised, is this round's.
   register_equivalence "$repo_p" "$p_base" "$p_head"
   register_equivalence "$repo_r" "$r_base" "$r_head"
   register_equivalence "$repo_k" "$k_base" "$k_head"
+  if [[ -n "${behind_base:-}" ]]; then
+    register_equivalence "$behind_repo" "$behind_base" "$behind_head"
+  fi
+  if [[ -n "${link_untracked_base:-}" ]]; then
+    register_equivalence "$link_untracked" "$link_untracked_base" "$link_untracked_head"
+  fi
 fi
 
 # The branch names: ones that resolve, ones that resolve nothing, one that is
@@ -2187,59 +2600,157 @@ for equivalence_entry in "${equivalence_repos[@]}"; do
     equivalence_pairs=$(( equivalence_pairs + 1 ))
   done
 done
-if (( equivalence_pairs < 28 )); then
+if (( equivalence_pairs < 42 )); then
   echo "the equivalence property checked only $equivalence_pairs pairs, which is too few to mean anything" >&2
   exit 1
 fi
 
 # ---- the shape rule: the unsafe call must be impossible to WRITE, not just absent -------------
 #
-# Four rounds of finding these one at a time produced more of them each round,
-# and three of the four in the last round were introduced by the repairs
-# themselves. A gate can only test the instances somebody imagined. So the
-# validator routes every external probe and every file read through two audited
-# helpers, and this asserts THE SHAPE: below the AUDITED HELPERS END marker there
-# is no `git`, no `<` redirection from a path, no process substitution, and no
-# command handed a file to read. What the helpers do is then a dozen lines to
-# review rather than forty call sites to audit.
+# Five rounds of finding these one at a time produced more of them each round,
+# and three of one round's four were introduced by the repairs themselves. A gate
+# can only test the instances somebody imagined. So the validator routes every
+# external probe, every file read and every directory listing through three
+# audited helpers, and this asserts THE SHAPE of everything below the AUDITED
+# HELPERS END marker.
+#
+# IT IS AN ALLOWLIST AND NOT A BAN LIST, because the ban list was defeated the
+# round it was written. `LC_ALL=C git ls-files` walked past a command-position
+# regex with no room for an assignment; `command -- git` past one with no room
+# for an option; `sed -n p -- "$1"` past a reader list that named `cat` and
+# `head` and not `sed`; and `read -r record<"$f"` past a redirection regex that
+# wanted a space before the `<`. All four are probes below. Naming what MAY run
+# has no such gaps to find: a command must be a shell builtin from the short list
+# in the scanner or a function the validator itself defines, and nothing may
+# redirect from a path.
+#
+# WHAT IT IS AND IS NOT, because the body used to claim more than this. It is a
+# TEXT SCAN over one file. It bounds what is WRITTEN in the validator; it does
+# not bound what bash can be made to do, and it is not a sandbox -- a command
+# word that is entirely inside quotes, or one reached through an `eval` of a
+# string this cannot see, is outside its reach. What it buys is the only thing
+# claimed for it: THE REVIEWED SURFACE IS THE AUDITED REGION, capped below at a
+# size that can be read in one sitting, instead of every call site in a
+# 1400-line file.
 #
 # THE INSTRUMENT IS TESTED FIRST, because a rule that matches nothing would pass
 # this file forever while proving nothing: each shape below is appended to a COPY
 # of the validator and must be caught.
 shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violation
   awk '
-    BEGIN { audited = 0; heredoc = 0; instring = 0
-            # Command position: the start of a line, after a separator, after a
-            # keyword that takes a command, or after a wrapper that RUNS one --
-            # `command git`, `exec git`, `env git`, `xargs git` are all git.
-            cmd = "(^[[:space:]]*|[;&|(){}!][[:space:]]*|(^|[[:space:]])(then|else|do|if|elif|while|until|command|exec|env|eval|xargs|nohup|time|builtin)[[:space:]]+)"
-          }
-    /^# ==== AUDITED HELPERS BEGIN/ { audited = 1; next }
-    /^# ==== AUDITED HELPERS END/   { audited = 0; next }
-    heredoc { if ($0 == "EOF") { heredoc = 0 } next }
+    # Pass one: the functions this file defines are commands it may run.
+    NR == FNR {
+      if ($0 ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\(\)/) {
+        name = $0
+        sub(/^[[:space:]]*/, "", name)
+        sub(/\(\).*$/, "", name)
+        defined[name] = 1
+      }
+      next
+    }
+    BEGIN {
+      # The builtins the validator may run. `cd` and `pwd` are here because
+      # locating a repository means entering a directory; they open no file and
+      # run no program.
+      split(": true false echo printf local return exit shift unset shopt read set export cd pwd trap break continue", w, " ")
+      for (i in w) allowed[w[i]] = 1
+      # Keywords that introduce a COMMAND: scanning continues past them.
+      split("if elif while until then else do time", t, " ")
+      for (i in t) transparent[t[i]] = 1
+      # Keywords that do not: what follows them on that line is a variable, a
+      # word list or nothing, and a command comes only after the next separator.
+      split("for select in function fi done", o, " ")
+      for (i in o) opaque[o[i]] = 1
+      audited = 0; heredoc = ""; instring = 0; insingle = 0
+      incase = 0; want_label = 0; subst = 0
+    }
     {
       line = $0
-      # A line CONTINUING a string carries prose, not code: keep only what
-      # follows the quote that closes it.
-      if (instring) {
-        i = index(line, "\"")
-        if (i == 0) { next }
-        line = substr(line, i + 1)
-        instring = 0
-      }
+      if (heredoc != "") { if (line == heredoc) { heredoc = "" } next }
+      if (line ~ /^# ==== AUDITED HELPERS BEGIN/) { audited = 1; next }
+      if (line ~ /^# ==== AUDITED HELPERS END/)   { audited = 0; next }
       if (line ~ /^[[:space:]]*#/) { next }
-      if (line ~ /<<'"'"'EOF'"'"'/) { heredoc = 1 }
-      quotes = gsub(/"/, "\"", line)
-      if (quotes % 2 == 1) { instring = 1 }
+      if (match(line, /<<-?[\x27"][A-Za-z_][A-Za-z0-9_]*[\x27"]/)) {
+        tag = substr(line, RSTART, RLENGTH)
+        sub(/^<<-?[\x27"]/, "", tag); sub(/[\x27"]$/, "", tag)
+        heredoc = tag
+      }
+      # A quoted run becomes one Q on the masked line and vanishes from the bare
+      # one. Redirections are judged on the masked line, so a `<` inside a
+      # message is prose and a `<` outside one is an open; commands are read off
+      # the bare line, so a case label like `100644|100755)` is not read as one.
+      masked = ""; bare = ""
+      n = length(line); i = 1
+      while (i <= n) {
+        c = substr(line, i, 1)
+        # A COMMAND SUBSTITUTION INSIDE A STRING IS STILL CODE. `x="$(git …)"`
+        # is quoted from end to end, so a scan that dropped quoted runs whole
+        # saw no command at all -- and `$(cat -- "$f")` with it.
+        if (!insingle && c == "$" && substr(line, i + 1, 1) == "(" && substr(line, i + 2, 1) != "(") {
+          subst++; subst_string[subst] = instring; subst_single[subst] = insingle
+          instring = 0; insingle = 0
+          masked = masked "$("; bare = bare "$("
+          i += 2; continue
+        }
+        if (c == ")" && subst > 0 && !instring && !insingle) {
+          instring = subst_string[subst]; insingle = subst_single[subst]; subst--
+          masked = masked ")"; bare = bare ")"
+          i++; continue
+        }
+        if (instring)    { if (c == "\"")   { instring = 0 } ; masked = masked "Q"; i++; continue }
+        if (insingle)    { if (c == "\x27") { insingle = 0 } ; masked = masked "Q"; i++; continue }
+        if (c == "\"")   { instring = 1; masked = masked "Q"; i++; continue }
+        if (c == "\x27") { insingle = 1; masked = masked "Q"; i++; continue }
+        masked = masked c; bare = bare c; i++
+      }
       if (audited) { next }
-      if (line ~ cmd "git[[:space:]]")                       { print FNR ": " $0; next }
-      if (line ~ /-v[[:space:]]+git([[:space:]]|$)/)          { print FNR ": " $0; next }
-      if (line ~ /<\(/)                                       { print FNR ": " $0; next }
-      if (line ~ /\$\(</)                                     { print FNR ": " $0; next }
-      if (line ~ /(^|[[:space:]0-9])<[[:space:]]*["'"'"'$\/]/)  { print FNR ": " $0; next }
-      if (line ~ cmd "(cat|dd|head|tail|od|xxd|wc)[[:space:]]+[^<>[:space:]]") { print FNR ": " $0; next }
+      # A redirection FROM a path. `<<` and `<<<` are a heredoc and a here-string
+      # and open nothing; `<&` duplicates a descriptor this shell already holds.
+      if (masked ~ /(^|[^<])<[[:space:]]*[^<&[:space:]]/) { print FNR ": " $0; next }
+      # Arithmetic holds no command.
+      gsub(/\$\(\([^)]*\)\)/, " ", bare)
+      gsub(/\(\([^)]*\)\)/, " ", bare)
+      cmdpos = 1; intest = 0; i = 1; n = length(bare)
+      while (i <= n) {
+        c = substr(bare, i, 1)
+        if (c == " " || c == "\t") { i++; continue }
+        if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")") {
+          if (c == ";" && substr(bare, i + 1, 1) == ";" && !intest) {
+            want_label = (incase > 0)
+          }
+          cmdpos = 1; i++; continue
+        }
+        tok = ""
+        while (i <= n) {
+          c = substr(bare, i, 1)
+          if (c == " " || c == "\t" || c == ";" || c == "&" || c == "|" || c == "(" || c == ")") { break }
+          tok = tok c
+          i++
+        }
+        term = (i <= n) ? substr(bare, i, 1) : ""
+        # A `[[ … ]]` test holds no command, and its contents may carry every
+        # separator there is.
+        if (intest) { if (tok == "]]") { intest = 0; cmdpos = 0 } ; continue }
+        if (tok == "[[") { intest = 1; continue }
+        if (tok == "esac") { if (incase > 0) { incase-- } ; want_label = 0; cmdpos = 0; continue }
+        # Inside a case block the words up to the first `)` name a branch; the
+        # branch itself follows them.
+        if (want_label) { if (term == ")") { want_label = 0; cmdpos = 1 } ; continue }
+        if (!cmdpos) { continue }
+        if (tok == "{" || tok == "}" || tok == "!" || tok == "\\") { continue }
+        if (tok ~ /^[A-Za-z_][A-Za-z0-9_]*(\[.*\])?\+?=/) { continue }
+        if (tok == "case") { incase++; want_label = 1; continue }
+        if (transparent[tok]) { continue }
+        if (opaque[tok]) { cmdpos = 0; continue }
+        cmdpos = 0
+        if (tok ~ /[*?]/) { continue }
+        if (tok ~ /^[0-9]/) { continue }
+        if (allowed[tok] || defined[tok]) { continue }
+        print FNR ": " $0
+        break
+      }
     }
-  ' "$1"
+  ' "$1" "$1"
 }
 
 # The quote tracking above assumes no escaped double quote, so that is asserted
@@ -2263,31 +2774,66 @@ shape_probe() {  # shape_probe <line to append>
     exit 1
   fi
 }
+# git, in every position a shell will take it.
 shape_probe 'git status >/dev/null'
 shape_probe 'if git diff --quiet; then :; fi'
 shape_probe 'mode="$(git -C "$d" ls-files -s -- x)"'
 shape_probe 'echo hi | git hash-object --stdin'
 shape_probe '{ git status; } >/dev/null'
 shape_probe 'command -v git >/dev/null'
-shape_probe 'while IFS= read -r record; do :; done < <(git ls-files -z)'
-shape_probe 'IFS= read -r line < "$listing"'
-shape_probe 'while read -r l; do :; done < "$f"'
-shape_probe 'out="$(cat -- "$listing")"'
-shape_probe 'n="$(wc -c < "$listing")"'
-shape_probe 'x=$(< "$listing")'
-shape_probe 'head -1 "$f"'
-shape_probe 'dd if="$f" of=/dev/null'
 shape_probe 'command git status'
 shape_probe 'exec git status'
 shape_probe 'env git status'
 shape_probe 'xargs git add'
 shape_probe 'eval git status'
+shape_probe '/usr/bin/git status'
+shape_probe 'while :; do git status; done'
+shape_probe 'until git status; do :; done'
+shape_probe 'time git status'
+shape_probe '! git diff --quiet'
+shape_probe 'probe() { case x in a) git status ;; esac; }'
+# THE FOUR THE LAST ROUND'S REVIEW EXECUTED, and the two shapes they are.
+shape_probe 'unchecked_git() { LC_ALL=C git ls-files -sz -- . || true; }'
+shape_probe 'unchecked_read() { sed -n p -- "$1" || true; }'
+shape_probe 'probe() { command -- git status; }'
+shape_probe 'probe() { grep -c . "$listing"; }'
+shape_probe 'probe() { read -r record<"$listing"; }'
+shape_probe 'GIT_DIR=x git rev-parse'
+shape_probe 'LC_ALL=C LANG=C sed -n p "$f"'
+shape_probe 'nice -n 1 git status'
+# A file read, by redirection and by argument, builtin and external.
+shape_probe 'while IFS= read -r record; do :; done < <(git ls-files -z)'
+shape_probe 'IFS= read -r line < "$listing"'
+shape_probe 'while read -r l; do :; done < "$f"'
 shape_probe 'while read -r x; do :; done < /etc/hostname'
+shape_probe 'out="$(cat -- "$listing")"'
+shape_probe 'n="$(wc -c < "$listing")"'
+shape_probe 'x=$(< "$listing")'
+shape_probe 'head -1 "$f"'
+shape_probe 'tail -n +1 -- "$f"'
+shape_probe 'dd if="$f" of=/dev/null'
+shape_probe 'mapfile -t arr < "$f"'
+shape_probe 'readarray -t a <"$f"'
+shape_probe 'awk "{print}" "$f"'
+shape_probe 'cut -f1 "$f"'
+shape_probe 'busybox cat "$f"'
+shape_probe 'exec 7< "$f"'
+shape_probe 'source "$f"'
+shape_probe '. "$f"'
+shape_probe 'builtin read -r l < "$f"'
+shape_probe 'for f in a b; do sed -n p "$f"; done'
+shape_probe 'select f in a; do cat "$f"; done'
+shape_probe 'probe() { if [[ -n "$x" ]]; then sed -n p "$f"; fi; }'
+# A line that ENDS in a continuation, because the backslash is a word and was
+# read as one: the command before it was accepted and the backslash after it was
+# not, so every `x="$(cmd)" \` in the file reported a violation of its own.
+shape_probe 'x="$(git rev-parse HEAD)" \'
+shape_probe 'out="$(cat -- "$listing")" \'
 
 # And the file as it stands has none of them.
 shape_found="$(shape_violations "$branch_validator")"
 if [[ -n "$shape_found" ]]; then
-  echo 'validate-pr-branch.sh runs git or reads a file outside its audited helpers:' >&2
+  echo 'validate-pr-branch.sh runs a command it may not, or reads a file, outside its audited helpers:' >&2
   printf '%s\n' "$shape_found" >&2
   exit 1
 fi
