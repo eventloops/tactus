@@ -164,8 +164,25 @@ must_fix_for() {
 
 # review_kind FILE: "json" when the comment carries a fenced ```json verdict (or the older bare
 # role_understanding object), "prose" otherwise. A prose review that merely quotes JSON is prose.
+# Nothing, and a non-zero status, when the file could not be read.
+#
+# A FAILED DETECTION IS NOT A FORMAT, and this is that rule at the point where it decides which
+# parser reads the review. `grep`'s 1 is "this comment carries no fenced object" -- an answer --
+# and its 2 is a file it could not read; `if grep ...; then json; else prose; fi` made the second
+# into the first and CHOSE A PARSER on it. The two parsers do not agree about the same review, so
+# that choice is a verdict: a JSON review whose object says CHANGES_REQUIRED and carries a P1
+# went to the prose parser, which reads the `VERDICT:` line sitting outside the object -- PASS --
+# and never sees a severity the object spells with a JSON escape (`"P1"` holds no `P1` for a
+# grep to find). READY, and a merge call, out of a review that blocks. So the two statuses are
+# kept apart and the unreadable one is no format at all; the caller blocks on it.
 review_kind() {
-  if grep -qE '^```json|"role_understanding"' "$1"; then echo json; else echo prose; fi
+  local status=0
+  grep -qE '^```json|"role_understanding"' "$1" || status=$?
+  case "$status" in
+    0) echo json ;;
+    1) echo prose ;;
+    *) return 1 ;;
+  esac
 }
 
 # parse_verdict_json FILE: the workflow form. Prints tab-separated lines:
@@ -401,30 +418,40 @@ parse_prose_review() {
   return 0
 }
 
-# frontmatter_has_id ID: reads a finding file on stdin and succeeds only when its YAML
-# frontmatter, the block between the opening `---` on line 1 and the next `---`, carries the
-# line `id: ID` (README: the id lives in the frontmatter, not the name). The same line in prose
-# or a code block further down is not a frontmatter id. The id is a fixed string, whole line.
+# frontmatter_has_id ID: reads a finding file on stdin and PRINTS `1` when its YAML frontmatter,
+# the block between the opening `---` on line 1 and the next `---`, carries the line `id: ID`
+# (README: the id lives in the frontmatter, not the name), and `0` when it does not. The same
+# line in prose or a code block further down is not a frontmatter id. The id is a fixed string,
+# whole line.
+#
+# THE ANSWER IS WHAT IT PRINTS AND THE STATUS IS ONLY EVER FAILURE, because the caller opens the
+# file and the caller's open can fail. `cmd < file` on a file bash cannot open returns 1 WITH THE
+# COMMAND NEVER RUN, and 1 used to be this function's word for "read to the end and did not carry
+# the id" -- so an unreadable blob answered the matcher's question, in the matcher's own
+# vocabulary, without the matcher. Two files filing one id counted as one, `duplicate-file` never
+# fired, and the pull request was ready. Opening the input and matching inside it are two
+# questions and they no longer share one channel: no answer at all is not a "no".
 frontmatter_has_id() {
   # ONE PARSER, NOT TWO JOINED BY A PIPE, because a pipeline has one status and there are two
   # things to say. Under `pipefail` that status is the RIGHTMOST non-zero one, so an `awk` that
   # died reading its input (2) stood behind a `grep` that found nothing in what little arrived
-  # (1), and 1 came back: "this file does not carry the id", an answer, from a read that never
-  # finished. Two files filing one id then counted as one, `duplicate-file` never fired, and the
-  # pull request was ready. (`grep -q` had the same shape from the other end: it exits at the
-  # first match, the `awk` still writing took SIGPIPE, and 141 came back for a file that
-  # matched.) With the match inside the one command there is no second status to hide behind:
-  # 0 matched, 1 did not, anything else is a read that failed -- and `awk`'s own failure is
-  # nothing else's "no".
+  # (1), and 1 came back -- an answer from a read that never finished. (`grep -q` had the same
+  # shape from the other end: it exits at the first match, the `awk` still writing took SIGPIPE,
+  # and 141 came back for a file that matched.) With the match inside the one command there is no
+  # second status to hide behind, and `awk`'s own failure prints no answer at all.
   #
   # The id reaches `awk` through the environment and not through `-v`, which expands backslash
   # escapes in the value and would compare an id carrying one as something else. `$0 == want` is
   # a whole-line string comparison, as `grep -xF` was: no character of the id means anything.
+  #
+  # `answered` guards the END block, which `exit` runs on its way out: without it the early exits
+  # would print their answer and then print it again.
   FRONTMATTER_ID="id: $1" awk '
-    NR == 1     { if ($0 != "---") exit 1; next }               # no opening fence, no frontmatter
-    $0 == "---" { exit (found ? 0 : 1) }                        # the block ends here
+    NR == 1     { if ($0 != "---") { print 0; answered = 1; exit 0 }   # no opening fence, no frontmatter
+                  next }
+    $0 == "---" { print (found ? 1 : 0); answered = 1; exit 0 }        # the block ends here
     $0 == ENVIRON["FRONTMATTER_ID"] { found = 1 }
-    END         { exit (found ? 0 : 1) }
+    END         { if (!answered) print (found ? 1 : 0) }
   '
 }
 
@@ -451,24 +478,41 @@ frontmatter_has_id() {
 # what a checkout materialised or what a name suggests.
 #
 # Each file then gets exactly one of three answers: it carries the id, it does not, or it could
-# not be read. `frontmatter_has_id` says which by its status -- 0, 1, or anything else -- and
-# anything else refuses the count rather than being folded into "no".
+# not be read. `frontmatter_has_id` PRINTS the first two and keeps its status for the third, so
+# that a blob bash could not open for it -- a redirection that fails returns 1 without running
+# the command -- cannot answer in its place. Anything but a printed `0` or `1`, status included,
+# refuses the count rather than being folded into "no".
+#
+# A LIST THAT ENDED IS NOT A LIST THAT WAS READ, which is the same rule one level up. `read`
+# returns non-zero at end of input AND on a failed read, the loop below ends on either, and what
+# it prints then is a count of the entries that happened to arrive: with the listing written
+# whole and its read failing after the first record, two files filing one id counted as one, and
+# that is `duplicate-file` turning into READY. `git ls-tree`'s status cannot see it -- it says
+# the list was WRITTEN. So the listing is given a last record of this function's own and the
+# count is printed only when the loop reached it; short of that, the read did not finish. That
+# also covers the listing bash could not open for the loop, which is zero iterations and a count
+# of zero.
 #
 # The names arrive NUL-separated through a file rather than a command substitution: `$(...)` drops
 # NUL bytes, so the separators would vanish and the loop would read nothing at all -- a count of
 # zero for every finding, on a tree that holds the file. The gate builds a small repository and
 # counts in it, because that is the mistake a shape rule does not catch.
 finding_file_count() {
-  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 entry cand
+  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 entry cand answer complete=0
   cand_file="$(mktemp)"
   blob_file="$(mktemp)"
   git ls-tree -r -z "$treeish" -- reviews/findings/ > "$cand_file" 2>/dev/null \
     || status=$?
   if ((status != 0)); then rm -f "$cand_file" "$blob_file"; return 1; fi
+  # The end-of-listing record. `ls-tree -z` writes `<mode> <type> <object><TAB><path>`, six digits
+  # and a space before anything else, so no entry of any tree is this string; and `printf` has no
+  # "nothing matched" answer, so a non-zero status here is unambiguously a write that failed.
+  printf 'end-of-listing\0' >> "$cand_file" || { rm -f "$cand_file" "$blob_file"; return 1; }
   # NUL-separated `<mode> <type> <object><TAB><path>` records, so a path with whitespace -- a tab
   # in it included -- stays one candidate: the mode ends at the first space and the path begins
   # after the first tab, and neither can be reached from inside the path.
   while IFS= read -r -d '' entry; do
+    [[ "$entry" == "end-of-listing" ]] && { complete=1; break; }
     case "${entry%% *}" in 100644|100755) ;; *) continue ;; esac
     cand="${entry#*$'\t'}"
     [[ "$cand" == *.md ]] || continue
@@ -477,13 +521,18 @@ finding_file_count() {
       return 1
     fi
     status=0
-    frontmatter_has_id "$id" < "$blob_file" || status=$?
-    case "$status" in
-      0) n=$((n + 1)) ;;
-      1) ;;                                              # read to the end and did not match
-      *) rm -f "$cand_file" "$blob_file"; return 1 ;;     # a read that failed is not a "no"
+    answer="$(frontmatter_has_id "$id" < "$blob_file")" || status=$?
+    # The status first, because it is the only thing that can say the read happened at all: a
+    # blob bash could not open leaves this 1 with `frontmatter_has_id` never run, and 1 was that
+    # helper's own word for "does not carry the id" until the answer moved to its output.
+    if ((status != 0)); then rm -f "$cand_file" "$blob_file"; return 1; fi
+    case "$answer" in
+      1) n=$((n + 1)) ;;
+      0) ;;                                              # read to the end and did not match
+      *) rm -f "$cand_file" "$blob_file"; return 1 ;;     # neither answer is not an answer
     esac
   done < "$cand_file"
+  ((complete)) || { rm -f "$cand_file" "$blob_file"; return 1; }
   rm -f "$cand_file" "$blob_file"
   printf '%s' "$n"
 }
@@ -865,7 +914,10 @@ audit_one() {
     review_at="$(gh api "repos/$repo/issues/comments/$review_id" --jq '.created_at')"
     review_file="$(mktemp)"
     gh api "repos/$repo/issues/comments/$review_id" --jq '.body' > "$review_file"
-    kind="$(review_kind "$review_file")"
+    # Empty is the third answer: the format could not be read. It is not "prose", because a
+    # parser chosen by a failed detection is a parser chosen at random, and the prose one reads
+    # a JSON review as a clean PASS.
+    kind="$(review_kind "$review_file")" || kind=""
     local sev id wit parse_complete=0 parse_file parse_status=0
     # The parser's output is written down and its status taken before a single row of it is
     # read. Through `< <(...)` that status was invisible, so the only thing the audit could look
@@ -877,8 +929,10 @@ audit_one() {
     parse_file="$(mktemp)"
     if [[ "$kind" == json ]]; then
       parse_verdict_json "$review_file" > "$parse_file" || parse_status=$?
-    else
+    elif [[ "$kind" == prose ]]; then
       parse_prose_review "$review_file" > "$parse_file" || parse_status=$?
+    else
+      blockers+=("review-format-unreadable")
     fi
     while IFS=$'\t' read -r sev id wit extra; do
       case "$sev" in

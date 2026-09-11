@@ -97,6 +97,16 @@
 #                                a fallback that stripped the leading colons and asterisks off
 #                                it, so `VERDICT: ::PASS` -- rejected one line earlier -- came
 #                                back out of the rejecting branch as `PASS`
+#   MUT-FINDING-BLOB-OPEN-AS-MISS  the blob the matcher was to read could not be OPENED, so the
+#                                redirection returned 1 with the matcher never run -- and 1 was
+#                                the matcher's own word for "does not carry the id"
+#   MUT-FINDING-LIST-SHORT-READ  the candidate listing stopped arriving part way through and the
+#                                entries that had arrived were counted as all of them: `read`
+#                                ends a loop at end of input and at a failed read alike
+#   MUT-REVIEW-KIND-UNREADABLE-IS-PROSE  a format detection that could not read the file chose
+#                                the prose parser, which reads a JSON review's `VERDICT:` line
+#                                from outside its verdict object and misses every severity the
+#                                object spells with a JSON escape
 #   MUT-HERESTRING-FAILURE-AS-ANSWER  a value was fed to a command through `<<<`, which spills to
 #                                a temporary file once it outgrows a pipe buffer: a file bash
 #                                cannot create is a redirection that failed, the command never
@@ -775,6 +785,72 @@ printf 'Reviewed head: %s\nThe object {"verdict":"PASS","findings":[]} is an exa
   "4ad962f000000000000000000000000000000001" > "$tmp/quoted.md"
 expect MUT-QUOTED-JSON-IS-JSON "$(review_kind "$tmp/quoted.md")" prose
 
+# A FORMAT DETECTION THAT FAILED IS NOT A FORMAT. `grep`'s 1 is "this comment carries no fenced
+# object", an answer; its 2 is a file it could not read. `if grep ...; then json; else prose; fi`
+# made the second into the first and CHOSE A PARSER on it -- and the two parsers do not agree
+# about the same review. The JSON form's own verdict object says CHANGES_REQUIRED and carries a
+# P1; sent to the prose parser it loses both, because the `VERDICT:` line the prose parser reads
+# sits outside the object and says PASS, and a severity the object spells with a JSON escape
+# (`"P1"`) holds no `P1` for any grep to find.
+kind_stub="$tmp/kind-stub"
+mkdir -p "$kind_stub"
+cat > "$kind_stub/grep" <<'STUB'
+#!/usr/bin/env bash
+# exit 2 for the format-detection read, and be the real grep for every other call.
+qe=0; pat=0
+for a in "$@"; do
+  [[ "$a" == "-qE" ]] && qe=1
+  [[ "$a" == '^```json|"role_understanding"' ]] && pat=1
+done
+(( qe && pat )) && exit 2
+exec "$REAL_GREP" "$@"
+STUB
+chmod +x "$kind_stub/grep"
+printf '```json\n{"verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}\n```\n\nVERDICT: PASS\n' \
+  > "$tmp/escaped-severity.md"
+# Read whole, this is a blocking review: a P1 in a feature lane, from an object that says so.
+expect MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$(review_kind "$tmp/escaped-severity.md")" json
+expect MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$(parse_verdict_json "$tmp/escaped-severity.md" | tr '\t' '|')" \
+  'META|-|CHANGES_REQUIRED|-
+P1|CRITICAL|0
+END|-|0'
+# The prose parser reads the same file as a clean PASS carrying nothing, which is what makes the
+# choice of parser a verdict rather than a formatting detail.
+expect MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$(parse_prose_review "$tmp/escaped-severity.md" | tr '\t' '|')" \
+  'META|-|PASS|-
+END|-|0'
+kind_status=0
+got="$(
+  export REAL_GREP="$real_grep" PATH="$kind_stub:$PATH"
+  hash -r
+  review_kind "$tmp/escaped-severity.md" 2>/dev/null
+)" || kind_status=$?
+((kind_status != 0)) \
+  || error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a detection that exited 2 answered with a format [$got]"
+[[ -z "$got" ]] \
+  || error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a failed detection named a parser [$got]"
+# And through main, because the helper refusing is only half of it: the audit must not fall
+# through to the prose parser on the way past. Neither parser runs, nothing is read out of the
+# review, and the audit says which of its reads did not happen.
+got="$(
+  export REAL_GREP="$real_grep"
+  STUB_REVIEW_BODY="$tmp/escaped-severity.md" STUB_COMMENTS_STATUS=0 \
+    PATH="$kind_stub:$lookup:$PATH" bash scripts/pr-ready-audit.sh 999 2>&1 | tr '\n' ' '
+)"
+contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "review-format-unreadable"
+contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "NOT-READY"
+[[ "$got" == *"verdict=PASS"* ]] \
+  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a verdict was read out of a review no parser read"
+# The same review with the detection working is judged by the JSON parser and blocks on its P1,
+# so the case above is about the failed detection and not about the review.
+got="$(
+  STUB_REVIEW_BODY="$tmp/escaped-severity.md" STUB_COMMENTS_STATUS=0 \
+    PATH="$lookup:$PATH" bash scripts/pr-ready-audit.sh 999 2>&1 | tr '\n' ' '
+)"
+contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "open-P1:CRITICAL"
+[[ "$got" == *review-format-unreadable* ]] \
+  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a readable review was reported unreadable"
+
 # A verdict is a whole token, in every locale. `[A-Z_]+$` matches the TAIL of a dirty token, and
 # `[A-Z_]` inside a grep is whatever the locale's collating order says it is: under en_US.utf8 the
 # grep carried `FAIL\xc3\x89PASS` through and the check took the clean `PASS` off its end, so a
@@ -883,10 +959,23 @@ printf -- '---\nid: OTHER-ID\nseverity: P2\n---\n\nThe prose below repeats a lin
 printf -- '---\nid: TARGET-ID\nseverity: P2\n---\n\nBody.\n' > "$tmp/front-id.md"
 printf -- '---\nid: TARGETXID\n---\n' > "$tmp/x-id.md"
 printf 'id: TARGET-ID\n---\nno opening fence\n' > "$tmp/no-front.md"
-frontmatter_has_id TARGET-ID < "$tmp/prose-id.md" && error "MUT-FRONTMATTER-BY-SUBSTRING: an id in prose matched"
-frontmatter_has_id TARGET-ID < "$tmp/front-id.md" || error "MUT-FRONTMATTER-BY-SUBSTRING: the frontmatter id did not match"
-frontmatter_has_id TARGET.ID < "$tmp/x-id.md" && error "MUT-FRONTMATTER-PATTERN: a dot matched as a regex"
-frontmatter_has_id TARGET-ID < "$tmp/no-front.md" && error "MUT-FRONTMATTER-BY-SUBSTRING: a file without a frontmatter block matched"
+# The answer is what it PRINTS -- `1` or `0` -- and its status is only ever failure. `cmd < file`
+# on a file bash cannot open returns 1 with the command never run, and 1 used to be this helper's
+# word for "read to the end and did not carry the id", so an input that could not be opened
+# answered in the matcher's place. Both are checked on every case: the answer, and a status of 0
+# saying the matcher is the one who gave it.
+has_id() {  # has_id ID FILE: "<status>|<answer>"
+  local out status=0
+  out="$(frontmatter_has_id "$1" < "$2")" || status=$?
+  printf '%s|%s' "$status" "$out"
+}
+expect MUT-FRONTMATTER-BY-SUBSTRING "$(has_id TARGET-ID "$tmp/prose-id.md")" "0|0"   # an id in prose is not one
+expect MUT-FRONTMATTER-BY-SUBSTRING "$(has_id TARGET-ID "$tmp/front-id.md")" "0|1"
+expect MUT-FRONTMATTER-PATTERN "$(has_id TARGET.ID "$tmp/x-id.md")" "0|0"            # a dot is not a regex
+expect MUT-FRONTMATTER-BY-SUBSTRING "$(has_id TARGET-ID "$tmp/no-front.md")" "0|0"   # no frontmatter block
+# An input the redirection could not open is not a file that does not carry the id: nothing ran,
+# so there is no answer, and the status says so.
+expect MUT-FINDING-BLOB-OPEN-AS-MISS "$(has_id TARGET-ID "$tmp/no-such-finding-file.md" 2>/dev/null)" "1|"
 
 # --- counting the files that file a finding ------------------------------------------------------
 # The one place git is exercised here, in a repository built for it. This count decides whether a
@@ -927,10 +1016,11 @@ fi
 # files filing one id is `duplicate-file` and one is ready, so a file that dropped out of the
 # count is the difference between blocked and merged.
 expect MUT-FINDING-FILE-READ-AS-MISS "$(count_in_fixture E-LONG-LINE)" 2
-# The helper's status is the count's evidence, so it says which of the three things happened:
-# 0 the file carries the id, 1 it does not, anything else the read did not finish. 141 is not 1.
-frontmatter_has_id E-LONG-LINE < "$findings_repo/reviews/findings/e2.md" \
-  || error "MUT-FINDING-FILE-READ-AS-MISS: the frontmatter read did not finish, status [$?]"
+# The helper's own report on that file, so the count above is not the only witness: `1` printed
+# and a status of 0, from a read that went to the end of a frontmatter block a quarter of a
+# megabyte long.
+expect MUT-FINDING-FILE-READ-AS-MISS \
+  "$(has_id E-LONG-LINE "$findings_repo/reviews/findings/e2.md")" "0|1"
 
 # A blob the tree still names and the object store no longer holds. `git grep` cannot find this
 # one for anybody: it printed `unable to read` on stderr, exited 0, and returned only the readable
@@ -984,16 +1074,106 @@ got="$(
   || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a count with a dead read in it succeeded, got [$got]"
 [[ "$got" == 1 ]] \
   && error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: two files filing one id counted as one"
-# And the helper itself: 1 means "read to the end and did not match", so a read that never
-# finished must not be reported as 1.
+# And the helper itself: a read that never finished prints no answer and says so in its status.
 front_status=0
-(
+front_out="$(
   export REAL_AWK="$(command -v awk)" PATH="$awk_stub:$PATH"
   hash -r
   frontmatter_has_id G-TWICE < "$dup_repo/reviews/findings/g2.md" 2>/dev/null
-) || front_status=$?
-((front_status != 1)) \
-  || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a read that died reported 1, which is an answer"
+)" || front_status=$?
+((front_status != 0)) \
+  || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a read that died reported success"
+[[ -z "$front_out" ]] \
+  || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a read that died printed an answer [$front_out]"
+
+# A BLOB THE CALLER COULD NOT OPEN is the same defect one layer out, and it does not need the
+# matcher to fail: `frontmatter_has_id "$id" < "$blob_file"` on a file bash cannot open is a
+# redirection that failed, so the shell returns 1 WITHOUT RUNNING THE MATCHER -- and 1 was the
+# matcher's own word for "read to the end and did not carry the id". The count then dropped the
+# file it could not open, two files filing one id came back as one, `duplicate-file` never fired
+# and the pull request was READY.
+#
+# The injection is a `git` that is the real git everywhere except the `show` of the second file,
+# whose output it writes and then REMOVES -- the blob is written, the read of it is what fails.
+# Removal rather than a mode change so the case is the same case for a run as root.
+git_stub="$tmp/git-stub"
+mkdir -p "$git_stub"
+cat > "$git_stub/git" <<'STUB'
+#!/usr/bin/env bash
+"$REAL_GIT" "$@"; s=$?
+if [[ "$1" == show && -n "${BLOB_FILE:-}" && -f "$BLOB_FILE" ]] \
+   && grep -qF 'SECOND-FILE-MARKER' "$BLOB_FILE"; then rm -f "$BLOB_FILE"; fi
+exit $s
+STUB
+chmod +x "$git_stub/git"
+# `mktemp` hands out predictable names so the stub above can name the blob file exactly;
+# `finding_file_count` takes the candidate list first and the blob second.
+mktemp_stub="$tmp/mktemp-stub"
+mkdir -p "$mktemp_stub"
+cat > "$mktemp_stub/mktemp" <<'STUB'
+#!/usr/bin/env bash
+(($# == 0)) || exec "$REAL_MKTEMP" "$@"
+n=$(( $(cat "$MK_COUNT") + 1 )); echo "$n" > "$MK_COUNT"
+p="$MK_DIR/ft.$n"; : > "$p"; echo "$p"
+STUB
+chmod +x "$mktemp_stub/mktemp"
+mkdir -p "$tmp/ftmp"
+blob_status=0
+got="$(
+  export REAL_GIT="$(command -v git)" REAL_MKTEMP="$(command -v mktemp)"
+  export MK_COUNT="$tmp/ftmp/count" MK_DIR="$tmp/ftmp" BLOB_FILE="$tmp/ftmp/ft.2"
+  echo 0 > "$MK_COUNT"
+  export PATH="$git_stub:$mktemp_stub:$PATH"
+  hash -r
+  cd "$dup_repo" && finding_file_count G-TWICE HEAD 2>/dev/null
+)" || blob_status=$?
+((blob_status != 0)) \
+  || error "MUT-FINDING-BLOB-OPEN-AS-MISS: a count whose blob could not be opened succeeded, got [$got]"
+[[ "$got" == 1 ]] \
+  && error "MUT-FINDING-BLOB-OPEN-AS-MISS: two files filing one id counted as one"
+
+# A LISTING THAT ENDED IS NOT A LISTING THAT WAS READ. `read` returns non-zero at end of input and
+# on a failed read alike, and the loop ends on either, so a list written whole and read half way
+# through printed the entries that arrived as though they were all of them: one file, no
+# `duplicate-file`, READY. `git ls-tree`'s status says the list was WRITTEN and cannot see it.
+#
+# The injection shortens the list under the loop -- the stub `git show` for the first candidate
+# truncates it to its first NUL-terminated record -- so the loop reads one entry and then an end
+# of input that is not the end of the list. A read that fails outright (EIO on the descriptor) is
+# the same ending and is witnessed on the pull request; this is the shape a gate can inject with
+# nothing but coreutils.
+cat > "$git_stub/git" <<'STUB'
+#!/usr/bin/env bash
+"$REAL_GIT" "$@"; s=$?
+if [[ "$1" == show && -n "${CAND_FILE:-}" && -f "$CAND_FILE" ]]; then
+  keep="$(tr '\0' '\n' < "$CAND_FILE" | head -1 | wc -c)"    # the first record and its separator
+  truncate -s "$keep" "$CAND_FILE"
+fi
+exit $s
+STUB
+short_status=0
+got="$(
+  export REAL_GIT="$(command -v git)" REAL_MKTEMP="$(command -v mktemp)"
+  export MK_COUNT="$tmp/ftmp/count" MK_DIR="$tmp/ftmp" CAND_FILE="$tmp/ftmp/ft.1"
+  echo 0 > "$MK_COUNT"
+  export PATH="$git_stub:$mktemp_stub:$PATH"
+  hash -r
+  cd "$dup_repo" && finding_file_count G-TWICE HEAD 2>/dev/null
+)" || short_status=$?
+((short_status != 0)) \
+  || error "MUT-FINDING-LIST-SHORT-READ: a count over a list that stopped arriving succeeded, got [$got]"
+[[ "$got" == 1 ]] \
+  && error "MUT-FINDING-LIST-SHORT-READ: two files filing one id counted as one"
+# The same stubs with nothing shortened still count both files, so the two cases above are about
+# the reads and not about the stubs.
+expect MUT-FINDING-LIST-SHORT-READ "$(
+  export REAL_GIT="$(command -v git)" REAL_MKTEMP="$(command -v mktemp)"
+  export MK_COUNT="$tmp/ftmp/count" MK_DIR="$tmp/ftmp"
+  echo 0 > "$MK_COUNT"
+  export PATH="$git_stub:$mktemp_stub:$PATH"
+  hash -r
+  cd "$dup_repo" && finding_file_count G-TWICE HEAD
+)" 2
 
 # WHAT GIT RECORDS DECIDES WHAT AN ENTRY IS. A committed symlink is a `120000` blob whose content
 # is its target string, and `git show` hands that string over exactly as it hands over a file's
