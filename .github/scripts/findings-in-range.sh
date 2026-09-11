@@ -169,11 +169,23 @@ findings_in "$head" | sort -u > "$out/head-findings"
 #
 # Under a criss-cross the union then holds commits that are ALSO reachable from
 # the target -- R's own commits, when L is the other base. That is deliberate,
-# not a leak: they are reachable from this head, so they are in this branch, and
-# the direction is the conservative one. A wider set can turn an accepted name
-# into an ambiguous refusal and never the other way round. Where there is one
-# merge base, which is every open pull request in this repository today, this
-# loop is the single rev-list it replaces.
+# not a leak: they are reachable from this head, so they are in this branch.
+#
+# WHAT WIDENING IS SAFE AGAINST, EXACTLY. A wider set can only RAISE a name's
+# match count, so a name that matches two findings still matches two: an
+# AMBIGUOUS name can never conform because another boundary was added, which is
+# the direction this gate exists to hold. It is not one-way in general, and an
+# earlier revision of this comment claimed it was. A name matching NOTHING can
+# become a name matching one, which is a refusal turning into an acceptance:
+# measured on the criss-crossed histories below, `fix-P3/liveness_only-one` is
+# refused at exit 1 `names no finding` by the single-rev-list form and conforms
+# at exit 0 once each boundary's range is taken separately. That acceptance is
+# the right answer -- the finding did exist inside the pull request, which is
+# the whole of what the name claims -- but it is an acceptance the narrower set
+# denied, and saying "never the other way round" hid it.
+#
+# Where there is one merge base, which is every open pull request in this
+# repository today, this loop is the single rev-list it replaces.
 while read -r merge_base; do
   git rev-list "$head" "^$merge_base" || exit 1
 done < "$out/merge-bases" | sort -u > "$out/range-commits"

@@ -333,6 +333,16 @@ printf 'P2_correctness_202609100001_shared-name.md\r\n' > "$twin_crlf_a"
 printf 'P2_correctness_202609100002_shared-name.md\r\n' > "$twin_crlf_b"
 printf 'P2_correctness_202609100001_shared-name.md\rP2_correctness_202609100002_shared-name.md\n' \
   > "$twin_lone_cr"
+# AND A NUL IS NEITHER, which is the separator that loses a name in SILENCE
+# rather than keeping one that cannot match. `$(cat …)` discards a NUL, so the
+# record after it is concatenated onto the one before -- the twin below becomes
+# `…shared-name.mdREADME.md`, matches nothing, and one match is left. The LF
+# listing beside it holds the same two names and is the control: same names,
+# same question, and the only difference is the byte between them.
+twin_nul_b="$fixture_dir/twin-nul-b.txt"
+twin_lf_b_pair="$fixture_dir/twin-lf-b-pair.txt"
+printf 'P2_correctness_202609100002_shared-name.md\0README.md\0' > "$twin_nul_b"
+printf 'P2_correctness_202609100002_shared-name.md\nREADME.md\n' > "$twin_lf_b_pair"
 
 line_ending_case() {  # line_ending_case <name> <want-exit> <want-text> <listing>...
   local name="$1" want_rc="$2" want_text="$3" rc=0 out
@@ -351,6 +361,10 @@ line_ending_case 'both listings are CRLF'      1 'names 2 findings' "$twin_crlf_
 line_ending_case 'a CRLF listing resolves'     0 'conforms'         "$twin_crlf_a"
 line_ending_case 'a carriage return that is not a line ending' \
   1 'holds a carriage return' "$twin_lf_a" "$twin_lone_cr"
+line_ending_case 'two names on LF, the control for the NUL case' \
+  1 'names 2 findings' "$twin_lf_a" "$twin_lf_b_pair"
+line_ending_case 'NUL-delimited records are not lines' \
+  1 'holds a NUL byte' "$twin_lf_a" "$twin_nul_b"
 
 # bulk-fix-P<n>/ carries no finding, and never batches a severity that is
 # repaired one at a time.
@@ -440,9 +454,23 @@ legacy_fail 'unlisted codex branch'   222 'codex/findings-p3-deadbeefcafe'
 
 range_script="$root/.github/scripts/findings-in-range.sh"
 
+# THE INITIAL BRANCH IS PINNED, because `git init` otherwise takes it from the
+# CONTRIBUTOR'S `init.defaultBranch` and the fixtures below create branches of
+# their own by name. With `init.defaultBranch=trunk` the merged-repair
+# repository's `checkout -b trunk` met a branch git had already created and the
+# suite died at exit 128, `fatal: a branch named 'trunk' already exists`, on a
+# tree that passes everywhere else. `symbolic-ref` rather than `init -b` or
+# `-c init.defaultBranch=`: HEAD is unborn here, so repointing it is the one
+# form that needs no git newer than the rest of this file does. The name is not
+# one any fixture creates, and the assertion is what keeps it that way.
 new_repo() {  # new_repo <dir>
   mkdir -p "$1"
   git -C "$1" init -q .
+  git -C "$1" symbolic-ref HEAD refs/heads/fixture-base
+  if [[ "$(git -C "$1" symbolic-ref --short HEAD)" != fixture-base ]]; then
+    echo "new_repo: the fixture's initial branch was not pinned: $1" >&2
+    exit 1
+  fi
   git -C "$1" config user.email fixture@example.invalid
   git -C "$1" config user.name 'fixture'
   git -C "$1" config commit.gpgsign false
@@ -1064,6 +1092,147 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
   fi
 else
   echo 'note: skipping the symlink cases (this filesystem will not create one)' >&2
+fi
+
+# ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
+#
+# A TRACKED finding need not be in the working tree, and the candidate names
+# came from a filesystem glob alone. Here one twin is removed from the checkout
+# and left in the index: the tree listings read the commit and refuse, and the
+# directory API saw a single match and CONFORMED at exit 0. Sparse checkouts are
+# the case that arrives without anyone doing anything unusual, and they are
+# below; this one needs nothing but `rm` and holds everywhere.
+recorded_repo="$fixture_dir/repo-recorded-not-materialised"
+new_repo "$recorded_repo"
+echo seed > "$recorded_repo/seed.txt"
+git -C "$recorded_repo" add -A && git -C "$recorded_repo" commit -q -m base
+mkdir -p "$recorded_repo/reviews/findings"
+echo one > "$recorded_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$recorded_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+git -C "$recorded_repo" add -A \
+  && git -C "$recorded_repo" commit -q -m 'two findings share a description'
+rm "$recorded_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+recorded_rc=0
+recorded_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  "$recorded_repo/reviews/findings" 2>&1)" || recorded_rc=$?
+if [[ "$recorded_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$recorded_out"; then
+  echo "a finding the index records and the checkout lacks must still be a candidate; got $recorded_rc" >&2
+  exit 1
+fi
+
+# ---- git's WORDS are not the decision ---------------------------------------------------------
+#
+# The same repository at a path holding the string git uses for "there is no
+# repository here", read through a LINKED WORKTREE -- which is what puts the
+# common `.git/config` on an absolute path, and so puts that path into git's
+# diagnostic. With the config unreadable git exits 128 saying `unable to access
+# '.../not a git repository - fixture/.git/config': Permission denied`, and a
+# substring test for git's own sentence matched inside the PATHNAME, which the
+# caller chooses. The validator fell back to the filesystem and answered
+# `conforms` at exit 0 with empty stderr, on a checkout it refuses when the
+# repository is readable. The exit status decides now, and "is there a
+# repository at all" is a second question put to `git rev-parse
+# --resolve-git-dir`, which reads no config and so still finds the repository
+# whose config git could not read. Root can read anything, so this only means
+# something as an ordinary user.
+phrase_repo="$fixture_dir/not a git repository - fixture"
+phrase_wt="$fixture_dir/linked-worktree"
+new_repo "$phrase_repo"
+echo seed > "$phrase_repo/seed.txt"
+git -C "$phrase_repo" add -A && git -C "$phrase_repo" commit -q -m base
+mkdir -p "$phrase_repo/reviews/findings"
+echo one > "$phrase_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$phrase_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+git -C "$phrase_repo" add -A \
+  && git -C "$phrase_repo" commit -q -m 'two findings share a description'
+if ! git -C "$phrase_repo" worktree add -q --detach "$phrase_wt" HEAD 2>/dev/null; then
+  echo 'note: skipping the path-shaped-like-a-message case (this git will not add a worktree)' >&2
+elif [[ "$(id -u)" -eq 0 ]] || ! chmod 000 "$phrase_repo/.git/config" 2>/dev/null \
+  || git -C "$phrase_wt/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  chmod 600 "$phrase_repo/.git/config" 2>/dev/null || true
+  echo 'note: skipping the path-shaped-like-a-message case (running as root, or chmod had no effect)' >&2
+else
+  # The linked worktree keeps its own index, and one twin is removed from its
+  # CHECKOUT alone: the filesystem fallback -- which cannot see an index at all
+  # -- answers `conforms` here rather than merely answering for another reason.
+  rm "$phrase_wt/reviews/findings/P2_correctness_202609100002_shared-name.md"
+  # git's message must really carry the path, or the case is about nothing.
+  # Captured and then matched: git exits 128 here, and under `pipefail` a
+  # pipeline out of it fails whatever grep found.
+  phrase_probe="$(git -C "$phrase_wt/reviews/findings" rev-parse --is-inside-work-tree 2>&1 || true)"
+  if ! grep -qF 'not a git repository - fixture' <<< "$phrase_probe"; then
+    echo 'the fixture was meant to put the repository PATH into git-s diagnostic' >&2
+    exit 1
+  fi
+  phrase_rc=0
+  phrase_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$phrase_wt/reviews/findings" 2>&1)" || phrase_rc=$?
+  chmod 600 "$phrase_repo/.git/config"
+  if [[ "$phrase_rc" == 0 ]]; then
+    echo 'a repository whose PATH holds git-s no-repository sentence conformed' >&2
+    exit 1
+  fi
+  if ! grep -q 'git could not say what it records' <<< "$phrase_out"; then
+    echo 'the refusal must be the unreadable repository, not a name that resolved elsewhere' >&2
+    exit 1
+  fi
+  # And a readable repository at the same path is not refused for its name: the
+  # index records both twins, so the name is ambiguous and says which two.
+  phrase_ok_rc=0
+  phrase_ok_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$phrase_wt/reviews/findings" 2>&1)" || phrase_ok_rc=$?
+  if [[ "$phrase_ok_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$phrase_ok_out"; then
+    echo "restoring the config must restore the verdict; got $phrase_ok_rc" >&2
+    exit 1
+  fi
+fi
+
+# ---- a sparse checkout is a smaller checkout and not a smaller ledger --------------------------
+#
+# The case that arrives on its own. `git sparse-checkout` leaves the index
+# recording every excluded path and `git status` EMPTY, so nothing about the
+# working tree says a finding is missing: with two findings sharing a
+# description and the second excluded, the directory API saw one match and
+# conformed at exit 0 while the tree listings refused the same commit at exit 1.
+# Both directions are asserted -- the twin that must still make the name
+# ambiguous, and an excluded finding that must still RESOLVE its own name --
+# because a candidate set that grew is only right if it grew for both.
+repo_n="$fixture_dir/repo-sparse-checkout"
+new_repo "$repo_n"
+echo seed > "$repo_n/seed.txt"
+git -C "$repo_n" add -A && git -C "$repo_n" commit -q -m base
+n_base="$(git -C "$repo_n" rev-parse HEAD)"
+mkdir -p "$repo_n/reviews/findings"
+echo one > "$repo_n/reviews/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$repo_n/reviews/findings/P2_correctness_202609100002_shared-name.md"
+echo three > "$repo_n/reviews/findings/P3_liveness_202609100003_left-out-of-the-checkout.md"
+echo four > "$repo_n/reviews/findings/P3_liveness_202609100004_a-real-finding.md"
+git -C "$repo_n" add -A && git -C "$repo_n" commit -q -m 'four findings, two sharing a description'
+n_head="$(git -C "$repo_n" rev-parse HEAD)"
+both_apis 'the control: a full checkout' \
+  "$repo_n" "$n_base" "$n_head" 'fix-P2/correctness_shared-name' 1
+n_twin='reviews/findings/P2_correctness_202609100002_shared-name.md'
+n_unique='reviews/findings/P3_liveness_202609100003_left-out-of-the-checkout.md'
+if git -C "$repo_n" sparse-checkout set --no-cone '/*' "!/$n_twin" "!/$n_unique" >/dev/null 2>&1 \
+  && [[ ! -e "$repo_n/$n_twin" && ! -e "$repo_n/$n_unique" ]] \
+  && [[ -z "$(git -C "$repo_n" status --porcelain)" ]]; then
+  # The exclusion is the CHECKOUT's and not the index's, which is what makes
+  # this a narrowed listing rather than a ledger that lost two findings.
+  if [[ "$(git -C "$repo_n" ls-files -- reviews/findings/ | wc -l)" != 4 ]]; then
+    echo 'the fixture was meant to leave all four findings in the index' >&2
+    exit 1
+  fi
+  both_apis 'a sparse checkout hides neither twin' \
+    "$repo_n" "$n_base" "$n_head" 'fix-P2/correctness_shared-name' 1
+  both_apis 'and an excluded finding still resolves its own name' \
+    "$repo_n" "$n_base" "$n_head" 'fix-P3/liveness_left-out-of-the-checkout' 0
+  both_apis 'and so does one the checkout did materialise' \
+    "$repo_n" "$n_base" "$n_head" 'fix-P3/liveness_a-real-finding' 0
+else
+  echo 'note: skipping the sparse-checkout cases (this git will not make one)' >&2
 fi
 
 # ---- a filename is not a line ----------------------------------------------------------------

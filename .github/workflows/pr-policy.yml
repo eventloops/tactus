@@ -124,8 +124,17 @@ jobs:
       # IT STANDS WHEN THIS STEP RUNS, and whether a description names one
       # finding or two is a property of the ledger that other pull requests
       # legitimately change. This step runs again on every synchronize and on
-      # the queue entry, so the verdict that binds a merge is the one taken
-      # against the ledger the merge lands on. findings-in-range.sh argues it.
+      # the queue entry -- and the listings it builds there are still the PULL
+      # REQUEST'S. The head is the pull request's head, read from the API above,
+      # and the boundary is its merge base; the queue commit's own tree is never
+      # listed. So a finding the target filed after the branch point is in none
+      # of the three on the entry either: replayed on a queue merge whose target
+      # had added two same-description findings, this step conformed at exit 0
+      # while the queue commit's own reviews/findings/ named 2 findings at exit
+      # 1. THE VERDICT IS NOT A VERDICT ON THE LEDGER THE MERGE LANDS ON, and no
+      # re-run makes it one. What it says is the narrow thing: the name resolved
+      # to exactly one filed finding in the three listings this step built, at
+      # the moment it ran. findings-in-range.sh argues it.
       - name: Validate the head branch name
         shell: bash
         env:
