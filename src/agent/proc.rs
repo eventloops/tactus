@@ -2380,7 +2380,26 @@ mod termination {
             );
         }
 
-        let identity = open_helper_identity(pid);
+        let identity = match open_helper_identity(pid) {
+            Ok(identity) => identity,
+            Err(errno) => {
+                // This host names processes and this launch could not take the
+                // name. Nothing is signalled and nothing is collected: closing
+                // the command pipe is what the helper reads as the end of its
+                // coordinator and it leaves on its own, where a `kill` and a
+                // `waitpid` on its number are what taking the name exists to
+                // stop.
+                for fd in [command[0], command[1], ack[0], ack[1]] {
+                    close_fd(fd);
+                }
+                return Err(format!(
+                    "taking an identity for the Unix cleanup reaper: {}; it was left to end on \
+                     its closed command pipe, because a helper this launch cannot name is not \
+                     one it may signal by number",
+                    std::io::Error::from_raw_os_error(errno)
+                ));
+            }
+        };
         close_fd(ack[1]);
         let reaper = Reaper {
             command_fd: command[1],
@@ -2733,7 +2752,13 @@ mod termination {
     #[cfg(target_os = "linux")]
     const HELPER_IDENTITY_ENDED: libc::c_int = -2;
 
-    fn open_helper_identity(pid: libc::pid_t) -> libc::c_int {
+    /// `Err(errno)` is an acquisition that failed for a reason which is not
+    /// evidence this host has no identity to give: this process is out of a
+    /// resource -- `EMFILE`, `ENFILE`, `ENOMEM` -- on a host whose identities
+    /// work. The number is the documented fallback for a platform that cannot
+    /// name a process, and a resource this process ran out of is not that, so
+    /// the launch fails rather than reaching for the number.
+    fn open_helper_identity(pid: libc::pid_t) -> Result<libc::c_int, libc::c_int> {
         #[cfg(target_os = "linux")]
         {
             let target = libc::c_long::from(pid);
@@ -2742,34 +2767,57 @@ mod termination {
             // reads through no pointer. It answers a close-on-exec descriptor
             // or a negative number, and touches nothing this process owns.
             let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, target, flags) };
-            let Ok(identity) = libc::c_int::try_from(opened) else {
-                return NO_HELPER_IDENTITY;
-            };
-            if identity < 0 {
-                return if last_errno() == libc::ESRCH {
-                    HELPER_IDENTITY_ENDED
-                } else {
-                    NO_HELPER_IDENTITY
+            if opened < 0 {
+                let errno = last_errno();
+                return match errno {
+                    // The kernel answering about this helper: it has ended and
+                    // been collected, so its number is free and is exactly what
+                    // must not be signalled.
+                    libc::ESRCH => Ok(HELPER_IDENTITY_ENDED),
+                    // The call is not one this host offers. A kernel older than
+                    // 5.3 answers `ENOSYS`, a kernel without the anonymous inode
+                    // filesystem `ENODEV`, a kernel that does not know the flag
+                    // word `EINVAL`, and a policy that forbids the call `EPERM`
+                    // or `EACCES`. That is the platform row DESIGN §15 names,
+                    // and the number is its documented fallback.
+                    libc::ENOSYS | libc::ENODEV | libc::EINVAL | libc::EPERM | libc::EACCES => {
+                        Ok(NO_HELPER_IDENTITY)
+                    }
+                    other => Err(other),
                 };
             }
+            let Ok(identity) = libc::c_int::try_from(opened) else {
+                // A descriptor this process cannot name. Not an answer about
+                // the helper and not an answer about the host, so not a
+                // licence to use the number either.
+                return Err(libc::EBADF);
+            };
+            // The probes choose which path to prefer, never whether the number
+            // is safe: `pidfd_open` landed in Linux 5.3, `P_PIDFD` in 5.4, and
+            // `pidfd_send_signal` is a separate call a policy can refuse on its
+            // own, so a host that cannot use a descriptor for all three is
+            // better off not holding one. What the teardown may do is decided
+            // by what the teardown's own call answers, in `signal_helper` and
+            // `collect_helper`, because a filter selects on arguments and these
+            // are not the arguments a teardown passes.
             let probes = [
                 identity_can_collect(identity),
                 identity_can_signal(identity),
             ];
             if probes.contains(&IdentityProbe::Refused) {
                 close_fd(identity);
-                return if probes.contains(&IdentityProbe::HelperEnded) {
+                return Ok(if probes.contains(&IdentityProbe::HelperEnded) {
                     HELPER_IDENTITY_ENDED
                 } else {
                     NO_HELPER_IDENTITY
-                };
+                });
             }
-            identity
+            Ok(identity)
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = pid;
-            NO_HELPER_IDENTITY
+            Ok(NO_HELPER_IDENTITY)
         }
     }
 
@@ -2858,7 +2906,19 @@ mod termination {
                     flags,
                 )
             };
-            return if sent == 0 { 0 } else { -1 };
+            if sent == 0 {
+                return 0;
+            }
+            // The call was made and the kernel answered it. `ESRCH` is the
+            // answer about this helper -- it has ended and been collected --
+            // and the number that named it is another process's now. Anything
+            // else is the call itself refused for these arguments, which a
+            // policy may do for `SIGKILL` while permitting the signal `0` the
+            // acquisition probe sent; that leaves this host where a host with
+            // no identity at all stands, and the number is what it has.
+            if last_errno() == libc::ESRCH {
+                return -1;
+            }
         }
         #[cfg(not(target_os = "linux"))]
         let _ = identity;
@@ -2880,7 +2940,21 @@ mod termination {
         #[cfg(target_os = "linux")]
         if identity >= 0 {
             if let Ok(id) = libc::id_t::try_from(identity) {
-                return collect_through_identity(id, status);
+                let collected = collect_through_identity(id, status);
+                if collected >= 0 {
+                    return collected;
+                }
+                // As in `signal_helper`: `ECHILD` is the kernel answering about
+                // this helper, and `EINTR` is this call to make again -- both
+                // are answers, and the number stays out of reach. Anything else
+                // is the consuming wait refused for these arguments, which a
+                // policy may do while permitting the `WNOHANG | WNOWAIT` the
+                // acquisition probe passed, and the number is then all there is
+                // to collect the helper by.
+                let errno = last_errno();
+                if errno == libc::ECHILD || errno == libc::EINTR {
+                    return -1;
+                }
             }
         }
         #[cfg(not(target_os = "linux"))]
@@ -3401,6 +3475,23 @@ mod termination {
         close_fd(wake[1]);
         close_fd(probe[0]);
         close_fd(probe[1]);
+        let identity = match identity {
+            Ok(identity) => identity,
+            Err(errno) => {
+                // As in `spawn_reaper`: a helper this launch cannot name is
+                // not one it may signal by number, so its command pipe is
+                // closed and it ends on that.
+                for fd in [command[0], command[1], ack[0]] {
+                    close_fd(fd);
+                }
+                return Err(format!(
+                    "taking an identity for the Unix job-control guard: {}; it was left to end \
+                     on its closed command pipe, because a helper this launch cannot name is \
+                     not one it may signal by number",
+                    std::io::Error::from_raw_os_error(errno)
+                ));
+            }
+        };
         if !set_nonblocking(command[1]) {
             for fd in [command[0], command[1], ack[0]] {
                 close_fd(fd);
@@ -4969,7 +5060,7 @@ mod termination {
                 unsafe { libc::_exit(0) };
             }
             assert!(pid > 0, "fork a stand-in reaper for the cancel to reap");
-            let identity = open_helper_identity(pid);
+            let identity = helper_identity(pid);
             assert!(write_raw(ack[1], &[REAPER_READY]), "queue the stale READY");
             let answer = thread::spawn(move || {
                 let mut frame = [0_u8; 5];
@@ -5527,7 +5618,7 @@ mod termination {
                 "fork a helper: {}",
                 std::io::Error::last_os_error()
             );
-            let identity = open_helper_identity(helper);
+            let identity = helper_identity(helper);
             assert!(identity >= 0, "this kernel gave the helper no identity");
             let helper_status = reap(helper);
             assert!(
@@ -5596,7 +5687,7 @@ mod termination {
                     }
                 }
                 assert!(child > 0, "fork: {}", std::io::Error::last_os_error());
-                let identity = open_helper_identity(child);
+                let identity = helper_identity(child);
                 assert!(identity >= 0, "this kernel gave the child no identity");
                 if exit_code.is_none() {
                     // SAFETY: `child` is this test's own unreaped child.
@@ -5708,6 +5799,19 @@ mod termination {
             );
         }
 
+        /// The acquisition every test below makes. A host that cannot be
+        /// asked for an identity at all is not a state any of them is about,
+        /// so it is a failure here and not a third answer to assert against.
+        fn helper_identity(pid: libc::pid_t) -> libc::c_int {
+            match open_helper_identity(pid) {
+                Ok(identity) => identity,
+                Err(errno) => panic!(
+                    "asking this host for the identity of {pid}: {}",
+                    std::io::Error::from_raw_os_error(errno)
+                ),
+            }
+        }
+
         #[cfg(target_os = "linux")]
         fn wildcard_wait() -> libc::pid_t {
             let mut status = 0;
@@ -5752,7 +5856,7 @@ mod termination {
                 "the wildcard wait collected something other than the helper"
             );
 
-            let identity = open_helper_identity(helper);
+            let identity = helper_identity(helper);
             let (stranger, stranger_lifetime) = spawn_sigchld_target();
             let end = Reaper {
                 command_fd: -1,
@@ -5810,7 +5914,7 @@ mod termination {
                 "fork a second helper: {}",
                 std::io::Error::last_os_error()
             );
-            let identity = open_helper_identity(helper);
+            let identity = helper_identity(helper);
             assert!(identity >= 0, "this kernel gave the helper no identity");
             assert_eq!(
                 wildcard_wait(),
@@ -5857,51 +5961,81 @@ mod termination {
             );
         }
 
+        /// One BPF instruction. `code` is the class word the kernel reads,
+        /// `jt`/`jf` are how many instructions a jump skips when the test
+        /// passes and when it fails, and `k` is the instruction's constant.
         #[cfg(target_os = "linux")]
-        fn refuse_pidfd_send_signal() {
-            const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+        fn seccomp_instruction(code: u32, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
+            libc::sock_filter {
+                code: u16::try_from(code).expect("a BPF instruction class fits the kernel's field"),
+                jt,
+                jf,
+                k,
+            }
+        }
+
+        /// Load the 32 bits of `seccomp_data` at `offset` into the accumulator.
+        #[cfg(target_os = "linux")]
+        fn seccomp_load(offset: u32) -> libc::sock_filter {
+            seccomp_instruction(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS, 0, 0, offset)
+        }
+
+        /// Jump `jt` instructions when the accumulator equals `k`, `jf` when it
+        /// does not.
+        #[cfg(target_os = "linux")]
+        fn seccomp_jump_if_equal(k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+            seccomp_instruction(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K, jt, jf, k)
+        }
+
+        /// Jump `jt` instructions when any bit of `k` is set in the
+        /// accumulator, `jf` when none is.
+        #[cfg(target_os = "linux")]
+        fn seccomp_jump_if_any_set(k: u32, jt: u8, jf: u8) -> libc::sock_filter {
+            seccomp_instruction(libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K, jt, jf, k)
+        }
+
+        #[cfg(target_os = "linux")]
+        fn seccomp_return(k: u32) -> libc::sock_filter {
+            seccomp_instruction(libc::BPF_RET | libc::BPF_K, 0, 0, k)
+        }
+
+        #[cfg(target_os = "linux")]
+        fn seccomp_refuse_with_eperm() -> u32 {
+            libc::SECCOMP_RET_ERRNO | u32::try_from(libc::EPERM).expect("EPERM fits u32")
+        }
+
+        #[cfg(target_os = "linux")]
+        fn seccomp_syscall_number(number: libc::c_long) -> u32 {
+            u32::try_from(number).expect("a syscall number fits the kernel's field")
+        }
+
+        /// The two halves of `seccomp_data.args[index]`, low word first.
+        /// `struct seccomp_data` is `nr` at 0, `arch` at 4, the instruction
+        /// pointer at 8, and six eight-byte arguments from 16; a BPF program
+        /// loads 32 bits at a time, and which half of an argument a given
+        /// offset names is the target's byte order.
+        #[cfg(target_os = "linux")]
+        fn seccomp_argument_words(index: u32) -> (u32, u32) {
+            const SECCOMP_DATA_ARGS_OFFSET: u32 = 16;
+            const ARGUMENT_WIDTH: u32 = 8;
+            let base = SECCOMP_DATA_ARGS_OFFSET + index * ARGUMENT_WIDTH;
+            if cfg!(target_endian = "little") {
+                (base, base + 4)
+            } else {
+                (base + 4, base)
+            }
+        }
+
+        /// Install `program` as this process's seccomp policy. A filter cannot
+        /// be lifted by the process that installs it, which is why every
+        /// fixture here is a subprocess helper.
+        #[cfg(target_os = "linux")]
+        fn install_seccomp_policy(program: &mut [libc::sock_filter]) {
             const NONE: libc::c_long = 0;
             const NO_NEW_PRIVS: libc::c_long = 1;
 
-            let load_syscall_number = u16::try_from(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS)
-                .expect("a BPF instruction class fits the kernel's field");
-            let jump_if_equal = u16::try_from(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K)
-                .expect("a BPF instruction class fits the kernel's field");
-            let return_constant = u16::try_from(libc::BPF_RET | libc::BPF_K)
-                .expect("a BPF instruction class fits the kernel's field");
-            let refuse_with_eperm =
-                libc::SECCOMP_RET_ERRNO | u32::try_from(libc::EPERM).expect("EPERM fits u32");
-            let signal_syscall = u32::try_from(libc::SYS_pidfd_send_signal)
-                .expect("a syscall number fits the kernel's field");
-
-            let mut program = [
-                libc::sock_filter {
-                    code: load_syscall_number,
-                    jt: 0,
-                    jf: 0,
-                    k: SECCOMP_DATA_NR_OFFSET,
-                },
-                libc::sock_filter {
-                    code: jump_if_equal,
-                    jt: 0,
-                    jf: 1,
-                    k: signal_syscall,
-                },
-                libc::sock_filter {
-                    code: return_constant,
-                    jt: 0,
-                    jf: 0,
-                    k: refuse_with_eperm,
-                },
-                libc::sock_filter {
-                    code: return_constant,
-                    jt: 0,
-                    jf: 0,
-                    k: libc::SECCOMP_RET_ALLOW,
-                },
-            ];
             let filter = libc::sock_fprog {
-                len: u16::try_from(program.len()).expect("four instructions fit the count"),
+                len: u16::try_from(program.len()).expect("the program fits the count"),
                 filter: program.as_mut_ptr(),
             };
 
@@ -5947,6 +6081,65 @@ mod termination {
             );
         }
 
+        /// `EPERM` for the whole `pidfd_send_signal` system call: the shape a
+        /// host takes when it does not offer the call at all.
+        #[cfg(target_os = "linux")]
+        fn refuse_pidfd_send_signal() {
+            const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+
+            let mut program = [
+                seccomp_load(SECCOMP_DATA_NR_OFFSET),
+                seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_pidfd_send_signal), 0, 1),
+                seccomp_return(seccomp_refuse_with_eperm()),
+                seccomp_return(libc::SECCOMP_RET_ALLOW),
+            ];
+            install_seccomp_policy(&mut program);
+        }
+
+        /// `EPERM` for `pidfd_send_signal(..., signal, ...)` and for nothing
+        /// else. A filter selects on arguments, so this permits the signal `0`
+        /// the acquisition probe sends and refuses the `SIGKILL` the teardown
+        /// sends through the same descriptor.
+        #[cfg(target_os = "linux")]
+        fn refuse_pidfd_send_signal_of(signal: libc::c_int) {
+            const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+            let (signal_low, signal_high) = seccomp_argument_words(1);
+            let number = u32::try_from(signal).expect("a signal number fits the kernel's field");
+
+            let mut program = [
+                seccomp_load(SECCOMP_DATA_NR_OFFSET),
+                seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_pidfd_send_signal), 0, 4),
+                seccomp_load(signal_high),
+                seccomp_jump_if_equal(0, 0, 2),
+                seccomp_load(signal_low),
+                seccomp_jump_if_equal(number, 1, 0),
+                seccomp_return(libc::SECCOMP_RET_ALLOW),
+                seccomp_return(seccomp_refuse_with_eperm()),
+            ];
+            install_seccomp_policy(&mut program);
+        }
+
+        /// `EPERM` for a `waitid` that collects, and for nothing else: the
+        /// acquisition probe passes `WNOWAIT` and leaves the helper where it
+        /// was, and the teardown's own wait does not.
+        #[cfg(target_os = "linux")]
+        fn refuse_the_consuming_waitid() {
+            const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+            let (options_low, _) = seccomp_argument_words(3);
+            let leaves_it_uncollected =
+                u32::try_from(libc::WNOWAIT).expect("an option bit fits the kernel's field");
+
+            let mut program = [
+                seccomp_load(SECCOMP_DATA_NR_OFFSET),
+                seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_waitid), 0, 3),
+                seccomp_load(options_low),
+                seccomp_jump_if_any_set(leaves_it_uncollected, 1, 0),
+                seccomp_return(seccomp_refuse_with_eperm()),
+                seccomp_return(libc::SECCOMP_RET_ALLOW),
+            ];
+            install_seccomp_policy(&mut program);
+        }
+
         #[cfg(target_os = "linux")]
         #[test]
         #[ignore = "subprocess helper"]
@@ -5981,7 +6174,7 @@ mod termination {
             );
             close_fd(witness);
 
-            let identity = open_helper_identity(helper);
+            let identity = helper_identity(helper);
             assert_eq!(
                 identity, NO_HELPER_IDENTITY,
                 "an identity whose signal syscall this host refuses was taken, and the \
@@ -6030,6 +6223,375 @@ mod termination {
             assert!(
                 output.status.success(),
                 "refused-signal helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn reaper_identity_under_a_descriptor_shortage_helper() {
+            if std::env::var_os("UPSTROKE_REAPER_IDENTITY_SHORTAGE_HELPER").is_none() {
+                return;
+            }
+
+            let devnull = std::ffi::CString::new("/dev/null").expect("a path with no null byte");
+            let open_now = std::fs::read_dir("/proc/self/fd")
+                .expect("this process's own descriptors")
+                .count();
+            let headroom =
+                u64::try_from(open_now + 64).expect("a descriptor count fits the limit word");
+            // SAFETY: `getrlimit` writes one `rlimit` through the pointer and
+            // `ceiling` is live for the call.
+            let mut ceiling: libc::rlimit = unsafe { std::mem::zeroed() };
+            let read_ceiling = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut ceiling) };
+            assert_eq!(
+                read_ceiling,
+                0,
+                "reading RLIMIT_NOFILE: {}",
+                std::io::Error::last_os_error()
+            );
+            let lowered = libc::rlimit {
+                rlim_cur: headroom,
+                rlim_max: ceiling.rlim_max,
+            };
+            // SAFETY: `setrlimit` reads one `rlimit` through the pointer and
+            // `lowered` is live for the call. The hard limit is carried
+            // forward unchanged, so the soft one can be put back below.
+            let narrowed = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) };
+            assert_eq!(
+                narrowed,
+                0,
+                "narrowing RLIMIT_NOFILE to {headroom}: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let mut held = Vec::new();
+            loop {
+                // SAFETY: `open` reads the path behind the pointer, which is
+                // live for the call, and answers a descriptor or a negative
+                // number.
+                let fd = unsafe { libc::open(devnull.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+                if fd < 0 {
+                    break;
+                }
+                held.push(fd);
+            }
+            let exhausted = last_errno();
+            // Give back exactly the four slots the two pipes `spawn_reaper`
+            // opens before its `fork` take, so `pidfd_open` is the fifth
+            // descriptor the launch asks the kernel for and the one that is
+            // refused.
+            for _ in 0..4 {
+                let Some(fd) = held.pop() else {
+                    panic!("the fill took fewer than four descriptors, so nothing is being tested")
+                };
+                close_fd(fd);
+            }
+
+            let launched = spawn_reaper();
+
+            for fd in held.drain(..) {
+                close_fd(fd);
+            }
+            // SAFETY: as above; `ceiling` is the limit this process started
+            // with and is live for the call.
+            let restored = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &ceiling) };
+
+            assert_eq!(
+                exhausted,
+                libc::EMFILE,
+                "the descriptor table filled for some other reason: {}",
+                std::io::Error::from_raw_os_error(exhausted)
+            );
+            assert_eq!(
+                restored,
+                0,
+                "restoring RLIMIT_NOFILE: {}",
+                std::io::Error::last_os_error()
+            );
+            match launched {
+                Ok(reaper) => {
+                    let identity = reaper.identity;
+                    reaper.cancel();
+                    panic!(
+                        "a launch that could not take an identity handed the reaper back with \
+                         identity {identity}: every end of that helper is a `kill` and a \
+                         `waitpid` on its number, and a descriptor this process ran out of is \
+                         not a kernel with no identities to give"
+                    );
+                }
+                Err(message) => assert!(
+                    message.starts_with("taking an identity for the Unix cleanup reaper"),
+                    "the launch failed for some other reason: {message}"
+                ),
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_descriptor_shortage_is_not_a_kernel_without_identities() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "reaper_identity_under_a_descriptor_shortage_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("UPSTROKE_REAPER_IDENTITY_SHORTAGE_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the descriptor-shortage helper");
+            assert!(
+                output.status.success(),
+                "descriptor-shortage helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        /// A descriptor naming `helper`, opened the way `open_helper_identity`
+        /// opens one and by hand, so a policy can be pinned against it before
+        /// the acquisition under test runs.
+        #[cfg(target_os = "linux")]
+        fn identity_by_hand(helper: libc::pid_t) -> libc::c_int {
+            let target = libc::c_long::from(helper);
+            let flags: libc::c_long = 0;
+            // SAFETY: as in `open_helper_identity`.
+            let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, target, flags) };
+            let witness = libc::c_int::try_from(opened).expect("a descriptor fits c_int");
+            assert!(
+                witness >= 0,
+                "the policy refused `pidfd_open`, so what follows would not be about the call \
+                 under test: {}",
+                std::io::Error::last_os_error()
+            );
+            witness
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn refused_sigkill_identity_helper() {
+            if std::env::var_os("UPSTROKE_REFUSED_SIGKILL_IDENTITY_HELPER").is_none() {
+                return;
+            }
+            refuse_pidfd_send_signal_of(libc::SIGKILL);
+
+            let (helper, helper_lifetime) = spawn_sigchld_target();
+            let witness = identity_by_hand(helper);
+            assert_eq!(
+                identity_can_collect(witness),
+                IdentityProbe::Available,
+                "the policy refused the wait, so what follows would not be about the signal"
+            );
+            assert_eq!(
+                identity_can_signal(witness),
+                IdentityProbe::Available,
+                "the policy refused the signal `0` the probe sends, so the probe would have \
+                 caught it and this is not the argument-sensitive case"
+            );
+            let flags: libc::c_long = 0;
+            // SAFETY: as in `signal_helper`, with the signal the teardown
+            // sends rather than the one the probe sends.
+            let refused = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    libc::c_long::from(witness),
+                    libc::c_long::from(libc::SIGKILL),
+                    std::ptr::null_mut::<libc::siginfo_t>(),
+                    flags,
+                )
+            };
+            let refused_errno = last_errno();
+            assert_eq!(
+                refused, -1,
+                "the policy did not refuse `pidfd_send_signal` for SIGKILL, so the probe and \
+                 the teardown are not being told apart"
+            );
+            assert_eq!(
+                refused_errno,
+                libc::EPERM,
+                "the refusal came from somewhere other than the policy: {}",
+                std::io::Error::from_raw_os_error(refused_errno)
+            );
+            close_fd(witness);
+
+            let identity = helper_identity(helper);
+            assert!(
+                identity >= 0,
+                "both probes pass under this policy, so the identity is taken and the teardown \
+                 through it is what has to answer for the refusal"
+            );
+
+            // Asserted before any collection: a wait through an identity on a
+            // helper nothing has killed does not return, and a test that hangs
+            // reports nothing.
+            let killed = signal_helper(helper, identity, libc::SIGKILL);
+            let kill_errno = if killed == 0 { 0 } else { last_errno() };
+            assert_eq!(
+                killed,
+                0,
+                "the teardown's own SIGKILL was not delivered and nothing handled the refusal, \
+                 so the collection that follows it waits on a helper still running: {}",
+                std::io::Error::from_raw_os_error(kill_errno)
+            );
+
+            let end = Reaper {
+                command_fd: -1,
+                ack_fd: -1,
+                _command_keepalive_fd: -1,
+                pid: helper,
+                identity,
+            }
+            .abandon();
+            assert_eq!(
+                end.kill_errno, 0,
+                "the teardown reported a signal that was not delivered"
+            );
+            assert_eq!(
+                end.waited, helper,
+                "the teardown collected {} and not the helper",
+                end.waited
+            );
+            assert!(
+                libc::WIFSIGNALED(end.status) && libc::WTERMSIG(end.status) == libc::SIGKILL,
+                "the helper did not end on the teardown's SIGKILL: {}",
+                end.status
+            );
+            close_fd(identity);
+            drop(helper_lifetime);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_refused_signal_is_answered_where_the_signal_is_sent() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "refused_sigkill_identity_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("UPSTROKE_REFUSED_SIGKILL_IDENTITY_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the refused-SIGKILL helper");
+            assert!(
+                output.status.success(),
+                "refused-SIGKILL helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn refused_consuming_wait_identity_helper() {
+            if std::env::var_os("UPSTROKE_REFUSED_CONSUMING_WAIT_HELPER").is_none() {
+                return;
+            }
+            refuse_the_consuming_waitid();
+
+            let (helper, helper_lifetime) = spawn_sigchld_target();
+            let witness = identity_by_hand(helper);
+            assert_eq!(
+                identity_can_collect(witness),
+                IdentityProbe::Available,
+                "the policy refused the probe's own wait, so the probe would have caught it \
+                 and this is not the argument-sensitive case"
+            );
+            let Ok(id) = libc::id_t::try_from(witness) else {
+                panic!("a descriptor fits id_t")
+            };
+            // SAFETY: as in `collect_through_identity`, with `WNOHANG` added so
+            // that a policy which does *not* refuse this call answers at once
+            // rather than waiting on a helper that is still running.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: `witness` names the helper and `info` is live for the
+            // call.
+            let refused = unsafe {
+                libc::waitid(libc::P_PIDFD, id, &mut info, libc::WEXITED | libc::WNOHANG)
+            };
+            let refused_errno = last_errno();
+            assert_eq!(
+                refused, -1,
+                "the policy did not refuse a `waitid` that collects, so the probe's wait and \
+                 the teardown's are not being told apart"
+            );
+            assert_eq!(
+                refused_errno,
+                libc::EPERM,
+                "the refusal came from somewhere other than the policy: {}",
+                std::io::Error::from_raw_os_error(refused_errno)
+            );
+            close_fd(witness);
+
+            let identity = helper_identity(helper);
+            assert!(
+                identity >= 0,
+                "the probes pass under this policy, so the identity is taken and the teardown \
+                 through it is what has to answer for the refusal"
+            );
+
+            let end = Reaper {
+                command_fd: -1,
+                ack_fd: -1,
+                _command_keepalive_fd: -1,
+                pid: helper,
+                identity,
+            }
+            .abandon();
+            assert_eq!(
+                end.kill_errno,
+                0,
+                "the teardown's SIGKILL was not delivered: {}",
+                std::io::Error::from_raw_os_error(end.kill_errno)
+            );
+            assert_eq!(
+                end.waited,
+                helper,
+                "the teardown left the helper behind: it collected {} and reported {}",
+                end.waited,
+                std::io::Error::from_raw_os_error(end.wait_errno)
+            );
+            assert!(
+                libc::WIFSIGNALED(end.status) && libc::WTERMSIG(end.status) == libc::SIGKILL,
+                "the helper did not end on the teardown's SIGKILL: {}",
+                end.status
+            );
+            close_fd(identity);
+            drop(helper_lifetime);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_refused_collection_is_answered_where_the_wait_is_made() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "refused_consuming_wait_identity_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("UPSTROKE_REFUSED_CONSUMING_WAIT_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the refused-collection helper");
+            assert!(
+                output.status.success(),
+                "refused-collection helper: {}\n{}\n{}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)

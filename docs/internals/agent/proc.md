@@ -1203,6 +1203,16 @@ then the `kill` and the `waitpid` they have always been. Row
 `HELPER-END-BY-PID-WHERE-THERE-IS-NO-IDENTITY` is what remains there,
 and DESIGN §15 states it as best effort rather than leaving it implied.
 
+A policy reaches it two ways, and only one of them is this constant.
+Where the refused call is `pidfd_open` itself, or a call a probe makes,
+acquisition answers `NO_HELPER_IDENTITY` and no descriptor is held.
+Where the refusal selects on arguments the probes do not pass — a
+filter that permits the probe's signal `0` and refuses the teardown's
+`SIGKILL` — nothing at acquisition can see it, and `signal_helper` and
+`collect_helper` reach the same place when their own call is refused.
+Neither route is available to an acquisition that failed for want of a
+descriptor: see `open_helper_identity`.
+
 ## `mod termination` › `const HELPER_IDENTITY_ENDED: libc::c_int = -2;`
 
 The answer for a helper that has already ended and been collected by
@@ -1220,11 +1230,12 @@ module exists to close. `signal_helper` and `collect_helper` answer for
 the ended helper instead: `ESRCH` and `ECHILD`, the answers the kernel
 itself gives through a descriptor that still names it.
 
-## `mod termination` › `fn open_helper_identity(pid: libc::pid_t) -> libc::c_int {`
+## `mod termination` › `fn open_helper_identity(pid: libc::pid_t) -> Result<libc::c_int, libc::c_int> {`
 
 A name for a helper this process has just forked that a reused number
 cannot impersonate, `HELPER_IDENTITY_ENDED` if the helper has already
-ended, or `NO_HELPER_IDENTITY`.
+ended, `NO_HELPER_IDENTITY` where this host has no such name to give, or
+`Err(errno)` where it has one and this process could not take it.
 
 Called as the next parent statement after `fork` returns, at both
 helper fork sites, because the window this leaves is the window it
@@ -1238,15 +1249,30 @@ mattered: a helper's entire startup, up to `HELPER_READY_BUDGET`, and
 then however long its teardown takes.
 
 **Only a refusal of the operation itself answers `NO_HELPER_IDENTITY`.**
-Every call here has two ways to fail, and they are opposites. `ESRCH`
-from `pidfd_open`, and `ECHILD` from the collection probe, are the
-kernel answering *about this helper*: it has ended and been collected,
-which is proof the call works and proof the number is free. `ENOSYS`,
-`EINVAL` and a policy's `EPERM` are the kernel or the host refusing the
-call, which is the only thing the number is a fallback for. Reading the
-first as the second — which the first form of this function did, closing
-the descriptor on any probe failure — hands the teardown back the number
-of a helper it has just established is gone.
+An acquisition here has three ways to fail, and they mean three
+different things. `ESRCH` from `pidfd_open`, and `ECHILD` from the
+collection probe, are the kernel answering *about this helper*: it has
+ended and been collected, which is proof the call works and proof the
+number is free. `ENOSYS`, `ENODEV`, `EINVAL` and a policy's `EPERM` or
+`EACCES` are this host not offering the call, which is the one thing the
+number is a fallback for. Reading the first as the second — which the
+first form of this function did, closing the descriptor on any probe
+failure — hands the teardown back the number of a helper it has just
+established is gone.
+
+**And a resource this process ran out of is neither.** `EMFILE`,
+`ENFILE` and `ENOMEM` say only that the descriptor could not be taken
+*now*, on a host whose identities work; the descriptor table of a
+process whose whole business is spawning and supervising agents is an
+ordinary thing to run to the end of. Answering `NO_HELPER_IDENTITY`
+there widens the documented fallback silently, and restores the exact
+sequence row `PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`
+exists to close — measured: a `spawn_reaper()` with four free
+descriptor slots took none, the host's wildcard wait collected the
+helper, and the teardown killed and collected the stranger holding the
+re-issued number. So the answer is `Err(errno)`, both launch sites fail
+on it, and the helper they cannot name is ended by closing its command
+pipe rather than by a signal aimed at a number.
 
 A descriptor is kept when both probes answered, whichever way they
 answered: a descriptor naming an ended helper is not a degraded
@@ -1256,13 +1282,24 @@ stranger holding the number. A descriptor is closed when either probe
 was refused, and what is answered then is `HELPER_IDENTITY_ENDED` if the
 other probe reported the helper gone and `NO_HELPER_IDENTITY` otherwise.
 
+**What the probes are for, and what they are not.** They choose which
+path to prefer on a host that cannot use a descriptor for all three
+calls, and nothing rests on them being right about the teardown. They
+cannot be: a seccomp filter selects on arguments, and the probes' are
+not the teardown's — signal `0` against `SIGKILL`, `WNOHANG | WNOWAIT`
+against a wait that collects. Whether the number may be used is settled
+in `signal_helper` and `collect_helper`, by what the teardown's own call
+answered.
+
 ## `mod termination` › `enum IdentityProbe {`
 
 What one capability probe on a fresh descriptor established.
 
 Three answers and not two, for the reason above: `Available` and
 `HelperEnded` both establish that the call works, and only `Refused`
-says the number is all there is.
+says this host will not offer it for the arguments the probe passed.
+What it does not establish is that the teardown's own call will be
+allowed, which is why neither probe is what decides that.
 
 ## `mod termination` › `fn identity_can_collect(identity: libc::c_int) -> IdentityProbe {`
 
@@ -1287,12 +1324,18 @@ Acquisition and collection succeeding does not establish it.
 `pidfd_send_signal` is a separate system call, and a seccomp policy can
 allow `pidfd_open`, `waitid` and `kill` while refusing this one —
 measured on the build box: `pidfd_open=3`, the collection probe `0`,
-`pidfd_send_signal` `-1 EPERM`. Without this probe such a host takes the
-identity, the teardown's `SIGKILL` answers `EPERM`, nothing is
-delivered, and the blocking collection call that follows waits on a
-helper that is still running. The probe sends signal `0`, which is the
-kernel's permission check and delivers nothing; `ESRCH` from it is an
-answer about the helper, not a refusal, so it reports `HelperEnded`.
+`pidfd_send_signal` `-1 EPERM`. A host that will not carry a signal
+through a descriptor is better off not holding one, which is what this
+answers.
+
+It establishes nothing about the teardown's own signal. The probe sends
+signal `0`, which is the kernel's permission check and delivers nothing;
+the teardown sends `SIGKILL`, and a filter that selects on arguments can
+permit the first and refuse the second — measured under a filter
+refusing `pidfd_send_signal(..., SIGKILL, ...)` alone, both probes
+answered `Available` and the teardown's signal answered `-1 EPERM`.
+`signal_helper` is where that is answered for. `ESRCH` from the probe is
+an answer about the helper, not a refusal, so it reports `HelperEnded`.
 
 ## `mod termination` › `fn signal_helper(pid: libc::pid_t, identity: libc::c_int, signal: libc::c_int) -> libc::c_int {`
 
@@ -1310,6 +1353,18 @@ is that same `ESRCH`, written into `errno` by `set_errno` and reported
 not the helper's any more. `describe_helper_end` then says "nothing of
 that number was there", which is what happened.
 
+Where the call was made and refused, the number is what is left. A
+policy that refuses `pidfd_send_signal` for `SIGKILL` while permitting
+the signal `0` acquisition probed with cannot be seen before the signal
+is sent, so it is answered here, where it happens: `ESRCH` is the
+kernel's answer about the helper and stops the teardown, and any other
+errno is the call refused for these arguments, which leaves this host
+exactly where a host with no identity at all stands. Falling through to
+the `kill` is that host's documented end. Not falling through is a
+launch that signals nothing and then blocks in the collection call on a
+helper still running — measured: `-9` from a watchdog at the head that
+did not fall through, against `exit 0` in 2.066s on its base.
+
 ## `mod termination` › `fn collect_helper(`
 
 Collect the helper, blocking, answering what `waitpid(pid, status, 0)`
@@ -1326,6 +1381,15 @@ is `-1` with `ECHILD`, as `waitid` on a descriptor naming it would have
 answered. Every caller here loops until the wait is not interrupted and
 then reads `errno`, so the answer has to be in `errno` and not only in
 the return value.
+
+As in `signal_helper`, a wait that was made and refused falls through to
+the number. `ECHILD` is the kernel answering about this helper and
+`EINTR` is this call to make again; both keep the number out of reach.
+Anything else is the consuming wait refused for arguments the
+`WNOHANG | WNOWAIT` probe did not pass, and the `waitpid` below is then
+the only way the helper is collected at all — measured: the head that
+did not fall through left it behind, `exit 101`, where its base exited
+`0`.
 
 ## `mod termination` › `fn collect_through_identity(identity: libc::id_t, status: &mut libc::c_int) -> libc::pid_t {`
 
@@ -2334,26 +2398,74 @@ failures are quoted in the pull request body; each run exited `101`.
 
 Subprocess entry for the host-reap check above.
 
+## `mod tests` › `fn install_seccomp_policy(program: &mut [libc::sock_filter]) {`
+
+Install a BPF program as this process's seccomp policy.
+
+`PR_SET_NO_NEW_PRIVS` first, since the kernel refuses `PR_SET_SECCOMP`
+without it or `CAP_SYS_ADMIN`, and it takes its remaining four arguments
+as `1, 0, 0, 0` exactly, which is why all five are passed. No
+architecture check in any program here, because these are fixtures and
+not sandboxes.
+
+A filter is irreversible for the process that installs it, so every
+fixture that calls this runs only in a subprocess helper. `prctl` is
+reached through `libc::syscall`, as `pidfd_open` and
+`pidfd_send_signal` are in this module: the classified, denied primitive
+is the same one, the syscall number is classified beside theirs in
+`effects/wrappers.toml`, and `libc::prctl` resolves on no other
+supported platform.
+
+The instruction builders above it — `seccomp_instruction`,
+`seccomp_load`, `seccomp_jump_if_equal`, `seccomp_jump_if_any_set`,
+`seccomp_return`, `seccomp_refuse_with_eperm` and
+`seccomp_syscall_number` — exist so that the three programs below read
+as what they select on. A jump's `jt` and `jf` are how many instructions
+it skips, so an instruction's meaning depends on where it sits; writing
+them as `sock_filter` literals hid that behind four struct fields each.
+
+## `mod tests` › `fn seccomp_argument_words(index: u32) -> (u32, u32) {`
+
+Where the two halves of a system call's `index`th argument sit in
+`seccomp_data`.
+
+The struct is `nr` at 0, `arch` at 4, the instruction pointer at 8 and
+six eight-byte arguments from 16. BPF loads 32 bits at a time, so an
+eight-byte argument is two loads, and which offset is the low half is
+the target's byte order — hence a pair and a `cfg!` rather than a
+constant. The three supported platforms are all little-endian; a
+program that read the wrong half on some other one would not refuse
+what it was written to refuse, and would pass silently.
+
 ## `mod tests` › `fn refuse_pidfd_send_signal() {`
 
-A seccomp filter that answers `EPERM` for `pidfd_send_signal` and allows
-every other system call.
+A seccomp filter that answers `EPERM` for `pidfd_send_signal` whatever
+its arguments, and allows every other system call.
 
-Four BPF instructions: load the syscall number out of `seccomp_data`,
-which is its first field; compare it with `pidfd_send_signal`; return
-`SECCOMP_RET_ERRNO | EPERM` on a match and `SECCOMP_RET_ALLOW`
-otherwise. No architecture check, because this is a fixture and not a
-sandbox. `PR_SET_NO_NEW_PRIVS` first, since the kernel refuses
-`PR_SET_SECCOMP` without it or `CAP_SYS_ADMIN`, and it takes its
-remaining four arguments as `1, 0, 0, 0` exactly, which is why all five
-are passed.
+The shape of a host that does not offer the call at all. Four
+instructions: load the syscall number, compare it, refuse or allow.
 
-A filter is irreversible for the process that installs it, so this runs
-only in the subprocess helper below. `prctl` is reached through
-`libc::syscall`, as `pidfd_open` and `pidfd_send_signal` are in this
-module: the classified, denied primitive is the same one, the syscall
-number is classified beside theirs in `effects/wrappers.toml`, and
-`libc::prctl` resolves on no other supported platform.
+## `mod tests` › `fn refuse_pidfd_send_signal_of(signal: libc::c_int) {`
+
+A seccomp filter that answers `EPERM` for
+`pidfd_send_signal(..., signal, ...)` and for nothing else.
+
+The case the acquisition probe cannot see, and the reason nothing rests
+on it seeing anything: a filter selects on arguments, the probe sends
+signal `0`, and the teardown sends `SIGKILL`. Both halves of the
+argument word are compared — a 64-bit argument slot carrying a small
+signal number has a zero high half, and a program that read only the low
+one would also refuse a signal whose high half was set.
+
+## `mod tests` › `fn refuse_the_consuming_waitid() {`
+
+A seccomp filter that answers `EPERM` for a `waitid` that collects, and
+allows one that does not.
+
+The collection half of the same case. `BPF_JSET` tests bits rather than
+equality, so the program is "this is `waitid` and `WNOWAIT` is not among
+its options" — which is exactly the difference between the probe's wait
+and the teardown's, and nothing else about the call.
 
 ## `mod tests` › `fn refused_identity_signal_helper() {`
 
@@ -2368,10 +2480,11 @@ would produce the same passing test.
 
 Then `open_helper_identity` must answer `NO_HELPER_IDENTITY`, and the
 teardown built on it must finish: `SIGKILL` delivered by number, the
-helper collected, `WIFSIGNALED`. That is the path the base took, and the
-hang this closes is what the reviewed head did instead — the identity
-taken, the signal refused, and the blocking collection call entered on a
-helper still running.
+helper collected, `WIFSIGNALED`. That is the path the base took, and it
+is where a host that will not carry a signal through a descriptor at all
+belongs. It is not what stops the hang — `signal_helper` is, for every
+refusal including the ones no probe can see; this pins the cheaper
+answer for the case a probe can.
 
 The helper is `spawn_sigchld_target`'s fixture child, which lives until
 its pipe closes, so a failing assertion here cannot leave a sleeping
@@ -2381,6 +2494,106 @@ child ends itself.
 ## `mod tests` › `fn an_identity_whose_signal_syscall_is_refused_is_not_taken() {`
 
 Subprocess entry for the refused-signal check above.
+
+## `mod tests` › `fn helper_identity(pid: libc::pid_t) -> libc::c_int {`
+
+`open_helper_identity` for the tests that are not about an acquisition
+that could not be made.
+
+A host that cannot be asked for an identity at all — no descriptor to be
+had, on a host that has identities — is not a state any of them models,
+so it fails here with the errno rather than becoming a third answer
+every one of them would have to assert against.
+
+## `mod tests` › `fn reaper_identity_under_a_descriptor_shortage_helper() {`
+
+That a descriptor this process ran out of is not read as a kernel with
+no identities to give.
+
+A real shortage and not an injected errno: the soft `RLIMIT_NOFILE` is
+narrowed to a little above what this process already holds, every
+remaining slot is filled with `/dev/null`, and then exactly four are
+handed back — the two pipes `spawn_reaper` opens before its `fork`. The
+descriptor it asks for next is `pidfd_open`'s, and the kernel answers
+`EMFILE`. The fill is asserted to have ended on `EMFILE` and not on
+something else, so a shortage that never happened cannot pass.
+
+The limit and the held descriptors are restored *before* the assertion,
+because a failing assertion reports through machinery that may want a
+descriptor of its own.
+
+In a fresh process because the fixture is the process's own descriptor
+table and resource limit, and because the launch is a real
+`spawn_reaper`.
+
+The assertion is that the launch does not hand back a reaper it cannot
+name: either it fails naming the acquisition, or it succeeded and every
+end of that helper is a `kill` and a `waitpid` on a number the kernel is
+free to re-issue. Witnessed against the acquisition's resource arm
+withdrawn; the failure is quoted in the pull request body and the run
+exited `101`.
+
+## `mod tests` › `fn a_descriptor_shortage_is_not_a_kernel_without_identities() {`
+
+Subprocess entry for the descriptor-shortage check above.
+
+## `mod tests` › `fn identity_by_hand(helper: libc::pid_t) -> libc::c_int {`
+
+A descriptor naming `helper`, opened the way `open_helper_identity`
+opens one.
+
+Every policy fixture pins its policy before the assertion that depends
+on it, and pinning means running the calls against a descriptor this
+test opened itself: a filter that happened to refuse the wrong call
+would otherwise produce the same passing test.
+
+## `mod tests` › `fn refused_sigkill_identity_helper() {`
+
+That a teardown whose own signal the host refuses answers for the
+refusal where the signal is sent.
+
+The policy refuses `pidfd_send_signal(..., SIGKILL, ...)` and nothing
+else, so acquisition's two probes both answer `Available` — asserted,
+along with the refusal of the real `SIGKILL` through the same
+descriptor, before anything else happens. That pins the case as the
+argument-sensitive one: the probes pass and the teardown is forbidden.
+
+`signal_helper`'s own answer is asserted *before* any collection,
+because a wait through an identity on a helper nothing has killed does
+not return, and a test that hangs reports nothing and stalls whatever is
+running it. The full `Reaper::abandon` follows it, so the teardown is
+also exercised end to end on a path that can no longer block.
+
+Witnessed against the fall-through in `signal_helper` withdrawn; the
+failure is quoted in the pull request body and the run exited `101`.
+
+## `mod tests` › `fn a_refused_signal_is_answered_where_the_signal_is_sent() {`
+
+Subprocess entry for the refused-`SIGKILL` check above.
+
+## `mod tests` › `fn refused_consuming_wait_identity_helper() {`
+
+That a teardown whose own wait the host refuses answers for the refusal
+where the wait is made.
+
+The collection half, pinned the same way: the probe's
+`WNOHANG | WNOWAIT` wait is shown to pass and a wait that collects is
+shown to be refused, so the two are known to be told apart by the
+options and not by the call. The pinning wait adds `WNOHANG` to the
+teardown's options, so a policy that did *not* refuse it answers at once
+instead of waiting on a helper that is still running.
+
+`Reaper::abandon` is then asserted whole, because the failure it guards
+is a helper left behind rather than a wait that blocks: without the
+fall-through the wait answers `-1 EPERM` at once and the teardown
+reports collecting nothing.
+
+Witnessed against the fall-through in `collect_helper` withdrawn; the
+failure is quoted in the pull request body and the run exited `101`.
+
+## `mod tests` › `fn a_refused_collection_is_answered_where_the_wait_is_made() {`
+
+Subprocess entry for the refused-collection check above.
 
 ## `mod tests` › `fn helper_ready_failure_helper() {`
 
