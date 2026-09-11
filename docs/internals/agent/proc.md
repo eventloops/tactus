@@ -889,6 +889,28 @@ Keep one parent-side reader open so a guard crash turns the next arm
 into an acknowledgement EOF instead of delivering SIGPIPE from an
 async signal handler that writes the command pipe.
 
+## `struct Reaper` › `identity: libc::c_int,`
+
+The descriptor that names this helper, or `NO_HELPER_IDENTITY` (`-1`)
+where the helper is known by number alone. It is `-1` on every launch
+with the identity path off, which is the default, and on every platform
+but Linux. With the path on it is the pid file descriptor `clone3`
+returned beside the pid (`fork_helper`), close-on-exec, held until the
+teardown's wait has collected the helper. Every teardown site tests
+`identity >= 0` and takes the identity arm or the base's code, never a
+mixture: a helper is ended by its name or by its number, and the number
+is never used where the name exists. The same field on `Guard` is the
+same thing; on the platforms where it is never read it carries
+`expect(dead_code)`, because there the guard is only ever ended by
+number.
+
+## `struct Guard` › `identity: libc::c_int,`
+
+As on `Reaper`. The guard lives for the process's life on the success
+path, so with the path on its descriptor is held for that long; on the
+three failure paths (`abort_setup`, the descriptor-configuration
+failure, the READY failure) `end_helper_through_identity` closes it.
+
 ## `pub(super) fn finish(&mut self) -> Result<(), UpstrokeError>` › `self.phase = Phase::Finished;`
 
 `cleanup` consumes and closes the reaper's raw descriptors.
@@ -1006,8 +1028,21 @@ it; the launch fails with an ordinary error. Arming process-wide
 where a forked helper's startup runs long under load, it killed the
 test harness with no diagnostic (`C-004`).
 Returns what the kill and the wait answered, for the failure
-message. The order and the calls are master's; only the two
-results are kept rather than discarded.
+message. With the identity path off the order and the calls are
+master's; only the two results are kept rather than discarded.
+
+With the identity path on (`identity >= 0`) the end is
+`end_helper_through_identity`: one `pidfd_send_signal` and, where it
+was delivered, one `waitid` through the descriptor, neither of which
+can reach a process the descriptor does not name. The pipe descriptors
+are closed after it, as `close_and_wait_reporting` would have closed
+them. `self.pid` is not read on that arm at all, which is the whole
+point: the number a host's wildcard wait may have freed is never
+signalled or waited on. `identity_teardown_helper` drives exactly that
+sequence — a helper the host collected, its identity kept, a stranger
+holding its number — and was witnessed against this arm withdrawn: the
+`kill` by number then answered `0` for the stranger and the stranger
+was found killed by signal 9.
 
 ## `impl Reaper` › `fn close_and_wait_reporting(self) -> (libc::pid_t, libc::c_int, libc::c_int) {`
 
@@ -1015,6 +1050,13 @@ results are kept rather than discarded.
 `waitpid` answered: the pid it returned or `-1`, the errno it left
 in that case, and the status it filled otherwise. The loop, the
 descriptors it closes and the order are unchanged.
+
+With the identity path on the wait is `wait_through_identity` — a
+blocking `waitid(P_PIDFD, ..., WEXITED)` — made after the same three
+pipe descriptors are closed, and the identity is closed once it has
+answered. This is the wait a `CANCEL` or `CLEANUP` acknowledgement is
+followed by, so it is unbounded for the same reason master's is: the
+reaper's exit is what releases the cleanup lease the caller depends on.
 
 ## `fn spawn_reaper() -> Result<Reaper, String>` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
 
@@ -1038,6 +1080,18 @@ Rendered BEFORE the fork, like `cleanup_paths` above and for the same
 reason: the reaper may not allocate. `None` is the ordinary state of
 every run today — nothing selects a container Runner until PR12 — and
 costs the reaper nothing at all.
+
+## `fn spawn_reaper() -> Result<Reaper, String>` › `let (pid, identity) = match fork_helper() {`
+
+The fork, and with the identity path on the name that comes with it.
+`fork_helper` answers `Err` only where no child exists — a `fork` that
+failed, or a `clone3` that answered an error — so the failure arm has
+nothing to end and nothing to collect: it closes the four pipe
+descriptors and fails the launch with the call's own words, which for
+`clone3` name the call and the variable that asked for it. The child
+takes the `pid == 0` arm below with `identity == NO_HELPER_IDENTITY`
+whichever way it was created, and the arm is master's. `spawn_guard`
+makes the same call and takes the same shape.
 
 ## `fn spawn_reaper() -> Result<Reaper, String>` › `if unsafe { libc::setpgid(0, 0) } != 0 {`
 
@@ -1085,14 +1139,14 @@ not a position.
 
 ## `fn spawn_reaper() -> Result<Reaper, String>` › `let end = describe_helper_end(reaper.abandon());`
 
-The teardown is master's, unchanged and in master's order; what
-it answered becomes the diagnostic. Nothing is asked of the pid
-before it, so this adds no window in which a number could be
-reaped elsewhere and reused (row
-`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`). The
-helper's report and the pipe's close arrive on the pipe, which the
-parent already owned and was already reading, so neither asks the
-kernel anything about the pid either.
+With the identity path off the teardown is master's, unchanged and in
+master's order; what it answered becomes the diagnostic. Nothing is
+asked of the pid before it, so this adds no window in which a number
+could be reaped elsewhere and reused. With the path on the teardown is
+through the descriptor `clone3` returned with the child, and the number
+is not used at all. Either way the helper's report and the pipe's close
+arrive on the pipe, which the parent already owned and was already
+reading, so neither asks the kernel anything about the pid.
 
 ## `fn install_reaper_dispositions() -> bool` › `if !scrub_private_helper_dispositions() {`
 
@@ -1151,6 +1205,22 @@ The stopped anchor pins the PGID until it becomes our unreaped
 zombie. Only release the reaper-owned run-cleanup lease once every
 member of that exact group is either gone or a non-running zombie.
 
+## `impl Guard` › `fn abort_setup(self) {`
+
+End a guard whose supervisor setup failed after it said READY. With the
+identity path off this is master's `kill` and `waitpid` with a null
+status pointer, retried on `EINTR`, exactly as it was; with the path on
+it is `end_helper_through_identity`, whose answers are discarded here
+as the base discards its own (row
+`PR125-CLOSE-DISCARDED-KILL-RESULT` names that at every site, and this
+change does not take it up). `default_wait_shapes_helper`'s
+`status-pointer` shape holds the default's arguments: a policy that
+kills a `wait4` carrying a status pointer is installed after the guard
+is launched and before this is called, and the fixture must exit `0`.
+It was witnessed against a status pointer put back into this wait, the
+shape a previous round of this repair introduced and a reviewer
+executed: `SIGSYS`, shell status 159.
+
 ## `impl Guard` › `fn stop_parent(self) -> Option<bool> {`
 
 Returns `Some(true)` only after the guard sent SIGSTOP and this
@@ -1171,12 +1241,15 @@ signal whose result the caller depends on and what row
 
 **Nothing here is a claim about which process the number named.** A
 pid cannot be tied to the helper that was forked with it while an
-embedding host may reap this process's children — that is the open
-design question of row
-`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`, and no
-observation the parent can make settles it. So these are the words for
-what two system calls answered, and a reader draws the same inference
-from them that they could draw from the calls themselves: no more.
+embedding host may reap this process's children, and no observation
+the parent can make settles it; DESIGN §15 states the end of a helper
+by number as best effort for that reason, and offers the identity path
+for the embedder who wants more. So these are the words for what two
+system calls answered, and a reader draws the same inference from them
+that they could draw from the calls themselves: no more. With
+`through_identity` set the two calls were `pidfd_send_signal` and
+`waitid` through the helper's own descriptor, which do name the
+process, and the words say so.
 
 ## `struct HelperEnd` › `kill_errno: libc::c_int,`
 
@@ -1194,6 +1267,18 @@ The errno `waitpid` left when it returned `-1`.
 
 The status `waitpid` filled when it returned a pid.
 
+## `struct HelperEnd` › `through_identity: bool,`
+
+Whether the signal and the wait went through the helper's identity
+rather than its number. It changes only the words: with it clear the
+description is byte for byte what it was before the field existed, and
+`a_helper_ending_is_described_by_what_the_kill_and_the_wait_answered`
+holds that. With it set, `waited == -1` together with `wait_errno == 0`
+means no wait was made — the signal was not delivered, so there was
+nothing to wait for — and the description says that rather than
+inventing an errno for a call that did not happen. By number that pair
+cannot occur: a `waitpid` that returns `-1` always leaves an errno.
+
 ## `mod termination` › `fn describe_helper_end(end: HelperEnd) -> String {`
 
 The words a failure message carries for a [`HelperEnd`].
@@ -1205,6 +1290,136 @@ exit status then names, or by being gone from the process table
 altogether. A helper that exits before READY does so through one of
 its own `_exit(1)` paths, so a status is the difference between "it
 failed setting itself up" and "it was still working when we gave up".
+
+Through the identity the same outcomes get the same sentences with
+"through the helper's identity" and "the wait through it" in them, one
+sentence for a signal that answered `ESRCH` — "nothing it named was
+there", which a descriptor can say and a number cannot — and one for a
+wait that was not made. `a_helper_ending_through_its_identity_is_described_as_such`
+pins each.
+
+## `mod termination` › `const NO_HELPER_IDENTITY: libc::c_int = -1;`
+
+The `identity` a helper carries when it is known by number alone.
+
+## `mod termination` › `const HELPER_IDENTITY_SWITCH: &str = "UPSTROKE_HELPER_IDENTITY";`
+
+The environment variable that turns the identity path on, and
+`HELPER_IDENTITY_ON` is the one value that turns it on; anything else,
+and an unset variable, leave it off. Off is the default and off is a
+host upstroke makes none of the three identity calls on. The reason it
+is a switch the embedder sets, and not something this process works
+out, is DESIGN §15's trust boundary: a syscall policy may kill the
+caller of a system call rather than refuse it, a process killed for a
+call takes no fallback, and nothing this process could learn from one
+call stays true once a filter is installed — so the only place the
+fact "this host permits these calls" is known is the deployment, and
+the environment is where a deployment speaks. Five earlier rounds of
+this repair tried to establish it from inside the process instead — a
+capability probe after the fork, errno readings, a probe in a forked
+child with a process-lifetime cache — and a reviewer executed each as
+fatal, forgeable or stale; the record is the pull request. An
+environment variable rather than an API, because the assertion is about
+a deployment and not about a run, and because it reaches an embedder
+who runs the binary and writes no Rust.
+
+## `mod termination` › `fn helper_identity_path_on() -> bool {`
+
+Read where it is used, at every fork, and never remembered.
+
+## `mod termination` › `fn fork_helper() -> Result<(libc::pid_t, libc::c_int), String> {`
+
+The one place a private helper is created. With the identity path off
+it is `fork`, and `Err` is the errno's words exactly as the two call
+sites used to format them, so the launch message is unchanged. With
+the path on it is `clone_helper_with_identity`. In both shapes `Ok`
+carries the child's pid and its identity, and the child sees
+`(0, NO_HELPER_IDENTITY)`.
+
+## `mod termination` › `struct CloneArgs {`
+
+`struct clone_args` from `linux/sched.h` in its first layout, sixty-four
+bytes (`CLONE_ARGS_SIZE_VER0`): a kernel that knows a later layout
+accepts the earlier size, and a kernel that knows only this one is
+Linux 5.3, which is the first with `clone3` at all. Spelled here rather
+than taken from the `libc` crate because that crate defines it per
+architecture and not on every Linux target this crate may be built
+for.
+
+## `mod termination` › `fn clone_helper_with_identity() -> Result<(libc::pid_t, libc::c_int), String> {`
+
+`clone3` with `CLONE_PIDFD` and `SIGCHLD` as the exit signal, and
+nothing else set, is a `fork` that also returns the descriptor naming
+the child. The descriptor is written by the kernel into `identity`
+through the address in `pidfd`, in the parent only: the child's copy
+of the address space is taken before the descriptor is installed, so
+the child neither holds the descriptor nor sees the write, and it is
+handed the constant rather than the variable to make that not matter.
+Because the name arrives with the child there is no state in which a
+helper exists and this process cannot name it — the state four earlier
+rounds spent themselves on, where `pidfd_open` after the fork could
+fail with `EMFILE` on a host whose identities worked, and the choice
+was then between signalling a number a host may have freed and
+collecting by a number the kernel may have re-issued. If `clone3` fails
+there is no child. The child is Rust code after a raw system call
+rather than after glibc's `fork`, which runs the `atfork` handlers and
+resets its own locks in the child; that is safe here on exactly the
+grounds the `SAFETY` comment on `fork` already asserted, that both
+helpers' children enter a fixed-storage syscall-only loop and never
+return to the runtime. The descriptor is close-on-exec, which
+`launched_helper_identity_helper` checks beside `/proc/self/fdinfo`
+naming the child's pid.
+
+`ENOSYS` is a kernel before 5.3, or a container profile that hides the
+call; `EPERM` is a policy that refuses it; `EMFILE` is this process out
+of descriptors. Each fails the launch with the call and the variable
+named, and none falls back to `fork`: the embedder asked for a helper
+it can name, and a helper it cannot name is not what it asked for.
+`identity_clone_refused_helper` and `identity_descriptor_shortage_helper`
+drive the first and the last, and both were witnessed against a
+fallback to `fork`, which started a helper by number.
+
+## `mod termination` › `fn end_helper_through_identity(identity: libc::c_int) -> HelperEnd {`
+
+The whole of a teardown through the identity: `pidfd_send_signal` with
+`SIGKILL`, and where it answered `0`, `wait_through_identity`; then the
+descriptor is closed. Where the signal answered anything else no wait
+is made and the `HelperEnd` says so (`waited == -1`,
+`wait_errno == 0`). `ESRCH` is the kernel saying the process the
+descriptor named has ended and been collected — by a host's wildcard
+wait, which is the finding's own sequence — and a wait would answer
+`ECHILD` for it. Any other errno is the call refused, and a refused
+signal leaves a helper alive: blocking in a wait on it would be the
+hang two earlier rounds were executed on, and signalling it by number
+would be the finding, so it is left to end on its closed command pipe
+and the message says it was not signalled and not waited for. A policy
+that writes `ESRCH` itself gets the same treatment, which is inside
+what turning the path on asserts and is what DESIGN §15 says. Witnessed
+against a retry by number after a refused signal
+(`identity_signal_refused_helper`: the helper was then found killed by
+signal 9, and `identity_teardown_helper`: the stranger was) and against
+an unmade wait reported as `ECHILD`.
+
+## `mod termination` › `fn wait_through_identity(identity: libc::c_int) -> (libc::pid_t, libc::c_int, libc::c_int) {`
+
+`waitid(P_PIDFD, fd, &info, WEXITED)`, retried on `EINTR` as master's
+`waitpid` loop is, answering the same triple `close_and_wait_reporting`
+answers: the pid collected, or `-1` and the errno. The status word is
+rebuilt from `si_code` and `si_status` by `wait_status_of` so that
+`describe_helper_end` reads it as it reads `waitpid`'s;
+`identity_wait_status_helper` holds the two equal for a child that
+exited and one that was killed. `ECHILD` is a helper something else
+collected first; anything else is the wait refused, and either way the
+helper is not collected here and not waited for by number
+(`identity_wait_refused_helper`, witnessed against a `waitpid` by number
+after the refusal, which collected it).
+
+## `mod termination` › `fn wait_status_of(code: libc::c_int, value: libc::c_int) -> libc::c_int {`
+
+The `waitpid` status word from a `siginfo_t`: `CLD_EXITED` puts the exit
+status in bits 8–15, `CLD_KILLED` the signal in bits 0–6, and
+`CLD_DUMPED` the same with bit 7 set, which is what `WIFEXITED`,
+`WIFSIGNALED` and `WTERMSIG` decode.
 
 ## `mod termination` › `enum SetupStep {`
 
@@ -1336,6 +1551,14 @@ closing, the budget elapsing and the wait failing are all `false`; a
 flood of unexpected bytes after the deadline ends at the first read
 against a zero remainder (row
 `PR125-CLOSE-FLOODED-CANCEL-UNBOUNDED-BY-THE-FINAL-LOOK`).
+
+## `mod termination` › `fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int) -> HelperEnd {`
+
+The READY-failure teardown of the guard, moved out of `spawn_guard`'s
+body so the identity arm and the base's arm sit side by side. The
+base's arm is the code that was inline: one `kill`, one `waitpid` with
+a status pointer, their answers kept for the message. The identity arm
+is `end_helper_through_identity`.
 
 ## `fn spawn_guard` › `let how = if wait == ReadyWait::Ready {`
 
@@ -1996,8 +2219,8 @@ before READY does so through one of its own `_exit(1)` paths, so
 "already exited with status 1" says it failed setting itself up,
 where "killed by signal 9" says it was still working when the
 parent gave up. Nothing here infers which process the number
-named; that is row
-`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`.
+named; by number nothing can, which is what the identity path is
+for.
 
 Witnessed against two mutations: the `WIFSIGNALED` and
 `WIFEXITED` arms swapped, and `kill_errno` replaced by a constant
