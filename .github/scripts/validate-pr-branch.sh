@@ -110,9 +110,21 @@
 # no push to the branch. That is the RIGHT answer: whether a description picks
 # out one finding or two is a property of the LEDGER, which other pull requests
 # legitimately change, and this script answers "does this name resolve to
-# exactly one filed finding" AGAINST THE LISTINGS IT IS HANDED, which are the
-# ledger as it stands when the check runs. It is not a statement about the head,
-# and no way of choosing the boundary would make it one.
+# exactly one filed finding" AGAINST THE LISTINGS IT IS HANDED AND AGAINST
+# NOTHING ELSE.
+#
+# THOSE LISTINGS ARE NOT THE LEDGER AS IT STANDS, and calling them that
+# overstates every verdict taken here. They are the pull request's three: the
+# merge-base tree, the head tree, and its own commits. A finding the TARGET
+# filed after the branch point is in none of them, on a synchronize and on the
+# queue entry alike, because the tree of the commit being merged is never
+# listed -- replayed on a queue merge whose target had added two
+# same-description findings, the name conformed at exit 0 while the queue
+# commit's own reviews/findings/ named 2 findings at exit 1. So the answer is
+# the narrow one: the name resolved to exactly one filed finding in the
+# listings handed over, at the moment they were built. It is not a statement
+# about the head, it is not a statement about the ledger a merge lands on, and
+# no way of choosing the boundary would make it either.
 # .github/scripts/findings-in-range.sh states the whole argument.
 #
 # WHY ALL THREE AND NOT JUST THE PULL REQUEST'S COMMITS. A finding the pull
@@ -155,6 +167,20 @@
 # every name the index records directly in the directory, and every name the
 # directory holds. Taking both can only ADD names, and `sort -u` makes a name
 # in both one finding rather than two.
+#
+# THE DIRECTORY'S HALF IS WHERE THE TWO APIS STILL PART, AND IT IS THE ONLY
+# PLACE LEFT THAT IS KNOWN TO. A file the checkout holds and git does not TRACK
+# is a candidate here and is in no tree listing: measured on one commit, an
+# untracked twin beside a committed finding is exit 1 `names 2 findings`
+# through the directory and exit 0 `conforms` through the trees. It is left
+# that way deliberately. A listing directory with no repository over it has
+# nothing but the filesystem to be read from, which is how this script is run
+# against a scratch directory and how most of its fixtures run; and the
+# disagreement cannot reach a merge, because the workflow always builds the
+# three listings and never hands over a directory. The rule that would close it
+# is "where there is an index, the index alone says which names exist", and the
+# price of that rule is a by-hand run refusing the finding its author has
+# written and not yet committed.
 #
 # A REPOSITORY GIT CANNOT READ IS A REFUSAL AND NOT A REPOSITORY THAT IS NOT
 # THERE. Reading the recorded mode means asking git two questions, and the
@@ -413,6 +439,11 @@ check_listing "$range_findings"
 # An entry below a subdirectory comes out as `sub/name` and matches no name in
 # the listing, which is the right answer twice over: the subdirectory is not a
 # finding whatever it holds, and what it holds is not in this listing.
+
+# The `.git` the walk below could not look at, named so the refusal can quote
+# it. Set only on the way out at status 2, and read only there.
+unexaminable_git=''
+
 # repository_above <directory>: is there a repository for git to have failed
 # ABOUT? A `.git` at that directory or at any ancestor, and `git rev-parse
 # --resolve-git-dir` -- which answers by EXIT STATUS, prints what this never
@@ -421,6 +452,31 @@ check_listing "$range_findings"
 # Asking git rather than `[[ -e ]]` is what keeps an empty directory named
 # `.git` from being one: a stray /tmp/.git would otherwise refuse every by-hand
 # listing under /tmp, and that is a false red on a legitimate branch.
+#
+# THE ANSWER IS ONE OF THREE AND NEVER ONE OF TWO: 0 a repository, 1 none, and
+# 2 "there is a `.git` here and this cannot look at it". Treating every
+# unsuccessful resolution as an absence is the discarded read failure one level
+# up, one level down: `git rev-parse --resolve-git-dir` fails with `error
+# opening '.../.git': Permission denied` on a LINKED WORKTREE whose `.git` FILE
+# is unreadable, that read as "no repository", and the filesystem fallback
+# answered `conforms` at exit 0 with empty stderr on a checkout this refuses at
+# exit 1 when the file is readable. Metadata that is MISSING may fall back;
+# metadata that CANNOT BE EXAMINED must refuse. Measured: the same fixture is
+# exit 1, `names 2 findings`, at ee37d4e7 and at this commit, and exit 0 in
+# between.
+#
+# WHICH OF THOSE THREE IT IS, IS NOT READ OUT OF GIT'S MESSAGE. Every failure
+# here is exit 128 whatever the reason -- `not a gitdir` for a nonexistent
+# `.git`, for an empty directory named `.git` and for an unreadable `.git`
+# DIRECTORY alike, `error opening` for an unreadable `.git` file -- and git's
+# words quote the caller's own pathname, which is how the last repair was
+# defeated. So the third answer comes from THIS asking the filesystem the one
+# question it can answer for itself: is there something named `.git` here that
+# it cannot look inside or read? A directory is looked INTO rather than listed,
+# because looking inside is what git does with one; a `.git` that is neither a
+# directory nor a regular file is nothing git would resolve and is left to the
+# walk. An unreadable `.git` DIRECTORY is the case git itself reports as no
+# repository, and the test below is what separates it from an empty one.
 #
 # A GIT_DIR or GIT_WORK_TREE in the environment points git at an index this walk
 # cannot reach, so it counts as a repository in play and the answer is yes.
@@ -434,6 +490,22 @@ repository_above() {
     if git rev-parse --resolve-git-dir "$dir/.git" >/dev/null 2>&1; then
       return 0
     fi
+    # Git said no. This level is an ABSENCE only where this can see that there
+    # was nothing to read; a `.git` it cannot examine leaves the question open,
+    # and an open question is not an absence. The tests are attempts and not
+    # permission bits: `-e <dir>/.` needs search on the directory, and the open
+    # needs read on the file, which is what git needed and did not get.
+    if [[ -d "$dir/.git" ]]; then
+      if [[ ! -e "$dir/.git/." ]]; then
+        unexaminable_git="$dir/.git"
+        return 2
+      fi
+    elif [[ -f "$dir/.git" ]]; then
+      if ! { : < "$dir/.git"; } 2>/dev/null; then
+        unexaminable_git="$dir/.git"
+        return 2
+      fi
+    fi
     if [[ "$dir" == / ]]; then
       return 1
     fi
@@ -443,7 +515,7 @@ repository_above() {
 }
 
 git_index_entries() {
-  local dir="$1" answer status=0 record
+  local dir="$1" answer status=0 record above=0
   command -v git >/dev/null 2>&1 || return 0
   # THE ANSWER IS GIT'S STDOUT AND ITS EXIT STATUS, AND NEVER THE TEXT OF A
   # MESSAGE: git's diagnostics quote the caller's own pathname, and a repository
@@ -454,8 +526,11 @@ git_index_entries() {
     # Git failing is permission to judge by the filesystem in exactly one case:
     # there is no repository here, so there is no index it could have read and
     # no recorded mode to disregard. Anything else -- a config it cannot read, a
-    # repository it will not touch -- is a refusal, whatever it said.
-    if ! repository_above "$dir"; then
+    # repository it will not touch, a `.git` this cannot examine either -- is a
+    # refusal, whatever it said. THREE ANSWERS AND NOT TWO, because collapsing
+    # the third into the second is how the filesystem fallback came back twice.
+    repository_above "$dir" || above=$?
+    if [[ "$above" -eq 1 ]]; then
       return 0
     fi
     echo "branch-name-policy: git could not say what it records for '$dir':" >&2
@@ -465,8 +540,16 @@ git_index_entries() {
     # refusal is two lines below and must not be pre-empted by `set -e`.
     { git -C "$dir" rev-parse --is-inside-work-tree 2>&1 >/dev/null || true; } \
       | sed 's/^/  /' >&2
-    echo "  A listing inside a repository this cannot read is refused rather than" >&2
-    echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
+    if [[ "$above" -eq 2 ]]; then
+      echo "  '$unexaminable_git' is there and cannot be examined, so whether this" >&2
+      echo "  listing is inside a repository is not known either. Metadata that" >&2
+      echo "  cannot be read is refused rather than read as metadata that is not" >&2
+      echo "  there, because only the second may be judged by the filesystem --" >&2
+      echo "  which cannot see a recorded mode at all." >&2
+    else
+      echo "  A listing inside a repository this cannot read is refused rather than" >&2
+      echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
+    fi
     return 1
   fi
   # Stdout alone, so the answer is `true` or `false` and nothing else: a warning
@@ -480,6 +563,48 @@ git_index_entries() {
     esac
     printf '%s\n' "$record"
   done
+}
+
+# recorded_path_mode <path>: what git RECORDS AT THAT PATH ITSELF -- a mode for
+# a blob, `tree` for a path it records things under, and nothing at all for a
+# path it records nothing about, which is an untracked one or no repository.
+#
+# The index is asked from the path's PARENT with the last component as the
+# pathspec, because asking from INSIDE the path is already following it: `git -C
+# <symlink> ls-files` answers for wherever the link points, which is the whole
+# defect. One `ls-files` answers both questions: a record whose name is exactly
+# the last component is a blob AT the path, and a record named `<base>/...` is
+# something recorded UNDER it, so the path is a directory in the ledger. The
+# exact name sorts before anything under it, so a blob is seen first.
+#
+# `:(literal)` because a pathname is the CALLER'S to choose and a pathspec is
+# not a pathname: a listing at `:weird` is read by git as pathspec magic, and
+# plain `-- ':weird'` matched nothing at all where the literal form matches the
+# path -- a listing silently read as recording nothing, which is the narrowing
+# every rule here refuses.
+recorded_path_mode() {
+  local path="$1" parent base record name
+  command -v git >/dev/null 2>&1 || return 0
+  while [[ "$path" == */ && "$path" != / ]]; do
+    path="${path%/}"
+  done
+  base="${path##*/}"
+  [[ -n "$base" ]] || return 0
+  parent="${path%/*}"
+  [[ "$parent" != "$path" ]] || parent='.'
+  [[ -n "$parent" ]] || parent=/
+  while IFS= read -r -d '' record; do
+    name="${record#*$'\t'}"
+    if [[ "$name" == "$base" ]]; then
+      printf '%s\n' "${record%% *}"
+      return 0
+    fi
+    if [[ "$name" == "$base"/* ]]; then
+      printf 'tree\n'
+      return 0
+    fi
+  done < <(git -C "$parent" ls-files -sz -- ":(literal)$base" 2>/dev/null)
+  return 0
 }
 
 # read_listing <listing>: the finding filenames in one listing, one per line,
@@ -503,9 +628,78 @@ git_index_entries() {
 # listings conform -- or one that is, which is a name that is no finding
 # answering for one. Both skip a name beginning with a dot, and both are right
 # to: a finding's name begins with `P`.
+#
+# AND THE LISTING'S OWN RECORDED TYPE IS READ BEFORE THE PATH IS FOLLOWED. The
+# entries were already decided by the mode git records; the DIRECTORY ITSELF was
+# not, and it is a tracked entry like any other. With `reviews/findings` a
+# committed symlink to a sibling directory -- a `120000 blob`, a clean checkout,
+# `git status` empty -- the tree listings hold no finding under reviews/findings/
+# and refuse at exit 1, while handing that path straight in FOLLOWED the link and
+# resolved a name out of files no ledger holds, at exit 0. It is the same rule
+# one level up: a symlink is not a finding, and a symlink is not the findings
+# directory either. The answer is the EMPTY SET and not a refusal, because the
+# empty set is what the tree listings give for that commit -- a refusal here
+# would part the two APIs again, the other way round, wherever another listing
+# resolves the name.
+#
+# Under core.symlinks=false the same commit materialises that link as a REGULAR
+# FILE holding `../elsewhere`, which is not a directory at all and would be read
+# as a file listing naming one absent finding. The recorded mode catches both,
+# because it is the same 120000 either way.
+#
+# The other way round -- git records a DIRECTORY and the checkout holds a link
+# or a file in its place -- is a listing this cannot read rather than one that
+# is empty: the findings are the entries the index records under that path, and
+# what the checkout put there is not the ledger. It refuses and says so, which
+# is the one answer that is neither a false green nor a silent narrowing.
 read_listing() {
-  local listing="$1" out entry path recorded record mode name recorded_regular recorded_other
-  local bytes kept
+  local listing="$1" out='' entry path recorded record mode name recorded_regular recorded_other
+  local nul listing_mode
+  # A failure here is a refusal and never "git records nothing about it": read
+  # as nothing, an unreadable index would put the listing back on the
+  # filesystem, which is the fallback every rule above refuses.
+  listing_mode="$(recorded_path_mode "$listing")" || {
+    echo "branch-name-policy: git could not report what it records for the listing" >&2
+    echo "  path '$listing' itself" >&2
+    return 1
+  }
+  case "$listing_mode" in
+    100644|100755) ;;
+    tree)
+      # Git records a DIRECTORY here, so the ledger's findings are the entries
+      # it records under it -- and they are reached by walking that directory,
+      # which needs the checkout to hold one. Where it holds a link or a file
+      # instead, the entries are in the index and not at the end of whatever is
+      # there, and a listing this cannot read is a refusal and never an empty
+      # set.
+      if [[ ! -d "$listing" || -L "$listing" ]]; then
+        echo "branch-name-policy: git records '$listing' as a directory and the" >&2
+        echo "  checkout does not hold one there, so its findings cannot be read from" >&2
+        echo "  it. That is refused rather than read from whatever the checkout put" >&2
+        echo "  in its place, which is not the ledger." >&2
+        return 1
+      fi
+      ;;
+    '')
+      # Git records nothing at this path: an untracked one, or no repository at
+      # all. The filesystem is then the only witness, and it is asked the same
+      # question the recorded mode answers above -- with `-L`, and never `-e`
+      # or `-d`, which FOLLOW a link rather than seeing one.
+      if [[ -L "$listing" ]]; then
+        echo "branch-name-policy: findings listing '$listing' is a symlink, so it is" >&2
+        echo "  not a findings directory and holds no finding of its own. A tree" >&2
+        echo "  listing of the same commit holds none for it either." >&2
+        return 0
+      fi
+      ;;
+    *)
+      echo "branch-name-policy: git records '$listing' as mode $listing_mode, which is" >&2
+      echo "  neither a regular file nor a directory: it is not a findings listing," >&2
+      echo "  and it holds no finding. A tree listing of the same commit holds none" >&2
+      echo "  for it either." >&2
+      return 0
+      ;;
+  esac
   if [[ -d "$listing" ]]; then
     ls -1 -- "$listing" >/dev/null || return 1
     # WHAT GIT RECORDS DECIDES A TRACKED ENTRY, NOT WHAT THE CHECKOUT
@@ -625,26 +819,40 @@ read_listing() {
     done
     return 0
   elif [[ -f "$listing" ]]; then
-    # A NUL IS NOT A SEPARATOR AND NOT PART OF A NAME, AND IT IS REFUSED BEFORE
-    # THE FILE IS READ, because reading it is what destroys the evidence.
-    # `$(cat …)` DISCARDS a NUL: a listing handed over as NUL-delimited records
-    # arrived with its records CONCATENATED -- `P2_…_shared-name.md<NUL>README.md`
-    # read as one name ending `.mdREADME.md` -- so a twin stopped matching, one
-    # match was left, and the ambiguous name conformed at exit 0 where the same
-    # two names LF-delimited refused it at exit 1. Bash prints a warning and
-    # carries on; this cannot, because what it carries on with is the narrowing
-    # every rule here refuses. Counting the bytes is how a NUL is seen at all:
-    # no bash variable can hold one, so the file is measured rather than read.
-    bytes="$(wc -c < "$listing")" || return 1
-    kept="$(LC_ALL=C tr -d '\000' < "$listing" | wc -c)" || return 1
-    if (( bytes != kept )); then
+    # THE FILE IS READ ONCE, AND WHAT IS CHECKED IS WHAT IS PARSED. A caller's
+    # path is not a value: it can hold different bytes at every open, and a
+    # check on bytes that are then re-read is a check on bytes nobody parsed.
+    # Measured on this listing: the NUL check counted the file twice and `cat`
+    # read it a third time, a replacement landed in the window between the
+    # counts and the read -- atomically, by rename -- and the ambiguous name
+    # conformed at exit 0 over `warning: command substitution: ignored null
+    # byte in input`, where the unreplaced file refuses it at exit 1. One open
+    # cannot disagree with itself, and the rule that follows from it is the
+    # whole repair: NEVER READ A CALLER-SUPPLIED PATH MORE THAN ONCE.
+    #
+    # `read -d ''` is that one open, and it is also how the NUL is seen. A NUL
+    # is not a separator and not part of a name, and no bash variable can hold
+    # one, so it is read AS the delimiter: FINDING it is the refusal, and not
+    # finding it -- the end of the file -- is the whole file in `out`. `$(cat
+    # …)` instead DISCARDED a NUL and concatenated the records either side
+    # (`P2_…_shared-name.md<NUL>README.md` read as one name ending
+    # `.mdREADME.md`), so a twin stopped matching, one match was left, and an
+    # ambiguous name conformed at exit 0 where the same two names LF-delimited
+    # refused it at exit 1. A read that fails part-way through the file cannot
+    # be told from the end of one here; that is the cost of the single open,
+    # and it is a smaller cost than measuring one file and parsing another.
+    nul=1
+    { IFS= read -r -d '' out; nul=$?; } < "$listing" || {
+      echo "branch-name-policy: findings listing '$listing' could not be opened" >&2
+      return 1
+    }
+    if (( nul == 0 )); then
       echo "branch-name-policy: findings listing '$listing' holds a NUL byte, which" >&2
       echo "  no filename can contain and no line ending is, so its records cannot be" >&2
       echo "  read as names. Write it with LF or CRLF line endings, one finding" >&2
       echo "  filename per line." >&2
       return 1
     fi
-    out="$(cat -- "$listing")" || return 1
     # CRLF IS A LINE ENDING HERE AND NEVER PART OF A NAME. A listing written on
     # Windows leaves a carriage return on the end of every name, none of them
     # matches a finding, and the set NARROWS IN SILENCE -- which is precisely
@@ -652,11 +860,12 @@ read_listing() {
     # naming one description: exit 1 `names 2 findings` with LF throughout, exit
     # 0 `conforms` with the second listing converted to CRLF, the twin gone and
     # nothing said. So a CRLF listing is the same listing, as
-    # .github/legacy-branches.txt is already read either way above. The trailing
-    # strip is the LAST line's ending: `$(...)` has eaten its newline already
-    # and left the carriage return behind.
+    # .github/legacy-branches.txt is already read either way above. The capture
+    # keeps the LAST line's ending, where `$(...)` used to eat it, so the pairs
+    # are converted first and the final newline goes after them; a blank line
+    # left anywhere is a name no finding has and matches nothing.
     out="${out//$'\r\n'/$'\n'}"
-    out="${out%$'\r'}"
+    out="${out%$'\n'}"
     # A carriage return that is NOT a line ending is neither a line ending nor
     # part of a name this could match, and guessing which would narrow the set
     # again. A listing this cannot read is a refusal.

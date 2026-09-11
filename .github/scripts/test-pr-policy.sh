@@ -366,6 +366,121 @@ line_ending_case 'two names on LF, the control for the NUL case' \
 line_ending_case 'NUL-delimited records are not lines' \
   1 'holds a NUL byte' "$twin_lf_a" "$twin_nul_b"
 
+# ---- the bytes that are CHECKED are the bytes that are PARSED -------------------------------
+#
+# A caller's path is not a value: it can hold different bytes at every open. The
+# NUL check counted the file twice and `$(cat)` read it a third time, so what was
+# checked and what was parsed were three different reads of one name. A
+# replacement landed -- atomically, by rename -- in the window between them, and
+# the ambiguous name conformed at exit 0 over `warning: command substitution:
+# ignored null byte in input` where the unreplaced listing refuses it at exit 1.
+#
+# THE REVIEWER USED inotify TO LAND THAT WRITE; an exported shell FUNCTION is the
+# same interception with nothing to install. It runs BEFORE the real command
+# opens the file, so the replacement lands INSIDE the window rather than near it,
+# and it fires on this listing's own path -- named as an argument, or standing as
+# the command's standard input, which is what /proc is needed for.
+#
+# TWO THINGS ARE ASSERTED, and the second is what stops the first passing for the
+# wrong reason. The verdict may not change, wherever the replacement lands; and
+# no more than ONE of those commands may open the listing at all. The repaired
+# read is `read -d ''` in the shell itself, which opens the file once and runs no
+# command this can hook, so the count is zero and the window does not exist.
+toctou_dir="$fixture_dir/toctou"
+mkdir -p "$toctou_dir"
+toctou_b="$toctou_dir/twin-b.txt"
+printf 'P2_correctness_202609100001_shared-name.md\n' > "$toctou_dir/twin-a.txt"
+printf 'P2_correctness_202609100002_shared-name.md\n' > "$toctou_dir/original"
+# The same BYTE COUNT, and no NUL: nothing that counts bytes can see this land.
+# Only the name is different, and that is enough to take the twin out of the set.
+printf 'P2_correctness_202609100002_a-different.md\n' > "$toctou_dir/swap-clean"
+# And the reviewer's own replacement, which `$(cat)` empties one byte at a time.
+printf 'P2_correctness_202609100002_shared-name.md\0README.md\0' > "$toctou_dir/swap-nul"
+
+# toctou_hooked <reads-before-the-replacement> <replacement> -- <command>...
+toctou_hooked() {
+  (
+    export SWAP_TARGET="$toctou_b" SWAP_AFTER="$1" SWAP_FROM="$2" \
+      SWAP_COUNTER="$toctou_dir/opens" PR_NUMBER='' \
+      LEGACY_BRANCHES="$fixture_dir/legacy.txt"
+    shift 3
+    printf '0\n' > "$SWAP_COUNTER"
+    _touches() {
+      local argument
+      for argument in "$@"; do
+        if [[ "$argument" == "$SWAP_TARGET" ]]; then return 0; fi
+      done
+      [[ "$(readlink /proc/self/fd/0 2>/dev/null || true)" == "$SWAP_TARGET" ]]
+    }
+    _hook() {
+      local n=0
+      if _touches "$@"; then
+        read -r n < "$SWAP_COUNTER" || true
+        n=$((n + 1))
+        printf '%s\n' "$n" > "$SWAP_COUNTER"
+        if (( n > SWAP_AFTER )); then
+          command cp -- "$SWAP_FROM" "$SWAP_TARGET.new"
+          command mv -f -- "$SWAP_TARGET.new" "$SWAP_TARGET"
+        fi
+      fi
+      return 0
+    }
+    wc()   { _hook "$@"; command wc "$@"; }
+    tr()   { _hook "$@"; command tr "$@"; }
+    cat()  { _hook "$@"; command cat "$@"; }
+    head() { _hook "$@"; command head "$@"; }
+    tail() { _hook "$@"; command tail "$@"; }
+    sed()  { _hook "$@"; command sed "$@"; }
+    awk()  { _hook "$@"; command awk "$@"; }
+    od()   { _hook "$@"; command od "$@"; }
+    cut()  { _hook "$@"; command cut "$@"; }
+    dd()   { _hook "$@"; command dd "$@"; }
+    export -f _touches _hook wc tr cat head tail sed awk od cut dd
+    "$@" 2>&1
+  )
+}
+
+if [[ ! -e /proc/self/fd/0 ]]; then
+  echo 'note: skipping the replaced-listing cases (no /proc to name a read by)' >&2
+else
+  # THE INSTRUMENT IS TESTED FIRST. A hook that never fires would pass every
+  # case below while proving nothing, so this reads the listing twice through
+  # the hooked commands and asserts that both reads were seen AND that the
+  # second one got the replacement.
+  cp -- "$toctou_dir/original" "$toctou_b"
+  probe_out="$(toctou_hooked 1 "$toctou_dir/swap-clean" -- \
+    "$BASH" -c 'wc -c < "$1" >/dev/null; cat -- "$1"' _ "$toctou_b")"
+  read -r probe_opens < "$toctou_dir/opens"
+  if [[ "$probe_opens" != 2 ]] || [[ "$probe_out" != *a-different* ]]; then
+    echo "the replacement hook does not work, so the cases below prove nothing:" >&2
+    echo "  opens $probe_opens, second read [$probe_out]" >&2
+    exit 1
+  fi
+
+  toctou_case() {  # toctou_case <label> <reads-before-the-replacement> <replacement>
+    local label="$1" after="$2" from="$3" rc=0 out opens
+    cp -- "$toctou_dir/original" "$toctou_b"
+    out="$(toctou_hooked "$after" "$from" -- \
+      "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+      "$toctou_dir/twin-a.txt" "$toctou_b")" || rc=$?
+    read -r opens < "$toctou_dir/opens"
+    if [[ "$rc" != 1 ]] || ! grep -qF 'names 2 findings' <<< "$out"; then
+      echo "a listing replaced after it was read changed the verdict: $label (exit $rc)" >&2
+      exit 1
+    fi
+    if (( opens > 1 )); then
+      echo "the listing was opened $opens times, so there is a window to land in: $label" >&2
+      exit 1
+    fi
+  }
+
+  # The control first: with nothing replaced the name is ambiguous and refused,
+  # which is the verdict the two cases below must not be able to move.
+  toctou_case 'nothing replaced'                   99 "$toctou_dir/original"
+  toctou_case 'replaced after the first read'       1 "$toctou_dir/swap-clean"
+  toctou_case "the reviewer's window, before the parse" 2 "$toctou_dir/swap-nul"
+fi
+
 # bulk-fix-P<n>/ carries no finding, and never batches a severity that is
 # repaired one at a time.
 branch_pass 'bulk P3' 'bulk-fix-P3/docs-fixes'
@@ -1094,6 +1209,93 @@ else
   echo 'note: skipping the symlink cases (this filesystem will not create one)' >&2
 fi
 
+# ---- and the findings DIRECTORY is a tracked entry too ----------------------------------------
+#
+# The ENTRIES were decided by the mode git records; the listing PATH itself was
+# still followed before its own recorded type was looked at. Commit
+# `reviews/findings` as a SYMLINK to a sibling directory and git calls it a
+# `120000 blob`, `git status` stays empty, and the tree listings hold no finding
+# under reviews/findings/ and refuse at exit 1 -- while handing that path
+# straight in FOLLOWED the link and resolved the name out of files no ledger
+# holds, at exit 0. It is the rule one level up from the entries: a symlink is
+# not a finding, and a symlink is not the findings directory either. Both APIs,
+# one commit, which is the property this pull request claims.
+if [[ -L "$symlink_probe" ]]; then
+  repo_p="$fixture_dir/repo-symlinked-findings-dir"
+  new_repo "$repo_p"
+  echo seed > "$repo_p/seed.txt"
+  git -C "$repo_p" add -A && git -C "$repo_p" commit -q -m base
+  p_base="$(git -C "$repo_p" rev-parse HEAD)"
+  mkdir -p "$repo_p/elsewhere" "$repo_p/reviews"
+  echo fixture > "$repo_p/elsewhere/P2_correctness_202609100001_no-ledger-entry.md"
+  ln -s ../elsewhere "$repo_p/reviews/findings"
+  git -C "$repo_p" add -A && git -C "$repo_p" commit -q -m 'a findings directory that is a symlink'
+  p_head="$(git -C "$repo_p" rev-parse HEAD)"
+  if ! git -C "$repo_p" ls-tree "$p_head" reviews/ | grep -q '^120000 blob .*reviews/findings$' \
+    || [[ -n "$(git -C "$repo_p" status --porcelain)" ]]; then
+    echo 'the fixture was meant to COMMIT reviews/findings as a symlink, cleanly' >&2
+    exit 1
+  fi
+  both_apis 'a symlinked findings directory holds no finding' \
+    "$repo_p" "$p_base" "$p_head" 'fix-P2/correctness_no-ledger-entry' 1
+
+  # The same name in a REAL findings directory resolves, so the case above is a
+  # filter on the listing path and not a listing read as empty.
+  repo_q="$fixture_dir/repo-real-findings-dir"
+  new_repo "$repo_q"
+  echo seed > "$repo_q/seed.txt"
+  git -C "$repo_q" add -A && git -C "$repo_q" commit -q -m base
+  q_base="$(git -C "$repo_q" rev-parse HEAD)"
+  commit_finding "$repo_q" 'P2_correctness_202609100001_no-ledger-entry.md' 'a real finding'
+  q_head="$(git -C "$repo_q" rev-parse HEAD)"
+  both_apis 'and a real findings directory still resolves it' \
+    "$repo_q" "$q_base" "$q_head" 'fix-P2/correctness_no-ledger-entry' 0
+
+  # THE SAME COMMIT CHECKED OUT WHERE THE FILESYSTEM CARRIES NO SYMLINK. Under
+  # core.symlinks=false the 120000 blob is materialised as a REGULAR FILE
+  # holding `../elsewhere`, which is not a directory at all: read as a file
+  # listing it names one absent finding, and the recorded mode is what catches
+  # it, because it is the same 120000 either way.
+  git -C "$repo_p" config core.symlinks false
+  rm "$repo_p/reviews/findings"
+  git -C "$repo_p" checkout -- reviews/findings
+  if [[ -L "$repo_p/reviews/findings" ]] || [[ ! -f "$repo_p/reviews/findings" ]]; then
+    echo 'note: skipping the materialised symlinked-directory case (this git left the link a link)' >&2
+  else
+    both_apis 'a symlinked findings directory materialised as a file holds none either' \
+      "$repo_p" "$p_base" "$p_head" 'fix-P2/correctness_no-ledger-entry' 1
+  fi
+
+  # AND THE OTHER WAY ROUND IS A REFUSAL AND NOT AN EMPTY SET. Where git records
+  # a DIRECTORY and the checkout holds a link in its place, the findings are the
+  # entries the index records under that path and the link is not the directory:
+  # reading it would answer out of somebody else's files, and reading it as
+  # empty would narrow the set in silence. This is the one case here where the
+  # two APIs deliberately differ -- the tree listings resolve the name at exit 0
+  # from the commit, and the directory listing refuses at exit 1 saying it
+  # cannot be read -- because a refusal is neither a false green nor a silent
+  # narrowing, and the checkout it needs is one `git checkout` away.
+  mkdir -p "$repo_q/elsewhere"
+  echo fixture > "$repo_q/elsewhere/P3_liveness_202609100009_not-in-the-ledger.md"
+  rm -rf "$repo_q/reviews/findings"
+  ln -s ../elsewhere "$repo_q/reviews/findings"
+  replaced_case() {  # replaced_case <branch>
+    local rc=0 out
+    out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+      "$BASH" "$branch_validator" "$1" "$repo_q/reviews/findings" 2>&1)" || rc=$?
+    if [[ "$rc" != 1 ]] || ! grep -q 'checkout does not hold one there' <<< "$out"; then
+      echo "a tracked findings directory replaced by a link must refuse, saying so: $1 (got $rc)" >&2
+      exit 1
+    fi
+  }
+  # Neither the ledger's own name -- which is no longer readable from that path
+  # -- nor the name at the end of the link, which no ledger holds.
+  replaced_case 'fix-P2/correctness_no-ledger-entry'
+  replaced_case 'fix-P3/liveness_not-in-the-ledger' 
+else
+  echo 'note: skipping the symlinked-findings-directory cases (this filesystem will not create one)' >&2
+fi
+
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #
 # A TRACKED finding need not be in the working tree, and the candidate names
@@ -1188,6 +1390,120 @@ else
     echo "restoring the config must restore the verdict; got $phrase_ok_rc" >&2
     exit 1
   fi
+fi
+
+# ---- metadata that cannot be EXAMINED is not metadata that is not there ------------------------
+#
+# Where git's discovery fails, "is there a repository at all" is asked as a
+# second question -- and EVERY unsuccessful answer to that one read as "no",
+# which is the discarded read failure of the case above, one level down. A
+# LINKED WORKTREE keeps its `.git` in a FILE: make that file unreadable and both
+# git probes exit 128 `Permission denied`, the filesystem fallback decided the
+# entry, and the twin the index records and the checkout lacks was gone -- the
+# ambiguous name CONFORMED at exit 0 with empty stderr on the checkout that is
+# refused at exit 1 when the file is readable. Missing metadata may fall back;
+# metadata that cannot be examined must refuse and say so. Root can read
+# anything, so the permission cases only mean something as an ordinary user.
+unexaminable_repo="$fixture_dir/repo-unexaminable-git"
+unexaminable_wt="$fixture_dir/unexaminable-worktree"
+new_repo "$unexaminable_repo"
+echo seed > "$unexaminable_repo/seed.txt"
+git -C "$unexaminable_repo" add -A && git -C "$unexaminable_repo" commit -q -m base
+mkdir -p "$unexaminable_repo/reviews/findings"
+echo one > "$unexaminable_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$unexaminable_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+git -C "$unexaminable_repo" add -A \
+  && git -C "$unexaminable_repo" commit -q -m 'two findings share a description'
+unexaminable_twin='reviews/findings/P2_correctness_202609100002_shared-name.md'
+
+# unexaminable_verdict <checkout> -> the exit code, with stderr on stdout
+unexaminable_verdict() {
+  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$1/reviews/findings" 2>&1
+}
+
+if ! git -C "$unexaminable_repo" worktree add -q --detach "$unexaminable_wt" HEAD 2>/dev/null \
+  || [[ ! -f "$unexaminable_wt/.git" ]]; then
+  echo 'note: skipping the unexaminable-.git cases (this git made no linked worktree)' >&2
+elif [[ "$(id -u)" -eq 0 ]] || ! chmod 000 "$unexaminable_wt/.git" 2>/dev/null \
+  || git -C "$unexaminable_wt/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  chmod 644 "$unexaminable_wt/.git" 2>/dev/null || true
+  echo 'note: skipping the unexaminable-.git cases (running as root, or chmod had no effect)' >&2
+else
+  chmod 644 "$unexaminable_wt/.git"
+  # The twin leaves the linked worktree's CHECKOUT and stays in its index, so
+  # the filesystem fallback -- which cannot see an index at all -- answers
+  # `conforms` here rather than merely answering for some other reason.
+  rm "$unexaminable_wt/$unexaminable_twin"
+  control_rc=0
+  control_out="$(unexaminable_verdict "$unexaminable_wt")" || control_rc=$?
+  if [[ "$control_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$control_out"; then
+    echo "the control was meant to refuse an ambiguous name; got $control_rc" >&2
+    exit 1
+  fi
+  chmod 000 "$unexaminable_wt/.git"
+  unreadable_file_rc=0
+  unreadable_file_out="$(unexaminable_verdict "$unexaminable_wt")" || unreadable_file_rc=$?
+  chmod 644 "$unexaminable_wt/.git"
+  if [[ "$unreadable_file_rc" == 0 ]]; then
+    echo 'a .git FILE that cannot be read conformed, which is the filesystem fallback again' >&2
+    exit 1
+  fi
+  if ! grep -q 'cannot be examined' <<< "$unreadable_file_out"; then
+    echo 'an unexaminable .git must refuse SAYING SO, not silently' >&2
+    exit 1
+  fi
+  # And restoring the mode restores the verdict, so the refusal is about the
+  # unreadable file and not about the worktree.
+  restored_rc=0
+  restored_out="$(unexaminable_verdict "$unexaminable_wt")" || restored_rc=$?
+  if [[ "$restored_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$restored_out"; then
+    echo "restoring the .git file must restore the verdict; got $restored_rc" >&2
+    exit 1
+  fi
+  # THE SAME HOLE ONE SHAPE OVER. A `.git` DIRECTORY that cannot be looked into
+  # is reported by git itself as `not a gitdir` -- the same words as an empty
+  # directory named `.git` and as no `.git` at all -- so the status cannot
+  # separate them and this asks the filesystem whether there was anything to
+  # read. The main checkout is the one with a `.git` directory.
+  rm "$unexaminable_repo/$unexaminable_twin"
+  main_rc=0
+  main_out="$(unexaminable_verdict "$unexaminable_repo")" || main_rc=$?
+  if [[ "$main_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$main_out"; then
+    echo "the main checkout was meant to refuse an ambiguous name; got $main_rc" >&2
+    exit 1
+  fi
+  if chmod 000 "$unexaminable_repo/.git" 2>/dev/null \
+    && ! git -C "$unexaminable_repo/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1
+  then
+    dir_rc=0
+    dir_out="$(unexaminable_verdict "$unexaminable_repo")" || dir_rc=$?
+    chmod 755 "$unexaminable_repo/.git"
+    if [[ "$dir_rc" == 0 ]] || ! grep -q 'cannot be examined' <<< "$dir_out"; then
+      echo "a .git DIRECTORY that cannot be looked into conformed or said nothing; got $dir_rc" >&2
+      exit 1
+    fi
+  else
+    chmod 755 "$unexaminable_repo/.git" 2>/dev/null || true
+    echo 'note: skipping the unexaminable-.git-directory case (chmod had no effect)' >&2
+  fi
+fi
+
+# AND A DIRECTORY NAMED `.git` THAT IS NOT A REPOSITORY IS STILL NOT ONE. This
+# is why the question is put to git rather than to `[[ -e ]]`, and why the
+# examinability test above is an attempt to look inside rather than a test that
+# something is there: a stray /tmp/.git -- an empty directory, readable, owned
+# by whoever got there first -- would otherwise turn every by-hand listing under
+# /tmp red, which is a false refusal of a legitimate branch.
+stray_parent="$fixture_dir/stray-git"
+mkdir -p "$stray_parent/.git" "$stray_parent/listing"
+echo real > "$stray_parent/listing/P3_liveness_202609100003_a-real-finding.md"
+if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+  "$stray_parent/listing" >/dev/null 2>&1; then
+  echo 'an empty directory named .git above a by-hand listing must not refuse it' >&2
+  exit 1
 fi
 
 # ---- a sparse checkout is a smaller checkout and not a smaller ledger --------------------------

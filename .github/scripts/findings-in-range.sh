@@ -47,9 +47,20 @@
 #   base -- and each was disproved by a case where the ledger moved underneath
 #   an unchanged head. A boundary that does not move is not the missing piece;
 #   there is no such boundary, because the thing being resolved is not a
-#   property of the branch. So: THIS SCRIPT RESOLVES THE NAME AGAINST THE LEDGER
-#   AS IT STANDS WHEN IT RUNS, and it runs again on every synchronize and on the
-#   queue entry that is actually merged.
+#   property of the branch. So: THIS SCRIPT BUILDS THE LISTINGS THE NAME IS
+#   RESOLVED AGAINST OUT OF THE PULL REQUEST -- its merge bases, its head, and
+#   its own commits -- AS THEY STAND WHEN IT RUNS, and it runs again on every
+#   synchronize and on the queue entry that is actually merged.
+#
+#   THAT IS NOT THE LEDGER AS IT STANDS ANYWHERE, and the three listings must
+#   not be described as one. The tree of the commit being merged is never
+#   listed: the head is the pull request's head and the boundary is its merge
+#   base, so a finding the TARGET filed after the branch point is in none of
+#   the three on the queue entry either. Replayed on a queue merge whose target
+#   had added two same-description findings, the name conformed at exit 0 while
+#   the queue commit's own reviews/findings/ named 2 findings at exit 1. What a
+#   green check says is the narrow thing: the name resolved to exactly one
+#   filed finding in the listings built here, at the moment they were built.
 #
 #   The merge base is still the right DEFAULT. It is the boundary that does not
 #   drag in a finding this branch never saw -- rooted at the target's current
