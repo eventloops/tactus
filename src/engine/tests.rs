@@ -4947,6 +4947,126 @@ fn crash_child_dies_inside_an_attempt() {
     std::process::exit(0);
 }
 
+const V1_OBJECT_GRAPH: &str = "UPSTROKE_PR271_V1_OBJECT_GRAPH";
+
+const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\
+     cmd = 'git diff --exit-code probe-recorded probe-replacing'\n";
+
+fn v1_object_graph_child(test: &str) -> std::process::ExitStatus {
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
+        .args(["--exact", test, "--ignored", "--nocapture"])
+        .env(V1_OBJECT_GRAPH, "1");
+    crate::workspace_manager::fixture::without_ambient_replacement_controls(&mut command)
+        .status()
+        .expect("spawn the witness child")
+}
+
+fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {
+    let repo = temp_engine_repo(tag);
+    crate::workspace_manager::fixture::pin_replacement_refs_in(&repo);
+    seed(&repo, plan, Some(config));
+
+    git_in(&repo, &["checkout", "-q", "-b", "probe"]);
+    fs::write(repo.join("probe.txt"), "recorded\n").expect("the recorded probe");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "recorded"]);
+    let recorded = git_in(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    git_in(&repo, &["tag", "probe-recorded"]);
+
+    fs::write(repo.join("probe.txt"), "replacing\n").expect("the replacing probe");
+    git_in(&repo, &["add", "-A"]);
+    git_in(&repo, &["commit", "-q", "-m", "replacing"]);
+    let replacing = git_in(&repo, &["rev-parse", "HEAD"]).trim().to_owned();
+    git_in(&repo, &["tag", "probe-replacing"]);
+    assert_ne!(recorded, replacing, "two distinct commits");
+
+    git_in(&repo, &["checkout", "-q", "main"]);
+    git_in(&repo, &["branch", "-q", "-D", "probe"]);
+    git_in(&repo, &["replace", &recorded, &replacing]);
+    assert_eq!(
+        git_in(&repo, &["replace", "-l"]).trim(),
+        recorded,
+        "the replacement is in place"
+    );
+    assert!(
+        git_in(&repo, &["status", "--porcelain"]).trim().is_empty(),
+        "the fixture left the worktree dirty"
+    );
+    repo
+}
+
+#[test]
+fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote() {
+    let status = v1_object_graph_child("engine::tests::v1_object_graph_helper");
+    assert!(
+        status.success(),
+        "the child drives `engine::run_harness` and `engine::resume_harness` over a \
+         repository whose probe commit carries a replacement, and ended {status:?}"
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper"]
+fn v1_object_graph_helper() {
+    if std::env::var_os(V1_OBJECT_GRAPH).is_none() {
+        return;
+    }
+    crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-object-graph");
+
+    let repo = replaced_probe_repo(
+        "v1graphrun",
+        "## Implement the widget\n<!-- upstroke: id=t1 depends= -->\n",
+        &format!("[interaction]\nmode = \"never\"\n\n{V1_OBJECT_GRAPH_GATE}"),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let report = run_with(&opts, &fake(Effect::EditFile)).expect("the run");
+    assert_eq!(report.gates, ["object-graph"], "{report:?}");
+    assert_eq!(report.outcome(), RunOutcome::Complete, "{report:?}");
+    assert!(committed(&report, "t1"), "{report:?}");
+
+    let repo = replaced_probe_repo(
+        "v1graphresume",
+        "## Doomed\n<!-- upstroke: id=t1 kind=implement depends= -->\n",
+        &format!(
+            "[interaction]\nmode = \"never\"\n\n\
+             [routing]\nimplement = {{ chain = [\"small\"], attempts_per = 1 }}\n\n\
+             {V1_OBJECT_GRAPH_GATE}"
+        ),
+    );
+    let mut opts = options(&repo);
+    opts.config_path = Some(repo.join("upstroke.toml"));
+    let parked = run_with(
+        &opts,
+        &source(vec![Effect::NoEdit], vec![ReviewBehavior::Pass]),
+    )
+    .expect("the first run");
+    assert_eq!(parked.outcome(), RunOutcome::Parked, "{parked:?}");
+    let question = parked
+        .questions
+        .first()
+        .expect("a question was raised")
+        .question
+        .id
+        .to_string();
+    crate::answer::answer(
+        &repo,
+        &question[..8],
+        crate::answer::Reply::Text("the widget lives in src/widget.rs".to_owned()),
+    )
+    .expect("answer");
+
+    let resumed = resume_with(
+        &resume_options(&repo, &parked.run_id),
+        &fake(Effect::EditFile),
+    )
+    .expect("the resume");
+    assert_eq!(resumed.gates, ["object-graph"], "{resumed:?}");
+    assert_eq!(resumed.outcome(), RunOutcome::Complete, "{resumed:?}");
+    assert!(committed(&resumed, "t1"), "{resumed:?}");
+}
+
 #[test]
 fn a_parked_run_is_answered_out_of_band_and_resumed() {
     let repo = temp_engine_repo("answerresume");

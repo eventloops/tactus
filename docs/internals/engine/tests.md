@@ -1247,6 +1247,73 @@ t1 commits; the process dies inside t2's first attempt.
 Only reachable if the adapter never got a second invocation, which
 would mean this test is not exercising what it claims to.
 
+## `const V1_OBJECT_GRAPH: &str = "UPSTROKE_PR271_V1_OBJECT_GRAPH";`
+
+The marker the helper below refuses to run without, for the reason every
+`#[ignore]` helper in this crate has one: a run with `--include-ignored`
+would otherwise execute its body in a process whose environment nobody
+prepared, which is the one environment this witness must never be measured
+in.
+
+## `const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\`
+
+A gate whose verdict *is* the object graph it reads, and nothing else.
+
+`probe-recorded` is a tag on a commit that `refs/replace/*` sends to the
+commit `probe-replacing` names. Reading replacements, the two names are one
+object and `git diff --exit-code` exits 0; reading the recorded graph they
+are two commits one blob apart and it exits 1. No shell builtin, no `grep`,
+no platform-specific quoting — the whole of the Windows leg is `git` and two
+ref names.
+
+## `fn v1_object_graph_child(test: &str) -> std::process::ExitStatus {`
+
+The helper runs in a child because what it measures is
+`HostEnvironment::from_process()`, which is production's own read of the
+environment this process was started in. There is no seam to filter it at,
+so the environment is prepared instead —
+[`without_ambient_replacement_controls`](../../../src/workspace_manager/fixture.rs)
+states what it takes away and why, and
+`assert_replacement_controls_pinned` refuses in the child if any of it
+survived.
+
+## `fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {`
+
+An engine repository carrying a replacement the run itself never touches.
+
+The two probe commits are made on a branch off `main` and the branch is
+deleted, so `probe.txt` is in no tree the engine reads, the worktree is
+clean when the run starts, and the tags are what keeps the commits alive.
+The replacement is installed last, after the checkouts that would otherwise
+resolve through it.
+
+## `#[test]`
+
+The v0.1 conductor runs and resumes on the graph its own workspace wrote
+(PR #271, round 2's fix-check finding).
+
+`src/gates.rs`'s `a_v1_gate_judges_the_tree_its_own_workspace_materialised`
+supplies `ObjectGraph::AsReplaced` **itself**, so it measures what that
+value does and not whether the conductor selects it; the environment test
+beside it checks the constructor independently, and
+`production_reaches_a_spawn_through_one_host_runner_per_run` accepts either
+constructor by design. Measured at head `aa2728d`: reverting the two calls
+in `src/engine/mod.rs` to `HostRunner::new()` left all of them green at `0`,
+so the whole legacy repair could have been reverted without a guard
+noticing.
+
+This drives `engine::run_with` and `engine::resume_with` — the production
+facades, one call above each of those two sites — so each is guarded on its
+own. Measured with `run_harness` alone reverted: the run parks, `GateFailed`,
+Git exit 1, exit `101`. Measured with `resume_harness` alone reverted: the
+first run parks as it is meant to, the answer un-parks it, and the resumed
+attempt parks on the same gate, exit `101`.
+
+The resume leg takes `a_parked_run_is_answered_out_of_band_and_resumed`'s
+shape — `Effect::NoEdit` parks the task before any gate runs, the answer is
+written by the CLI path, and the resumed attempt is the first one to reach
+a gate — because a resume of a completed run replays and runs nothing.
+
 ## `let repo = temp_engine_repo("answerresume");`
 
 §21's definition-of-done (d) across processes: the run ends parked,
