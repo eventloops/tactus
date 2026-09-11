@@ -32,8 +32,9 @@ use std::collections::BTreeSet;
 // this module's: `src/engine/topology/**` needs them too and cannot reach
 // an effect primitive of its own. See that module for why they moved.
 use super::fixture::{
-    Fixture, assert_replacement_controls_pinned, died_by_abort, died_by_kill, fan_out_directory,
-    git, git_out, run_kill_child, scratch, without_ambient_replacement_controls,
+    Fixture, assert_replacement_controls_pinned, create_dir, died_by_abort, died_by_kill,
+    fan_out_directory, git, git_out, run_kill_child, scratch, without_ambient_replacement_controls,
+    write_file,
 };
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
@@ -5966,6 +5967,181 @@ fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
         .manager
         .remove_snapshot(&mut NoHooks, &snapshot)
         .expect("Snapshot.Remove + Snapshot.RemoveIntent");
+}
+
+/// Where [`the_neutraliser_defeats_every_ambient_control_it_enumerates`] tells
+/// its probe to do the work; `#[ignore]`-guarded for the reason
+/// [`QUIESCENCE_REPLACEMENT`] is.
+const REPLACEMENT_CONTROL_PROBE: &str = "UPSTROKE_PR271_REPLACEMENT_CONTROL_PROBE";
+
+/// One hostile environment per mechanism the enumeration claims to close,
+/// built over `root`.
+///
+/// Every row is a way an operator, a wrapper or a machine can decide Git's
+/// replacement behaviour for a child, measured one at a time on git 2.43.0.
+/// The last row sets all of them at once, because a neutraliser that closes
+/// each in isolation and leaves one open in combination is the shape this
+/// pull request has already shipped twice.
+fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(String, OsString)>)> {
+    let disables = root.join("disables.cfg");
+    write_file(&disables, b"[core]\n\tuseReplaceRefs = false\n");
+    let including = root.join("including.cfg");
+    write_file(
+        &including,
+        format!("[include]\n\tpath = {}\n", disables.display()).as_bytes(),
+    );
+    let home = root.join("home");
+    write_file(
+        &home.join(".gitconfig"),
+        b"[core]\n\tuseReplaceRefs = false\n",
+    );
+    let xdg = root.join("xdg");
+    write_file(
+        &xdg.join("git").join("config"),
+        b"[core]\n\tuseReplaceRefs = false\n",
+    );
+    let empty_home = root.join("empty-home");
+    create_dir(&empty_home);
+
+    let set = |key: &str, value: &OsStr| (key.to_owned(), value.to_owned());
+    let rows: Vec<(&'static str, Vec<(String, OsString)>)> = vec![
+        (
+            "GIT_NO_REPLACE_OBJECTS",
+            vec![set("GIT_NO_REPLACE_OBJECTS", OsStr::new("1"))],
+        ),
+        (
+            "an indexed config pair, counted",
+            vec![
+                set("GIT_CONFIG_COUNT", OsStr::new("1")),
+                set("GIT_CONFIG_KEY_0", OsStr::new("core.useReplaceRefs")),
+                set("GIT_CONFIG_VALUE_0", OsStr::new("false")),
+            ],
+        ),
+        (
+            "an indexed config pair, uncounted",
+            vec![
+                set("GIT_CONFIG_KEY_0", OsStr::new("core.useReplaceRefs")),
+                set("GIT_CONFIG_VALUE_0", OsStr::new("false")),
+            ],
+        ),
+        (
+            "GIT_CONFIG_PARAMETERS",
+            vec![set(
+                "GIT_CONFIG_PARAMETERS",
+                OsStr::new("'core.usereplacerefs'='false'"),
+            )],
+        ),
+        (
+            "GIT_CONFIG_GLOBAL",
+            vec![set("GIT_CONFIG_GLOBAL", disables.as_os_str())],
+        ),
+        (
+            "GIT_CONFIG_SYSTEM",
+            vec![set("GIT_CONFIG_SYSTEM", disables.as_os_str())],
+        ),
+        (
+            "GIT_CONFIG_GLOBAL through include.path",
+            vec![set("GIT_CONFIG_GLOBAL", including.as_os_str())],
+        ),
+        ("HOME", vec![set("HOME", home.as_os_str())]),
+        (
+            "XDG_CONFIG_HOME",
+            vec![
+                set("HOME", empty_home.as_os_str()),
+                set("XDG_CONFIG_HOME", xdg.as_os_str()),
+            ],
+        ),
+        ("GIT_CONFIG", vec![set("GIT_CONFIG", disables.as_os_str())]),
+        (
+            "GIT_REPLACE_REF_BASE",
+            vec![set("GIT_REPLACE_REF_BASE", OsStr::new("refs/elsewhere/"))],
+        ),
+    ];
+    let everything: Vec<(String, OsString)> = rows
+        .iter()
+        .flat_map(|(_, pairs)| pairs.iter().cloned())
+        .collect();
+    let mut rows = rows;
+    rows.push(("all of them at once", everything));
+    rows
+}
+
+/// Run [`replacement_control_probe_helper`] under `hostile`, neutralised or
+/// not, and return its exit status.
+fn run_replacement_control_probe(
+    hostile: &[(String, OsString)],
+    neutralised: bool,
+) -> std::process::ExitStatus {
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
+        .args([
+            "--exact",
+            "workspace_manager::tests::replacement_control_probe_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env(REPLACEMENT_CONTROL_PROBE, "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    for (key, value) in hostile {
+        command.env(key, value);
+    }
+    if neutralised {
+        without_ambient_replacement_controls(&mut command);
+    }
+    command.status().expect("spawn the control probe")
+}
+
+/// Every name in the enumeration earns its place, and the measurement catches
+/// what no name list reaches (PR #271, round 3).
+///
+/// The neutralisation is only *exercised* when the control it removes is
+/// actually set, and CI sets none of them -- so without this grid a name could
+/// be dropped from [`without_ambient_replacement_controls`] and nothing would
+/// go red until a reviewer exported it, which is exactly how rounds 1 and 2
+/// were found. Each row is run twice: neutralised, where the probe must still
+/// see `refs/replace/*` honoured, and raw, where it must not. The raw leg is
+/// what keeps the neutralised leg from being vacuous.
+///
+/// `HOME` and `XDG_CONFIG_HOME` are in the grid and in **neither** name list:
+/// they are closed by pinning `GIT_CONFIG_GLOBAL`, and their raw legs fail in
+/// [`assert_replacement_refs_are_live`] rather than in the name check. That is
+/// the half of the closure that does not depend on the enumeration being
+/// complete, and this is where it is witnessed doing the work.
+#[test]
+fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
+    let root = scratch("replacement-controls");
+    let rows = hostile_replacement_environments(&root);
+    assert_eq!(
+        rows.len(),
+        12,
+        "one row per mechanism, plus the combination"
+    );
+
+    for (name, hostile) in &rows {
+        assert!(
+            run_replacement_control_probe(hostile, true).success(),
+            "`{name}` survived the neutralisation: a Git child of the probe did \
+             not honour `refs/replace/*`"
+        );
+        assert!(
+            !run_replacement_control_probe(hostile, false).success(),
+            "`{name}` is not a control at all on this Git: the probe passed with \
+             it set and nothing taken away, so the row above proves nothing"
+        );
+    }
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Spawned by [`the_neutraliser_defeats_every_ambient_control_it_enumerates`].
+#[test]
+#[ignore = "subprocess helper"]
+fn replacement_control_probe_helper() {
+    if std::env::var_os(REPLACEMENT_CONTROL_PROBE).is_none() {
+        return;
+    }
+    assert_replacement_controls_pinned("control-probe");
 }
 
 /// Where [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`]

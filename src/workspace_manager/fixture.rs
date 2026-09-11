@@ -445,9 +445,14 @@ pub(crate) const REPLACEMENT_CONTROLS_REMOVED: &[&str] = &[
 ///
 /// Measured on git 2.43.0, and **not** what `git-config(1)` describes: with
 /// `GIT_CONFIG_COUNT` *absent* a lone `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
-/// still takes effect, so removing the count alone leaves the vector open.
-/// `GIT_CONFIG_COUNT=0` closes it (measured), and these removals close it a
-/// second, independent way.
+/// still takes effect, so removing the count alone would leave the vector
+/// open. What closes it is the `GIT_CONFIG_COUNT=0` pin below, and these
+/// removals are a second, independent way: measured, emptying this list
+/// leaves `the_neutraliser_defeats_every_ambient_control_it_enumerates`
+/// green, so it is defence in depth and not the load-bearing half. They also
+/// close the case the pin cannot -- a pair set on the `Command` itself rather
+/// than inherited, which the sweep over this process's environment would not
+/// see.
 pub(crate) const REPLACEMENT_CONTROL_PREFIXES: &[&str] = &["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
 
 /// Pinned to a fixed value rather than removed, because an absent value is
@@ -459,7 +464,17 @@ pub(crate) const REPLACEMENT_CONTROL_PREFIXES: &[&str] = &["GIT_CONFIG_KEY_", "G
 /// no `[core] useReplaceRefs`, and no `include.path`/`includeIf` reaching
 /// one, survives at either level -- including at `git init`, where a global
 /// `init.templateDir` otherwise copies a `config` **into the new repository**
-/// and lands below every later `git config` (measured).
+/// and lands below every later `git config` (measured). With both pinned,
+/// `git config --show-scope --list` reports `command` and `local` and nothing
+/// else (measured), which is the whole claim.
+///
+/// `GIT_CONFIG_NOSYSTEM` is redundant while `GIT_CONFIG_SYSTEM` is pinned --
+/// git(1) says setting the latter means the build-time system file is not
+/// read, and the scope listing above confirms it. It is pinned anyway so that
+/// neither variable is alone in carrying the claim. The grid does go red when
+/// it is dropped, but that is `assert_replacement_controls_pinned`'s own
+/// precondition failing, not a measured vector; do not read it as evidence
+/// this one is load-bearing.
 pub(crate) const REPLACEMENT_CONTROLS_PINNED: &[&str] = &[
     "GIT_CONFIG_COUNT",
     "GIT_CONFIG_GLOBAL",
@@ -522,6 +537,14 @@ pub(crate) fn is_ambient_replacement_control(key: &OsStr) -> bool {
 /// missing, applied in one place. It is not closed by construction, so the
 /// witnesses that could pass silently also call
 /// [`assert_replacement_refs_are_live`], which closes it by measurement.
+///
+/// `the_neutraliser_defeats_every_ambient_control_it_enumerates` is where
+/// this function is exercised: CI exports none of these, so without that grid
+/// a name could be dropped here and nothing would go red until a reviewer
+/// exported it, which is how rounds 1 and 2 were found. Measured against it,
+/// dropping `GIT_NO_REPLACE_OBJECTS`, `GIT_CONFIG`, `GIT_CONFIG_PARAMETERS`,
+/// `GIT_REPLACE_REF_BASE`, the `GIT_CONFIG_COUNT` pin, the
+/// `GIT_CONFIG_GLOBAL` pin or the `GIT_CONFIG_SYSTEM` pin each turns it red.
 pub(crate) fn without_ambient_replacement_controls(command: &mut Command) {
     for key in REPLACEMENT_CONTROLS_REMOVED {
         command.env_remove(key);
@@ -657,8 +680,21 @@ pub(crate) fn assert_replacement_refs_are_live(tag: &str) {
     assert_ne!(recorded, replacing, "two distinct commits");
 
     git(&repo, &["replace", &recorded, &replacing]);
-    let read = git(&repo, &["show", &format!("{recorded}:probe.txt")]);
     let controls = ambient_replacement_controls();
+    assert_eq!(
+        git(
+            &repo,
+            &["for-each-ref", "--format=%(refname)", "refs/replace/"]
+        ),
+        format!("refs/replace/{recorded}"),
+        "`{tag}`: `git replace` did not write under `refs/replace/`, so this \
+         process is not speaking about the namespace the design and the finding \
+         name. `GIT_REPLACE_REF_BASE` moves it, and a probe that writes and \
+         reads through the same moved base would answer yes to a question it \
+         was not asked. The enumerated controls this process carries are \
+         {controls:?}"
+    );
+    let read = git(&repo, &["show", &format!("{recorded}:probe.txt")]);
     assert_eq!(
         read, "replacing",
         "`{tag}`: this process cannot witness replacement isolation, because a \
