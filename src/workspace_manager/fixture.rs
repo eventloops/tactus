@@ -522,7 +522,7 @@ pub(crate) fn is_ambient_replacement_control(key: &OsStr) -> bool {
 /// missing, applied in one place. It is not closed by construction, so the
 /// witnesses that could pass silently also call
 /// [`assert_replacement_refs_are_live`], which closes it by measurement.
-pub(crate) fn without_ambient_replacement_controls(command: &mut Command) -> &mut Command {
+pub(crate) fn without_ambient_replacement_controls(command: &mut Command) {
     for key in REPLACEMENT_CONTROLS_REMOVED {
         command.env_remove(key);
     }
@@ -538,7 +538,6 @@ pub(crate) fn without_ambient_replacement_controls(command: &mut Command) -> &mu
     for (key, value) in pinned_replacement_controls() {
         command.env(key, value);
     }
-    command
 }
 
 /// This process's environment as [`without_ambient_replacement_controls`]
@@ -692,9 +691,8 @@ pub(crate) fn pin_replacement_refs_in(repo: &Path) {
         .arg("-C")
         .arg(repo)
         .args(["config", "core.useReplaceRefs", "true"]);
-    let out = without_ambient_replacement_controls(&mut command)
-        .output()
-        .expect("run git");
+    without_ambient_replacement_controls(&mut command);
+    let out = command.output().expect("run git");
     assert!(
         out.status.success(),
         "pinning core.useReplaceRefs in {}: {}",

@@ -4957,9 +4957,8 @@ fn v1_object_graph_child(test: &str) -> std::process::ExitStatus {
     command
         .args(["--exact", test, "--ignored", "--nocapture"])
         .env(V1_OBJECT_GRAPH, "1");
-    crate::workspace_manager::fixture::without_ambient_replacement_controls(&mut command)
-        .status()
-        .expect("spawn the witness child")
+    crate::workspace_manager::fixture::without_ambient_replacement_controls(&mut command);
+    command.status().expect("spawn the witness child")
 }
 
 fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {

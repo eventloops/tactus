@@ -5995,9 +5995,8 @@ fn run_child_without_replacement_isolation(test: &str) -> std::process::ExitStat
     command
         .args(["--exact", test, "--ignored", "--nocapture"])
         .env(QUIESCENCE_REPLACEMENT, "1");
-    without_ambient_replacement_controls(&mut command)
-        .status()
-        .expect("spawn the witness child")
+    without_ambient_replacement_controls(&mut command);
+    command.status().expect("spawn the witness child")
 }
 
 /// Quiescence answers about the tree the worktree holds, not about whatever

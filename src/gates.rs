@@ -508,9 +508,8 @@ mod tests {
         let dir = temp_dir(tag);
         let mut command = StdCommand::new("git");
         command.arg("-C").arg(&dir).args(["init", "-q"]);
-        let out = without_ambient_replacement_controls(&mut command)
-            .output()
-            .expect("git");
+        without_ambient_replacement_controls(&mut command);
+        let out = command.output().expect("git");
         assert!(out.status.success());
         dir
     }
@@ -552,9 +551,8 @@ mod tests {
             ])
             .args(["-c", "core.autocrlf=false", "-c", "core.eol=lf"])
             .args(args);
-        let out = without_ambient_replacement_controls(&mut command)
-            .output()
-            .expect("git");
+        without_ambient_replacement_controls(&mut command);
+        let out = command.output().expect("git");
         assert!(
             out.status.success(),
             "git {args:?}: {}",
@@ -893,9 +891,8 @@ mod tests {
             .arg("-C")
             .arg(&repo)
             .args(["config", "--local", "test.quoted"]);
-        let get = without_ambient_replacement_controls(&mut read_back)
-            .output()
-            .expect("read back");
+        without_ambient_replacement_controls(&mut read_back);
+        let get = read_back.output().expect("read back");
         assert_eq!(
             String::from_utf8_lossy(&get.stdout).trim(),
             "two words",
