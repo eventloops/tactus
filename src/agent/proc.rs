@@ -5747,7 +5747,11 @@ mod termination {
 
         #[cfg(target_os = "linux")]
         #[test]
-        fn the_end_of_a_helper_follows_its_identity_and_not_its_number() {
+        #[ignore = "subprocess helper"]
+        fn identity_teardown_helper() {
+            if std::env::var_os("UPSTROKE_IDENTITY_TEARDOWN_HELPER").is_none() {
+                return;
+            }
             // SAFETY: the forked child calls only `_exit`.
             let helper = unsafe { libc::fork() };
             if helper == 0 {
@@ -5810,6 +5814,22 @@ mod termination {
             );
         }
 
+        /// The named finding's own sequence, run where the identity path is on:
+        /// a helper an embedding host has collected, its number re-issued to a
+        /// stranger, and a teardown that must reach neither.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn the_end_of_a_helper_follows_its_identity_and_not_its_number() {
+            let output = run_fixture(
+                "identity_teardown_helper",
+                &[
+                    ("UPSTROKE_IDENTITY_TEARDOWN_HELPER", "1"),
+                    (HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON),
+                ],
+            );
+            assert_fixture_succeeded("identity-teardown helper", &output);
+        }
+
         #[cfg(target_os = "linux")]
         fn statuses_for(exit_code: Option<libc::c_int>) -> (libc::c_int, libc::c_int) {
             let mut filled = [0, 0];
@@ -5857,7 +5877,11 @@ mod termination {
 
         #[cfg(target_os = "linux")]
         #[test]
-        fn a_wait_through_an_identity_answers_the_status_waitpid_answers() {
+        #[ignore = "subprocess helper"]
+        fn identity_wait_status_helper() {
+            if std::env::var_os("UPSTROKE_IDENTITY_WAIT_STATUS_HELPER").is_none() {
+                return;
+            }
             let (by_number, by_identity) = statuses_for(Some(7));
             assert_eq!(by_identity, by_number, "a child that exited with 7");
             assert!(
@@ -5871,6 +5895,19 @@ mod termination {
                 libc::WIFSIGNALED(by_identity) && libc::WTERMSIG(by_identity) == libc::SIGKILL,
                 "{by_identity}"
             );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_wait_through_an_identity_answers_the_status_waitpid_answers() {
+            let output = run_fixture(
+                "identity_wait_status_helper",
+                &[
+                    ("UPSTROKE_IDENTITY_WAIT_STATUS_HELPER", "1"),
+                    (HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON),
+                ],
+            );
+            assert_fixture_succeeded("identity-wait-status helper", &output);
         }
 
         #[cfg(target_os = "linux")]
@@ -5927,6 +5964,7 @@ mod termination {
             let output = Command::new(std::env::current_exe().expect("test executable"))
                 .args(["reaper_identity_helper", "--ignored", "--nocapture"])
                 .env("UPSTROKE_REAPER_IDENTITY_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -6089,6 +6127,7 @@ mod termination {
                     "--nocapture",
                 ])
                 .env("UPSTROKE_HELPER_IDENTITY_HOST_REAP_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -6260,6 +6299,13 @@ mod termination {
         /// and been collected, written by something that is not the kernel.
         #[cfg(target_os = "linux")]
         fn refuse_pidfd_send_signal_of_with(signal: libc::c_int, errno: libc::c_int) {
+            answer_pidfd_send_signal_of_with(signal, seccomp_refuse_with(errno));
+        }
+
+        /// Take `action` for `pidfd_send_signal(..., signal, ...)` and allow
+        /// everything else, `pidfd_send_signal` with any other signal included.
+        #[cfg(target_os = "linux")]
+        fn answer_pidfd_send_signal_of_with(signal: libc::c_int, action: u32) {
             const SECCOMP_DATA_NR_OFFSET: u32 = 0;
             let (signal_low, signal_high) = seccomp_argument_words(1);
             let number = u32::try_from(signal).expect("a signal number fits the kernel's field");
@@ -6272,7 +6318,35 @@ mod termination {
                 seccomp_load(signal_low),
                 seccomp_jump_if_equal(number, 1, 0),
                 seccomp_return(libc::SECCOMP_RET_ALLOW),
-                seccomp_return(seccomp_refuse_with(errno)),
+                seccomp_return(action),
+            ];
+            install_seccomp_policy(&mut program);
+        }
+
+        /// Take `action` for `waitid(P_PIDFD, ..., WNOWAIT)` -- the one call
+        /// that asks a descriptor about a helper's fate without collecting it
+        /// -- and allow every other `waitid`, so a `waitid` this process makes
+        /// for any other reason is untouched.
+        #[cfg(target_os = "linux")]
+        fn answer_the_fate_waitid_with(action: u32) {
+            const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+            let (target_low, target_high) = seccomp_argument_words(0);
+            let (options_low, _) = seccomp_argument_words(3);
+            let by_descriptor = libc::P_PIDFD;
+            let leaves_it_uncollected =
+                u32::try_from(libc::WNOWAIT).expect("an option bit fits the kernel's field");
+
+            let mut program = [
+                seccomp_load(SECCOMP_DATA_NR_OFFSET),
+                seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_waitid), 0, 6),
+                seccomp_load(target_high),
+                seccomp_jump_if_equal(0, 0, 4),
+                seccomp_load(target_low),
+                seccomp_jump_if_equal(by_descriptor, 0, 2),
+                seccomp_load(options_low),
+                seccomp_jump_if_any_set(leaves_it_uncollected, 1, 0),
+                seccomp_return(libc::SECCOMP_RET_ALLOW),
+                seccomp_return(action),
             ];
             install_seccomp_policy(&mut program);
         }
@@ -6342,10 +6416,11 @@ mod termination {
             close_fd(witness);
 
             let identity = helper_identity(helper);
-            assert_eq!(
-                identity, NO_HELPER_IDENTITY,
-                "an identity whose signal syscall this host refuses was taken, and the \
-                 teardown through it enters its blocking wait on a helper it never signalled"
+            assert!(
+                identity >= 0,
+                "the descriptor was dropped because this host will not carry a signal through \
+                 it, which hands the teardown back the number of a helper an embedding host \
+                 may already have collected -- the sequence the descriptor exists to close"
             );
 
             let end = Reaper {
@@ -6377,12 +6452,13 @@ mod termination {
 
         #[cfg(target_os = "linux")]
         #[test]
-        fn an_identity_whose_signal_syscall_is_refused_is_not_taken() {
+        fn a_host_that_refuses_the_signal_syscall_still_collects_through_the_descriptor() {
             use std::os::unix::process::CommandExt;
 
             let output = Command::new(std::env::current_exe().expect("test executable"))
                 .args(["refused_identity_signal_helper", "--ignored", "--nocapture"])
                 .env("UPSTROKE_REFUSED_IDENTITY_SIGNAL_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -6509,6 +6585,7 @@ mod termination {
                     "--nocapture",
                 ])
                 .env("UPSTROKE_REAPER_IDENTITY_SHORTAGE_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -6647,6 +6724,7 @@ mod termination {
                     "--nocapture",
                 ])
                 .env("UPSTROKE_REFUSED_SIGKILL_IDENTITY_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -6752,6 +6830,7 @@ mod termination {
                     "--nocapture",
                 ])
                 .env("UPSTROKE_REFUSED_CONSUMING_WAIT_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -6772,6 +6851,70 @@ mod termination {
         #[cfg(target_os = "linux")]
         fn kill_the_caller_of_pidfd_open() {
             answer_pidfd_open_with(libc::SECCOMP_RET_KILL_PROCESS);
+        }
+
+        /// Which of the three identity system calls a fatal policy is pinned
+        /// to. One filter can be fatal on one call and permit the other two,
+        /// and each is a separate variant of the same hazard: the call does not
+        /// return, so no answer to it can be read and no fallback can be taken.
+        #[cfg(target_os = "linux")]
+        const FATAL_CALLS: [&str; 3] = ["pidfd_open", "pidfd_send_signal_zero", "waitid_wnowait"];
+
+        /// Install the fatal policy `which` names, and nothing wider. Each
+        /// selects on the arguments one identity call is made with, because a
+        /// filter selects on arguments and a policy narrow enough to miss a
+        /// probe is the shape that ended four rounds of them.
+        #[cfg(target_os = "linux")]
+        fn kill_the_caller_of(which: &str) {
+            match which {
+                "pidfd_open" => kill_the_caller_of_pidfd_open(),
+                "pidfd_send_signal_zero" => {
+                    answer_pidfd_send_signal_of_with(0, libc::SECCOMP_RET_KILL_PROCESS);
+                }
+                "waitid_wnowait" => {
+                    answer_the_fate_waitid_with(libc::SECCOMP_RET_KILL_PROCESS);
+                }
+                other => panic!("no fatal policy is defined for {other}"),
+            }
+        }
+
+        /// Run one of this module's own `#[ignore]` fixtures as a subprocess,
+        /// with `vars` in its environment and nothing else added. A seccomp
+        /// filter cannot be lifted by the process that installs it, and the
+        /// identity path is read from the environment, so every fixture that
+        /// sets either is a subprocess of its own.
+        #[cfg(target_os = "linux")]
+        fn run_fixture(fixture: &str, vars: &[(&str, &str)]) -> std::process::Output {
+            use std::os::unix::process::CommandExt;
+
+            let mut command = Command::new(std::env::current_exe().expect("test executable"));
+            command.args([fixture, "--ignored", "--nocapture"]);
+            for (name, value) in vars {
+                command.env(name, value);
+            }
+            command
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap_or_else(|error| panic!("run the {fixture} fixture: {error}"))
+        }
+
+        /// Fail with everything the fixture said, and with the status it left,
+        /// which is where a process killed for a system call reports itself:
+        /// `SIGSYS` arrives as a signal and never as an exit code.
+        #[cfg(target_os = "linux")]
+        fn assert_fixture_succeeded(fixture: &str, output: &std::process::Output) {
+            use std::os::unix::process::ExitStatusExt;
+
+            assert!(
+                output.status.success(),
+                "{fixture}: status {} (code {:?}, signal {:?})\n{}\n{}",
+                output.status,
+                output.status.code(),
+                output.status.signal(),
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         /// Take `action` for `pidfd_open` and allow everything else.
@@ -6810,21 +6953,31 @@ mod termination {
         #[test]
         #[ignore = "subprocess helper"]
         fn fatal_identity_policy_helper() {
-            if std::env::var_os("UPSTROKE_FATAL_IDENTITY_POLICY_HELPER").is_none() {
+            let Some(which) = std::env::var_os("UPSTROKE_FATAL_IDENTITY_POLICY_HELPER") else {
                 return;
-            }
-            kill_the_caller_of_pidfd_open();
+            };
+            let which = which
+                .to_str()
+                .expect("the fixture names one of FATAL_CALLS");
+            assert!(
+                !helper_identity_path_on(),
+                "this fixture is about the default, and the default is off"
+            );
+            kill_the_caller_of(which);
 
-            // A launch, in full, on a host that ends the process which asks it
-            // for a name. Reaching the statement after this one is the whole
-            // assertion: a `pidfd_open` made here never returns.
-            let reaper =
-                spawn_reaper().expect("a launch under a policy that kills on `pidfd_open`");
+            // A launch and a cancellation, in full, on a host that ends the
+            // process which makes one of these calls. Reaching the statement
+            // after each of them is the whole assertion: a call made here under
+            // this policy does not return, and a process ended by a system call
+            // reports `-31` and takes no branch.
+            let reaper = spawn_reaper().unwrap_or_else(|error| {
+                panic!("a launch under a policy fatal on {which}: {error}")
+            });
             let identity = reaper.identity;
             reaper.cancel();
             assert_eq!(
                 identity, NO_HELPER_IDENTITY,
-                "a call this host kills the caller of answered with a descriptor"
+                "a launch with the identity path off held a descriptor"
             );
             assert_eq!(
                 PENDING_TERMINATION.load(Ordering::SeqCst),
@@ -6835,6 +6988,89 @@ mod termination {
             assert!(
                 abandoned < 0 && last_errno() == libc::ECHILD,
                 "the launch left {abandoned} behind uncollected"
+            );
+        }
+
+        /// A launch makes no identity system call before the one it made last,
+        /// so nothing it learned earlier can authorise a later one. The policy
+        /// arrives between the two launches, which is when a seccomp filter is
+        /// free to arrive: a thread can install one at any point in a process's
+        /// life.
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn fatal_policy_after_a_launch_helper() {
+            if std::env::var_os("UPSTROKE_FATAL_POLICY_AFTER_A_LAUNCH_HELPER").is_none() {
+                return;
+            }
+            assert!(
+                !helper_identity_path_on(),
+                "this fixture is about the default, and the default is off"
+            );
+
+            let first = spawn_reaper().expect("a launch under no policy at all");
+            let before = first.identity;
+            first.cancel();
+
+            kill_the_caller_of_pidfd_open();
+
+            let second = spawn_reaper().expect("a launch after the policy arrived");
+            let after = second.identity;
+            second.cancel();
+
+            assert_eq!(
+                before, NO_HELPER_IDENTITY,
+                "the first launch held a descriptor with the identity path off"
+            );
+            assert_eq!(
+                after, NO_HELPER_IDENTITY,
+                "the second launch held a descriptor with the identity path off"
+            );
+            let abandoned = abandoned_child();
+            assert!(
+                abandoned < 0 && last_errno() == libc::ECHILD,
+                "the launches left {abandoned} behind uncollected"
+            );
+        }
+
+        /// The same two launches with the path on, under a policy that
+        /// *refuses* rather than kills, so the second launch's own answer can
+        /// be read. What the first launch found is not carried into it.
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn refusing_policy_after_a_launch_helper() {
+            if std::env::var_os("UPSTROKE_REFUSING_POLICY_AFTER_A_LAUNCH_HELPER").is_none() {
+                return;
+            }
+            assert!(
+                helper_identity_path_on(),
+                "this fixture is about the path being on"
+            );
+
+            let first = spawn_reaper().expect("a launch under no policy at all");
+            let before = first.identity;
+            first.cancel();
+            assert!(
+                before >= 0,
+                "this host offers `pidfd_open` and the first launch took no descriptor, so \
+                 what the second launch does is not about the policy"
+            );
+
+            answer_pidfd_open_with(seccomp_refuse_with(libc::EPERM));
+
+            let second = spawn_reaper().expect("a launch after the policy arrived");
+            let after = second.identity;
+            second.cancel();
+            assert_eq!(
+                after, NO_HELPER_IDENTITY,
+                "the second launch answered {after} for a call the policy now refuses, which \
+                 is an answer from before the policy existed and not one this launch was given"
+            );
+            let abandoned = abandoned_child();
+            assert!(
+                abandoned < 0 && last_errno() == libc::ECHILD,
+                "the launches left {abandoned} behind uncollected"
             );
         }
 
@@ -6879,6 +7115,7 @@ mod termination {
                     "--nocapture",
                 ])
                 .env("UPSTROKE_UNKNOWN_PIDFD_OPEN_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -6892,25 +7129,50 @@ mod termination {
             );
         }
 
+        /// The hazard the identity path is off for, in all three of its
+        /// shapes. Each fixture is a whole launch and cancellation under a
+        /// filter that is fatal on exactly one of the three calls and permits
+        /// everything else, which is how a probe covering the other two is got
+        /// past. With the path off none of the three is made, so there is
+        /// nothing for the policy to act on.
         #[cfg(target_os = "linux")]
         #[test]
-        fn a_policy_that_kills_on_the_identity_call_does_not_kill_this_process() {
-            use std::os::unix::process::CommandExt;
+        fn a_policy_fatal_on_an_identity_call_is_not_reached_with_the_path_off() {
+            for which in FATAL_CALLS {
+                let output = run_fixture(
+                    "fatal_identity_policy_helper",
+                    &[("UPSTROKE_FATAL_IDENTITY_POLICY_HELPER", which)],
+                );
+                assert_fixture_succeeded(&format!("fatal-policy helper ({which})"), &output);
+            }
+        }
 
-            let output = Command::new(std::env::current_exe().expect("test executable"))
-                .args(["fatal_identity_policy_helper", "--ignored", "--nocapture"])
-                .env("UPSTROKE_FATAL_IDENTITY_POLICY_HELPER", "1")
-                .process_group(0)
-                .stdin(Stdio::null())
-                .output()
-                .expect("run the fatal-policy helper");
-            assert!(
-                output.status.success(),
-                "fatal-policy helper: {}\n{}\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
+        /// And the policy that arrives after a launch has already run. Nothing
+        /// a launch learned is remembered, so there is no earlier answer for
+        /// the second launch to trust.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_policy_installed_between_two_launches_is_not_outrun_by_the_first() {
+            let output = run_fixture(
+                "fatal_policy_after_a_launch_helper",
+                &[("UPSTROKE_FATAL_POLICY_AFTER_A_LAUNCH_HELPER", "1")],
             );
+            assert_fixture_succeeded("fatal-policy-after-a-launch helper", &output);
+        }
+
+        /// The same, with the path on and the policy refusing rather than
+        /// killing, so that the second launch's own answer is readable.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn every_launch_asks_this_host_again() {
+            let output = run_fixture(
+                "refusing_policy_after_a_launch_helper",
+                &[
+                    ("UPSTROKE_REFUSING_POLICY_AFTER_A_LAUNCH_HELPER", "1"),
+                    (HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON),
+                ],
+            );
+            assert_fixture_succeeded("refusing-policy-after-a-launch helper", &output);
         }
 
         /// Fill this process's descriptor table, leaving exactly `spare` slots
@@ -7084,6 +7346,7 @@ mod termination {
                     "--nocapture",
                 ])
                 .env("UPSTROKE_IDENTITY_SHORTAGE_CLEANUP_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -7095,6 +7358,151 @@ mod termination {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+        }
+
+        /// A helper that is still inside its own startup does not end when its
+        /// command pipe closes: this one is in its startup delay, and the
+        /// reviewer's own reproduction had one blocked in the `open` that takes
+        /// the run's cleanup lease, which is a FIFO whose writer may never
+        /// arrive. Either way closing the pipe is not a release, and the wait
+        /// for a helper this launch could not name has to stop on its own.
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn unnameable_helper_wait_bound_helper() {
+            if std::env::var_os("UPSTROKE_UNNAMEABLE_HELPER_WAIT_BOUND_HELPER").is_none() {
+                return;
+            }
+            assert!(
+                helper_identity_path_on(),
+                "with the path off there is no acquisition to fail and nothing to wait for"
+            );
+            let delay = std::env::var("UPSTROKE_TEST_REAPER_READY_DELAY_MS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("the startup delay this fixture is measured against");
+            let delay = Duration::from_millis(delay);
+            assert!(
+                delay > HELPER_READY_BUDGET * 4,
+                "a delay of {delay:?} is not far enough past {HELPER_READY_BUDGET:?} to tell a \
+                 bounded wait from one that waited the helper out"
+            );
+
+            // Four descriptors are the reaper's two pipes, so `pidfd_open` is
+            // the first thing the launch asks the kernel for that there is no
+            // descriptor left to answer.
+            let (held, ceiling) = fill_descriptors_leaving(4);
+            let began = std::time::Instant::now();
+            let launched = spawn_reaper();
+            let waited = began.elapsed();
+            release_descriptors(held, ceiling);
+
+            let Err(message) = launched else {
+                panic!("a launch with no descriptor left for an identity was accepted")
+            };
+            assert!(
+                message.starts_with("taking an identity for the Unix cleanup reaper"),
+                "the launch failed for some other reason: {message}"
+            );
+            assert!(
+                message.contains("still running and still uncollected after"),
+                "the failure does not say what became of the helper it could not name: \
+                 {message}"
+            );
+            assert!(
+                waited < delay / 2,
+                "the launch took {waited:?}, which is the helper's own {delay:?} startup delay \
+                 waited out rather than a wait bounded at {HELPER_READY_BUDGET:?}: closing the \
+                 command pipe does not release a helper that has not finished starting, and an \
+                 embedder cannot get past a launch that does not return"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_helper_this_launch_could_not_name_is_waited_for_within_its_startup_budget() {
+            let output = run_fixture(
+                "unnameable_helper_wait_bound_helper",
+                &[
+                    ("UPSTROKE_UNNAMEABLE_HELPER_WAIT_BOUND_HELPER", "1"),
+                    (HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON),
+                    ("UPSTROKE_TEST_REAPER_READY_DELAY_MS", "20000"),
+                ],
+            );
+            assert_fixture_succeeded("unnameable-helper-wait-bound helper", &output);
+        }
+
+        /// The pair of answers that made acquisition report a live reaper dead.
+        /// `ECHILD` from the wait that collects nothing and `EPERM` from signal
+        /// `0` are both answers to calls a *launch* makes, and a policy can
+        /// write them while permitting every call a *teardown* makes. Nothing
+        /// at acquisition asks either question now, so the descriptor is kept
+        /// and the teardown's own calls do the work.
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn forged_acquisition_pair_helper() {
+            if std::env::var_os("UPSTROKE_FORGED_ACQUISITION_PAIR_HELPER").is_none() {
+                return;
+            }
+            answer_the_fate_waitid_with(seccomp_refuse_with(libc::ECHILD));
+            refuse_pidfd_send_signal_of_with(0, libc::EPERM);
+
+            let (target, target_lifetime) = spawn_sigchld_target();
+            let witness = identity_by_hand(target);
+            assert_eq!(
+                helper_fate_by_wait(witness),
+                HelperFate::Ended,
+                "the policy did not write `ECHILD` for the wait that collects nothing, so the \
+                 pair this fixture is about is not in force"
+            );
+            assert_eq!(
+                helper_fate_by_signal(witness),
+                HelperFate::Unanswered,
+                "the policy did not refuse signal `0`, so the pair this fixture is about is \
+                 not in force"
+            );
+            close_fd(witness);
+            drop(target_lifetime);
+            let settled = wait_for_lifetime_target(target).expect("the target ends with its pipe");
+            assert!(
+                libc::WIFEXITED(settled),
+                "the target did not end on its own terms: {settled}"
+            );
+
+            let reaper = spawn_reaper().expect("spawn private reaper");
+            let (pid, identity) = (reaper.pid, reaper.identity);
+            assert!(
+                identity >= 0,
+                "acquisition answered {identity} for a reaper this launch had just forked and \
+                 never waited on: a policy's `ECHILD` and `EPERM` were read as its fate"
+            );
+            reaper.cancel();
+
+            let abandoned = abandoned_child();
+            assert!(
+                abandoned < 0 && last_errno() == libc::ECHILD,
+                "the reaper {pid} this launch forked was left behind, and {abandoned} is what \
+                 the wait for it answered"
+            );
+            assert_eq!(
+                PENDING_TERMINATION.load(Ordering::SeqCst),
+                0,
+                "the cancelled reaper armed process-wide termination"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_policy_answering_a_launch_does_not_settle_a_helper_fate() {
+            let output = run_fixture(
+                "forged_acquisition_pair_helper",
+                &[
+                    ("UPSTROKE_FORGED_ACQUISITION_PAIR_HELPER", "1"),
+                    (HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON),
+                ],
+            );
+            assert_fixture_succeeded("forged-acquisition-pair helper", &output);
         }
 
         #[cfg(target_os = "linux")]
@@ -7208,6 +7616,7 @@ mod termination {
             let output = Command::new(std::env::current_exe().expect("test executable"))
                 .args(["forged_esrch_identity_helper", "--ignored", "--nocapture"])
                 .env("UPSTROKE_FORGED_ESRCH_IDENTITY_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
@@ -7261,6 +7670,7 @@ mod termination {
             let output = Command::new(std::env::current_exe().expect("test executable"))
                 .args(["forged_echild_identity_helper", "--ignored", "--nocapture"])
                 .env("UPSTROKE_FORGED_ECHILD_IDENTITY_HELPER", "1")
+                .env(HELPER_IDENTITY_SWITCH, HELPER_IDENTITY_ON)
                 .process_group(0)
                 .stdin(Stdio::null())
                 .output()
