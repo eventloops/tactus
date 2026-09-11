@@ -490,6 +490,10 @@ mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_manager::fixture::{
+        environment_without_ambient_replacement_controls, pin_replacement_refs_in,
+        without_ambient_replacement_controls,
+    };
     use std::env;
     use std::process::Command as StdCommand;
 
@@ -502,10 +506,9 @@ mod tests {
 
     fn temp_repo(tag: &str) -> PathBuf {
         let dir = temp_dir(tag);
-        let out = StdCommand::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(["init", "-q"])
+        let mut command = StdCommand::new("git");
+        command.arg("-C").arg(&dir).args(["init", "-q"]);
+        let out = without_ambient_replacement_controls(&mut command)
             .output()
             .expect("git");
         assert!(out.status.success());
@@ -513,7 +516,11 @@ mod tests {
     }
 
     fn host() -> crate::runner::host::HostRunner {
-        crate::runner::host::HostRunner::new()
+        use crate::runner::host::{HostEnvironment, HostRunner, KeyCase};
+        HostRunner::new().with_environment(HostEnvironment::with_base(
+            environment_without_ambient_replacement_controls(),
+            KeyCase::current(),
+        ))
     }
 
     fn gate_id(n: u32) -> InvocationId {
@@ -533,7 +540,8 @@ mod tests {
     }
 
     fn git_as_the_legacy_workspace_does(dir: &Path, args: &[&str]) -> String {
-        let out = StdCommand::new("git")
+        let mut command = StdCommand::new("git");
+        command
             .arg("-C")
             .arg(dir)
             .args([
@@ -543,8 +551,8 @@ mod tests {
                 "user.email=u@example.invalid",
             ])
             .args(["-c", "core.autocrlf=false", "-c", "core.eol=lf"])
-            .args(args)
-            .env_remove(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0)
+            .args(args);
+        let out = without_ambient_replacement_controls(&mut command)
             .output()
             .expect("git");
         assert!(
@@ -559,16 +567,13 @@ mod tests {
         objects: crate::runner::host::ObjectGraph,
     ) -> crate::runner::host::HostRunner {
         use crate::runner::host::{HostEnvironment, HostRunner, KeyCase};
-        let case = KeyCase::current();
-        let base = std::env::vars_os()
-            .filter(|(key, _)| {
-                !case.same_key(
-                    key,
-                    std::ffi::OsStr::new(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0),
-                )
-            })
-            .collect();
-        HostRunner::new().with_environment(HostEnvironment::with_base(base, case).reading(objects))
+        HostRunner::new().with_environment(
+            HostEnvironment::with_base(
+                environment_without_ambient_replacement_controls(),
+                KeyCase::current(),
+            )
+            .reading(objects),
+        )
     }
 
     #[test]
@@ -576,6 +581,7 @@ mod tests {
         use crate::runner::host::ObjectGraph;
 
         let repo = temp_repo("legacy-replacement");
+        pin_replacement_refs_in(&repo);
         fs::write(repo.join("f.txt"), "A\n").expect("the recorded content");
         git_as_the_legacy_workspace_does(&repo, &["add", "f.txt"]);
         git_as_the_legacy_workspace_does(&repo, &["commit", "-q", "-m", "recorded"]);
@@ -594,9 +600,6 @@ mod tests {
             &["checkout", "--detach", "--quiet", &recorded_commit],
         );
 
-        // The premise, and the half this pull request must not have changed:
-        // the workspace's own checkout of the recorded tree put the replacing
-        // blob on disk.
         assert_eq!(
             fs::read_to_string(repo.join("f.txt")).expect("the checkout"),
             "B\n",
@@ -885,10 +888,12 @@ mod tests {
             set.check(&host(), gate_id(0), &ws),
             Ok(GateResult::Pass { .. })
         ));
-        let get = StdCommand::new("git")
+        let mut read_back = StdCommand::new("git");
+        read_back
             .arg("-C")
             .arg(&repo)
-            .args(["config", "--local", "test.quoted"])
+            .args(["config", "--local", "test.quoted"]);
+        let get = without_ambient_replacement_controls(&mut read_back)
             .output()
             .expect("read back");
         assert_eq!(

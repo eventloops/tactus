@@ -208,6 +208,14 @@ impl Fixture {
         // alone while the blob is the one it asked for.
         git(&base, &["config", "core.autocrlf", "false"]);
         git(&base, &["config", "core.eol", "lf"]);
+        // Whether `refs/replace/*` is honoured is pinned for the same reason
+        // and against the same class of accident: an operator's
+        // `core.useReplaceRefs = false`, or one an `init.templateDir` copied
+        // into this repository's own config, decides what four of these
+        // suites measure. See `pin_replacement_refs_in`, and
+        // `without_ambient_replacement_controls` for the half a repository's
+        // configuration cannot reach.
+        pin_replacement_refs_in(&base);
         // `git worktree add` writes a reflog entry; keep the repository
         // self-contained so nothing depends on a global config.
         git(&base, &["config", "core.logAllRefUpdates", "true"]);
@@ -410,6 +418,289 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
         command.env(key, value);
     }
     command.status().expect("spawn the kill child")
+}
+
+// -----------------------------------------------------------------------
+// The ambient controls over `refs/replace/*`
+// -----------------------------------------------------------------------
+
+/// Removed outright from a Git child that measures replacement behaviour:
+/// each of these decides that behaviour by its **presence**, or hands the
+/// child a path or a ref namespace the fixture did not write.
+///
+/// `GIT_NO_REPLACE_OBJECTS` and `GIT_REPLACE_REF_BASE` are `git-replace(1)`'s
+/// and `git(1)`'s own; `GIT_CONFIG_PARAMETERS` is the undocumented variable
+/// Git itself uses to propagate `-c` into its subprocesses, and it reaches
+/// `core.useReplaceRefs` exactly as `-c` does; `GIT_CONFIG` redirects
+/// `git config`'s **writes**, so a fixture that pins a key with it set would
+/// pin it in the operator's file and not in its own repository.
+pub(crate) const REPLACEMENT_CONTROLS_REMOVED: &[&str] = &[
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG",
+];
+
+/// Removed by prefix: the indexed configuration pairs, every index of them.
+///
+/// Measured on git 2.43.0, and **not** what `git-config(1)` describes: with
+/// `GIT_CONFIG_COUNT` *absent* a lone `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
+/// still takes effect, so removing the count alone leaves the vector open.
+/// `GIT_CONFIG_COUNT=0` closes it (measured), and these removals close it a
+/// second, independent way.
+pub(crate) const REPLACEMENT_CONTROL_PREFIXES: &[&str] = &["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
+
+/// Pinned to a fixed value rather than removed, because an absent value is
+/// not a neutral one: absent `GIT_CONFIG_GLOBAL` means *read `$HOME`'s and
+/// `$XDG_CONFIG_HOME`'s*, and absent `GIT_CONFIG_COUNT` means *read whatever
+/// indexed pairs are there*.
+///
+/// The two file variables are pinned at a file this process wrote empty, so
+/// no `[core] useReplaceRefs`, and no `include.path`/`includeIf` reaching
+/// one, survives at either level -- including at `git init`, where a global
+/// `init.templateDir` otherwise copies a `config` **into the new repository**
+/// and lands below every later `git config` (measured).
+pub(crate) const REPLACEMENT_CONTROLS_PINNED: &[&str] = &[
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+];
+
+/// An empty Git configuration file, written once per test process.
+///
+/// A file this process wrote rather than a path it expects to be absent: Git
+/// reads a missing file as empty today, but "nothing created this path" is a
+/// claim about the rest of the run, and "this file is empty" is a fact.
+/// `/dev/null` is not portable to the Windows leg of the matrix.
+pub(crate) fn neutral_git_config() -> &'static Path {
+    static FILE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    FILE.get_or_init(|| {
+        let path =
+            std::env::temp_dir().join(format!("upstroke-neutral-gitconfig-{}", std::process::id()));
+        fs::write(&path, b"").unwrap_or_else(|error| {
+            panic!(
+                "writing the neutral Git configuration {}: {error}",
+                path.display()
+            )
+        });
+        path
+    })
+    .as_path()
+}
+
+/// [`REPLACEMENT_CONTROLS_PINNED`] with the values they are pinned to.
+pub(crate) fn pinned_replacement_controls() -> Vec<(&'static str, OsString)> {
+    let neutral = neutral_git_config().as_os_str().to_owned();
+    vec![
+        ("GIT_CONFIG_COUNT", OsString::from("0")),
+        ("GIT_CONFIG_GLOBAL", neutral.clone()),
+        ("GIT_CONFIG_SYSTEM", neutral),
+        ("GIT_CONFIG_NOSYSTEM", OsString::from("1")),
+    ]
+}
+
+/// Whether `key` is one of the enumerated ambient controls, under either
+/// name rule: Windows matches environment keys case-insensitively, so a
+/// filter that matched only the documented spelling would pass
+/// `git_no_replace_objects` straight through on that leg of the matrix.
+pub(crate) fn is_ambient_replacement_control(key: &OsStr) -> bool {
+    let name = key.to_string_lossy().to_ascii_uppercase();
+    REPLACEMENT_CONTROLS_REMOVED.contains(&name.as_str())
+        || REPLACEMENT_CONTROLS_PINNED.contains(&name.as_str())
+        || REPLACEMENT_CONTROL_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+/// Take every ambient control over `refs/replace/*` away from `command`'s
+/// child, so what the child measures is what the code under test installs.
+///
+/// Rounds 1 and 2 of PR #271 each shipped a witness that passed without its
+/// own fix, through two different controls -- `GIT_NO_REPLACE_OBJECTS` and
+/// then `core.useReplaceRefs=false`. This is the enumeration both were
+/// missing, applied in one place. It is not closed by construction, so the
+/// witnesses that could pass silently also call
+/// [`assert_replacement_refs_are_live`], which closes it by measurement.
+pub(crate) fn without_ambient_replacement_controls(command: &mut Command) -> &mut Command {
+    for key in REPLACEMENT_CONTROLS_REMOVED {
+        command.env_remove(key);
+    }
+    for (key, _) in std::env::vars_os() {
+        let name = key.to_string_lossy().to_ascii_uppercase();
+        if REPLACEMENT_CONTROL_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        {
+            command.env_remove(&key);
+        }
+    }
+    for (key, value) in pinned_replacement_controls() {
+        command.env(key, value);
+    }
+    command
+}
+
+/// This process's environment as [`without_ambient_replacement_controls`]
+/// would leave it, for a boundary that takes a base rather than a `Command`.
+pub(crate) fn environment_without_ambient_replacement_controls() -> Vec<(OsString, OsString)> {
+    let mut base: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(key, _)| !is_ambient_replacement_control(key))
+        .collect();
+    for (key, value) in pinned_replacement_controls() {
+        base.push((OsString::from(key), value));
+    }
+    base
+}
+
+/// Every enumerated control this process still carries, with its value, for
+/// a diagnostic that says what the environment actually was.
+pub(crate) fn ambient_replacement_controls() -> Vec<String> {
+    let mut seen: Vec<String> = std::env::vars_os()
+        .filter(|(key, _)| is_ambient_replacement_control(key))
+        .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()))
+        .collect();
+    seen.sort();
+    seen
+}
+
+/// Refuse to measure replacement behaviour in a process that still carries an
+/// ambient control over it, and then refuse again on the evidence.
+///
+/// The first half is the enumeration by name: nothing in
+/// [`REPLACEMENT_CONTROLS_REMOVED`] survived, `GIT_CONFIG_COUNT` is the `0`
+/// that closes the indexed pairs whatever indices are present, and the two
+/// configuration files are files this process can see and that are **empty**
+/// -- their *paths* are per-process, so what a child checks is what they hold
+/// and never which path the parent chose.
+///
+/// The second half is [`assert_replacement_refs_are_live`], which is the one
+/// that does not depend on the list being complete.
+pub(crate) fn assert_replacement_controls_pinned(tag: &str) {
+    for key in REPLACEMENT_CONTROLS_REMOVED {
+        assert!(
+            std::env::var_os(key).is_none(),
+            "`{tag}`: `{key}` reached this process, and the reads it governs \
+             would answer about the environment rather than about the code \
+             under test: {:?}",
+            ambient_replacement_controls()
+        );
+    }
+    assert_eq!(
+        std::env::var_os("GIT_CONFIG_COUNT").as_deref(),
+        Some(OsStr::new("0")),
+        "`{tag}`: `GIT_CONFIG_COUNT` must be pinned at `0`; absent, a lone \
+         `GIT_CONFIG_KEY_0` still takes effect (measured on git 2.43.0): {:?}",
+        ambient_replacement_controls()
+    );
+    assert!(
+        std::env::var_os("GIT_CONFIG_NOSYSTEM").is_some(),
+        "`{tag}`: `GIT_CONFIG_NOSYSTEM` must be pinned: {:?}",
+        ambient_replacement_controls()
+    );
+    for key in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
+        let Some(path) = std::env::var_os(key) else {
+            panic!(
+                "`{tag}`: `{key}` must be pinned at an empty file, or the level \
+                 it names -- and every `include.path` reaching one -- decides \
+                 what this process measures: {:?}",
+                ambient_replacement_controls()
+            );
+        };
+        let path = PathBuf::from(path);
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "`{tag}`: reading the pinned `{key}` at {}: {error}",
+                path.display()
+            )
+        });
+        assert!(
+            bytes.is_empty(),
+            "`{tag}`: the pinned `{key}` at {} is not empty, so it is not neutral",
+            path.display()
+        );
+    }
+    assert_replacement_refs_are_live(tag);
+}
+
+/// Measure -- in **this process's** environment, over a throwaway repository
+/// -- that a Git child still honours `refs/replace/*`.
+///
+/// The enumeration above is a list of names, and a list of names is exactly
+/// what cost this pull request two rounds: a witness sensitive to one vector
+/// and blind to the next passes silently. This is the closure that does not
+/// depend on the list being complete. A witness whose failure mode is a
+/// *silent pass* calls it before it measures anything, so a control nobody
+/// enumerated turns that silent pass into this panic.
+///
+/// The child is `read_only_git`'s and `HostEnvironment::from_process`'s own
+/// child: both inherit this process's environment, which is why measuring
+/// this process is measuring theirs.
+pub(crate) fn assert_replacement_refs_are_live(tag: &str) {
+    let root = scratch(&format!("replacement-live-{tag}"));
+    let repo = root.join("repo");
+    create_dir(&repo);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "tests@upstroke.local"]);
+    git(&repo, &["config", "user.name", "upstroke tests"]);
+    git(&repo, &["config", "core.autocrlf", "false"]);
+    git(&repo, &["config", "core.eol", "lf"]);
+
+    write_file(&repo.join("probe.txt"), b"recorded\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "recorded"]);
+    let recorded = git(&repo, &["rev-parse", "HEAD"]);
+
+    write_file(&repo.join("probe.txt"), b"replacing\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "replacing"]);
+    let replacing = git(&repo, &["rev-parse", "HEAD"]);
+    assert_ne!(recorded, replacing, "two distinct commits");
+
+    git(&repo, &["replace", &recorded, &replacing]);
+    let read = git(&repo, &["show", &format!("{recorded}:probe.txt")]);
+    let controls = ambient_replacement_controls();
+    assert_eq!(
+        read, "replacing",
+        "`{tag}`: this process cannot witness replacement isolation, because a \
+         Git child of it does not honour `refs/replace/*` in the first place. \
+         The enumerated controls it carries are {controls:?}; if none of them \
+         explains this, the enumeration in `REPLACEMENT_CONTROLS_REMOVED` and \
+         `REPLACEMENT_CONTROLS_PINNED` is missing a mechanism"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The repository configuration a fixture that measures replacement
+/// behaviour pins for itself, for the reason `Fixture::new` pins
+/// `core.autocrlf` and `core.eol` (§12).
+///
+/// Repository-local configuration outranks the system and global files and
+/// everything they include, so this is what survives an operator's
+/// `core.useReplaceRefs = false` in `~/.gitconfig`. It does **not** outrank
+/// `-c`, `GIT_CONFIG_COUNT` or `GIT_NO_REPLACE_OBJECTS` (measured, all
+/// three), which is why it is the second half of the closure and never the
+/// whole of it.
+///
+/// The write itself goes through [`without_ambient_replacement_controls`],
+/// because `GIT_CONFIG` sends `git config`'s writes to the file it names: a
+/// pin made under it would land in the operator's file, succeed, and leave
+/// this repository saying nothing.
+pub(crate) fn pin_replacement_refs_in(repo: &Path) {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(repo)
+        .args(["config", "core.useReplaceRefs", "true"]);
+    let out = without_ambient_replacement_controls(&mut command)
+        .output()
+        .expect("run git");
+    assert!(
+        out.status.success(),
+        "pinning core.useReplaceRefs in {}: {}",
+        repo.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// A `git` child a test can kill at a chosen moment.

@@ -32,7 +32,8 @@ use std::collections::BTreeSet;
 // this module's: `src/engine/topology/**` needs them too and cannot reach
 // an effect primitive of its own. See that module for why they moved.
 use super::fixture::{
-    Fixture, died_by_abort, died_by_kill, fan_out_directory, git, git_out, run_kill_child, scratch,
+    Fixture, assert_replacement_controls_pinned, died_by_abort, died_by_kill, fan_out_directory,
+    git, git_out, run_kill_child, scratch, without_ambient_replacement_controls,
 };
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
@@ -5976,22 +5977,25 @@ fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
 /// one environment this witness must never be measured in.
 const QUIESCENCE_REPLACEMENT: &str = "UPSTROKE_PR271_QUIESCENCE_REPLACEMENT";
 
-/// Run this test binary again at `test`, `--exact --ignored`, with
-/// [`NO_REPLACEMENT_OBJECTS`]'s key **removed** from the child's environment,
-/// and return its exit status.
+/// Run this test binary again at `test`, `--exact --ignored`, with **every**
+/// ambient control over `refs/replace/*` taken away from the child, and return
+/// its exit status.
 ///
-/// [`run_kill_child`] sets variables; this one unsets the single variable that
-/// would make its witness pass for the wrong reason. `Command` inherits the
-/// parent's environment, so a suite run under an exported
-/// `GIT_NO_REPLACE_OBJECTS=1` -- which is what this pull request makes upstroke's
-/// own gates supply -- would hand the child the protection the child exists to
-/// prove the code installs. `env_remove` is the only call here that matters;
-/// everything else is [`run_kill_child`]'s shape.
+/// [`run_kill_child`] sets variables; this one takes away the ones that would
+/// make its witness pass for the wrong reason. `Command` inherits the parent's
+/// environment, so a suite run under an exported `GIT_NO_REPLACE_OBJECTS=1` --
+/// which is what this pull request makes upstroke's own gates supply -- would
+/// hand the child the protection the child exists to prove the code installs.
+/// Round 2 removed that one variable and the reviewer reached the same silent
+/// pass through `core.useReplaceRefs=false` instead, so what is removed here is
+/// the enumeration [`without_ambient_replacement_controls`] carries, and the
+/// child measures what is left before it trusts it.
 fn run_child_without_replacement_isolation(test: &str) -> std::process::ExitStatus {
-    Command::new(std::env::current_exe().expect("this test binary"))
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
         .args(["--exact", test, "--ignored", "--nocapture"])
-        .env(QUIESCENCE_REPLACEMENT, "1")
-        .env_remove(NO_REPLACEMENT_OBJECTS.0)
+        .env(QUIESCENCE_REPLACEMENT, "1");
+    without_ambient_replacement_controls(&mut command)
         .status()
         .expect("spawn the witness child")
 }
@@ -6017,11 +6021,16 @@ fn run_child_without_replacement_isolation(test: &str) -> std::process::ExitStat
 /// replacement of the recorded tree is installed, and an untouched worktree
 /// becomes a `TreeMismatch` that routes to forced removal and a fresh add.
 ///
-/// Witnessed failing with the pair removed from `read_only_git`, **with
-/// `GIT_NO_REPLACE_OBJECTS=1` exported into this parent**: the child exited
-/// `101` on `Err(TreeMismatch { expected: "6640fb01...", difference: "1 path(s)
-/// differ: b.txt" })` over a worktree nothing had written to -- `b.txt` being
-/// what the seed tree the replacement points at does not carry.
+/// Witnessed failing with the pair removed from `read_only_git`, once under
+/// **each** ambient control the parent neutralises, every one of them exported
+/// into that parent: `GIT_NO_REPLACE_OBJECTS=1`, `GIT_CONFIG_COUNT` +
+/// `GIT_CONFIG_KEY_0`/`VALUE_0`, `GIT_CONFIG_KEY_0`/`VALUE_0` with no count,
+/// `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, a
+/// `HOME`/`XDG_CONFIG_HOME` carrying `core.useReplaceRefs = false`, and
+/// `GIT_REPLACE_REF_BASE`. All eleven exited `101` on
+/// `Err(TreeMismatch { expected: "...", difference: "1 path(s) differ: b.txt" })`
+/// over a worktree nothing had written to -- `b.txt` being what the seed tree
+/// the replacement points at does not carry.
 #[test]
 fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
     let status = run_child_without_replacement_isolation(
@@ -6029,25 +6038,26 @@ fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
     );
     assert!(
         status.success(),
-        "the child witnesses quiescence over a replaced tree with \
-         `{}` absent from its own environment, and ended {status:?}",
-        NO_REPLACEMENT_OBJECTS.0
+        "the child witnesses quiescence over a replaced tree with every ambient \
+         control over `refs/replace/*` taken away from it, and ended {status:?}"
     );
 }
 
 /// Spawned by [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`].
+///
+/// [`assert_replacement_controls_pinned`] is the round-3 repair, and it is the
+/// first statement for a reason: it refuses the enumerated controls by name and
+/// then measures, over a throwaway repository in *this* environment, that
+/// `refs/replace/*` is honoured at all. The witness below is worth nothing
+/// unless it is, and a mechanism nobody enumerated fails there rather than
+/// passing here.
 #[test]
 #[ignore = "subprocess helper"]
 fn quiescence_replacement_helper() {
     if std::env::var_os(QUIESCENCE_REPLACEMENT).is_none() {
         return;
     }
-    assert!(
-        std::env::var_os(NO_REPLACEMENT_OBJECTS.0).is_none(),
-        "the parent must remove `{}` before spawning this child, or the reads \
-         below inherit the protection they are here to witness",
-        NO_REPLACEMENT_OBJECTS.0
-    );
+    assert_replacement_controls_pinned("quiescence");
 
     let fixture = Fixture::created("replace-quiescence");
     let slot = fixture.add_task(&mut NoHooks, "q", 1);
