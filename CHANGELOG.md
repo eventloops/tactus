@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- A Unix private helper (the cleanup reaper, the job-control guard) can be ended through a name
+  the kernel cannot re-issue instead of through its pid. **Opt-in, Linux 5.4+, off by default:**
+  with `UPSTROKE_HELPER_IDENTITY=1` each helper is created by `clone3` with `CLONE_PIDFD`,
+  signalled with `pidfd_send_signal` and collected with `waitid(P_PIDFD, ...)`, and no other
+  call is made. Setting it asserts that the host's syscall policy permits those three calls.
+  With it unset, upstroke makes none of them and ending a helper stays the `kill` and the
+  `waitpid` it has always been, which `DESIGN.md` §15 now states is best effort against an
+  embedding host that reaps this process's children with wildcard waits.
 - Relicensed to Apache-2.0 with a NOTICE file; earlier releases keep the terms recorded in their
   own tagged metadata and source notices (decided 2026-09-01).
 - The G2 checkpoint: the v0.2 parallel-execution machinery (worktree-per-task isolation, the
