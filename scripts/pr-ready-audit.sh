@@ -279,24 +279,55 @@ PY
 # Those three sets are spelled out character by character, for the reason valid_login spells its
 # one out: a range inside a bash regex is resolved by the locale's collating order and not by
 # ASCII, so `[0-9a-f]` is not the hex alphabet it looks like and `[A-Z_]` is not the upper-case
-# one. The greps that feed them still use ranges, which is the shape they had; where a locale
-# widens one, what reaches these is checked against the narrow set and a head that does not match
-# it becomes `-`, which blocks. Narrow is the safe side of that disagreement.
+# one. THE READS RUN IN `C` so the ranges that feed them are the ranges they look like, and so
+# that one review parses to one answer on every machine: this file's own header forbids
+# locale-dependent output, and leaving the greps wide while the checks were narrow produced
+# exactly that. Under en_US.utf8 `[A-Z_]+` admitted `É`, the check then took the clean tail of
+# what came back, and `VERDICT: FAILÉPASS` parsed as PASS here and as FAIL under `C`. Both halves
+# are closed: `C` for every read, and each check anchored at BOTH ends over a whole token.
+#
+# A CHECK ANCHORED AT ONE END VALIDATES A SUFFIX, NOT A TOKEN. `[A-Z_]+$` matches the tail of
+# `FAILÉPASS` and says PASS, which is a new way to approve a change; `($hex{40})` unanchored
+# searches every line the grep returned, so a first marker with a bad character in it was skipped
+# over and a LATER line's commit came back as "the first". What does not validate whole is never
+# trimmed to the part that does: a head becomes `-`, which blocks, and a verdict is carried
+# through as written, which is not PASS and names itself in the blocker.
 parse_prose_review() {
   local f="$1" head="" verdict="" stray="" raw line status=0
   local hex='[0123456789abcdef]'
   local upper='[ABCDEFGHIJKLMNOPQRSTUVWXYZ_]'
   local sev='P[0123]'
+  # Every read below, and bash's own matching, in `C`. `export` because a plain `local` is not in
+  # the environment the greps are given; both are restored when the function returns.
+  local LC_ALL=C
+  export LC_ALL
 
-  raw="$(grep -oE '(head=|Reviewed head: )[0-9a-f]{40}' "$f")" || status=$?
+  # The marker and the whole run after it, not the part of that run that looks like a commit, for
+  # the reason the verdict read takes the whole token: a grep that matches only what is well
+  # formed hands back a listing its own failures have been dropped from, and the FIRST line of
+  # that listing is then not the first marker in the file.
+  raw="$(grep -oE '(head=|Reviewed head: )[^[:space:]]*' "$f")" || status=$?
   ((status <= 1)) || return 1
-  [[ "$raw" =~ ($hex{40}) ]] && head="${BASH_REMATCH[1]}"       # the first, as `head -1` took
+  line="${raw%%$'\n'*}"                                         # the first, as `head -1` took
+  [[ "$line" =~ ^(head=|Reviewed\ head:\ )($hex{40})$ ]] && head="${BASH_REMATCH[2]}"
 
   status=0
-  raw="$(grep -oE 'VERDICT:\**:? *[A-Z_]+' "$f")" || status=$?
+  # The whole run after the marker, not just the part that looks like a verdict, so that what
+  # follows a good token is in hand to be judged rather than left off the end of the match.
+  raw="$(grep -oE 'VERDICT:\**:? *[^[:space:]]*' "$f")" || status=$?
   ((status <= 1)) || return 1
   while IFS= read -r line; do                                   # the last, as `tail -1` took
-    [[ "$line" =~ ($upper+)$ ]] && verdict="${BASH_REMATCH[1]}"
+    [[ -n "$line" ]] || continue                                # no VERDICT: `<<<` still feeds one
+    if [[ "$line" =~ ^VERDICT:[*]*:?\ *($upper+)[*]*$ ]]; then
+      verdict="${BASH_REMATCH[1]}"
+    else
+      # Not a verdict token. Carried whole -- prefix stripped by expansion, which has no regex
+      # and no locale in it -- so it cannot be mistaken for the clean word inside it.
+      verdict="${line#VERDICT:}"
+      while [[ "$verdict" == " "* || "$verdict" == ":"* || "$verdict" == "*"* ]]; do
+        verdict="${verdict#?}"
+      done
+    fi
   done <<< "$raw"
 
   printf 'META\t%s\t%s\t-\n' "${head:-"-"}" "${verdict:-"-"}"
@@ -305,7 +336,11 @@ parse_prose_review() {
   raw="$(grep -oE '^[0-9]+\. \*\*P[0-3]' "$f")" || status=$?
   ((status <= 1)) || return 1
   while IFS= read -r line; do
-    [[ "$line" =~ ($sev) ]] && printf '%s\t-\t0\n' "${BASH_REMATCH[1]}"
+    [[ -n "$line" ]] || continue                                # no findings: `<<<` still feeds one
+    # A line the grep returned and this cannot read is a finding, and a finding this does not
+    # print is a blocker the audit never raises. It refuses rather than skipping it.
+    [[ "$line" =~ ^[0123456789]+\.\ \*\*($sev)$ ]] || return 1
+    printf '%s\t-\t0\n' "${BASH_REMATCH[1]}"
   done <<< "$raw"
 
   status=0
@@ -329,14 +364,26 @@ parse_prose_review() {
 # line `id: ID` (README: the id lives in the frontmatter, not the name). The same line in prose
 # or a code block further down is not a frontmatter id. The id is a fixed string, whole line.
 frontmatter_has_id() {
-  # `grep` without `-q`, its output discarded instead. `-q` exits at the first match, the `awk`
-  # still writing the rest of the block takes SIGPIPE, and `pipefail` reports that as 141 -- for
-  # a file that matched. The caller read 141 as "did not match", so a second file filing the
-  # same id, with a long line after it, counted as no file at all and two files became one.
-  # Reading the block to its end costs nothing and leaves the status meaning what it says:
-  # 0 matched, 1 did not, anything else is a read that failed.
-  awk 'NR == 1 { if ($0 != "---") exit; next } $0 == "---" { exit } { print }' \
-    | grep -xF -e "id: $1" > /dev/null
+  # ONE PARSER, NOT TWO JOINED BY A PIPE, because a pipeline has one status and there are two
+  # things to say. Under `pipefail` that status is the RIGHTMOST non-zero one, so an `awk` that
+  # died reading its input (2) stood behind a `grep` that found nothing in what little arrived
+  # (1), and 1 came back: "this file does not carry the id", an answer, from a read that never
+  # finished. Two files filing one id then counted as one, `duplicate-file` never fired, and the
+  # pull request was ready. (`grep -q` had the same shape from the other end: it exits at the
+  # first match, the `awk` still writing took SIGPIPE, and 141 came back for a file that
+  # matched.) With the match inside the one command there is no second status to hide behind:
+  # 0 matched, 1 did not, anything else is a read that failed -- and `awk`'s own failure is
+  # nothing else's "no".
+  #
+  # The id reaches `awk` through the environment and not through `-v`, which expands backslash
+  # escapes in the value and would compare an id carrying one as something else. `$0 == want` is
+  # a whole-line string comparison, as `grep -xF` was: no character of the id means anything.
+  FRONTMATTER_ID="id: $1" awk '
+    NR == 1     { if ($0 != "---") exit 1; next }               # no opening fence, no frontmatter
+    $0 == "---" { exit (found ? 0 : 1) }                        # the block ends here
+    $0 == ENVIRON["FRONTMATTER_ID"] { found = 1 }
+    END         { exit (found ? 0 : 1) }
+  '
 }
 
 # finding_file_count ID TREEISH: how many files under reviews/findings/ in TREEISH carry `id: ID`
@@ -352,6 +399,15 @@ frontmatter_has_id() {
 # tree and not the blobs, so a file whose blob is gone is still a candidate here and fails its own
 # read below. (No `*.md` pathspec: `ls-tree` matches paths literally and a glob selected nothing.)
 #
+# THE MODE GIT RECORDS DECIDES WHAT AN ENTRY IS, so the listing keeps it: `--name-only` drops it,
+# and a name is not a file. A committed symlink is a `120000` blob whose CONTENT IS ITS TARGET
+# STRING, and `git show` hands that string over exactly as it hands over a file's text -- so
+# `reviews/findings/symlink.md`, a broken link whose target reads `---\nid: X\n---`, was counted
+# as the file filing X and a finding that had never been written was filed. A `160000` gitlink is
+# not a finding either. Only `100644` and `100755` are, which is the rule PR #251 settled for
+# `validate-pr-branch.sh` against the same defect, from the same source: what git records, never
+# what a checkout materialised or what a name suggests.
+#
 # Each file then gets exactly one of three answers: it carries the id, it does not, or it could
 # not be read. `frontmatter_has_id` says which by its status -- 0, 1, or anything else -- and
 # anything else refuses the count rather than being folded into "no".
@@ -361,14 +417,18 @@ frontmatter_has_id() {
 # zero for every finding, on a tree that holds the file. The gate builds a small repository and
 # counts in it, because that is the mistake a shape rule does not catch.
 finding_file_count() {
-  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 cand
+  local id="$1" treeish="$2" cand_file blob_file status=0 n=0 entry cand
   cand_file="$(mktemp)"
   blob_file="$(mktemp)"
-  git ls-tree -r -z --name-only "$treeish" -- reviews/findings/ > "$cand_file" 2>/dev/null \
+  git ls-tree -r -z "$treeish" -- reviews/findings/ > "$cand_file" 2>/dev/null \
     || status=$?
   if ((status != 0)); then rm -f "$cand_file" "$blob_file"; return 1; fi
-  # NUL-separated names, so a path with whitespace stays one candidate.
-  while IFS= read -r -d '' cand; do
+  # NUL-separated `<mode> <type> <object><TAB><path>` records, so a path with whitespace -- a tab
+  # in it included -- stays one candidate: the mode ends at the first space and the path begins
+  # after the first tab, and neither can be reached from inside the path.
+  while IFS= read -r -d '' entry; do
+    case "${entry%% *}" in 100644|100755) ;; *) continue ;; esac
+    cand="${entry#*$'\t'}"
     [[ "$cand" == *.md ]] || continue
     if ! git show "$treeish:$cand" > "$blob_file" 2>/dev/null; then
       rm -f "$cand_file" "$blob_file"

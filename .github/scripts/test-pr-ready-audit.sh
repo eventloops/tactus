@@ -80,6 +80,19 @@
 #                                finished parse from a marker instead of from a status
 #   MUT-PROSE-READ-SUPPRESSED    a read that failed inside the prose parser was reported as
 #                                "nothing matched", and END was printed over it
+#   MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS  the frontmatter read was a pipeline, so under
+#                                `pipefail` the reader's failure (2) stood behind the matcher's
+#                                ordinary "no match" (1) and the caller was handed an answer
+#   MUT-PROSE-VERDICT-SUFFIX     the verdict check was anchored at one end, so it validated the
+#                                TAIL of the token and read `VERDICT: FAIL<U+00C9>PASS` as PASS --
+#                                and read it differently under `C`, in a file whose header
+#                                forbids locale-dependent output
+#   MUT-PROSE-HEAD-NOT-FIRST     the head check searched the whole listing instead of its first
+#                                line, so a first marker it could not read was stepped over and a
+#                                later line's commit came back as the reviewed head
+#   MUT-FINDING-SYMLINK-AS-FILE  the candidate listing dropped the mode git records, so a
+#                                `120000` symlink was read as a file and its TARGET STRING as
+#                                that file's frontmatter
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -738,6 +751,40 @@ printf 'Reviewed head: %s\nThe object {"verdict":"PASS","findings":[]} is an exa
   "4ad962f000000000000000000000000000000001" > "$tmp/quoted.md"
 expect MUT-QUOTED-JSON-IS-JSON "$(review_kind "$tmp/quoted.md")" prose
 
+# A verdict is a whole token, in every locale. `[A-Z_]+$` matches the TAIL of a dirty token, and
+# `[A-Z_]` inside a grep is whatever the locale's collating order says it is: under en_US.utf8 the
+# grep carried `FAIL\xc3\x89PASS` through and the check took the clean `PASS` off its end, so a
+# review that says FAIL approved the change -- while the same file under `C` blocked. One answer
+# everywhere, and the token that is not a verdict is carried whole so the blocker names it.
+printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\nVERDICT: FAIL\xc3\x89PASS\n' \
+  c3a6665000000000000000000000000000000003 > "$tmp/prose-suffix.md"
+suffix_want="$(printf 'META|c3a6665000000000000000000000000000000003|FAIL\xc3\x89PASS|-\nEND|-|0')"
+# The ambient locale, and then `$locales` -- `C` and every UTF-8 locale this machine has, built
+# for the login check above. The defect is a disagreement between them, so one alone cannot see it.
+expect MUT-PROSE-VERDICT-SUFFIX "$(parse_prose_review "$tmp/prose-suffix.md" | tr '\t' '|')" "$suffix_want"
+for loc in "${locales[@]}"; do
+  got="$(LC_ALL="$loc" parse_prose_review "$tmp/prose-suffix.md" | tr '\t' '|')"
+  expect "MUT-PROSE-VERDICT-SUFFIX under $loc" "$got" "$suffix_want"
+done
+# A verdict wrapped in the emphasis a frontier review writes is still that verdict, and the last
+# line still wins: the whole-token rule must not refuse the form the reviews actually use.
+printf 'head=%s\n**VERDICT: CHANGES_REQUIRED**\n**VERDICT: PASS**\n' \
+  c3a6665000000000000000000000000000000003 > "$tmp/prose-emphasis.md"
+# `| head -1` is not how a line is taken from a parser here: it closes the pipe at the first line,
+# the parser still printing takes SIGPIPE, and under `pipefail` this file's own `set -e` ends the
+# run at 141 -- the trap the script under test was repaired for, in the gate that proves it.
+got="$(parse_prose_review "$tmp/prose-emphasis.md" | tr '\t' '|')"
+expect MUT-PROSE-VERDICT-SUFFIX "${got%%$'\n'*}" 'META|c3a6665000000000000000000000000000000003|PASS|-'
+# The head is the FIRST marker, and a first marker that does not read whole is not a licence to
+# take the second: the audit would then check the pull request's head against a commit the review
+# never named. `-` blocks; the later line does not stand in for it.
+printf 'head=c3a6665\xc3\x8900000000000000000000000000000003\nReviewed head: %s\n' \
+  4ad962f000000000000000000000000000000001 > "$tmp/prose-head.md"
+for loc in "${locales[@]}"; do
+  got="$(LC_ALL="$loc" parse_prose_review "$tmp/prose-head.md" | tr '\t' '|')"
+  expect "MUT-PROSE-HEAD-NOT-FIRST under $loc" "${got%%$'\n'*}" 'META|-|-|-'
+done
+
 # --- the frontmatter id match ------------------------------------------------------------------
 printf -- '---\nid: OTHER-ID\nseverity: P2\n---\n\nThe prose below repeats a line.\nid: TARGET-ID\n' > "$tmp/prose-id.md"
 printf -- '---\nid: TARGET-ID\nseverity: P2\n---\n\nBody.\n' > "$tmp/front-id.md"
@@ -808,6 +855,76 @@ rm -f "$broken_repo/.git/objects/${broken_blob:0:2}/${broken_blob:2}"
 if (cd "$broken_repo" && finding_file_count F-TWICE HEAD) > "$tmp/blob.out" 2>&1; then
   error "MUT-FINDING-FILE-READ-AS-MISS: a file whose blob could not be read was counted, got [$(cat "$tmp/blob.out")]"
 fi
+
+# A frontmatter read that DIES is not a file that does not carry the id. While the read was a
+# pipeline this was unprovable from the outside: under `pipefail` the reader's 2 stood behind the
+# matcher's ordinary 1 -- nothing matched, because nothing arrived -- and 1 is an answer. Two
+# files filing one id came back as one, which is `duplicate-file` turning into ready.
+#
+# The injection is an `awk` that fails on the second file and is the real `awk` everywhere else,
+# so the count has one good read and one dead one, exactly as a half-readable blob would give it.
+awk_stub="$tmp/awk-stub"
+mkdir -p "$awk_stub"
+cat > "$awk_stub/awk" <<'STUB'
+#!/usr/bin/env bash
+# The frontmatter arrives on stdin, so the file is known by what is in it and not by an argument.
+in="$(mktemp)"; cat > "$in"
+if grep -qF 'SECOND-FILE-MARKER' "$in"; then rm -f "$in"; exit 2; fi
+"$REAL_AWK" "$@" < "$in"; s=$?; rm -f "$in"; exit $s
+STUB
+chmod +x "$awk_stub/awk"
+dup_repo="$tmp/dup-repo"
+mkdir -p "$dup_repo/reviews/findings"
+git init -q "$dup_repo"
+printf -- '---\nid: G-TWICE\n---\n\nBody.\n' > "$dup_repo/reviews/findings/g1.md"
+printf -- '---\nid: G-TWICE\nnote: SECOND-FILE-MARKER\n---\n\nBody.\n' > "$dup_repo/reviews/findings/g2.md"
+git -C "$dup_repo" add -A
+git -C "$dup_repo" -c user.email=t@example -c user.name=t commit -qm "file one id twice"
+expect MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS "$( (cd "$dup_repo" && finding_file_count G-TWICE HEAD) )" 2
+dup_status=0
+got="$(
+  export REAL_AWK="$(command -v awk)" PATH="$awk_stub:$PATH"
+  hash -r
+  cd "$dup_repo" && finding_file_count G-TWICE HEAD 2>/dev/null
+)" || dup_status=$?
+((dup_status != 0)) \
+  || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a count with a dead read in it succeeded, got [$got]"
+[[ "$got" == 1 ]] \
+  && error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: two files filing one id counted as one"
+# And the helper itself: 1 means "read to the end and did not match", so a read that never
+# finished must not be reported as 1.
+front_status=0
+(
+  export REAL_AWK="$(command -v awk)" PATH="$awk_stub:$PATH"
+  hash -r
+  frontmatter_has_id G-TWICE < "$dup_repo/reviews/findings/g2.md" 2>/dev/null
+) || front_status=$?
+((front_status != 1)) \
+  || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a read that died reported 1, which is an answer"
+
+# WHAT GIT RECORDS DECIDES WHAT AN ENTRY IS. A committed symlink is a `120000` blob whose content
+# is its target string, and `git show` hands that string over exactly as it hands over a file's
+# text -- so a broken link named like a finding, pointing at `---\nid: X\n---`, filed a finding
+# that had never been written. The entry is built through the index rather than with `ln -s`, so
+# the case is the same one wherever this suite is run by hand.
+link_repo="$tmp/link-repo"
+mkdir -p "$link_repo/reviews/findings"
+git init -q "$link_repo"
+link_blob="$(printf -- '---\nid: SYMLINK-ID\n---\n' | git -C "$link_repo" hash-object -w --stdin)"
+git -C "$link_repo" update-index --add --cacheinfo "120000,$link_blob,reviews/findings/symlink.md"
+git -C "$link_repo" -c user.email=t@example -c user.name=t commit -qm "commit a link named like a finding"
+expect MUT-FINDING-SYMLINK-AS-FILE "$(git -C "$link_repo" ls-tree -r HEAD -- reviews/findings/ | cut -c1-6)" 120000
+expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count SYMLINK-ID HEAD) )" 0
+# The regular file beside it still counts, so the mode filter is a filter and not a refusal. The
+# new file is staged BY PATH: `add -A` would see no `symlink.md` in a work tree that never had one
+# and stage its deletion, and the case under test would leave the tree it is testing.
+printf -- '---\nid: REGULAR-ID\n---\n\nBody.\n' > "$link_repo/reviews/findings/regular.md"
+git -C "$link_repo" add -- reviews/findings/regular.md
+git -C "$link_repo" -c user.email=t@example -c user.name=t commit -qm "file one finding properly"
+expect MUT-FINDING-SYMLINK-AS-FILE \
+  "$(git -C "$link_repo" ls-tree -r HEAD -- reviews/findings/ | cut -c1-6 | sort -u | tr '\n' ' ')" "100644 120000 "
+expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count REGULAR-ID HEAD) )" 1
+expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count SYMLINK-ID HEAD) )" 0
 
 # --- the newest check run per name -------------------------------------------------------------
 got="$(printf 'upstroke-ci\t100\tsuccess\nupstroke-ci\t250\tfailure\nupstroke-pr-policy\t120\tsuccess\nupstroke-ci\t90\tsuccess\n' | newest_per_name | tr ' ' '\n' | grep . | sort | tr '\n' ' ')"
