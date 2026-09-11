@@ -1572,6 +1572,7 @@ not_an_effect = [
     "SECCOMP_MODE_FILTER",
     "SECCOMP_RET_ALLOW",
     "SECCOMP_RET_ERRNO",
+    "SECCOMP_RET_KILL_PROCESS",
     "SEEK_SET",
     "SIGABRT",
     "SIGBUS",

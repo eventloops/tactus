@@ -6001,7 +6001,15 @@ mod termination {
 
         #[cfg(target_os = "linux")]
         fn seccomp_refuse_with_eperm() -> u32 {
-            libc::SECCOMP_RET_ERRNO | u32::try_from(libc::EPERM).expect("EPERM fits u32")
+            seccomp_refuse_with(libc::EPERM)
+        }
+
+        /// Answer `errno` from the call without making it. The errno is the
+        /// policy's own and reaches the caller as if the kernel had written it,
+        /// which is why an errno alone establishes nothing about a helper.
+        #[cfg(target_os = "linux")]
+        fn seccomp_refuse_with(errno: libc::c_int) -> u32 {
+            libc::SECCOMP_RET_ERRNO | u32::try_from(errno).expect("an errno fits u32")
         }
 
         #[cfg(target_os = "linux")]
@@ -6102,6 +6110,15 @@ mod termination {
         /// sends through the same descriptor.
         #[cfg(target_os = "linux")]
         fn refuse_pidfd_send_signal_of(signal: libc::c_int) {
+            refuse_pidfd_send_signal_of_with(signal, libc::EPERM);
+        }
+
+        /// As `refuse_pidfd_send_signal_of`, with the errno the policy answers
+        /// named: `EPERM` is a call this host refuses, and `ESRCH` is the
+        /// answer the kernel would have given about a helper that had ended
+        /// and been collected, written by something that is not the kernel.
+        #[cfg(target_os = "linux")]
+        fn refuse_pidfd_send_signal_of_with(signal: libc::c_int, errno: libc::c_int) {
             const SECCOMP_DATA_NR_OFFSET: u32 = 0;
             let (signal_low, signal_high) = seccomp_argument_words(1);
             let number = u32::try_from(signal).expect("a signal number fits the kernel's field");
@@ -6114,7 +6131,7 @@ mod termination {
                 seccomp_load(signal_low),
                 seccomp_jump_if_equal(number, 1, 0),
                 seccomp_return(libc::SECCOMP_RET_ALLOW),
-                seccomp_return(seccomp_refuse_with_eperm()),
+                seccomp_return(seccomp_refuse_with(errno)),
             ];
             install_seccomp_policy(&mut program);
         }
@@ -6124,6 +6141,15 @@ mod termination {
         /// was, and the teardown's own wait does not.
         #[cfg(target_os = "linux")]
         fn refuse_the_consuming_waitid() {
+            refuse_the_consuming_waitid_with(libc::EPERM);
+        }
+
+        /// As `refuse_the_consuming_waitid`, with the errno the policy answers
+        /// named: `EPERM` is a call this host refuses, and `ECHILD` is the
+        /// answer the kernel would have given about a helper that had already
+        /// been collected, written by something that is not the kernel.
+        #[cfg(target_os = "linux")]
+        fn refuse_the_consuming_waitid_with(errno: libc::c_int) {
             const SECCOMP_DATA_NR_OFFSET: u32 = 0;
             let (options_low, _) = seccomp_argument_words(3);
             let leaves_it_uncollected =
@@ -6134,7 +6160,7 @@ mod termination {
                 seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_waitid), 0, 3),
                 seccomp_load(options_low),
                 seccomp_jump_if_any_set(leaves_it_uncollected, 1, 0),
-                seccomp_return(seccomp_refuse_with_eperm()),
+                seccomp_return(seccomp_refuse_with(errno)),
                 seccomp_return(libc::SECCOMP_RET_ALLOW),
             ];
             install_seccomp_policy(&mut program);
@@ -6592,6 +6618,455 @@ mod termination {
             assert!(
                 output.status.success(),
                 "refused-collection helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        /// `SECCOMP_RET_KILL_PROCESS` for `pidfd_open` and for nothing else:
+        /// the disposition a disallowed call draws by default under systemd's
+        /// `SystemCallFilter=`. The call does not return, so there is no errno
+        /// for the caller to read and no branch for it to take.
+        #[cfg(target_os = "linux")]
+        fn kill_the_caller_of_pidfd_open() {
+            const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+
+            let mut program = [
+                seccomp_load(SECCOMP_DATA_NR_OFFSET),
+                seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_pidfd_open), 0, 1),
+                seccomp_return(libc::SECCOMP_RET_KILL_PROCESS),
+                seccomp_return(libc::SECCOMP_RET_ALLOW),
+            ];
+            install_seccomp_policy(&mut program);
+        }
+
+        /// Whether this process has a child nothing collected: the pid of one
+        /// if it has, and `-1` with `ECHILD` if it has not. The wait blocks and
+        /// there is no clock in it — with every helper collected there is no
+        /// child left and it answers at once, and an abandoned helper is either
+        /// already a zombie or is ending on its closed command pipe, which is
+        /// what this returns.
+        #[cfg(target_os = "linux")]
+        fn abandoned_child() -> libc::pid_t {
+            loop {
+                // SAFETY: `waitpid` writes no status through the null pointer
+                // and reaches none but this process's own children.
+                let waited = unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) };
+                if waited > 0 || !last_errno_is_interrupted() {
+                    return waited;
+                }
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn fatal_identity_policy_helper() {
+            if std::env::var_os("UPSTROKE_FATAL_IDENTITY_POLICY_HELPER").is_none() {
+                return;
+            }
+            kill_the_caller_of_pidfd_open();
+
+            // A launch, in full, on a host that ends the process which asks it
+            // for a name. Reaching the statement after this one is the whole
+            // assertion: a `pidfd_open` made here never returns.
+            let reaper =
+                spawn_reaper().expect("a launch under a policy that kills on `pidfd_open`");
+            let identity = reaper.identity;
+            reaper.cancel();
+            assert_eq!(
+                identity, NO_HELPER_IDENTITY,
+                "a call this host kills the caller of answered with a descriptor"
+            );
+            assert_eq!(
+                PENDING_TERMINATION.load(Ordering::SeqCst),
+                0,
+                "the cancelled reaper armed process-wide termination"
+            );
+            let abandoned = abandoned_child();
+            assert!(
+                abandoned < 0 && last_errno() == libc::ECHILD,
+                "the launch left {abandoned} behind uncollected"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_policy_that_kills_on_the_identity_call_does_not_kill_this_process() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args(["fatal_identity_policy_helper", "--ignored", "--nocapture"])
+                .env("UPSTROKE_FATAL_IDENTITY_POLICY_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the fatal-policy helper");
+            assert!(
+                output.status.success(),
+                "fatal-policy helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        /// Fill this process's descriptor table, leaving exactly `spare` slots
+        /// free. The soft limit is lowered first so the fill is bounded; the
+        /// hard limit is carried forward unchanged so `release_descriptors` can
+        /// put the soft one back.
+        #[cfg(target_os = "linux")]
+        fn fill_descriptors_leaving(spare: usize) -> (Vec<libc::c_int>, libc::rlimit) {
+            let devnull = std::ffi::CString::new("/dev/null").expect("a path with no null byte");
+            let open_now = std::fs::read_dir("/proc/self/fd")
+                .expect("this process's own descriptors")
+                .count();
+            let headroom =
+                u64::try_from(open_now + 64).expect("a descriptor count fits the limit word");
+            // SAFETY: `getrlimit` writes one `rlimit` through the pointer and
+            // `ceiling` is live for the call.
+            let mut ceiling: libc::rlimit = unsafe { std::mem::zeroed() };
+            let read_ceiling = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut ceiling) };
+            assert_eq!(
+                read_ceiling,
+                0,
+                "reading RLIMIT_NOFILE: {}",
+                std::io::Error::last_os_error()
+            );
+            let lowered = libc::rlimit {
+                rlim_cur: headroom,
+                rlim_max: ceiling.rlim_max,
+            };
+            // SAFETY: `setrlimit` reads one `rlimit` through the pointer and
+            // `lowered` is live for the call.
+            let narrowed = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &lowered) };
+            assert_eq!(
+                narrowed,
+                0,
+                "narrowing RLIMIT_NOFILE to {headroom}: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let mut held = Vec::new();
+            loop {
+                // SAFETY: `open` reads the path behind the pointer, which is
+                // live for the call, and answers a descriptor or a negative
+                // number.
+                let fd = unsafe { libc::open(devnull.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+                if fd < 0 {
+                    break;
+                }
+                held.push(fd);
+            }
+            let exhausted = last_errno();
+            assert_eq!(
+                exhausted,
+                libc::EMFILE,
+                "the descriptor table filled for some other reason: {}",
+                std::io::Error::from_raw_os_error(exhausted)
+            );
+            for _ in 0..spare {
+                let Some(fd) = held.pop() else {
+                    panic!(
+                        "the fill took fewer than {spare} descriptors, so nothing is being tested"
+                    )
+                };
+                close_fd(fd);
+            }
+            (held, ceiling)
+        }
+
+        #[cfg(target_os = "linux")]
+        fn release_descriptors(held: Vec<libc::c_int>, ceiling: libc::rlimit) {
+            for fd in held {
+                close_fd(fd);
+            }
+            // SAFETY: as in `fill_descriptors_leaving`; `ceiling` is the limit
+            // this process started with and is live for the call.
+            let restored = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &ceiling) };
+            assert_eq!(
+                restored,
+                0,
+                "restoring RLIMIT_NOFILE: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn identity_shortage_child_cleanup_helper() {
+            if std::env::var_os("UPSTROKE_IDENTITY_SHORTAGE_CLEANUP_HELPER").is_none() {
+                return;
+            }
+            const LAUNCHES: usize = 3;
+            const REAPER: usize = 0;
+            let policy = SignalPolicy {
+                termination_mask: 0,
+                guard_wake_mask: 0,
+                stop_mask: 0,
+                job_control: false,
+            };
+
+            // Four descriptors are the reaper's two pipes and eight are the
+            // guard's four. Both are opened before the launch's `fork`, so the
+            // identity is the first thing it asks the kernel for that there is
+            // no descriptor left to answer.
+            let mut left_behind = Vec::new();
+            for site in [REAPER, 1] {
+                let (what, spare) = if site == REAPER {
+                    ("Unix cleanup reaper", 4)
+                } else {
+                    ("Unix job-control guard", 8)
+                };
+                let (held, ceiling) = fill_descriptors_leaving(spare);
+                let mut failures = Vec::with_capacity(LAUNCHES);
+                for _ in 0..LAUNCHES {
+                    failures.push(if site == REAPER {
+                        spawn_reaper().err()
+                    } else {
+                        spawn_guard(policy).err()
+                    });
+                }
+                release_descriptors(held, ceiling);
+
+                for failure in &failures {
+                    let Some(message) = failure else {
+                        panic!("a launch with no descriptor left for an identity was accepted")
+                    };
+                    assert!(
+                        message.starts_with(&format!("taking an identity for the {what}")),
+                        "the launch failed for some other reason: {message}"
+                    );
+                }
+                let mut abandoned = Vec::new();
+                loop {
+                    let waited = abandoned_child();
+                    if waited < 0 {
+                        assert_eq!(
+                            last_errno(),
+                            libc::ECHILD,
+                            "waiting for the children of {LAUNCHES} {what} launches: {}",
+                            std::io::Error::last_os_error()
+                        );
+                        break;
+                    }
+                    abandoned.push(waited);
+                }
+                left_behind.push((what, abandoned));
+            }
+
+            let leaked = left_behind
+                .iter()
+                .filter(|(_, abandoned)| !abandoned.is_empty())
+                .map(|(what, abandoned)| format!("{what} left {abandoned:?}"))
+                .collect::<Vec<_>>();
+            assert!(
+                leaked.is_empty(),
+                "{LAUNCHES} launches that could not name their helper left it behind \
+                 uncollected -- {}: closing the command pipe lets a helper exit, and a child \
+                 nothing waits for stays this process's for the rest of its life",
+                leaked.join("; ")
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_launch_that_could_not_name_its_helper_still_collects_it() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "identity_shortage_child_cleanup_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("UPSTROKE_IDENTITY_SHORTAGE_CLEANUP_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the shortage-cleanup helper");
+            assert!(
+                output.status.success(),
+                "shortage-cleanup helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn forged_esrch_identity_helper() {
+            if std::env::var_os("UPSTROKE_FORGED_ESRCH_IDENTITY_HELPER").is_none() {
+                return;
+            }
+            refuse_pidfd_send_signal_of_with(libc::SIGKILL, libc::ESRCH);
+
+            let (helper, helper_lifetime) = spawn_sigchld_target();
+            let witness = identity_by_hand(helper);
+            assert_eq!(
+                identity_can_collect(witness),
+                IdentityProbe::Available,
+                "the policy answered the wait, so what follows would not be about the signal"
+            );
+            assert_eq!(
+                identity_can_signal(witness),
+                IdentityProbe::Available,
+                "the policy answered the signal `0` the probe sends, so this is not the \
+                 argument-sensitive case"
+            );
+            let flags: libc::c_long = 0;
+            // SAFETY: as in `signal_helper`, with the signal the teardown sends
+            // rather than the one the probe sends.
+            let forged = unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    libc::c_long::from(witness),
+                    libc::c_long::from(libc::SIGKILL),
+                    std::ptr::null_mut::<libc::siginfo_t>(),
+                    flags,
+                )
+            };
+            let forged_errno = last_errno();
+            assert_eq!(
+                forged, -1,
+                "the policy did not answer `pidfd_send_signal` for SIGKILL itself, so nothing \
+                 here is forged"
+            );
+            assert_eq!(
+                forged_errno,
+                libc::ESRCH,
+                "the refusal came from somewhere other than the policy: {}",
+                std::io::Error::from_raw_os_error(forged_errno)
+            );
+            close_fd(witness);
+            // SAFETY: `helper` is this test's own child and nothing has
+            // collected it, so it is still a process this wait can answer for.
+            let alive = unsafe { libc::waitpid(helper, std::ptr::null_mut(), libc::WNOHANG) };
+            assert_eq!(
+                alive, 0,
+                "the helper the policy is about to answer `ESRCH` for has ended, so the answer \
+                 would have been the kernel's own"
+            );
+
+            let identity = helper_identity(helper);
+            assert!(
+                identity >= 0,
+                "both probes pass under this policy, so the identity is taken and the teardown \
+                 through it is what has to answer for the forged errno"
+            );
+
+            // Asserted before any collection: a wait through an identity on a
+            // helper nothing has killed does not return, and a test that hangs
+            // reports nothing.
+            let killed = signal_helper(helper, identity, libc::SIGKILL);
+            let kill_errno = if killed == 0 { 0 } else { last_errno() };
+            assert_eq!(
+                killed,
+                0,
+                "an `ESRCH` this policy wrote was read as the helper having ended and been \
+                 collected: nothing was signalled, and the collection that follows waits on a \
+                 helper still running: {}",
+                std::io::Error::from_raw_os_error(kill_errno)
+            );
+
+            let end = Reaper {
+                command_fd: -1,
+                ack_fd: -1,
+                _command_keepalive_fd: -1,
+                pid: helper,
+                identity,
+            }
+            .abandon();
+            assert_eq!(
+                end.kill_errno, 0,
+                "the teardown reported a signal that was not delivered"
+            );
+            assert_eq!(
+                end.waited, helper,
+                "the teardown collected {} and not the helper",
+                end.waited
+            );
+            assert!(
+                libc::WIFSIGNALED(end.status) && libc::WTERMSIG(end.status) == libc::SIGKILL,
+                "the helper did not end on the teardown's SIGKILL: {}",
+                end.status
+            );
+            close_fd(identity);
+            drop(helper_lifetime);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn an_esrch_a_policy_wrote_is_not_proof_the_helper_ended() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args(["forged_esrch_identity_helper", "--ignored", "--nocapture"])
+                .env("UPSTROKE_FORGED_ESRCH_IDENTITY_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the forged-ESRCH helper");
+            assert!(
+                output.status.success(),
+                "forged-ESRCH helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn forged_echild_identity_helper() {
+            if std::env::var_os("UPSTROKE_FORGED_ECHILD_IDENTITY_HELPER").is_none() {
+                return;
+            }
+            refuse_the_consuming_waitid_with(libc::ECHILD);
+
+            let reaper = spawn_reaper().expect("spawn private reaper");
+            let (pid, identity) = (reaper.pid, reaper.identity);
+            assert!(
+                identity >= 0,
+                "both probes pass under this policy, so the identity is taken and the collection \
+                 through it is what has to answer for the forged errno"
+            );
+            reaper.cancel();
+
+            let abandoned = abandoned_child();
+            assert!(
+                abandoned < 0 && last_errno() == libc::ECHILD,
+                "an `ECHILD` this policy wrote was read as the helper having been collected: \
+                 the reaper {pid} this launch forked was left behind, and {abandoned} is what \
+                 the wait for it answered"
+            );
+            assert_eq!(
+                PENDING_TERMINATION.load(Ordering::SeqCst),
+                0,
+                "the cancelled reaper armed process-wide termination"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn an_echild_a_policy_wrote_is_not_proof_the_helper_was_collected() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args(["forged_echild_identity_helper", "--ignored", "--nocapture"])
+                .env("UPSTROKE_FORGED_ECHILD_IDENTITY_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the forged-ECHILD helper");
+            assert!(
+                output.status.success(),
+                "forged-ECHILD helper: {}\n{}\n{}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
