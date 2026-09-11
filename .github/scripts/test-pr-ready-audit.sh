@@ -29,6 +29,13 @@
 #   MUT-LANE-LABEL-LIST-BY-HAND  the label list, or the label reconciliation, named lanes by hand
 #                                instead of following the table, so it went stale the moment the
 #                                table moved and left a retired `lane:*` label uncorrected
+#   MUT-LANE-LABEL-SPLIT-ON-SPACES  the labels arrived as one space-joined field and every reader
+#                                of it split on whitespace, which is not a label's boundary: a
+#                                label named `lane:legacy docs` was reported and removed as
+#                                `lane:legacy`, the removal of a label the pull request does not
+#                                carry failed, and the run ended there with every pull request
+#                                after it unaudited -- or a single label containing
+#                                `ready-to-merge` was taken for the ready label, the same way
 #   MUT-P3-EFFORT-FROM-LANE-ALONE  the P3 row's effort ignored the branch, or read the category as
 #                                a PREFIX of the slug rather than as the whole first token -- so
 #                                `bulk-fix-P3/docs-contract-cleanup` was reviewed at low effort --
@@ -740,8 +747,20 @@ case "$*" in
   *"--json body"*)            (( ${STUB_BODY_STATUS:-0} )) && exit "$STUB_BODY_STATUS"
                               echo "no ledger" ;;
   "pr view"*)                 (( ${STUB_PRVIEW_STATUS:-0} )) && exit "$STUB_PRVIEW_STATUS"
-                              printf '%s\n%s\nfalse\nCLEAN\n%s\nmaster\n%s\n' \
-                                "${STUB_BRANCH:-feature/x}" "$head" "${STUB_LABELS:-}" "$head" ;;
+                              printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n' \
+                                "${STUB_BRANCH:-feature/x}" "$head" "$head"
+                              # THE LABELS ARE LAST AND TAKE A LINE EACH, which is what the audit's
+                              # own `--jq` asks gh for: a label name may hold a SPACE, so a
+                              # space-joined field has no boundaries to read. STUB_LABELS is one
+                              # label per line. The count gh declares ahead of them is derived from
+                              # the same text, so this stub cannot disagree with itself;
+                              # STUB_LABEL_COUNT overrides it, to model a read that came back split.
+                              stub_labels_n=0
+                              if [[ -n "${STUB_LABELS:-}" ]]; then
+                                stub_labels_n="$(printf '%s\n' "$STUB_LABELS" | wc -l)"
+                              fi
+                              printf '%s\n' "${STUB_LABEL_COUNT:-$stub_labels_n}"
+                              if [[ -n "${STUB_LABELS:-}" ]]; then printf '%s\n' "$STUB_LABELS"; fi ;;
   *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
 esac
 GH
@@ -994,7 +1013,7 @@ contains MUT-LANE-PREFIX-UNKNOWN-DEFAULTS "$got" '#999  -             '
 # neither reported nor removed; and the list would have gone stale again the next time the table
 # moved. Every `lane:*` label that is not this pull request's lane is reported, whether or not the
 # table has ever heard of it.
-got="$(STUB_BRANCH=docs/a-slug STUB_LABELS='lane:feature lane:findings-p3 ready-to-merge' \
+got="$(STUB_BRANCH=docs/a-slug STUB_LABELS=$'lane:feature\nlane:findings-p3\nready-to-merge' \
   STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
 # The lane came from the PREFIX and not from either label on the pull request. A label is not bound
 # to a commit, so a lane read out of one would let an edit change which severities bind a merge.
@@ -1008,6 +1027,119 @@ got="$(STUB_BRANCH=docs/a-slug STUB_LABELS='lane:docs' \
   STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
 [[ "$got" == *lane-label-mismatch* ]] \
   && error "MUT-LANE-LABEL-LIST-BY-HAND: a correct lane label was reported as a mismatch: [$got]"
+
+# --- a label name may hold a space, and a space is not its boundary -----------------------------
+# The labels arrived as one space-joined field and every reader of that field split it on
+# whitespace. `lane:legacy docs` was collected as `lane:legacy`: the real label was never
+# identified, so the sweep this audit claims -- every `lane:*` label that is not this pull
+# request's -- did not hold, and --apply then asked GitHub to remove a label the pull request does
+# not carry. That removal fails, and under `set -e` the run ends there with every pull request
+# after it unaudited. Measured on the unrepaired audit: `lane-label-mismatch=lane:legacy`, one
+# `--remove-label lane:legacy`, exit 1.
+#
+# The whole label, in the REPORT. `blockers=` is included so this cannot be satisfied by the
+# truncated name: `lane-label-mismatch=lane:legacy blockers=` is what the defect printed.
+got="$(STUB_BRANCH=docs/a-slug STUB_LABELS='lane:legacy docs' \
+  STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "lane-label-mismatch=lane:legacy docs blockers="
+
+# AND IN THE REMOVAL, which is where the run died. This drives --apply against a stub that records
+# every `pr edit` argument one per bracket -- so a label holding a space cannot be misread here
+# either -- and that REFUSES a removal of a label the pull request does not carry, which is what
+# GitHub does. Two pull requests, so "the run carried on" is observed and not assumed.
+apply_gh="$tmp/apply-gh"
+mkdir -p "$apply_gh"
+cat > "$apply_gh/gh" <<'GH'
+#!/usr/bin/env bash
+head=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+case "$*" in
+  "repo view"*)               echo eventloops/upstroke ;;
+  *"--jq .owner.login")       echo eventloops ;;
+  *"--jq .owner.type")        echo User ;;
+  *"/labels?per_page=100"*)   ;;                                 # the repository has none of them yet
+  "label create"*)            ;;
+  "pr edit"*)                 printf '[%s]' "$@" >> "$STUB_EDIT_LOG"
+                              printf '\n' >> "$STUB_EDIT_LOG"
+                              # GitHub refuses to take off a label that is not on the pull
+                              # request, and that refusal is the finding's whole cost.
+                              prev=''
+                              for arg in "$@"; do
+                                if [[ "$prev" == --remove-label ]]; then
+                                  case $'\n'"${STUB_LABELS:-}"$'\n' in
+                                    *$'\n'"$arg"$'\n'*) ;;
+                                    *) echo "could not remove label: $arg" >&2; exit 1 ;;
+                                  esac
+                                fi
+                                prev="$arg"
+                              done ;;
+  *rulesets*)                 ;;                                 # no branch ruleset
+  *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
+  *"/pulls?state=open"*)      exit 0 ;;
+  *timeline*)                 ;;                                 # no base change
+  *"/comments?per_page=100"*) [[ -n "${STUB_REVIEW_BODY:-}" ]] && echo "2026-09-01T00:00:00Z 5001"
+                              exit "${STUB_COMMENTS_STATUS:-1}" ;;
+  *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
+  *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
+  *"--json body"*)            echo "no ledger" ;;
+  "pr view"*)                 printf '%s\n%s\nfalse\nCLEAN\nmaster\n%s\n' \
+                                "${STUB_BRANCH:-feature/x}" "$head" "$head"
+                              stub_labels_n=0
+                              if [[ -n "${STUB_LABELS:-}" ]]; then
+                                stub_labels_n="$(printf '%s\n' "$STUB_LABELS" | wc -l)"
+                              fi
+                              printf '%s\n' "$stub_labels_n"
+                              if [[ -n "${STUB_LABELS:-}" ]]; then printf '%s\n' "$STUB_LABELS"; fi ;;
+  *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
+esac
+GH
+chmod +x "$apply_gh/gh"
+run_apply() {  # run_apply ARG...: "<exit status>|<output, on one line>", with --apply
+  local out status=0
+  out="$(PATH="$apply_gh:$PATH" bash scripts/pr-ready-audit.sh --apply "$@" 2>&1)" || status=$?
+  printf '%s|%s' "$status" "$(tr '\n' ' ' <<< "$out")"
+}
+: > "$tmp/apply-edits.log"
+got="$(STUB_EDIT_LOG="$tmp/apply-edits.log" STUB_BRANCH=docs/a-slug STUB_LABELS='lane:legacy docs' \
+  STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_apply 999 1000)"
+edits="$(tr '\n' ' ' < "$tmp/apply-edits.log")"
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$edits" '[--remove-label][lane:legacy docs]'
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$edits" '[--add-label][lane:docs]'
+[[ "$edits" == *'[--remove-label][lane:legacy]'* ]] \
+  && error "MUT-LANE-LABEL-SPLIT-ON-SPACES: the removal named the first word of the label: [$edits]"
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "0|"
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "#1000"
+
+# A LABEL THAT MERELY CONTAINS THE READY LABEL IS NOT THE READY LABEL. `[[ " $labels " ==
+# *" $ready_label "* ]]` over the joined string answered yes for a single label `x ready-to-merge
+# y`, so a NOT-READY pull request carrying one had `ready-to-merge` taken off it -- a removal of a
+# label it does not have, which fails and ends the run exactly as the case above does.
+: > "$tmp/apply-edits.log"
+got="$(STUB_EDIT_LOG="$tmp/apply-edits.log" STUB_BRANCH=docs/a-slug \
+  STUB_LABELS=$'lane:docs\nx ready-to-merge y' \
+  STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_apply 999)"
+edits="$(tr '\n' ' ' < "$tmp/apply-edits.log")"
+[[ "$edits" == *'--remove-label'* ]] \
+  && error "MUT-LANE-LABEL-SPLIT-ON-SPACES: a label containing the ready label was taken for it: [$edits]"
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "0|"
+# and the ready label itself is still recognised when it really is on the pull request, so the
+# case above is about the boundary and not about the test having stopped working.
+: > "$tmp/apply-edits.log"
+got="$(STUB_EDIT_LOG="$tmp/apply-edits.log" STUB_BRANCH=docs/a-slug \
+  STUB_LABELS=$'lane:docs\nready-to-merge' \
+  STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_apply 999)"
+edits="$(tr '\n' ' ' < "$tmp/apply-edits.log")"
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$edits" '[--remove-label][ready-to-merge]'
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "0|"
+
+# A COUNT THAT DISAGREES WITH THE NAMES IS A READ THIS CANNOT TRUST. The labels are one per line
+# now, and a label name cannot hold a line ending -- so that is checked rather than assumed: the
+# count comes over the wire ahead of the names, and a mismatch means one label arrived as two, a
+# half of which could be a `lane:` name this would report and try to remove.
+got="$(STUB_BRANCH=docs/a-slug STUB_LABELS=$'lane:a\nb' STUB_LABEL_COUNT=1 \
+  STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-LANE-LABEL-SPLIT-ON-SPACES "$got" "blockers=pr-lookup-failed"
+[[ "$got" == *lane-label-mismatch* ]] \
+  && error "MUT-LANE-LABEL-SPLIT-ON-SPACES: a label read this could not trust was acted on: [$got]"
 
 # --- one parser, one success condition ----------------------------------------------------------
 # Everything below runs `scripts/pr-review-parse.py`, which is what the audit runs. Two readings of

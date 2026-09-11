@@ -5,7 +5,8 @@
 # against, from the repository in the current directory:
 #
 #   <out-dir>/changed-paths     every path the pull request changes, one per line, as `git diff
-#                               --name-only` spells it.
+#                               --name-only` spells it, with rename detection OFF so that BOTH
+#                               ENDPOINTS of a rename are listed and not the destination alone.
 #   <out-dir>/added-findings    one line per file the pull request ADDS or RENAMES under
 #                               reviews/findings/: `<severity><TAB><path>`, where <severity> is the
 #                               value of the `severity:` line in the file's YAML frontmatter AT THE
@@ -85,8 +86,19 @@ git merge-base --all "$target" "$head" > "$out/merge-bases" \
 [[ -s "$out/merge-bases" ]] \
   || { echo "no merge base between $target and $head" >&2; exit 1; }
 
+# --no-renames, BECAUSE A RENAME PRINTS ONLY ITS DESTINATION and both of its endpoints are paths
+# this pull request changes. With detection on -- which is git's default, and is what `-M` asks for
+# on the other listing -- `git mv src/engine.rs reviews/findings/P3_<...>.md` plus frontmatter is
+# reported as one path under reviews/findings/, and `src/engine.rs` is absent: the findings/
+# confinement limit, which is the whole of what makes that lane's low review safe, then sees a diff
+# confined to the ledger while the pull request deletes a source file. Off, the rename is a delete
+# and an add and both paths are listed. It is also the conservative direction the header argues
+# for: a wider set of changed paths can only ADD a path outside reviews/findings/.
+#
+# The other listing keeps `-M` on purpose. There the question is what the pull request LEAVES
+# BEHIND under reviews/findings/, which is the destination alone.
 while read -r merge_base; do
-  git diff --name-only "$merge_base" "$head" || exit 1
+  git diff --no-renames --name-only "$merge_base" "$head" || exit 1
 done < "$out/merge-bases" | sort -u > "$out/changed-paths"
 
 # severity_of <path>: the `severity:` value in the YAML frontmatter of that path at the head -- the
@@ -96,17 +108,31 @@ done < "$out/merge-bases" | sort -u > "$out/changed-paths"
 #
 # A file with no opening fence has no frontmatter and answers `-`. The FIRST severity line in the
 # block wins, so a second one cannot overwrite the first with something acceptable.
+#
+# A CARRIAGE RETURN AT THE END OF A LINE IS PART OF THE LINE ENDING AND NEVER PART OF THE VALUE, so
+# it comes off before anything is compared. A file authored on Windows opens `---\r`, which is not
+# `---`, and every such finding read as having no frontmatter at all and was refused for it.
+# validate-pr-branch.sh already takes CRLF as a line ending in every listing it reads, and this
+# reader has to agree with it.
+#
+# THE WHOLE BLOB IS CONSUMED, AND THE ANSWER IS PRINTED ONCE AT THE END. `exit` at the closing
+# fence left `git cat-file` writing into a pipe with no reader: SIGPIPE, status 141, and under
+# `pipefail` a builder that refused a legitimate pull request -- on every branch prefix, since the
+# builder runs for all of them -- as soon as a finding outgrew a pipe buffer. Measured at 150 KB.
+# `done` holds the answer and every later line is skipped, so first-wins still means first-wins.
 severity_of() {
   git cat-file blob "$head:$1" | awk '
-    NR == 1     { if ($0 != "---") { print "-"; answered = 1; exit 0 }
+    { sub(/\r$/, "", $0) }
+    NR == 1     { if ($0 != "---") { answer = "-"; done = 1 }
                   next }
-    $0 == "---" { print (sev == "" ? "-" : sev); answered = 1; exit 0 }
+    done        { next }
+    $0 == "---" { answer = (sev == "" ? "-" : sev); done = 1; next }
     sev == "" && /^severity:[ \t]/ {
                   value = $0
                   sub(/^severity:[ \t]+/, "", value)
                   sub(/[ \t\r]+$/, "", value)
                   if (value != "") { sev = value } }
-    END         { if (!answered) print (sev == "" ? "-" : sev) }
+    END         { print (done ? answer : (sev == "" ? "-" : sev)) }
   '
 }
 
@@ -163,6 +189,29 @@ while read -r merge_base; do
       || { echo "could not read $path at $head, so its severity is not known" >&2; exit 1; }
     [[ -n "$sev" ]] \
       || { echo "no severity could be read for $path at $head" >&2; exit 1; }
+    # A VALUE THAT CAN HOLD THE FIELD DELIMITER FORGES THE RECORD, so it is refused before it is
+    # serialised. The record is `<severity><TAB><path>` and the severity is whatever the
+    # frontmatter said: a file whose block reads `severity: P3<TAB>reviews/findings/forged` emitted
+    # `P3<TAB>reviews/findings/forged<TAB><the real path>`, and the validator -- which takes the
+    # severity up to the FIRST tab and the path after it -- read severity `P3` and a path of the
+    # attacker's choosing, so the real file's severity was never judged at all. Measured: three
+    # such payloads on a correctly named P3_ file, all accepted. A line ending in the value splits
+    # the record in two and is refused here for the reason a newline in a PATH is.
+    #
+    # The VALUE DOMAIN is not checked here and must not be: this listing carries what the
+    # frontmatter says so that the validator can name it -- `its frontmatter severity is [P4]` --
+    # and a builder that refused anything but P0-P3 would turn that refusal into a step that died
+    # with no finding named. What is refused here is a value that cannot be carried in a record.
+    case "$sev" in
+      *$'\t'* | *$'\n'* | *$'\r'*)
+        echo "the frontmatter severity of a file this pull request adds under reviews/findings/" >&2
+        echo "  holds a tab or a line ending, and a <severity><TAB><path> record cannot carry" >&2
+        echo "  one: read back, the value would be taken for a path and the real severity would" >&2
+        echo "  never be judged. A severity is P0, P1, P2 or P3 and nothing else. Refusing:" >&2
+        printf '  %q\n  %q\n' "$path" "$sev" >&2
+        exit 1
+        ;;
+    esac
     printf '%s\t%s\n' "$sev" "$path" >> "$out/added-findings"
   done < "$out/added-status"
   # A status with no path after it is a diff that arrived in part.

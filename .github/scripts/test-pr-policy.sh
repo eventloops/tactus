@@ -2909,6 +2909,11 @@ new_repo "$repo_diff"
 mkdir -p "$repo_diff/reviews/findings" "$repo_diff/src"
 echo seed > "$repo_diff/seed.txt"
 echo 'fn main() {}' > "$repo_diff/src/engine.rs"
+# A source file with enough content for git to CALL a move of it a rename. `fn main() {}` moved
+# under reviews/findings/ with frontmatter bolted on is too dissimilar to be detected as one, and
+# case 10 is about what happens when detection fires.
+awk 'BEGIN { for (i = 0; i < 200; i++) print "pub fn archived_" i "() { let _ = " i "; }" }' \
+  > "$repo_diff/src/archive-me.rs"
 finding_body P9 > "$repo_diff/reviews/findings/P9_correctness_202609010000_already-here.md"
 finding_body P2 > "$repo_diff/reviews/findings/NOT-A-FINDING.md"
 finding_body P2 > "$repo_diff/reviews/findings/P2_correctness_202609010001_to-be-renamed.md"
@@ -3192,6 +3197,120 @@ if [[ "$(unreadable_verdict findings/a-slug '' '')" != 0 ]]; then
   echo 'a findings/ branch with no listings at all was refused' >&2
   exit 1
 fi
+
+# 10. WHAT ROUND 1 OF THIS PULL REQUEST'S REVIEW FOUND, one case per finding. Each was measured
+#     against the unrepaired builder before the repair and each failed there; they are here so the
+#     suite, and not only a review, refuses the next one.
+#
+#     A RENAME INTO THE LEDGER IS A PATH OUTSIDE THE LEDGER TOO. `git diff --name-only` detects
+#     renames by default and prints ONLY THE DESTINATION, so `git mv src/archive-me.rs
+#     reviews/findings/P3_<...>.md` with frontmatter added arrived as a changed-path listing holding
+#     one path under reviews/findings/ and nothing else -- and the confinement limit, which is the
+#     whole of what makes the findings/ lane's low review safe, accepted a pull request that
+#     deletes a source file. No push access is needed to open one: anyone can, from a fork.
+branch_from rename-into-the-ledger
+git -C "$repo_diff" mv src/archive-me.rs reviews/findings/P3_correctness_202609110012_archived.md
+{ finding_body P3
+  cat "$repo_diff/reviews/findings/P3_correctness_202609110012_archived.md"
+} > "$fixture_dir/archived.md"
+cp -- "$fixture_dir/archived.md" "$repo_diff/reviews/findings/P3_correctness_202609110012_archived.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'archive a source file as a finding'
+diff_rename_in="$(git -C "$repo_diff" rev-parse HEAD)"
+# THE PRECONDITION IS ASSERTED, because without it this case passes for the wrong reason: if the
+# two files were too dissimilar git would report an add and a delete, `src/archive-me.rs` would be
+# listed by any implementation, and the case would say nothing about rename detection at all.
+rename_status="$(git -C "$repo_diff" diff --name-status -M "$diff_base" "$diff_rename_in")"
+case "$rename_status" in
+  R*) ;;
+  *) echo "the rename fixture is not a rename git detects, so it proves nothing: [$rename_status]" >&2
+     exit 1 ;;
+esac
+diff_case 'a findings/ branch that renames a source file into the ledger' \
+  "$repo_diff" "$diff_base" "$diff_rename_in" findings/archive-the-engine 1
+diff_says 'a findings/ branch that renames a source file into the ledger' \
+  "$repo_diff" "$diff_base" "$diff_rename_in" findings/archive-the-engine 'src/archive-me.rs'
+# and the destination is still judged as an added finding, so turning detection off on the
+# changed-path listing did not cost the other listing its rename handling.
+diff_case 'the same rename on a prefix that admits code' \
+  "$repo_diff" "$diff_base" "$diff_rename_in" ci/archive-the-engine 0
+
+#     A SEVERITY HOLDING THE FIELD DELIMITER FORGES THE RECORD. added-findings is
+#     `<severity><TAB><path>` and the severity is whatever the frontmatter said, so a block reading
+#     `severity: P3<TAB>reviews/findings/forged` emitted three fields: the validator read severity
+#     `P3`, took the injected text as the path, and the real file's severity was never judged.
+#     Measured on the unrepaired builder: accepted, rc=0, on three payloads.
+for forged_tail in 'reviews/findings/forged' \
+                   'reviews/findings/P3_correctness_202609110009_forged.md' \
+                   'reviews/findings/P3_correctness_202609110013_forged.md'; do
+  branch_from severity-holding-a-tab
+  # The injected severity is P3 -- a value the validator ACCEPTS -- which is what makes this the
+  # exploit and not a refusal for some other reason: read back, the record says P3 and names a
+  # path of the author's choosing, while the file's real severity is the whole injected string
+  # and is judged by nothing.
+  printf -- '---\nid: FIXTURE-6\nseverity: P3\t%s\ndisposition: deferred\n---\n' "$forged_tail" \
+    > "$repo_diff/reviews/findings/P3_correctness_202609110013_forged.md"
+  git -C "$repo_diff" add -A
+  git -C "$repo_diff" commit -q -m 'file a finding whose severity holds a tab'
+  diff_forged="$(git -C "$repo_diff" rev-parse HEAD)"
+  builder_refuses "a frontmatter severity holding a tab [$forged_tail]" \
+    "$diff_base" "$diff_forged" 'holds a tab or a line ending'
+done
+# A LINE ENDING IN THE VALUE SPLITS THE RECORD, and is refused for the reason a newline in a PATH
+# is: one record per line is what this listing promises.
+branch_from severity-holding-a-carriage-return
+printf -- '---\nid: FIXTURE-6\nseverity: P3\rP3\ndisposition: deferred\n---\n' \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110015_split.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding whose severity holds a CR'
+diff_split="$(git -C "$repo_diff" rev-parse HEAD)"
+builder_refuses 'a frontmatter severity holding a carriage return' \
+  "$diff_base" "$diff_split" 'holds a tab or a line ending'
+
+#     A LARGE FINDING IS STILL A FINDING. `git cat-file blob | awk` with an `exit` at the closing
+#     fence left git writing into a pipe nobody was reading: SIGPIPE, status 141, and under
+#     `pipefail` the builder exited 1 as soon as a finding outgrew a pipe buffer -- on EVERY branch
+#     prefix, since the builder runs for all of them. The padding is well over 64 KB on purpose.
+branch_from a-large-finding
+{ finding_body P3
+  awk 'BEGIN { for (i = 0; i < 4000; i++) print "padding padding padding padding padding padding" }'
+} > "$repo_diff/reviews/findings/P3_liveness_202609110014_large.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a large finding'
+diff_large="$(git -C "$repo_diff" rev-parse HEAD)"
+large_bytes="$(wc -c < "$repo_diff/reviews/findings/P3_liveness_202609110014_large.md")"
+(( large_bytes > 100000 )) \
+  || { echo "the large-finding fixture is only $large_bytes bytes, which is not comfortably past a pipe buffer" >&2; exit 1; }
+diff_case 'a findings/ branch filing a finding larger than a pipe buffer' \
+  "$repo_diff" "$diff_base" "$diff_large" findings/file-a-large-one 0
+# and its severity is READ, not merely survived: the same file named P3_ with a P4 block is
+# refused, which a builder that answered `-` for everything large would not do.
+branch_from a-large-mismatched-finding
+{ finding_body P4
+  awk 'BEGIN { for (i = 0; i < 4000; i++) print "padding padding padding padding padding padding" }'
+} > "$repo_diff/reviews/findings/P3_liveness_202609110016_large-mismatch.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a large mismatched finding'
+diff_large_bad="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_says 'a large finding whose frontmatter severity is P4' \
+  "$repo_diff" "$diff_base" "$diff_large_bad" findings/file-a-large-one 'its frontmatter severity is [P4]'
+
+#     CRLF IS A LINE ENDING HERE TOO. The opening fence was compared exactly, so a file authored on
+#     Windows opens `---\r`, matched nothing, and every CRLF finding read as having no frontmatter
+#     at all -- refused at rc=1 for the line endings it was written with. validate-pr-branch.sh
+#     already takes CRLF as a line ending in every listing it reads and this reader has to agree.
+branch_from crlf-frontmatter
+printf -- '---\r\nid: FIXTURE-7\r\nseverity: P3\r\ndisposition: deferred\r\n---\r\n' \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110017_crlf.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a CRLF finding'
+diff_crlf="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a findings/ branch filing a CRLF-authored finding' \
+  "$repo_diff" "$diff_base" "$diff_crlf" findings/file-a-crlf-one 0
+# and the value is read, not defaulted: the same file with a P4 block is refused AS A P4, which a
+# reader that answered `-` for every CRLF file would report as [-].
+branch_from crlf-frontmatter-mismatched
+printf -- '---\r\nid: FIXTURE-7\r\nseverity: P4\r\ndisposition: deferred\r\n---\r\n' \
+  > "$repo_diff/reviews/findings/P3_correctness_202609110018_crlf-bad.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a mismatched CRLF finding'
+diff_crlf_bad="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_says 'a CRLF-authored finding whose frontmatter severity is P4' \
+  "$repo_diff" "$diff_base" "$diff_crlf_bad" findings/file-a-crlf-one 'its frontmatter severity is [P4]'
 
 echo 'diff-rule fixtures passed'
 

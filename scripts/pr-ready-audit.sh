@@ -794,9 +794,27 @@ main() {
   done
 }
 
+# has_label <name>: that label is on the pull request now being audited, compared WHOLE. Reads
+# `pr_labels`, which audit_one fills; there is one pull request in flight at a time.
+#
+# `[[ " $labels " == *" $name "* ]]` over a space-joined string was not this test: a single label
+# `a ready-to-merge b` answered yes for `ready-to-merge`, and `lane:x y` answered no for `lane:x y`.
+has_label() {
+  local want="$1" i
+  for ((i = 0; i < ${#pr_labels[@]}; i++)); do
+    [[ "${pr_labels[i]}" == "$want" ]] && return 0
+  done
+  return 1
+}
+
 audit_one() {
   local pr="$1"
-  local meta meta_raw meta_status branch head draft merge_state labels base base_oid attempt
+  local meta meta_raw meta_status branch head draft merge_state base base_oid attempt
+  # pr_labels is the pull request's labels, ONE ARRAY ELEMENT PER LABEL, and every test and every
+  # removal below goes through it. `labels` was one space-joined string and every reader of it
+  # split on whitespace, which is not where a label's boundaries are.
+  local label_count label_index
+  local -a pr_labels
   # GitHub computes mergeability lazily and answers UNKNOWN until it has; asking again after a
   # pause usually settles it, and an UNKNOWN that survives three asks fails closed below. A read
   # that fails outright gets the same three attempts and then says so: read through `< <(...)` its
@@ -807,9 +825,18 @@ audit_one() {
     meta_status=0
     # One field per line, read with mapfile: a tab-separated read would collapse an empty field
     # (no labels) and shift every field after it.
+    #
+    # A LABEL NAME MAY HOLD A SPACE, so the labels are the LAST thing on the wire and take a line
+    # each rather than being joined into one field. Joined with a space and split on whitespace,
+    # `lane:legacy docs` was collected as `lane:legacy`: the real label was never identified, the
+    # removal of a label that does not exist failed, and the run died there with every pull request
+    # after it unaudited -- so "every lane:* label is swept" did not hold. A label name cannot hold
+    # a newline, and that is CHECKED rather than assumed: the count comes over the wire ahead of
+    # the names and a mismatch is a read this cannot trust, which is reported as a failed lookup
+    # below rather than acted on.
     meta_raw="$(gh pr view "$pr" --repo "$repo" \
       --json headRefName,headRefOid,isDraft,mergeStateStatus,labels,baseRefName,baseRefOid \
-      --jq '.headRefName, .headRefOid, (.isDraft|tostring), .mergeStateStatus, ([.labels[].name]|join(" ")), .baseRefName, .baseRefOid')" \
+      --jq '.headRefName, .headRefOid, (.isDraft|tostring), .mergeStateStatus, .baseRefName, .baseRefOid, ([.labels[].name]|length), (.labels[].name)')" \
       || meta_status=$?
     # Walked by expansion, for the reason the listing above is: a `mapfile` that never ran leaves
     # `meta` empty, and empty fields are what this loop exists to stop being audited.
@@ -822,7 +849,19 @@ audit_one() {
       done
     fi
     branch="${meta[0]:-}"; head="${meta[1]:-}"; draft="${meta[2]:-}"; merge_state="${meta[3]:-}"
-    labels="${meta[4]:-}"; base="${meta[5]:-}"; base_oid="${meta[6]:-}"
+    base="${meta[4]:-}"; base_oid="${meta[5]:-}"; label_count="${meta[6]:-}"
+    pr_labels=()
+    for ((label_index = 7; label_index < ${#meta[@]}; label_index++)); do
+      pr_labels+=("${meta[label_index]}")
+    done
+    # The count the read declared against the number of lines it produced. They disagree only if a
+    # label carried a line ending, which would have split one label into two -- and a half of a
+    # `lane:` name is a label this would report and try to remove.
+    case "$label_count" in
+      '' | *[!0-9]*) meta_status=$(( meta_status == 0 ? 90 : meta_status )) ;;
+      *) (( ${#pr_labels[@]} == label_count )) \
+           || meta_status=$(( meta_status == 0 ? 90 : meta_status )) ;;
+    esac
     [[ ( "$merge_state" == UNKNOWN || $meta_status -ne 0 ) && $attempt -lt 3 ]] || break
     sleep 3
   done
@@ -1151,14 +1190,19 @@ audit_one() {
   # neither reported nor removed. The lane `lane_list` gives is the one label that may stay; `lane:`
   # is reserved for this audit's output, which is why --ready-label refuses a name in it.
   #
-  # Walked by expansion rather than `for l in $labels`, which GLOBS: a label carrying `*` or `?`
-  # would be expanded against the working directory, and a label that matched nothing would come
-  # back as the pattern. Collected once into an array, because the same set is reported below and
-  # removed further down, and re-splitting a string twice is two chances to split it differently.
-  local stale_lanes=() rest_labels="$labels" one_label
-  while [[ -n "$rest_labels" ]]; do
-    one_label="${rest_labels%% *}"
-    if [[ "$rest_labels" == *" "* ]]; then rest_labels="${rest_labels#* }"; else rest_labels=""; fi
+  # Taken from `pr_labels`, WHERE ONE ELEMENT IS ONE LABEL, and never by splitting a joined string:
+  # the string was split on spaces, and a space is legal in a label name, so `lane:legacy docs` was
+  # collected as `lane:legacy`. The real label went unreported, and the removal below then asked
+  # GitHub to take a label off that the pull request does not carry -- which fails, and under
+  # `set -e` ends the run with every pull request after this one unaudited.
+  #
+  # Never `for l in $labels`, which GLOBS as well as splitting: a label carrying `*` or `?` would be
+  # expanded against the working directory, and one that matched nothing would come back as the
+  # pattern. Collected once into an array, because the same set is reported below and removed
+  # further down, and re-splitting twice is two chances to split it differently.
+  local stale_lanes=() one_label
+  for ((j = 0; j < ${#pr_labels[@]}; j++)); do
+    one_label="${pr_labels[j]}"
     [[ "$one_label" == lane:* && "$one_label" != "lane:$lane" ]] && stale_lanes+=("$one_label")
   done
   for ((j = 0; j < ${#stale_lanes[@]}; j++)); do
@@ -1171,7 +1215,7 @@ audit_one() {
     for ((j = 0; j < ${#stale_lanes[@]}; j++)); do
       gh pr edit "$pr" --repo "$repo" --remove-label "${stale_lanes[j]}" >/dev/null
     done
-    [[ " $labels " != *" lane:$lane "* ]] && gh pr edit "$pr" --repo "$repo" --add-label "lane:$lane" >/dev/null
+    has_label "lane:$lane" || gh pr edit "$pr" --repo "$repo" --add-label "lane:$lane" >/dev/null
     # The ready label is a report of this audit at $head, not an authorisation: GitHub labels are
     # not bound to a commit, so a push can always land between the audit and the label write.
     # The head is read again before the write and again after it, and a label written across a
@@ -1187,7 +1231,7 @@ audit_one() {
       fi
     fi
     if [[ "$state" == READY ]]; then
-      [[ " $labels " != *" $ready_label "* ]] && gh pr edit "$pr" --repo "$repo" --add-label "$ready_label" >/dev/null
+      has_label "$ready_label" || gh pr edit "$pr" --repo "$repo" --add-label "$ready_label" >/dev/null
       after_write="$(gh pr view "$pr" --repo "$repo" --json headRefOid --jq .headRefOid)"
       if [[ "$after_write" != "$head" ]]; then
         gh pr edit "$pr" --repo "$repo" --remove-label "$ready_label" >/dev/null
@@ -1228,7 +1272,7 @@ audit_one() {
         fi
       fi
     else
-      [[ " $labels " == *" $ready_label "* ]] && gh pr edit "$pr" --repo "$repo" --remove-label "$ready_label" >/dev/null
+      has_label "$ready_label" && gh pr edit "$pr" --repo "$repo" --remove-label "$ready_label" >/dev/null
     fi
   fi
   return 0
