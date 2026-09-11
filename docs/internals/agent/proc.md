@@ -2284,6 +2284,104 @@ Witnessed against `open_helper_identity` taking no descriptor at all:
 
 Subprocess entry for the reaper-identity check above.
 
+## `mod tests` › `fn wildcard_wait() -> libc::pid_t {`
+
+The wait an embedding host's `SIGCHLD` handler makes: `waitpid(-1, ...)`,
+retried while interrupted, answering whichever child it collected.
+
+It is only ever called from a subprocess helper. A wildcard wait in a
+process shared with the rest of the suite collects other tests'
+children, which is why
+`the_end_of_a_helper_follows_its_identity_and_not_its_number` reaps its
+helper by number instead. Where the wait itself is the thing being
+modelled — the host reaping between the fork and the descriptor, or
+between the descriptor and the probe — the test takes a process of its
+own and uses the real one.
+
+## `mod tests` › `fn helper_identity_after_a_host_reap_helper() {`
+
+That a helper an embedding host has already collected is not read as a
+kernel that has no identities to give.
+
+Two orderings, because the host's wait can land on either side of
+`pidfd_open` and the two fail differently.
+
+The first: the wildcard wait collects the helper before any descriptor
+names it, so `pidfd_open` answers `ESRCH`. The assertions are on the
+consequence before the contract — the stranger now holding the helper's
+number is still running and still uncollected after the teardown, as
+`the_end_of_a_helper_follows_its_identity_and_not_its_number` asserts
+for the case where a descriptor was taken in time, and only then that
+`open_helper_identity` did not answer `NO_HELPER_IDENTITY`. In that
+order a failure reports the damage rather than only the decision that
+led to it.
+
+The second: the descriptor names the helper, and the wildcard wait
+collects it before the probes run. The assertions are on the probes
+themselves, because no test can place a wait inside
+`open_helper_identity` between its `pidfd_open` and its probing; what
+the function does with the probe answers is the section on it above.
+Both probes must report `HelperEnded`, since both are answering about
+the helper rather than refusing the call, and a `Refused` from either
+is what discards the descriptor.
+
+Witnessed against the two arms of the repair withdrawn one at a time —
+the `ESRCH` arm of `open_helper_identity` answering `NO_HELPER_IDENTITY`,
+and the `ECHILD` arm of `identity_can_collect` answering `Refused`. The
+failures are quoted in the pull request body; each run exited `101`.
+
+## `mod tests` › `fn a_helper_a_host_collected_is_not_a_kernel_without_identities() {`
+
+Subprocess entry for the host-reap check above.
+
+## `mod tests` › `fn refuse_pidfd_send_signal() {`
+
+A seccomp filter that answers `EPERM` for `pidfd_send_signal` and allows
+every other system call.
+
+Four BPF instructions: load the syscall number out of `seccomp_data`,
+which is its first field; compare it with `pidfd_send_signal`; return
+`SECCOMP_RET_ERRNO | EPERM` on a match and `SECCOMP_RET_ALLOW`
+otherwise. No architecture check, because this is a fixture and not a
+sandbox. `PR_SET_NO_NEW_PRIVS` first, since the kernel refuses
+`PR_SET_SECCOMP` without it or `CAP_SYS_ADMIN`, and it takes its
+remaining four arguments as `1, 0, 0, 0` exactly, which is why all five
+are passed.
+
+A filter is irreversible for the process that installs it, so this runs
+only in the subprocess helper below. `prctl` is reached through
+`libc::syscall`, as `pidfd_open` and `pidfd_send_signal` are in this
+module: the classified, denied primitive is the same one, the syscall
+number is classified beside theirs in `effects/wrappers.toml`, and
+`libc::prctl` resolves on no other supported platform.
+
+## `mod tests` › `fn refused_identity_signal_helper() {`
+
+That an identity whose signal system call the host refuses is not taken.
+
+The policy is pinned before the assertion that depends on it: a
+descriptor is opened by hand and the two probes run against it, so the
+`NO_HELPER_IDENTITY` below is known to be the answer to a refused
+`pidfd_send_signal` and not to a refused `pidfd_open` or a refused
+`waitid`. Without that, a filter that happened to deny the wrong call
+would produce the same passing test.
+
+Then `open_helper_identity` must answer `NO_HELPER_IDENTITY`, and the
+teardown built on it must finish: `SIGKILL` delivered by number, the
+helper collected, `WIFSIGNALED`. That is the path the base took, and the
+hang this closes is what the reviewed head did instead — the identity
+taken, the signal refused, and the blocking collection call entered on a
+helper still running.
+
+The helper is `spawn_sigchld_target`'s fixture child, which lives until
+its pipe closes, so a failing assertion here cannot leave a sleeping
+process behind: the helper process exits, the write end closes, and the
+child ends itself.
+
+## `mod tests` › `fn an_identity_whose_signal_syscall_is_refused_is_not_taken() {`
+
+Subprocess entry for the refused-signal check above.
+
 ## `mod tests` › `fn helper_ready_failure_helper() {`
 
 Subprocess entry for the READY-failure message at both call sites.

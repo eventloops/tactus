@@ -5653,8 +5653,10 @@ mod termination {
                 reaper.identity >= 0,
                 "the reaper this launch forked carries no identity"
             );
-            let fdinfo = std::fs::read_to_string(format!("/proc/self/fdinfo/{}", reaper.identity))
-                .expect("the identity's own /proc entry");
+            let fdinfo = std::fs::read_to_string(
+                std::path::Path::new("/proc/self/fdinfo").join(reaper.identity.to_string()),
+            )
+            .expect("the identity's own /proc entry");
             let named = format!("Pid:\t{}", reaper.pid);
             assert!(
                 fdinfo.lines().any(|line| line == named),
@@ -5700,6 +5702,334 @@ mod termination {
             assert!(
                 output.status.success(),
                 "reaper identity helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        fn wildcard_wait() -> libc::pid_t {
+            let mut status = 0;
+            loop {
+                // SAFETY: `status` is writable. `waitpid(-1, ...)` is the
+                // wildcard wait an embedding host's `SIGCHLD` handler makes,
+                // and this helper process has only the children it forks here.
+                let waited = unsafe { libc::waitpid(-1, &mut status, 0) };
+                if waited > 0 {
+                    return waited;
+                }
+                assert!(
+                    waited < 0 && last_errno_is_interrupted(),
+                    "waitpid(-1): {}",
+                    std::io::Error::last_os_error()
+                );
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn helper_identity_after_a_host_reap_helper() {
+            if std::env::var_os("UPSTROKE_HELPER_IDENTITY_HOST_REAP_HELPER").is_none() {
+                return;
+            }
+
+            // SAFETY: the forked child calls only `_exit`.
+            let helper = unsafe { libc::fork() };
+            if helper == 0 {
+                // SAFETY: leave the forked child without running destructors.
+                unsafe { libc::_exit(0) };
+            }
+            assert!(
+                helper > 0,
+                "fork a helper: {}",
+                std::io::Error::last_os_error()
+            );
+            assert_eq!(
+                wildcard_wait(),
+                helper,
+                "the wildcard wait collected something other than the helper"
+            );
+
+            let identity = open_helper_identity(helper);
+            let (stranger, stranger_lifetime) = spawn_sigchld_target();
+            let end = Reaper {
+                command_fd: -1,
+                ack_fd: -1,
+                _command_keepalive_fd: -1,
+                pid: stranger,
+                identity,
+            }
+            .abandon();
+            let mut status = 0;
+            // SAFETY: `status` is writable and `stranger` is this process's own
+            // child. `WNOHANG` makes the look bounded.
+            let looked = unsafe { libc::waitpid(stranger, &mut status, libc::WNOHANG) };
+            let looked_errno = last_errno();
+            assert_eq!(
+                looked, 0,
+                "the teardown reached the stranger now holding the helper's number: the look \
+                 for the stranger answered {looked} (status {status}, errno {looked_errno}) \
+                 and the teardown reported kill_errno {}, waited {}, wait_errno {}",
+                end.kill_errno, end.waited, end.wait_errno
+            );
+            assert_eq!(
+                end.kill_errno,
+                libc::ESRCH,
+                "the signal did not answer for the helper that had ended"
+            );
+            assert_eq!(end.waited, -1, "the wait collected something");
+            assert_eq!(
+                end.wait_errno,
+                libc::ECHILD,
+                "the wait did not answer for the helper that had ended"
+            );
+            assert_ne!(
+                identity, NO_HELPER_IDENTITY,
+                "a helper an embedding host had already collected was read as a kernel with \
+                 no identities, which puts its number back under the signal and the wait"
+            );
+
+            drop(stranger_lifetime);
+            let settled =
+                wait_for_lifetime_target(stranger).expect("the stranger ends with its pipe");
+            assert!(
+                libc::WIFEXITED(settled),
+                "the stranger did not end on its own terms: {settled}"
+            );
+
+            // SAFETY: the forked child calls only `_exit`.
+            let helper = unsafe { libc::fork() };
+            if helper == 0 {
+                // SAFETY: leave the forked child without running destructors.
+                unsafe { libc::_exit(0) };
+            }
+            assert!(
+                helper > 0,
+                "fork a second helper: {}",
+                std::io::Error::last_os_error()
+            );
+            let identity = open_helper_identity(helper);
+            assert!(identity >= 0, "this kernel gave the helper no identity");
+            assert_eq!(
+                wildcard_wait(),
+                helper,
+                "the wildcard wait collected something other than the second helper"
+            );
+            assert_eq!(
+                identity_can_collect(identity),
+                IdentityProbe::HelperEnded,
+                "a helper the host collected reads as a kernel that will not collect through \
+                 a descriptor, and the descriptor naming it is discarded"
+            );
+            assert_eq!(
+                identity_can_signal(identity),
+                IdentityProbe::HelperEnded,
+                "a helper the host collected reads as a kernel that will not signal through \
+                 a descriptor, and the descriptor naming it is discarded"
+            );
+            close_fd(identity);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_helper_a_host_collected_is_not_a_kernel_without_identities() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "helper_identity_after_a_host_reap_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("UPSTROKE_HELPER_IDENTITY_HOST_REAP_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the host-reap identity helper");
+            assert!(
+                output.status.success(),
+                "host-reap identity helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        fn refuse_pidfd_send_signal() {
+            const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+            const NONE: libc::c_long = 0;
+            const NO_NEW_PRIVS: libc::c_long = 1;
+
+            let load_syscall_number = u16::try_from(libc::BPF_LD | libc::BPF_W | libc::BPF_ABS)
+                .expect("a BPF instruction class fits the kernel's field");
+            let jump_if_equal = u16::try_from(libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K)
+                .expect("a BPF instruction class fits the kernel's field");
+            let return_constant = u16::try_from(libc::BPF_RET | libc::BPF_K)
+                .expect("a BPF instruction class fits the kernel's field");
+            let refuse_with_eperm =
+                libc::SECCOMP_RET_ERRNO | u32::try_from(libc::EPERM).expect("EPERM fits u32");
+            let signal_syscall = u32::try_from(libc::SYS_pidfd_send_signal)
+                .expect("a syscall number fits the kernel's field");
+
+            let mut program = [
+                libc::sock_filter {
+                    code: load_syscall_number,
+                    jt: 0,
+                    jf: 0,
+                    k: SECCOMP_DATA_NR_OFFSET,
+                },
+                libc::sock_filter {
+                    code: jump_if_equal,
+                    jt: 0,
+                    jf: 1,
+                    k: signal_syscall,
+                },
+                libc::sock_filter {
+                    code: return_constant,
+                    jt: 0,
+                    jf: 0,
+                    k: refuse_with_eperm,
+                },
+                libc::sock_filter {
+                    code: return_constant,
+                    jt: 0,
+                    jf: 0,
+                    k: libc::SECCOMP_RET_ALLOW,
+                },
+            ];
+            let filter = libc::sock_fprog {
+                len: u16::try_from(program.len()).expect("four instructions fit the count"),
+                filter: program.as_mut_ptr(),
+            };
+
+            // SAFETY: `prctl` takes its five arguments by value and reads
+            // through no pointer for `PR_SET_NO_NEW_PRIVS`, which the kernel
+            // refuses unless the remaining four are 1, 0, 0 and 0.
+            let allowed = unsafe {
+                libc::syscall(
+                    libc::SYS_prctl,
+                    libc::c_long::from(libc::PR_SET_NO_NEW_PRIVS),
+                    NO_NEW_PRIVS,
+                    NONE,
+                    NONE,
+                    NONE,
+                )
+            };
+            assert_eq!(
+                allowed,
+                0,
+                "PR_SET_NO_NEW_PRIVS: {}",
+                std::io::Error::last_os_error()
+            );
+
+            let mode = libc::c_long::from(libc::SECCOMP_MODE_FILTER);
+            // SAFETY: `PR_SET_SECCOMP` reads the `sock_fprog` behind the third
+            // argument and the instructions behind that program's own pointer;
+            // both are live here for the call and the kernel copies them.
+            let installed = unsafe {
+                libc::syscall(
+                    libc::SYS_prctl,
+                    libc::c_long::from(libc::PR_SET_SECCOMP),
+                    mode,
+                    std::ptr::from_ref(&filter),
+                    NONE,
+                    NONE,
+                )
+            };
+            assert_eq!(
+                installed,
+                0,
+                "PR_SET_SECCOMP: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn refused_identity_signal_helper() {
+            if std::env::var_os("UPSTROKE_REFUSED_IDENTITY_SIGNAL_HELPER").is_none() {
+                return;
+            }
+            refuse_pidfd_send_signal();
+
+            let (helper, helper_lifetime) = spawn_sigchld_target();
+
+            let target = libc::c_long::from(helper);
+            let flags: libc::c_long = 0;
+            // SAFETY: as in `open_helper_identity`.
+            let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, target, flags) };
+            let witness = libc::c_int::try_from(opened).expect("a descriptor fits c_int");
+            assert!(
+                witness >= 0,
+                "the policy refused `pidfd_open`, so what follows would not be about the \
+                 signal: {}",
+                std::io::Error::last_os_error()
+            );
+            assert_eq!(
+                identity_can_collect(witness),
+                IdentityProbe::Available,
+                "the policy refused the wait, so what follows would not be about the signal"
+            );
+            assert_eq!(
+                identity_can_signal(witness),
+                IdentityProbe::Refused,
+                "the policy did not refuse the signal syscall"
+            );
+            close_fd(witness);
+
+            let identity = open_helper_identity(helper);
+            assert_eq!(
+                identity, NO_HELPER_IDENTITY,
+                "an identity whose signal syscall this host refuses was taken, and the \
+                 teardown through it enters its blocking wait on a helper it never signalled"
+            );
+
+            let end = Reaper {
+                command_fd: -1,
+                ack_fd: -1,
+                _command_keepalive_fd: -1,
+                pid: helper,
+                identity,
+            }
+            .abandon();
+            assert_eq!(
+                end.kill_errno,
+                0,
+                "the teardown's signal was not delivered: {}",
+                std::io::Error::from_raw_os_error(end.kill_errno)
+            );
+            assert_eq!(
+                end.waited, helper,
+                "the teardown collected {} and not the helper",
+                end.waited
+            );
+            assert!(
+                libc::WIFSIGNALED(end.status) && libc::WTERMSIG(end.status) == libc::SIGKILL,
+                "the helper did not end on the teardown's SIGKILL: {}",
+                end.status
+            );
+            drop(helper_lifetime);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn an_identity_whose_signal_syscall_is_refused_is_not_taken() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args(["refused_identity_signal_helper", "--ignored", "--nocapture"])
+                .env("UPSTROKE_REFUSED_IDENTITY_SIGNAL_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the refused-signal helper");
+            assert!(
+                output.status.success(),
+                "refused-signal helper: {}\n{}\n{}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
