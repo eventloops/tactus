@@ -2883,12 +2883,12 @@ mod termination {
                 unsafe { libc::_exit(0) };
             }
             if target < 0 {
-                report[1] = blocked_byte(last_errno());
+                report[1] = blocked_by(last_errno());
             } else {
                 report = identity_calls_against(target);
             }
         } else {
-            report[1] = blocked_byte(last_errno());
+            report[1] = blocked_by(last_errno());
         }
         let _ = write_raw(report_fd, &report);
         // SAFETY: leave the probe without running destructors.
@@ -2926,7 +2926,7 @@ mod termination {
         let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, named, flags) };
         let identity = libc::c_int::try_from(opened).unwrap_or(-1);
         if identity < 0 {
-            blocked = blocked_byte(last_errno());
+            blocked = blocked_by_shortage(last_errno());
         } else {
             answered |= IDENTITY_NAMES;
             let held = libc::c_long::from(identity);
@@ -2962,17 +2962,31 @@ mod termination {
         [answered, blocked]
     }
 
-    /// The errno of a probe step that could not be performed, which is this
-    /// process being short of something and never an answer about the host;
-    /// zero for every other failure, which is an answer. Every errno this can
-    /// carry is far below `u8::MAX`, and one that is not is reported as a
-    /// blocked probe all the same rather than as a fact about the host.
+    /// A step of the probe that could not be performed at all -- no child to
+    /// run the calls against, no way to take an inherited `SIGCHLD`
+    /// disposition off this one. That is a state of this process and never an
+    /// answer about the host, so it is always reported, whatever errno it
+    /// left: an errno wider than a byte, and a step that left none, are
+    /// reported as a blocked probe rather than recorded as a fact.
     #[cfg(target_os = "linux")]
-    fn blocked_byte(errno: libc::c_int) -> u8 {
+    fn blocked_by(errno: libc::c_int) -> u8 {
+        match u8::try_from(errno) {
+            Ok(0) | Err(_) => u8::MAX,
+            Ok(byte) => byte,
+        }
+    }
+
+    /// A `pidfd_open` that failed, told apart the way `open_helper_identity`
+    /// tells its own apart: a resource this process ran out of is this process
+    /// being short and blocks the probe, and every other errno is an answer
+    /// about the host -- `ENOSYS`, `ENODEV`, `EINVAL`, `EPERM` and `EACCES`
+    /// say it does not offer the call, and an `ESRCH` for a process the probe
+    /// knows is there says a policy wrote it. An answer leaves the bit clear
+    /// rather than failing the launch.
+    #[cfg(target_os = "linux")]
+    fn blocked_by_shortage(errno: libc::c_int) -> u8 {
         match errno {
-            libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::EAGAIN | libc::EINVAL => {
-                u8::try_from(errno).unwrap_or(u8::MAX)
-            }
+            libc::EMFILE | libc::ENFILE | libc::ENOMEM | libc::EAGAIN => blocked_by(errno),
             _ => 0,
         }
     }
@@ -6943,12 +6957,18 @@ mod termination {
         /// for the caller to read and no branch for it to take.
         #[cfg(target_os = "linux")]
         fn kill_the_caller_of_pidfd_open() {
+            answer_pidfd_open_with(libc::SECCOMP_RET_KILL_PROCESS);
+        }
+
+        /// Take `action` for `pidfd_open` and allow everything else.
+        #[cfg(target_os = "linux")]
+        fn answer_pidfd_open_with(action: u32) {
             const SECCOMP_DATA_NR_OFFSET: u32 = 0;
 
             let mut program = [
                 seccomp_load(SECCOMP_DATA_NR_OFFSET),
                 seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_pidfd_open), 0, 1),
-                seccomp_return(libc::SECCOMP_RET_KILL_PROCESS),
+                seccomp_return(action),
                 seccomp_return(libc::SECCOMP_RET_ALLOW),
             ];
             install_seccomp_policy(&mut program);
@@ -7001,6 +7021,60 @@ mod termination {
             assert!(
                 abandoned < 0 && last_errno() == libc::ECHILD,
                 "the launch left {abandoned} behind uncollected"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn unknown_pidfd_open_identity_helper() {
+            if std::env::var_os("UPSTROKE_UNKNOWN_PIDFD_OPEN_HELPER").is_none() {
+                return;
+            }
+            // The errno a kernel that does not know `pidfd_open`'s flag word
+            // answers, which `open_helper_identity` has always read as this
+            // host not offering the call. The probe has to read it the same
+            // way: it is an answer about the host, not this process being
+            // short of a resource, so the launch takes the number and succeeds
+            // rather than failing on `Err(EINVAL)`.
+            answer_pidfd_open_with(seccomp_refuse_with(libc::EINVAL));
+
+            let reaper = spawn_reaper().expect("a launch on a host that does not offer the call");
+            let identity = reaper.identity;
+            reaper.cancel();
+            assert_eq!(
+                identity, NO_HELPER_IDENTITY,
+                "a call this host does not offer answered with a descriptor"
+            );
+            let abandoned = abandoned_child();
+            assert!(
+                abandoned < 0 && last_errno() == libc::ECHILD,
+                "the launch left {abandoned} behind uncollected"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_call_this_host_does_not_offer_is_not_a_shortage_of_this_process() {
+            use std::os::unix::process::CommandExt;
+
+            let output = Command::new(std::env::current_exe().expect("test executable"))
+                .args([
+                    "unknown_pidfd_open_identity_helper",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("UPSTROKE_UNKNOWN_PIDFD_OPEN_HELPER", "1")
+                .process_group(0)
+                .stdin(Stdio::null())
+                .output()
+                .expect("run the unknown-call helper");
+            assert!(
+                output.status.success(),
+                "unknown-call helper: {}\n{}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
             );
         }
 
