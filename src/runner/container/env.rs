@@ -435,32 +435,41 @@ mod tests {
 
     #[test]
     fn every_composed_environment_disables_replacement_objects() {
-        let mut base = image_base();
-        base.push((NO_REPLACEMENT_OBJECTS.0.to_owned(), String::new()));
-        let environment = ContainerEnvironment::from_image(base);
         let volumes = volumes();
         let layout = BoundaryLayout::new();
         let mut rows = 0_usize;
-        for role in ExecutionRole::all() {
-            let agent = binding(&role);
-            let scope = scope(&role, agent.as_ref(), &volumes, &layout);
-            for overlay in [
-                Vec::new(),
-                vec![(NO_REPLACEMENT_OBJECTS.0.to_owned(), "0".to_owned())],
-            ] {
-                let composed = environment
-                    .compose(&scope, &overlay)
-                    .unwrap_or_else(|error| panic!("{role} was refused: {error}"));
-                assert_eq!(
-                    value(&composed, NO_REPLACEMENT_OBJECTS.0),
-                    Some(NO_REPLACEMENT_OBJECTS.1),
-                    "{role} (overlay {overlay:?}): the container would read whatever \
-                     `git replace` points at the judged objects"
-                );
-                rows += 1;
+        for case in KeyCase::ALL {
+            let mut base = image_base();
+            base.push((NO_REPLACEMENT_OBJECTS.0.to_ascii_lowercase(), String::new()));
+            let environment = ContainerEnvironment::with_base(base, *case);
+            for role in ExecutionRole::all() {
+                let agent = binding(&role);
+                let scope = scope(&role, agent.as_ref(), &volumes, &layout);
+                for overlay in [
+                    Vec::new(),
+                    vec![(NO_REPLACEMENT_OBJECTS.0.to_owned(), "0".to_owned())],
+                ] {
+                    let composed = environment
+                        .compose(&scope, &overlay)
+                        .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+                    let named: Vec<&str> = composed
+                        .iter()
+                        .filter(|(name, _)| {
+                            case.same_key(name.as_ref(), NO_REPLACEMENT_OBJECTS.0.as_ref())
+                        })
+                        .map(|(_, value)| value.as_str())
+                        .collect();
+                    assert_eq!(
+                        named,
+                        vec![NO_REPLACEMENT_OBJECTS.1],
+                        "{role} ({case:?}, overlay {overlay:?}): the container would read \
+                         whatever `git replace` points at the judged objects"
+                    );
+                    rows += 1;
+                }
             }
         }
-        assert_eq!(rows, ExecutionRole::all().len() * 2);
+        assert_eq!(rows, ExecutionRole::all().len() * 2 * KeyCase::ALL.len());
     }
 
     #[test]

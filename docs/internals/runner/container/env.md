@@ -457,12 +457,26 @@ reserved-key refusal still governs.
 ## `fn every_composed_environment_disables_replacement_objects() {`
 
 The container boundary composes the replacement isolation too, from an
-image base it did not write and under any overlay (PR #130, pass 3's
-P1). An image is free to declare `ENV GIT_NO_REPLACE_OBJECTS=` and this
+image base it did not write, under any overlay, and under **both** name
+rules (PR #130, pass 3's P1; the second name rule, PR #271 round 1's P3).
+An image is free to declare `ENV GIT_NO_REPLACE_OBJECTS=` and this
 boundary has to outrank it.
 
-Witnessed failing with the upsert removed from `compose`: `Some("")` for
-every role, the image's own value.
+`from_image` selects `CONTAINER_KEY_CASE` alone, so this grid builds its
+environments with `with_base` and walks `KeyCase::ALL`: the host witness
+covers both rules and the claim that both boundaries do had to be made
+true rather than narrowed. The image's own entry is spelled in lower case
+and the assertion collects *every* entry the rule in force calls this
+name, so a case-insensitive compose that appended a second entry instead
+of overwriting the image's is a failure here rather than a duplicate key
+in a container's environment.
+
+Witnessed failing with the upsert removed from `compose`: `[]` against
+`["1"]` for every role and both rules — the image's own empty value the
+only entry. Witnessed failing on the `Insensitive` rows alone with the
+upsert's `self.case` replaced by `KeyCase::Sensitive`, which is the
+mutation the single-rule grid could not see: `["", "1"]` against
+`["1"]`.
 
 ## `impl ContainerEnvironment` › `pub fn certify_path(&self, composed: &[(String, String)]) -> Result<(), UpstrokeError> {`
 
