@@ -78,6 +78,22 @@ in the engine acts on a record's contents: reclaim trusts the intent's file name
 record is provenance for an operator and for any future reader, which this contract binds. The
 implementation is `IntentRecord` in `src/workspace_manager/naming.rs`.
 
+**What an exact snapshot is exact against.** A snapshot is exact against the objects the
+repository holds, never against the objects `git replace` points at them. `refs/replace/A -> B`
+makes Git read `B` wherever `A` is named while `rev-parse` still prints `A`, so a resolve-once
+check cannot see it: measured on git 2.43, `commit-tree A -p P` records the raw tree `A` and
+`worktree add --detach` materialises `A`, while a process inside that worktree reading through Git
+sees `B` — `git show HEAD:f` returns the replacement and `git status --porcelain` reports the
+untouched checkout modified. Two trees for one snapshot is not a tree §4's "ground truth is the
+diff" could name, so upstroke removes the ambiguity rather than detecting it: every child it
+starts that can run Git — the engine's own commands and read-only reads, and every gate, reviewer
+and implementer, on the host runner and in a container alike — runs with
+`GIT_NO_REPLACE_OBJECTS=1`. This is not configurable. A replacement graph is a ref outside the
+recorded inputs of a run, so a verdict that depended on one would not be reproducible from the
+record; an operator who wants the replaced history judged rewrites it, and the run judges what the
+repository then holds. The variable is one constant, `NO_REPLACEMENT_OBJECTS` in
+`src/workspace_manager.rs`, named at each of those boundaries.
+
 Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data}` — including `question_raised`, `question_answered`, `design_defect`, `capacity_snapshot`, `pool_exhausted`, and `spend_down_engaged`. `status`, the ledger, and the capacity view are pure folds over this file.
 
 **One fold, not two.** The engine never mutates run state directly: it appends an event and folds it back in through the same function `resume` and `status` use to rebuild state from the file, and it applies the event *as it will be read back* rather than as constructed. A live run and a replay of its own log are therefore the same computation, not two that agree by inspection. Two things deliberately do not survive replay — a session id and its `resume_next` flag, because both describe a conversation that believed it had left edits in a working tree that a crash has since rolled back (§14 pairs session-resume with tree retention precisely so the two never diverge).

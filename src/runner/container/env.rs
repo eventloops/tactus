@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use crate::error::UpstrokeError;
 use crate::runner::host::{KeyCase, credential_location, reserved_keys};
 use crate::runner::{AgentId, ExecutionRole, ProbeTarget};
+use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryLayout {
@@ -209,6 +210,14 @@ impl ContainerEnvironment {
             .collect()
     }
 
+    /// The environment a role process executes in inside the container.
+    ///
+    /// [`NO_REPLACEMENT_OBJECTS`] last, after the overlay, for the reason
+    /// `HostEnvironment::compose` states: the judged tree is the objects the
+    /// repository holds, and the image's own `ENV` is a base this runner did
+    /// not write. The Git view the container receives carries the repository's
+    /// refs, `refs/replace/*` among them, so a container process is exposed to
+    /// exactly the rewriting a host process is.
     pub fn compose(
         &self,
         scope: &RoleScope<'_>,
@@ -228,6 +237,8 @@ impl ContainerEnvironment {
         for (key, value) in overlay {
             upsert(&mut composed, self.case, key.clone(), value.clone());
         }
+        let (key, value) = NO_REPLACEMENT_OBJECTS;
+        upsert(&mut composed, self.case, key.to_owned(), value.to_owned());
         self.certify_path(&composed)?;
         Ok(composed)
     }
