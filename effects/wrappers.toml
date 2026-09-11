@@ -1529,6 +1529,7 @@ not_an_effect = [
     "EINVAL",
     "EIO",
     "EMFILE",
+    "ENFILE",
     "ENODEV",
     "ENOENT",
     "ENOMEM",
