@@ -27,9 +27,11 @@ Three rules decide which P1 blocks a merge, and they disagree.
   `MAINTAINING.md` does not. Pull requests #232 and #251 merged under it with P1s still labelled P1 and
   filed `deferred`, which is neither route the "Serious P1" section offers.
 
-`scripts/pr-ready-audit.sh` follows the lane table. At line 1140 it tests the must-fix set against the
-reviewer's label, before it reads the pull request's ledger, so no classification recorded in a ledger
-row can reach it. Executed on 2026-09-11 at 19:17 UTC with this commit's audit, read-only:
+`scripts/pr-ready-audit.sh` follows the lane table. It parses the pull request's ledger at lines 1100
+to 1117, but for each finding it applies the must-fix set to the reviewer's label at line 1140 and
+raises the blocker there, before the lookup of that finding's ledger row at line 1152. No
+classification recorded in a ledger row can change the answer for a must-fix severity. Executed on
+2026-09-11 at 19:17 UTC with this commit's audit, read-only:
 
 ```
 $ bash scripts/pr-ready-audit.sh --reviewer eventloops 251

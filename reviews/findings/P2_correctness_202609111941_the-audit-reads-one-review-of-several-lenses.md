@@ -18,7 +18,8 @@ and regression, and a third by lane. `MAINTAINING.md` step 4 describes one revie
 the driver posts as one SHA-bound comment. `scripts/pr-ready-audit.sh` reads exactly one comment.
 `review_comment_filter` keeps the trusted reviewer's comments that carry `<!-- upstroke-frontier-review`
 or `Reviewed head: <sha>`, `last` at line 575 keeps the newest on each page, and `latest_review_id`
-keeps the newest across pages. No form exists in which a multi-lens review reaches the audit whole.
+keeps the newest across pages. A multi-lens review can therefore reach the audit only as one combined,
+marker-bearing comment in a form `scripts/pr-review-parse.py` reads, and nothing today writes one.
 
 Executed on 2026-09-11 at 19:17 UTC with this commit's audit, read-only, with no `--apply` and no
 `--enqueue`:
