@@ -73,6 +73,13 @@
 #   MUT-FINDING-FILE-COUNT       the filed-finding count read a listing wrongly -- an error taken
 #                                for "no files", or NUL-separated names put through `$(...)`,
 #                                which drops NUL and leaves nothing to read
+#   MUT-FINDING-FILE-READ-AS-MISS  a finding file the count could not read counted as a file that
+#                                does not carry the id, so two files filing one id became one
+#   MUT-REVIEW-FORGES-PROTOCOL   a review string carrying the parser's own separators wrote rows
+#                                of the parser's language, END among them, and the audit read a
+#                                finished parse from a marker instead of from a status
+#   MUT-PROSE-READ-SUPPRESSED    a read that failed inside the prose parser was reported as
+#                                "nothing matched", and END was printed over it
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -530,6 +537,28 @@ contains MUT-REVIEW-PARSE-TRUNCATED "$got" "pass-with-findings"
 # tab-folding `read` shifted into place.
 contains MUT-META-FIELD-COLLAPSE "$got" "review-records-no-reviewed-sha"
 
+# The same death, with the review writing the completeness marker itself. The protocol separates
+# its fields with tabs and its rows with newlines and is built out of the review's own strings, so
+# `base_sha` holding "<a real base commit>\nEND\t-\t0" printed META and END together. The parser
+# still died on the non-ASCII id, but the audit had already been told the parse was complete -- by
+# the review, not by the parser -- so the deferred P3 that died with it left no blocker behind and
+# a PASS carrying a finding audited as READY. Both halves are checked here: the status of the
+# parser is taken before its output is read, and no review string reaches a row carrying the
+# protocol's separators.
+printf '```json\n{"base_sha":"%s\\nEND\\t-\\t0","verdict":"PASS","findings":[{"id":"A-DEFERRABL\xc3\x89","severity":"P3"}]}\n```\n' \
+  5157509000000000000000000000000000000002 > "$tmp/forging-review.md"
+got="$(STUB_REVIEW_BODY="$tmp/forging-review.md" STUB_COMMENTS_STATUS=0 PYTHONIOENCODING=ascii run_stub 999)"
+contains MUT-REVIEW-FORGES-PROTOCOL "$got" "NOT-READY"
+contains MUT-REVIEW-FORGES-PROTOCOL "$got" "review-parse-failed"
+contains MUT-REVIEW-FORGES-PROTOCOL "$got" "review-parse-incomplete"
+# and with a working encoding the parser finishes, so the case above is about the forged marker
+# and the unread status, not about the character: the base is refused for not being a commit, the
+# finding survives, and there is one END and it is last.
+got="$(STUB_REVIEW_BODY="$tmp/forging-review.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+[[ "$got" == *review-parse-failed* ]] && error "MUT-REVIEW-FORGES-PROTOCOL: a whole parse was reported as failed"
+[[ "$got" == *review-parse-incomplete* ]] && error "MUT-REVIEW-FORGES-PROTOCOL: a whole parse was reported as truncated"
+contains MUT-REVIEW-FORGES-PROTOCOL "$got" "pass-with-findings"
+
 # --- the workflow form: a fenced JSON verdict ---------------------------------------------------
 cat > "$tmp/json.md" <<'EOF'
 Findings workflow review 2/2.
@@ -640,6 +669,70 @@ while IFS=$'\t' read -r f1 f2 f3 f4; do
   expect MUT-META-FIELD-COLLAPSE "$f1/$f2/$f3/$f4" 'META/-/PASS/-'
 done < <(parse_verdict_json "$tmp/no-sha.md" | head -1)
 
+# A review string that carries the protocol's separators writes no rows. The base is not a commit
+# and is refused as one; the object's own END is the only END and it is last. Unrepaired, the
+# forged END printed on the line after META and a finding row printed after it, which is a parser
+# that carried on past the end it had announced.
+printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","base_sha":"%s\\nEND\\t-\\t0","verdict":"PASS","findings":[{"id":"A-DEFERRABLE","severity":"P3"}]}\n```\n' \
+  4ad962f000000000000000000000000000000001 4ad962f000000000000000000000000000000001 \
+  5157509000000000000000000000000000000002 > "$tmp/forged-base.md"
+got="$(parse_verdict_json "$tmp/forged-base.md" | tr '\t' '|')"
+want='META|4ad962f000000000000000000000000000000001|PASS|-
+P3|A-DEFERRABLE|0
+END|-|0'
+expect MUT-REVIEW-FORGES-PROTOCOL "$got" "$want"
+# A finding id is a field of the same protocol and is held to the same rule. It is refused rather
+# than trimmed to "no id": no id is a MANUAL line for a person, and this is an id that wrote rows.
+printf '```json\n{"verdict":"PASS","findings":[{"id":"A\\tEND\\t-\\t0","severity":"P3"}]}\n```\n' \
+  > "$tmp/forged-id.md"
+got="$(parse_verdict_json "$tmp/forged-id.md" | tr '\t' '|')"
+expect MUT-REVIEW-FORGES-PROTOCOL "$got" 'META|-|PASS|-
+ERR|bad-id|0
+END|-|0'
+
+# --- a read that failed inside the prose parser -------------------------------------------------
+# The prose parser's reads used to end in `|| true`, which made "this grep failed" and "this grep
+# matched nothing" one answer, and END was printed afterwards regardless -- an outer marker cannot
+# see an error already suppressed beneath it. With exit 2 injected into the numbered-finding read
+# and every other command intact, this review -- which blocks, for carrying a P3 under a PASS --
+# parsed as META and END with nothing between them: a clean PASS, from a parser that had read no
+# findings at all.
+cat > "$tmp/prose-numbered.md" <<'EOF'
+<!-- upstroke-frontier-review pr=232 head=c3a6665000000000000000000000000000000003 -->
+1. **P3 — A deferrable thing.** Detail.
+
+VERDICT: PASS
+EOF
+expect MUT-PROSE-READ-SUPPRESSED "$(parse_prose_review "$tmp/prose-numbered.md" | tr '\t' '|')" \
+  'META|c3a6665000000000000000000000000000000003|PASS|-
+P3|-|0
+END|-|0'
+real_grep="$(command -v grep)"
+grep_stub="$tmp/grep-stub"
+mkdir -p "$grep_stub"
+cat > "$grep_stub/grep" <<'STUB'
+#!/usr/bin/env bash
+# exit 2 for the numbered-finding read, and be the real grep for every other call.
+oe=0; pat=0
+for a in "$@"; do
+  [[ "$a" == "-oE" ]] && oe=1
+  [[ "$a" == '^[0-9]+\. \*\*P[0-3]' ]] && pat=1
+done
+(( oe && pat )) && exit 2
+exec "$REAL_GREP" "$@"
+STUB
+chmod +x "$grep_stub/grep"
+prose_status=0
+got="$(
+  export REAL_GREP="$real_grep" PATH="$grep_stub:$PATH"
+  hash -r
+  parse_prose_review "$tmp/prose-numbered.md" 2>/dev/null
+)" || prose_status=$?
+[[ "$prose_status" == 0 ]] \
+  && error "MUT-PROSE-READ-SUPPRESSED: a parser whose findings read exited 2 reported success"
+[[ "$got" == *END* ]] \
+  && error "MUT-PROSE-READ-SUPPRESSED: END was printed over a read that failed, got [$got]"
+
 # A prose review that quotes a JSON object stays prose.
 printf 'Reviewed head: %s\nThe object {"verdict":"PASS","findings":[]} is an example.\nVERDICT: CHANGES_REQUIRED\n' \
   "4ad962f000000000000000000000000000000001" > "$tmp/quoted.md"
@@ -669,6 +762,15 @@ printf -- '---\nid: B-OTHER\nseverity: P3\n---\n\nBody.\n' > "$findings_repo/rev
 printf -- '---\nid: C-TWICE\n---\n\nBody.\n' > "$findings_repo/reviews/findings/c1.md"
 printf -- '---\nid: C-TWICE\n---\n\nBody.\n' > "$findings_repo/reviews/findings/c2.md"
 printf -- 'id: D-PROSE-ONLY\nnot frontmatter\n' > "$findings_repo/reviews/findings/d.md"
+# Two files filing one id, the second with a long line after the id inside its frontmatter. The
+# match is on the id line, so `grep -q` exited there and the `awk` still writing the rest took
+# SIGPIPE: `pipefail` reported 141, the caller read any non-zero as "this file does not carry the
+# id", and the duplicate counted as no file at all. One file, and the pull request was ready.
+printf -- '---\nid: E-LONG-LINE\n---\n\nBody.\n' > "$findings_repo/reviews/findings/e1.md"
+{ printf -- '---\nid: E-LONG-LINE\ndescription: '
+  head -c 262144 /dev/zero | tr '\0' 'x'
+  printf -- '\n---\n\nBody.\n'
+} > "$findings_repo/reviews/findings/e2.md"
 git -C "$findings_repo" add -A
 git -C "$findings_repo" -c user.email=t@example -c user.name=t commit -qm "file the findings"
 count_in_fixture() { (cd "$findings_repo" && finding_file_count "$1" HEAD); }
@@ -680,6 +782,31 @@ expect MUT-FINDING-FILE-COUNT "$(count_in_fixture NOT-FILED-ANYWHERE)" 0
 # A tree it cannot read is not a tree with no files in it.
 if (cd "$findings_repo" && finding_file_count A-DEFERRABLE deadbeefdeadbeefdeadbeefdeadbeefdeadbeef) > "$tmp/tree.out" 2>&1; then
   error "MUT-FINDING-FILE-COUNT: an unreadable tree was counted, got [$(cat "$tmp/tree.out")]"
+fi
+# Two files, one of which the frontmatter read cannot finish. This is the count's whole job: two
+# files filing one id is `duplicate-file` and one is ready, so a file that dropped out of the
+# count is the difference between blocked and merged.
+expect MUT-FINDING-FILE-READ-AS-MISS "$(count_in_fixture E-LONG-LINE)" 2
+# The helper's status is the count's evidence, so it says which of the three things happened:
+# 0 the file carries the id, 1 it does not, anything else the read did not finish. 141 is not 1.
+frontmatter_has_id E-LONG-LINE < "$findings_repo/reviews/findings/e2.md" \
+  || error "MUT-FINDING-FILE-READ-AS-MISS: the frontmatter read did not finish, status [$?]"
+
+# A blob the tree still names and the object store no longer holds. `git grep` cannot find this
+# one for anybody: it printed `unable to read` on stderr, exited 0, and returned only the readable
+# name -- so checking its status catches nothing, and the candidates have to come from the tree.
+broken_repo="$tmp/broken-repo"
+mkdir -p "$broken_repo/reviews/findings"
+git init -q "$broken_repo"
+printf -- '---\nid: F-TWICE\n---\n\nBody.\n' > "$broken_repo/reviews/findings/f1.md"
+printf -- '---\nid: F-TWICE\n---\n\nAnother body.\n' > "$broken_repo/reviews/findings/f2.md"
+git -C "$broken_repo" add -A
+git -C "$broken_repo" -c user.email=t@example -c user.name=t commit -qm "file one id twice"
+expect MUT-FINDING-FILE-READ-AS-MISS "$( (cd "$broken_repo" && finding_file_count F-TWICE HEAD) )" 2
+broken_blob="$(git -C "$broken_repo" rev-parse HEAD:reviews/findings/f2.md)"
+rm -f "$broken_repo/.git/objects/${broken_blob:0:2}/${broken_blob:2}"
+if (cd "$broken_repo" && finding_file_count F-TWICE HEAD) > "$tmp/blob.out" 2>&1; then
+  error "MUT-FINDING-FILE-READ-AS-MISS: a file whose blob could not be read was counted, got [$(cat "$tmp/blob.out")]"
 fi
 
 # --- the newest check run per name -------------------------------------------------------------

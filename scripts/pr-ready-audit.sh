@@ -85,11 +85,15 @@
 # and none of them is an empty result: an unreadable comment page blocks as `review-lookup-failed`,
 # an unreadable timeline as `timeline-lookup-failed`, an unreadable pull request as
 # `pr-lookup-failed`, a review the parser did not finish reading as `review-parse-incomplete`, a
-# review that records no reviewed commit as `review-records-no-reviewed-sha`, a finding-file
-# listing that errored as `finding-file-lookup-failed`, and a gate-edit check that could not run as
+# parser that exited non-zero as `review-parse-failed`, a review that records no reviewed commit as
+# `review-records-no-reviewed-sha`, a finding-file listing that errored as
+# `finding-file-lookup-failed`, and a gate-edit check that could not run as
 # `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
 # run before the first pull request is judged. Every list request is paginated, because a first
-# page is not a list and 30 rows of nothing hid an active ruleset on page two.
+# page is not a list and 30 rows of nothing hid an active ruleset on page two. A parse is judged
+# by two of those blockers and not one: END says the parser reached the end of the findings, its
+# exit status says it did not die getting there, and END alone will not do, because END is a row
+# the review's own strings could write and one did.
 #
 # Reading "I could not look" as "there is nothing there" is precisely how a blocked pull request
 # enqueues, and it has happened here more than once: a comment page whose failure was swallowed
@@ -169,6 +173,11 @@ review_kind() {
 # carrying a deferred finding audits as a PASS carrying none, which is READY and a merge call.
 # No field is ever empty either: `read` with IFS=tab folds runs of tabs together, so an empty
 # reviewed_sha shifted the verdict into its column and the base into the verdict's.
+#
+# END is necessary and it is not sufficient. It is a row in a protocol built out of the strings
+# the review supplied, so a review can write one, and one did. The caller takes this parser's
+# exit status as well, and no value reaches a row until it has been checked for the protocol's
+# own separators: a marker cannot stand in for a status.
 parse_verdict_json() {
   local py
   py="$(command -v python3 || command -v python || true)"
@@ -191,7 +200,25 @@ if not isinstance(verdict, dict) or not isinstance(verdict.get("findings"), list
     sys.exit(0)
 # Identity, verdict, base and findings from this one object. Anything in the comment outside the
 # object that looks like a finding is for a person, not for the parser.
-print("META\t" + (str(verdict.get("reviewed_sha", "")).strip() or "-") + "\t" + (str(verdict.get("verdict", "")).strip() or "-") + "\t" + (str(verdict.get("base_sha", "")).strip() or "-"))
+#
+# Every value that reaches the protocol is checked on the way in, because the protocol is made
+# out of the reviewer's own text. Tab separates its fields and newline its rows, so a string
+# carrying either writes rows of its own: `"base_sha": "<a real base commit>\nEND\t-\t0"` printed
+# a valid META line with the completeness marker behind it, the next print died on an encoding
+# error, and the audit read a finished parse and a clean PASS out of a parser that exited 1.
+# A commit field holds a commit or it holds nothing, and a verdict is one word.
+def field(v):
+    if v is None or isinstance(v, (dict, list, bool)):
+        return None
+    s = str(v).strip()
+    return None if not s or re.search(r"[\x00-\x1f\x7f]", s) else s
+def sha_field(v):
+    s = field(v)
+    return s if s and re.fullmatch(r"[0-9a-fA-F]{7,40}", s) else None
+def verdict_field(v):
+    s = field(v)
+    return s if s and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,39}", s) else None
+print("META\t" + (sha_field(verdict.get("reviewed_sha")) or "-") + "\t" + (verdict_field(verdict.get("verdict")) or "-") + "\t" + (sha_field(verdict.get("base_sha")) or "-"))
 outside = text.replace(found[-1], "")
 stray = sorted(set(re.findall(r"\b(?:P[0-3]|MUST)\b", outside)))
 if stray:
@@ -203,7 +230,14 @@ for f in verdict["findings"]:
         print("ERR\tunparsed\t0")
         continue
     sev = str(f.get("severity", "")).strip()
-    fid = str(f.get("id", "")).strip() or "-"
+    raw_id = f.get("id")
+    fid = field(raw_id)
+    if fid is None and raw_id is not None and str(raw_id).strip():
+        # An id that cannot be a protocol field is not narrowed to "no id": no id is a MANUAL
+        # line for a person to read, and this is a finding whose id would have written rows.
+        print("ERR\tbad-id\t0")
+        continue
+    fid = fid or "-"
     wit = int(any(present(f.get(k)) for k in ("witness", "reproduction", "repro", "failing_test", "mutation", "mutation_witness")))
     # A MUST deviation is fixed whatever its label (MAINTAINING step 5): any field of the finding
     # naming MUST as a word, or a field whose name says mandatory/deviation, marks it.
@@ -227,14 +261,65 @@ PY
 #   <severity> - 0     one per numbered "N. **P<n>" finding
 #   STRAY <tokens> 0   any P0-P3 or MUST token outside the numbered findings, PASS included
 #   END - 0            the parser reached the end
+#
+# Each read is taken on its own and its status checked before anything at all is printed. These
+# reads used to end in `|| true`, which made "this grep failed" and "this grep matched nothing"
+# one answer: with exit 2 injected into the numbered-finding read, a prose review carrying a P3
+# and a PASS -- which blocks -- printed META and END with nothing between them, and the audit
+# read a clean PASS out of a parser that had read no findings at all. END is printed last and
+# cannot see an error suppressed beneath it, so the errors are caught where they happen and END
+# is reached only when there were none. grep's 1 is "no match" and is an answer; 2 and above,
+# and a death by signal, are not.
+#
+# The second stage of each read is bash's own regex rather than another command in the pipe. A
+# pipeline's status under `pipefail` is its rightmost non-zero one, so `grep(2) | sed | grep(1)`
+# reports 1 -- the failure hidden behind the ordinary "no match" of a later stage, which is the
+# same suppression in a different costume.
+#
+# Those three sets are spelled out character by character, for the reason valid_login spells its
+# one out: a range inside a bash regex is resolved by the locale's collating order and not by
+# ASCII, so `[0-9a-f]` is not the hex alphabet it looks like and `[A-Z_]` is not the upper-case
+# one. The greps that feed them still use ranges, which is the shape they had; where a locale
+# widens one, what reaches these is checked against the narrow set and a head that does not match
+# it becomes `-`, which blocks. Narrow is the safe side of that disagreement.
 parse_prose_review() {
-  local f="$1" head verdict stray
-  head="$(grep -oE '(head=|Reviewed head: )[0-9a-f]{40}' "$f" | head -1 | grep -oE '[0-9a-f]{40}' || true)"
-  verdict="$(grep -oE 'VERDICT:\**:? *[A-Z_]+' "$f" | tail -1 | grep -oE '[A-Z_]+$' || true)"
+  local f="$1" head="" verdict="" stray="" raw line status=0
+  local hex='[0123456789abcdef]'
+  local upper='[ABCDEFGHIJKLMNOPQRSTUVWXYZ_]'
+  local sev='P[0123]'
+
+  raw="$(grep -oE '(head=|Reviewed head: )[0-9a-f]{40}' "$f")" || status=$?
+  ((status <= 1)) || return 1
+  [[ "$raw" =~ ($hex{40}) ]] && head="${BASH_REMATCH[1]}"       # the first, as `head -1` took
+
+  status=0
+  raw="$(grep -oE 'VERDICT:\**:? *[A-Z_]+' "$f")" || status=$?
+  ((status <= 1)) || return 1
+  while IFS= read -r line; do                                   # the last, as `tail -1` took
+    [[ "$line" =~ ($upper+)$ ]] && verdict="${BASH_REMATCH[1]}"
+  done <<< "$raw"
+
   printf 'META\t%s\t%s\t-\n' "${head:-"-"}" "${verdict:-"-"}"
-  grep -oE '^[0-9]+\. \*\*P[0-3]' "$f" | grep -oE 'P[0-3]' | sed 's/$/\t-\t0/' || true
-  stray="$(grep -vE '^[0-9]+\. \*\*P[0-3]' "$f" | grep -oE '\bP[0-3]\b|\bMUST\b' | sort -u | tr '\n' '/' | sed 's#/$##' || true)"
+
+  status=0
+  raw="$(grep -oE '^[0-9]+\. \*\*P[0-3]' "$f")" || status=$?
+  ((status <= 1)) || return 1
+  while IFS= read -r line; do
+    [[ "$line" =~ ($sev) ]] && printf '%s\t-\t0\n' "${BASH_REMATCH[1]}"
+  done <<< "$raw"
+
+  status=0
+  raw="$(grep -vE '^[0-9]+\. \*\*P[0-3]' "$f")" || status=$?
+  ((status <= 1)) || return 1
+  status=0
+  raw="$(grep -oE '\bP[0-3]\b|\bMUST\b' <<< "$raw")" || status=$?
+  ((status <= 1)) || return 1
+  status=0
+  stray="$(sort -u <<< "$raw" | tr '\n' '/')" || status=$?
+  ((status == 0)) || return 1
+  stray="${stray%/}"
   [[ -n "$stray" ]] && printf 'STRAY\t%s\t0\n' "$stray"
+
   printf 'END\t-\t0\n'
   return 0
 }
@@ -244,14 +329,32 @@ parse_prose_review() {
 # line `id: ID` (README: the id lives in the frontmatter, not the name). The same line in prose
 # or a code block further down is not a frontmatter id. The id is a fixed string, whole line.
 frontmatter_has_id() {
-  awk 'NR == 1 { if ($0 != "---") exit; next } $0 == "---" { exit } { print }' | grep -qxF "id: $1"
+  # `grep` without `-q`, its output discarded instead. `-q` exits at the first match, the `awk`
+  # still writing the rest of the block takes SIGPIPE, and `pipefail` reports that as 141 -- for
+  # a file that matched. The caller read 141 as "did not match", so a second file filing the
+  # same id, with a long line after it, counted as no file at all and two files became one.
+  # Reading the block to its end costs nothing and leaves the status meaning what it says:
+  # 0 matched, 1 did not, anything else is a read that failed.
+  awk 'NR == 1 { if ($0 != "---") exit; next } $0 == "---" { exit } { print }' \
+    | grep -xF -e "id: $1" > /dev/null
 }
 
 # finding_file_count ID TREEISH: how many files under reviews/findings/ in TREEISH carry `id: ID`
 # in their YAML frontmatter. A non-zero status means the listing, or one of the files it named,
 # could not be read -- which is not a count of zero. This rule wants exactly one file, so a read
-# that quietly does not count can turn two files into one as easily as one into none, and `git
-# grep` exits 1 for "nothing matched" and above 1 for an error, which `|| true` read as one answer.
+# that quietly does not count can turn two files into one as easily as one into none.
+#
+# The candidates are the tree's own paths, from `git ls-tree`, and every one of them is read.
+# `git grep` cannot supply them: it answers with the files it managed to search, and a blob it
+# could not read is not among them -- with one file's blob removed it printed `unable to read` on
+# stderr, exited 0, and returned the other name, so two files filing one id came back as one.
+# Checking its status could not have caught that, because its status was 0. `ls-tree` reads the
+# tree and not the blobs, so a file whose blob is gone is still a candidate here and fails its own
+# read below. (No `*.md` pathspec: `ls-tree` matches paths literally and a glob selected nothing.)
+#
+# Each file then gets exactly one of three answers: it carries the id, it does not, or it could
+# not be read. `frontmatter_has_id` says which by its status -- 0, 1, or anything else -- and
+# anything else refuses the count rather than being folded into "no".
 #
 # The names arrive NUL-separated through a file rather than a command substitution: `$(...)` drops
 # NUL bytes, so the separators would vanish and the loop would read nothing at all -- a count of
@@ -261,17 +364,23 @@ finding_file_count() {
   local id="$1" treeish="$2" cand_file blob_file status=0 n=0 cand
   cand_file="$(mktemp)"
   blob_file="$(mktemp)"
-  git grep -l -z -F -e "id: $id" "$treeish" -- 'reviews/findings/*.md' > "$cand_file" 2>/dev/null \
+  git ls-tree -r -z --name-only "$treeish" -- reviews/findings/ > "$cand_file" 2>/dev/null \
     || status=$?
-  if ((status > 1)); then rm -f "$cand_file" "$blob_file"; return 1; fi
+  if ((status != 0)); then rm -f "$cand_file" "$blob_file"; return 1; fi
   # NUL-separated names, so a path with whitespace stays one candidate.
   while IFS= read -r -d '' cand; do
-    cand="${cand#*:}"   # git grep prefixes each name with "<treeish>:"
+    [[ "$cand" == *.md ]] || continue
     if ! git show "$treeish:$cand" > "$blob_file" 2>/dev/null; then
       rm -f "$cand_file" "$blob_file"
       return 1
     fi
-    if frontmatter_has_id "$id" < "$blob_file"; then n=$((n + 1)); fi
+    status=0
+    frontmatter_has_id "$id" < "$blob_file" || status=$?
+    case "$status" in
+      0) n=$((n + 1)) ;;
+      1) ;;                                              # read to the end and did not match
+      *) rm -f "$cand_file" "$blob_file"; return 1 ;;     # a read that failed is not a "no"
+    esac
   done < "$cand_file"
   rm -f "$cand_file" "$blob_file"
   printf '%s' "$n"
@@ -648,7 +757,20 @@ audit_one() {
     review_file="$(mktemp)"
     gh api "repos/$repo/issues/comments/$review_id" --jq '.body' > "$review_file"
     kind="$(review_kind "$review_file")"
-    local sev id wit parse_complete=0
+    local sev id wit parse_complete=0 parse_file parse_status=0
+    # The parser's output is written down and its status taken before a single row of it is
+    # read. Through `< <(...)` that status was invisible, so the only thing the audit could look
+    # at was the output -- and the output is built out of the reviewer's own text. A review
+    # recording `base_sha: "<a real base commit>\nEND<tab>-<tab>0"` printed the completeness
+    # marker itself, the parser died on the next line, and a marker the review supplied stood in
+    # for a status nothing looked at. A marker cannot say the parser finished; only its status
+    # can, and the fields it prints are checked for the protocol's separators on the way in.
+    parse_file="$(mktemp)"
+    if [[ "$kind" == json ]]; then
+      parse_verdict_json "$review_file" > "$parse_file" || parse_status=$?
+    else
+      parse_prose_review "$review_file" > "$parse_file" || parse_status=$?
+    fi
     while IFS=$'\t' read -r sev id wit extra; do
       case "$sev" in
         END) parse_complete=1 ;;
@@ -660,12 +782,16 @@ audit_one() {
         "") ;;
         *) findings+=("$sev"$'\t'"$id"$'\t'"$wit") ;;
       esac
-    done < <(if [[ "$kind" == json ]]; then parse_verdict_json "$review_file"; else parse_prose_review "$review_file"; fi)
-    rm -f "$review_file"
+    done < "$parse_file"
+    rm -f "$review_file" "$parse_file"
 
-    # The parser's own END. Without it the stream is whatever the parser managed to print before it
-    # died, which is a findings list that is short by an unknown amount -- and every finding it
-    # failed to print is a blocker this audit will not raise. A short list is not a clean review.
+    # The parser's own status, and then its own END. Without the END the stream is whatever the
+    # parser managed to print before it died, which is a findings list short by an unknown amount
+    # -- and every finding it failed to print is a blocker this audit will not raise. A short list
+    # is not a clean review. Without the status the END is only a row in the parser's output, and
+    # the parser's output is made out of the review's strings: one review wrote its own END and
+    # the parse that printed it exited 1.
+    ((parse_status == 0)) || blockers+=("review-parse-failed:$parse_status")
     ((parse_complete)) || blockers+=("review-parse-incomplete")
     # A review that does not say which commit it reviewed cannot be checked against the head. This
     # used to land on a blocker only because `read` with IFS=tab folded the empty field and shifted
