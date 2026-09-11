@@ -18,6 +18,26 @@
 #
 # Each case names the defect it exists to catch, so a green run says what it proved:
 #   MUT-LANE-LABEL-INPUT         the lane came from a label, not the branch prefix
+#   MUT-LANE-TABLE-DRIFT         a prefix's lane, review effort or must-fix set disagreed with
+#                                scripts/lane.sh's table -- asserted for all thirteen prefixes and
+#                                not a sample, because the table this replaces WAS a sample: three
+#                                `codex/` shapes and a catch-all, and every real prefix fell into
+#                                the catch-all
+#   MUT-LANE-PREFIX-UNKNOWN-DEFAULTS  a branch outside the vocabulary was given a lane instead of a
+#                                refusal, which is how an unknown prefix was silently handed the
+#                                most expensive review and the loosest fix set
+#   MUT-LANE-LABEL-LIST-BY-HAND  the label list, or the label reconciliation, named lanes by hand
+#                                instead of following the table, so it went stale the moment the
+#                                table moved and left a retired `lane:*` label uncorrected
+#   MUT-P3-EFFORT-FROM-LANE-ALONE  the P3 row's effort ignored the branch, or read the category as
+#                                a PREFIX of the slug rather than as the whole first token -- so
+#                                `bulk-fix-P3/docs-contract-cleanup` was reviewed at low effort --
+#                                or answered low for a caller that passed no branch at all, which
+#                                cheapens a review by omission
+#   MUT-P3-COUNT-UNBOUNDED       the P3 lane had no tolerance: either `verdict-not-pass` still
+#                                demanded a PASS no review could give, or the unwitnessed P3s were
+#                                not counted against three, or a witnessed one was counted as
+#                                unwitnessed
 #   MUT-P3-LANE-DEFERS           the P3 lane let a P3 be deferred
 #   MUT-JSON-SPLIT-BY-REGEX      findings read by splitting text on "},{" instead of a parser
 #   MUT-NULL-WITNESS             a null witness field counted as a witness
@@ -200,20 +220,116 @@ PR_READY_AUDIT_LIBRARY=1 source scripts/pr-ready-audit.sh
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-# --- lanes and severity sets ------------------------------------------------------------------
-expect MUT-LANE-LABEL-INPUT "$(lane_for codex/findings-p3-7d2d8e9dc74a)" findings-p3
-expect MUT-LANE-LABEL-INPUT "$(lane_for codex/findings-ba8fdc8dec2b)" findings-p1p2
-expect MUT-LANE-LABEL-INPUT "$(lane_for codex/sweep-f3eb59a749fe)" feature
-expect MUT-LANE-LABEL-INPUT "$(lane_for fix/sampler-kill-and-inspection)" feature
-expect MUT-P3-LANE-DEFERS "$(must_fix_for findings-p3)" "P0 P1 P2 P3"
-expect MUT-P3-LANE-DEFERS "$(must_fix_for findings-p1p2)" "P0 P1 P2"
-expect MUT-P3-LANE-DEFERS "$(must_fix_for feature)" "P0 P1"
+# --- the lane table: every prefix in the vocabulary, not a sample ------------------------------
+# scripts/lane.sh is sourced by scripts/pr-ready-audit.sh, so sourcing the audit above defined it.
+# EVERY PREFIX IS ASSERTED AND NOT A SAMPLE, because the table this replaces was a sample -- three
+# `codex/` shapes and a catch-all -- and the catch-all was where the thirteen real prefixes went.
+# The row is the assertion: prefix, lane, effort, must-fix, one line each, so a change to the table
+# that does not change this file is a change nothing agreed to.
+lane_rows=(
+  'feature/a-slug|feature|max|P0 P1'
+  'refactor/a-slug|refactor|max|P0 P1'
+  'ci/a-slug|ci|max|P0 P1'
+  'gate/a-slug|gate|max|P0 P1'
+  'standards/a-slug|standards|high|P0 P1 P2'
+  'docs/a-slug|docs|low|P0 P1'
+  'findings/a-slug|findings|low|P0 P1'
+  'fix-P0/correctness_a-slug|fix-p0p1|max|P0 P1'
+  'fix-P1/correctness_a-slug|fix-p0p1|max|P0 P1'
+  'fix-P2/correctness_a-slug|fix-p2|high|P0 P1 P2'
+  'bulk-fix-P2/a-slug|bulk-fix-p2|max|P0 P1 P2'
+  'fix-P3/correctness_a-slug|fix-p3|max|P0 P1 P2'
+  'bulk-fix-P3/a-slug|fix-p3|max|P0 P1 P2'
+)
+for row in "${lane_rows[@]}"; do
+  branch="${row%%|*}"; rest="${row#*|}"
+  want_lane="${rest%%|*}"; rest="${rest#*|}"
+  want_effort="${rest%%|*}"; want_fix="${rest#*|}"
+  got_lane="$(lane_for "$branch")" \
+    || { error "MUT-LANE-TABLE-DRIFT: [$branch] has no lane"; continue; }
+  expect "MUT-LANE-TABLE-DRIFT lane [$branch]" "$got_lane" "$want_lane"
+  expect "MUT-LANE-TABLE-DRIFT effort [$branch]" "$(effort_for "$got_lane" "$branch")" "$want_effort"
+  expect "MUT-LANE-TABLE-DRIFT must-fix [$branch]" "$(must_fix_for "$got_lane")" "$want_fix"
+done
+# Eleven lanes, and `lane_list` is what the label list and both reconciliation loops are driven
+# from: a lane in the table and not in the list is a lane whose label is never created.
+expect MUT-LANE-LABEL-LIST-BY-HAND "$(lane_list | tr '\n' ' ')" \
+  "feature refactor ci gate standards docs findings fix-p0p1 fix-p2 bulk-fix-p2 fix-p3 "
+for row in "${lane_rows[@]}"; do
+  branch="${row%%|*}"; rest="${row#*|}"; want_lane="${rest%%|*}"
+  lane_list | grep -qxF "$want_lane" \
+    || error "MUT-LANE-LABEL-LIST-BY-HAND: [$branch] is in lane [$want_lane], which lane_list omits"
+done
+
+# --- an unknown prefix is a refusal and never a default lane ------------------------------------
+# THE WHOLE POINT OF THE TABLE. The catch-all it replaces handed a prefix nobody had thought about
+# the most expensive review and the loosest fix set, in silence. The three `codex/` shapes are here
+# because they are exactly what the old table read, and they are outside the vocabulary now.
+for unknown in codex/findings-p3-7d2d8e9dc74a codex/findings-ba8fdc8dec2b codex/sweep-f3eb59a749fe \
+               fix/sampler-kill-and-inspection feat/branch-gate-live-check bulk-fix-P0/a-slug \
+               bulk-fix-P1/a-slug "" feature refactor FEATURE/a-slug "  "; do
+  if lane_for "$unknown" > "$tmp/lane.out" 2>&1; then
+    error "MUT-LANE-PREFIX-UNKNOWN-DEFAULTS: [$unknown] was given the lane [$(cat "$tmp/lane.out")]"
+  fi
+done
+# and the refusal PRINTS THE VOCABULARY, because a name outside it is usually a name nobody has
+# written down rather than a typo, and the answer to that is the table.
+lane_for codex/findings-p3-7d2d8e9dc74a > "$tmp/refusal.out" 2>&1 || true
+contains MUT-LANE-PREFIX-UNKNOWN-DEFAULTS "$(cat "$tmp/refusal.out")" "is not a known branch prefix"
+for prefix in 'feature/' 'refactor/' 'ci/' 'gate/' 'standards/' 'docs/' 'findings/' 'fix-P0/' \
+              'fix-P1/' 'fix-P2/' 'fix-P3/' 'bulk-fix-P2/' 'bulk-fix-P3/'; do
+  contains "MUT-LANE-PREFIX-UNKNOWN-DEFAULTS vocabulary [$prefix]" "$(cat "$tmp/refusal.out")" "$prefix"
+done
+
+# --- the P3 row's effort is a function of the NAME, and it fails expensive ----------------------
+# One row of the table makes effort a function of the branch rather than of the lane, and there are
+# three ways to get it wrong.
+#
+# `effort_for fix-p3` with NO BRANCH must answer max: a caller that forgets the argument must not be
+# cheapened into a low review by its own omission.
+#
+# The category is THE ONE THE NAME BEGINS WITH, one rule for both P3 prefixes: `fix-P3/` names carry
+# it before the `_`, and a `bulk-fix-P3/` slug may begin with it -- `bulk-fix-P3/docs-contract-sweep`
+# is a docs-contract batch and takes the docs-contract effort. Read as an exact `_`-delimited token
+# instead, a hyphenated bulk slug can never equal a bare category name and every P3 batch is `max`,
+# which is the table's own row not being applied.
+#
+# And the category ends at a WORD BOUNDARY. A bare byte prefix reads `docs-contract` out of
+# `docs-contractual-review`, whose first word is `docs`, and hands the cheap review to a name nobody
+# chose it for.
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3)" max
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 '')" max
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 fix-P3/docs-contract_a-slug)" low
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 fix-P3/docs-contract_docs-are-wrong)" low
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 bulk-fix-P3/docs-contract)" low
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 bulk-fix-P3/docs-contract-sweep)" low
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 fix-P3/correctness_a-slug)" max
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 fix-P3/liveness_a-slug)" max
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 bulk-fix-P3/correctness-sweep)" max
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 bulk-fix-P3/misc-cleanup)" max
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 bulk-fix-P3/a-batch-of-things)" max
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 bulk-fix-P3/docs-contractual-review)" max
+expect MUT-P3-EFFORT-FROM-LANE-ALONE "$(effort_for fix-p3 bulk-fix-P3/docs)" max
+# Every other lane is answered from the lane alone, so `effort_for "$lane"` stays true for them and
+# a branch passed alongside changes nothing.
+for row in "${lane_rows[@]}"; do
+  branch="${row%%|*}"; rest="${row#*|}"
+  want_lane="${rest%%|*}"; rest="${rest#*|}"; want_effort="${rest%%|*}"
+  [[ "$want_lane" == fix-p3 ]] && continue
+  expect "MUT-P3-EFFORT-FROM-LANE-ALONE lane-only [$want_lane]" "$(effort_for "$want_lane")" "$want_effort"
+done
+
+# --- a lane nobody can answer is answered by nobody ---------------------------------------------
 # A lane this does not know is not a lane with nothing to fix in it: `[[ "  " == *" P1 "* ]]` is
 # false, so an empty must-fix set makes every severity in every review deferrable. The permissive
-# answer is said, never fallen into.
-for unknown in "" lane:feature findings feature-ish FEATURE; do
+# answer is said, never fallen into -- and the same holds for the effort, where the permissive
+# answer is the cheap review.
+for unknown in "" lane:feature findings-p3 findings-p1p2 feature-ish FEATURE fix-p0 fix-P2; do
   if must_fix_for "$unknown" > "$tmp/lane.out" 2>&1; then
     error "MUT-P3-LANE-DEFERS: lane [$unknown] was answered with [$(cat "$tmp/lane.out")]"
+  fi
+  if effort_for "$unknown" > "$tmp/lane.out" 2>&1; then
+    error "MUT-P3-LANE-DEFERS: lane [$unknown] was given the effort [$(cat "$tmp/lane.out")]"
   fi
 done
 
@@ -469,7 +585,10 @@ join_continuations() {
     print buf; buf = ""
   } END { if (buf != "") print buf }'
 }
-code_lines() { grep -vE '^[[:space:]]*#' scripts/pr-ready-audit.sh; }
+# The audit AND the table it sources. Every shape rule below is about what this code may be
+# written as, and scripts/lane.sh is part of the audit the moment it is sourced: a here-string
+# added there spills the same way, and a `gh` or `git` command added there fails open the same way.
+code_lines() { grep -vhE '^[[:space:]]*#' scripts/pr-ready-audit.sh scripts/lane.sh; }
 while IFS= read -r call; do
   [[ "$call" == *"gh api "* ]] || continue
   [[ "$call" == *"--paginate"* ]] && continue
@@ -621,7 +740,8 @@ case "$*" in
   *"--json body"*)            (( ${STUB_BODY_STATUS:-0} )) && exit "$STUB_BODY_STATUS"
                               echo "no ledger" ;;
   "pr view"*)                 (( ${STUB_PRVIEW_STATUS:-0} )) && exit "$STUB_PRVIEW_STATUS"
-                              printf 'feature/x\n%s\nfalse\nCLEAN\n\nmaster\n%s\n' "$head" "$head" ;;
+                              printf '%s\n%s\nfalse\nCLEAN\n%s\nmaster\n%s\n' \
+                                "${STUB_BRANCH:-feature/x}" "$head" "${STUB_LABELS:-}" "$head" ;;
   *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
 esac
 GH
@@ -770,6 +890,124 @@ contains MUT-REVIEW-FORGES-PROTOCOL "$got" "NOT-READY"
 contains MUT-REVIEW-FORGES-PROTOCOL "$got" "pass-with-findings"
 [[ "$got" == *review-parse-incomplete* ]] \
   && error "MUT-REVIEW-FORGES-PROTOCOL: a forged marker shortened the parse"
+
+# --- the P3 rule, and the PASS rule it replaces, through main -----------------------------------
+# `verdict-not-pass` demanded a PASS from a lane whose reviews file P3s, so it could be reached only
+# by looping reviews until one returned nothing. It is deleted, and the rule now is a COUNT: no P0,
+# P1 or P2, and three P3s or fewer -- three UNWITNESSED ones, because a P3 carrying a failing test,
+# reproduction or mutation witness is fixed whatever the count and is already blocked in every lane.
+#
+# These run the whole script against the stub, because the count is made inside `audit_one` and no
+# call on a helper can reach it. They assert the LANE RULE'S OWN BLOCKER and not the READY verdict:
+# a review the stub can serve has no ledger row and no filed finding behind it, so every one of
+# these pull requests is NOT-READY on `no-row:` whatever the count says, and the question this rule
+# answers is whether `unwitnessed-p3s` is among the blockers.
+p3_review() {  # p3_review FILE FINDING-JSON...: a CHANGES_REQUIRED review carrying those findings
+  local out="$1" sep='' one
+  shift
+  printf '```json\n{"verdict":"CHANGES_REQUIRED","findings":[' > "$out"
+  for one in "$@"; do
+    printf '%s%s' "$sep" "$one" >> "$out"
+    sep=','
+  done
+  printf ']}\n```\n' >> "$out"
+}
+unwitnessed_p3='{"id":"P3-%s","severity":"P3"}'
+p3_review "$tmp/p3-three.md" \
+  "$(printf "$unwitnessed_p3" a)" "$(printf "$unwitnessed_p3" b)" "$(printf "$unwitnessed_p3" c)"
+p3_review "$tmp/p3-four.md" \
+  "$(printf "$unwitnessed_p3" a)" "$(printf "$unwitnessed_p3" b)" "$(printf "$unwitnessed_p3" c)" \
+  "$(printf "$unwitnessed_p3" d)"
+p3_review "$tmp/p3-one-witnessed.md" '{"id":"P3-w","severity":"P3","witness":"a failing test"}'
+# THE CASE THAT SEPARATES THE TWO COUNTS, and the only one that does: three unwitnessed P3s beside a
+# witnessed one. Counted as four the tolerance is exceeded; counted as the three the rule is written
+# over, it is not -- and the witnessed one blocks on its own terms either way, which is why a fixture
+# carrying a witnessed P3 ALONE cannot tell the two apart.
+witnessed_p3='{"id":"P3-w","severity":"P3","mutation":"a surviving mutant"}'
+p3_review "$tmp/p3-three-plus-witnessed.md" \
+  "$(printf "$unwitnessed_p3" a)" "$(printf "$unwitnessed_p3" b)" "$(printf "$unwitnessed_p3" c)" \
+  "$witnessed_p3"
+p3_review "$tmp/p3-four-plus-witnessed.md" \
+  "$(printf "$unwitnessed_p3" a)" "$(printf "$unwitnessed_p3" b)" "$(printf "$unwitnessed_p3" c)" \
+  "$(printf "$unwitnessed_p3" d)" "$witnessed_p3"
+
+p3_run() {  # p3_run BRANCH FILE: the audit's line for a pull request on that branch and review
+  STUB_BRANCH="$1" STUB_REVIEW_BODY="$2" STUB_COMMENTS_STATUS=0 run_stub 999
+}
+got="$(p3_run fix-P3/correctness_a-slug "$tmp/p3-three.md")"
+contains MUT-P3-COUNT-UNBOUNDED "$got" "fix-p3"
+[[ "$got" == *unwitnessed-p3s* ]] \
+  && error "MUT-P3-COUNT-UNBOUNDED: three unwitnessed P3s were blocked by the tolerance: [$got]"
+got="$(p3_run fix-P3/correctness_a-slug "$tmp/p3-four.md")"
+contains MUT-P3-COUNT-UNBOUNDED "$got" "unwitnessed-p3s:4-over-3"
+contains MUT-P3-COUNT-UNBOUNDED "$got" "NOT-READY"
+# A witnessed P3 is one P3 -- inside the tolerance by count -- and blocks anyway. `flags & 1` is the
+# parser's word for a witness field, and it is cleared P3s that the tolerance counts.
+got="$(p3_run fix-P3/correctness_a-slug "$tmp/p3-one-witnessed.md")"
+contains MUT-P3-COUNT-UNBOUNDED "$got" "witnessed:P3-w"
+contains MUT-P3-COUNT-UNBOUNDED "$got" "NOT-READY"
+[[ "$got" == *unwitnessed-p3s* ]] \
+  && error "MUT-P3-COUNT-UNBOUNDED: a witnessed P3 was counted as an unwitnessed one: [$got]"
+# Three unwitnessed P3s and a witnessed one: four findings, three of them counted. The witnessed one
+# blocks, and the tolerance does not -- which is the whole of "three UNWITNESSED P3s".
+got="$(p3_run fix-P3/correctness_a-slug "$tmp/p3-three-plus-witnessed.md")"
+contains MUT-P3-COUNT-UNBOUNDED "$got" "witnessed:P3-w"
+[[ "$got" == *unwitnessed-p3s* ]] \
+  && error "MUT-P3-COUNT-UNBOUNDED: a witnessed P3 was counted towards the tolerance: [$got]"
+# And with a fourth unwitnessed one the blocker names FOUR and not five, so the number it reports is
+# the number it counted.
+got="$(p3_run fix-P3/correctness_a-slug "$tmp/p3-four-plus-witnessed.md")"
+contains MUT-P3-COUNT-UNBOUNDED "$got" "unwitnessed-p3s:4-over-3"
+# bulk-fix-P3/ shares the lane and so shares the rule.
+got="$(p3_run bulk-fix-P3/a-batch "$tmp/p3-four.md")"
+contains MUT-P3-COUNT-UNBOUNDED "$got" "unwitnessed-p3s:4-over-3"
+# And it is the fix-p3 LANE'S rule: four deferrable P3s on a feature branch are four filed findings.
+got="$(p3_run feature/a-slug "$tmp/p3-four.md")"
+[[ "$got" == *unwitnessed-p3s* ]] \
+  && error "MUT-P3-COUNT-UNBOUNDED: the P3 tolerance was applied outside the fix-p3 lane: [$got]"
+# The rule it replaces is gone, in the audit and on the wire: a P3 lane with a CHANGES_REQUIRED
+# verdict used to block on `verdict-not-pass` alone, which no review could ever clear.
+got="$(p3_run fix-P3/correctness_a-slug "$tmp/p3-three.md")"
+[[ "$got" == *verdict-not-pass* ]] \
+  && error "MUT-P3-COUNT-UNBOUNDED: verdict-not-pass still blocks a P3 lane: [$got]"
+expect MUT-P3-COUNT-UNBOUNDED "$(code_lines | grep -c 'verdict-not-pass' || true)" 0
+
+# --- a branch outside the vocabulary, through main ----------------------------------------------
+# The catch-all is gone from the audit too, and this is what a pull request carrying a name outside
+# the vocabulary now gets: a row, a blocker, NOT-READY, and the run carries on. It must not be given
+# a lane, and it must not stop the audit -- one unknown name is not a reason to leave every other
+# pull request unjudged.
+got="$(STUB_BRANCH=codex/findings-p3-7d2d8e9dc74a STUB_REVIEW_BODY="$tmp/p3-three.md" \
+  STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-LANE-PREFIX-UNKNOWN-DEFAULTS "$got" "branch-prefix-unknown:codex"
+contains MUT-LANE-PREFIX-UNKNOWN-DEFAULTS "$got" "NOT-READY"
+contains MUT-LANE-PREFIX-UNKNOWN-DEFAULTS "$got" "is not a known branch prefix"
+expect MUT-LANE-PREFIX-UNKNOWN-DEFAULTS "${got%%|*}" 0
+# The LANE COLUMN of the row itself, and not the run's output, which carries the vocabulary the
+# refusal printed and every lane name in it. `%-14s` pads the column, so a `-` there is the audit
+# saying this pull request has no lane; any lane name would appear in exactly that position.
+contains MUT-LANE-PREFIX-UNKNOWN-DEFAULTS "$got" '#999  -             '
+
+# --- a lane label is an output, and a stale one is reported and removed --------------------------
+# The two reconciliation loops named `lane:feature`, `lane:findings-p1p2` and `lane:findings-p3` by
+# hand. Two of those lanes no longer exist, so a label left behind by the old audit would have been
+# neither reported nor removed; and the list would have gone stale again the next time the table
+# moved. Every `lane:*` label that is not this pull request's lane is reported, whether or not the
+# table has ever heard of it.
+got="$(STUB_BRANCH=docs/a-slug STUB_LABELS='lane:feature lane:findings-p3 ready-to-merge' \
+  STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+# The lane came from the PREFIX and not from either label on the pull request. A label is not bound
+# to a commit, so a lane read out of one would let an edit change which severities bind a merge.
+contains MUT-LANE-LABEL-INPUT "$got" '#999  docs          '
+contains MUT-LANE-LABEL-LIST-BY-HAND "$got" "lane-label-mismatch=lane:feature"
+contains MUT-LANE-LABEL-LIST-BY-HAND "$got" "lane-label-mismatch=lane:findings-p3"
+[[ "$got" == *"lane-label-mismatch=ready-to-merge"* ]] \
+  && error "MUT-LANE-LABEL-LIST-BY-HAND: a label outside the lane: namespace was reported as a lane"
+# and the pull request's own lane label is not a mismatch with itself.
+got="$(STUB_BRANCH=docs/a-slug STUB_LABELS='lane:docs' \
+  STUB_REVIEW_BODY="$tmp/p3-three.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+[[ "$got" == *lane-label-mismatch* ]] \
+  && error "MUT-LANE-LABEL-LIST-BY-HAND: a correct lane label was reported as a mismatch: [$got]"
 
 # --- one parser, one success condition ----------------------------------------------------------
 # Everything below runs `scripts/pr-review-parse.py`, which is what the audit runs. Two readings of

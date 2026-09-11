@@ -209,7 +209,16 @@ read this file, so changing the contract is a change to this file and to the gat
 Every head branch is in the vocabulary `.github/scripts/validate-pr-branch.sh` enforces, checked by
 `upstroke-pr-policy` on each pull request and each queue entry. `feature/`, `refactor/`, `docs/`,
 `standards/`, `ci/`, `gate/` and `findings/` take a lower-case name whose words are joined by single
-hyphens; `findings/` is for a pull request that touches `reviews/findings/` and nothing else.
+hyphens; `findings/` is for a pull request that touches `reviews/findings/` and nothing else, and
+**that limit is checked against the diff**: the changed paths between the merge base and the head
+are handed to the validator, and a `findings/` branch carrying a path outside `reviews/findings/` is
+refused with the paths named. It is what makes that prefix's low-effort review safe, and an empty
+changed-path listing is refused there too — a pull request that changes nothing files nothing.
+**A file any pull request adds or renames under `reviews/findings/` is a finding**: its name starts
+`P0_`–`P3_` and its frontmatter `severity:` is one of P0–P3, or the pull request is refused. Only
+what the diff **adds or renames** is checked, so a name already on `master` never turns another pull
+request red. `.github/scripts/changed-in-range.sh` builds both listings, because nothing below the
+validator's audited region may run a command or open a file.
 `fix-P<n>/` takes `<category>_<description>` and must name exactly one finding filed under
 `reviews/findings/`, for `n` in 0–3. `bulk-fix-P<n>/` takes a hyphenated name and carries a batch of
 them, for `n` in 2–3; P0 and P1 are never batched. The two are separate prefixes so that each one's
@@ -302,23 +311,50 @@ rule shipped with a migration list of the pull requests that predated it, that l
 shortened, and it reached zero open pull requests — so a name outside the vocabulary is refused
 whoever opened the pull request and whatever its number.
 
-The lane the audit derives from a prefix is a **separate** mapping, and it is unchanged: it still
-reads `codex/findings-p3-*`, `codex/findings-*` and everything else. A `findings/`, `fix-P<n>/` or
-`bulk-fix-P<n>/` branch is therefore audited as feature work, which is looser than any of the three
-is meant to be. That was tolerable while `fix-P<n>/` was reserved and unused; with no `fix/` prefix
-every repair is on it, so widening the lane table is the next change this rule owes. It is its own
-change because it touches `scripts/pr-ready-audit.sh`.
+**The lane a prefix is audited in is one table, `scripts/lane.sh`, and every reader sources it.**
+It was three copies — the audit's, the review poller's and the fix-brief writer's — each reading
+`codex/findings-p3-*`, `codex/findings-*` and a catch-all, and none of those prefixes is in the
+vocabulary above, so every branch fell into the catch-all and was given the most expensive review
+and the loosest fix set with nothing said. Thirteen prefixes, eleven lanes, eleven `lane:*` labels:
 
-Readiness to enqueue is the lane rule of 2026-09-06, audited by `scripts/pr-ready-audit.sh`,
-which decides a pull request's lane from its branch prefix alone (`codex/findings-p3-*`,
-`codex/findings-*`, everything else), counts only the owner's review comments, keeps the `lane:*`
-and `ready-to-merge` labels current (a label is its output, never its input, and
+| prefix | lane | review effort | must fix before ready |
+|---|---|---|---|
+| `feature/` | `feature` | max | P0–P1 |
+| `refactor/` | `refactor` | max | P0–P1 |
+| `ci/` | `ci` | max | P0–P1 |
+| `gate/` | `gate` | max | P0–P1 |
+| `standards/` | `standards` | high | P0–P2 |
+| `docs/` | `docs` | low | P0–P1 |
+| `findings/` | `findings` | low | P0–P1 |
+| `fix-P0/`, `fix-P1/` | `fix-p0p1` | max | P0–P1 |
+| `fix-P2/` | `fix-p2` | high | P0–P2 |
+| `bulk-fix-P2/` | `bulk-fix-p2` | max | P0–P2 |
+| `fix-P3/`, `bulk-fix-P3/` | `fix-p3` | `docs-contract` low, every other category max | P0–P2, and the P3 rule |
+
+`fix-P0/` and `fix-P1/` share a row and so share a lane, as `fix-P3/` and `bulk-fix-P3/` do. The
+`fix-p3` row is the one whose effort is a function of the **name** rather than of the lane: the
+category is the one the name **begins with** — before the `_` in a `fix-P3/<category>_<desc>` name,
+and at the front of a `bulk-fix-P3/` slug, so `bulk-fix-P3/docs-contract-sweep` is a `docs-contract`
+batch. It ends at a word boundary, so `docs-contractual-review` begins with `docs` and not with a
+category. A name that carries none — or that is not passed at all — is reviewed at max. Fail
+expensive, never cheap. The review of a `findings/` branch asks one question: whether any finding it files
+duplicates one already filed. **A branch outside the vocabulary has no lane**: `lane_for` refuses it
+and prints the table, and the pull request carrying it is reported `branch-prefix-unknown` rather
+than given a default.
+
+**The P3 rule** (2026-09-08) replaces “ready only on a `PASS`”, which a lane whose reviews file P3s
+could reach only by looping reviews. A `fix-p3` pull request is ready when its review carries no P0,
+P1 or P2 and **three P3s or fewer**. A P3 carrying a failing test, reproduction or mutation witness
+is fixed whatever the count, as step 5 says and as the audit's `witnessed:` blocker enforces in
+every lane, so the tolerance is three **unwitnessed** P3s.
+
+Readiness to enqueue is that table, audited by `scripts/pr-ready-audit.sh`, which decides a pull
+request's lane from its branch prefix alone, counts only the owner's review comments, keeps the
+`lane:*` and `ready-to-merge` labels current (a label is its output, never its input, and
 `ready-to-merge` is advisory: it reports the audit's verdict on the head it read, while the act
 bound to that head is the enqueue itself, which names the commit), and with `--enqueue` adds
 each ready pull request to the queue in the order its arguments give, so the caller states the
-priority. The
-P3 findings lane is ready only on a `PASS`; the P1/P2 findings lane fixes P0–P2 and files P3;
-feature and sweep work fixes P0–P1 and files P2 and P3, one file per finding under
+priority. A finding a lane need not fix is filed and deferred: one file per finding under
 `reviews/findings/` with a `deferred` ledger row. A witnessed defect or a `MUST` deviation is
 fixed whatever its label, as step 5 says.
 

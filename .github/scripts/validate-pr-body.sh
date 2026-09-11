@@ -127,6 +127,9 @@ else
       pre_existing|introduced_by_feature|fix_regression|undetermined) ;;
       *) error "$id has unsupported provenance: $provenance" ;;
     esac
+    # The eight categories. The list is duplicated in .github/scripts/validate-pr-branch.sh, which
+    # matches a fix-P*/ branch name against it, and in scripts/lane.sh, which reads a P3 branch's
+    # category to choose the review effort. All three move together.
     case "$category" in
       correctness|crash-consistency|security-trust|portability|liveness|performance|compatibility|docs-contract) ;;
       *) error "$id has unsupported category: $category" ;;

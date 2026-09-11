@@ -95,7 +95,10 @@ jobs:
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-body.sh "$title"
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-ledger-evidence.sh "$head"
 
-      # The branch vocabulary. A fix-P*/ name resolves against reviews/findings/
+      # The branch vocabulary, and the two rules about the pull request's own
+      # diff: a findings/ branch is confined to reviews/findings/, and every file
+      # the pull request adds or renames there is a finding with a severity in
+      # P0-P3. A fix-P*/ name resolves against reviews/findings/
       # anywhere in the PULL REQUEST, not at its two ends. Repairing a finding
       # deletes its file, so a pull request that has done its job carries none
       # at the branch point; a pull request that files the finding it repairs
@@ -157,8 +160,19 @@ jobs:
           # answered out of git's records instead of out of the checkout.
           bash .github/scripts/findings-in-range.sh \
             "$TARGET_SHA" "$head_sha" "$RUNNER_TEMP/findings"
+          # And the two listings the DIFF is judged against, built the same way and for the same
+          # reason: the validator may run no command and open no file outside its audited helpers,
+          # so `git diff` and every blob read happen here. changed-paths is what makes a findings/
+          # branch's low-effort review safe -- it is refused if it touches anything outside
+          # reviews/findings/ -- and added-findings is every file the pull request adds or renames
+          # under that directory, with the severity its frontmatter records, so a finding nothing
+          # can act on cannot be filed.
+          bash .github/scripts/changed-in-range.sh \
+            "$TARGET_SHA" "$head_sha" "$RUNNER_TEMP/changed"
           bash .github/scripts/validate-pr-branch.sh \
             "$(cat "$RUNNER_TEMP/pr-branch")" \
             "$RUNNER_TEMP/findings/merge-base-findings" \
             "$RUNNER_TEMP/findings/head-findings" \
-            "$RUNNER_TEMP/findings/range-findings"
+            "$RUNNER_TEMP/findings/range-findings" \
+            "$RUNNER_TEMP/changed/changed-paths" \
+            "$RUNNER_TEMP/changed/added-findings"
