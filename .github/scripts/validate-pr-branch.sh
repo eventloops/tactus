@@ -248,23 +248,19 @@
 # onto the one before -- one twin stopped matching, and an ambiguous name
 # conformed at exit 0 where the same two names LF-delimited refused it at exit 1.
 #
-# GRANDFATHERING, AND WHY AN EXEMPTION IS A PULL REQUEST AND NOT A NAME.
-# .github/legacy-branches.txt lists the pull requests that predate this rule,
-# `<number> <head branch>`, and BOTH fields must match. A listed pull request is
-# accepted with a warning; the file reaching zero entries is the signal the
-# migration finished.
+# THERE IS NO EXEMPTION. Every head branch is in the vocabulary above: a name
+# outside it is refused whoever opened the pull request and whatever its
+# number. The rule shipped with a migration list of the pull requests that
+# predated it -- accepted with a warning, entries only ever removed -- and that
+# list is gone. It reached zero open pull requests, and the owner ruled on
+# 2026-09-09 that every head branch conforms and there is no exemption path.
+# The PR_NUMBER that carried a listed entry's identity, and the file it was
+# matched against, went with it.
 #
-# Keying on the branch name alone exempted anybody who typed it. Nothing stops a
-# fork creating `codex/findings-p3-1a57a2730a12` today and opening a new pull
-# request, and a lookup that is handed only that name cannot tell it from the
-# pull request the entry was written for. A migration list whose CONTENTS no
-# longer decide who is exempt is not a migration list, and the population would
-# no longer be the 24 pull requests it claims to describe. The number bounds it.
-#
-# PR_NUMBER carries that identity. With no PR_NUMBER there is nothing to match
-# and no exemption is granted -- deliberately: a caller checking a name by hand
-# is not judging a pull request, and the safe answer to an unidentified caller
-# is the rule itself.
+# So this file answers the one narrow question it was written to answer: is the
+# NAME in the vocabulary, and -- for a fix-P*/ name -- does it resolve to
+# exactly one filed finding in the listings handed over. Nothing else about the
+# pull request carrying that name is read here.
 #
 # EVERY FALSE ACCEPTANCE THIS FILE HAS GIVEN WAS A FAILED PROBE ANSWERED AS AN
 # ABSENCE, AND THAT IS WHY THERE IS NOW EXACTLY ONE WAY OUT OF IT. Six review
@@ -361,21 +357,6 @@ export PATH="/usr/bin:/bin:$PATH"
 # executed too.
 shopt -s nullglob
 unset GLOBIGNORE
-
-# The directory this script sits in, worked out with parameter expansion and
-# `cd`, both of which are builtins: `dirname` is an external command and this
-# file runs none outside its audited helpers. `${BASH_SOURCE[0]%/*}` alone is
-# the bug .github/scripts/test-pr-policy.sh carries and CLAUDE.md warns about --
-# it strips nothing when the script is invoked by bare name from inside its own
-# directory -- so the no-separator case is spelled out instead.
-self_path="${BASH_SOURCE[0]}"
-case "$self_path" in
-  */*) self_dir="${self_path%/*}" ;;
-  *) self_dir='.' ;;
-esac
-script_dir="$self_dir"
-script_dir="$(CDPATH= cd -P -- "$self_dir" && pwd)"
-legacy_file="${LEGACY_BRANCHES:-$script_dir/../legacy-branches.txt}"
 
 branch="${1:-}"
 merge_base_findings="${2:-}"
@@ -765,57 +746,6 @@ normalise_listing_path "$head_findings"
 head_findings="$normalised_listing"
 normalise_listing_path "$range_findings"
 range_findings="$normalised_listing"
-
-# legacy_exempt: is THIS pull request one the migration list names? Both the
-# number and the branch must match the same line. The fields are compared with
-# `==` and never handed to a pattern matcher, so a name beginning with a dash is
-# a name and not a set of options.
-#
-# The list goes through read_file like every other file: a migration list that
-# cannot be read is a refusal and not an empty list. Failing closed here refuses
-# a pull request that IS exempt rather than exempting one that is not, so the
-# wrong answer is cheap -- but it is still the wrong answer, and "the file was
-# there and unreadable" is not "the file lists nobody".
-legacy_exempt() {
-  local pr="${PR_NUMBER:-}" listed_pr listed_branch read_status=0
-  [[ -f "$legacy_file" ]] || return 1
-  [[ "$pr" =~ ^[0-9]+$ ]] || return 1
-  read_file "$legacy_file" || read_status=$?
-  if (( read_status == 3 )); then
-    fail "the migration list '$legacy_file' holds a NUL byte, so its lines cannot
-  be read as '<pull-request number> <head branch>' records."
-  fi
-  if (( read_status != 0 )); then
-    fail "the migration list '$legacy_file' could not be read, so whether pull
-  request #$pr is exempt from the branch vocabulary is not known. A gate that
-  cannot see its input refuses rather than deciding it saw nothing."
-  fi
-  while read -r listed_pr listed_branch _; do
-    listed_branch="${listed_branch%$'\r'}"
-    if [[ -z "$listed_pr" || "$listed_pr" == \#* ]]; then
-      continue
-    fi
-    if [[ "$listed_pr" == "$pr" && "$listed_branch" == "$branch" ]]; then
-      return 0
-    fi
-  done <<< "$file_bytes"
-  return 1
-}
-
-# A listed pull request is accepted, loudly, so the exemption is visible in the
-# check's log rather than silent.
-if legacy_exempt; then
-  echo "branch-name-policy: pull request #${PR_NUMBER} predates the branch" >&2
-  echo "  vocabulary and is listed in ${legacy_file##*/} as '$branch'." >&2
-  echo "  DO NOT RENAME THE HEAD BRANCH. GitHub CLOSES a pull request when its" >&2
-  echo "  head branch is renamed, and it cannot be reopened until the old name" >&2
-  echo "  is restored -- at which point the branch is back under the name this" >&2
-  echo "  rule refuses. An entry leaves the list when its pull request merges," >&2
-  echo "  or by way of a replacement pull request opened on a conforming name" >&2
-  echo "  carrying the same head commit, quoting this number and its review" >&2
-  echo "  evidence. MAINTAINING.md states this." >&2
-  exit 0
-fi
 
 # The `.git` the walk below could not look at, named so the refusal can quote
 # it. Set only on the way out at status 2, and read only there.
