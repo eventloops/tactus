@@ -1192,6 +1192,181 @@ Returns `Some(true)` only after the guard sent SIGSTOP and this
 process subsequently resumed. `Some(false)` means a concurrent
 continue/termination cancelled the stop before it was issued.
 
+## `mod termination` › `static IDENTITY_CALLS: AtomicU8 = AtomicU8::new(0);`
+
+What a probe in a forked child found this host's identity system calls
+answering, and zero until one has run.
+
+Three rounds of review closed one case in this machinery and produced
+the next, and the two that remained share a property no branch placed
+after a call can answer. A syscall policy can make `pidfd_open` **fatal**
+rather than refuse it: `SECCOMP_RET_KILL_PROCESS` is the disposition a
+disallowed call draws by default under systemd's `SystemCallFilter=`,
+and the process is gone before there is an errno to read — measured, at
+the head before this one, as a directly captured `-31` (`SIGSYS`) from a
+real `spawn_reaper`, where the same fixture on the branch's base
+launched and cancelled at `0`. And a policy can **write** `ESRCH` or
+`ECHILD` itself, which are the two answers `signal_helper` and
+`collect_helper` otherwise read as the kernel's own facts about a
+helper. Neither can be told from inside the call.
+
+So the calls are made once, where being killed for making them is
+survivable, and what they answered there is what the calls made in this
+process are read against. One `AtomicU8` and not a `OnceLock`, because
+a probe that could not be run is not an answer to remember: see
+`established_identity_calls`.
+
+## `mod termination` › `const IDENTITY_PROBED: u8 = 1 << 0;`
+
+That a child reported at all, carried by every reported answer.
+
+Without it a host that offers none of the three calls would report the
+same zero as a host nothing has asked yet, and the second must keep
+asking while the first must not. It is the bit that makes
+`IDENTITY_CALLS`'s zero mean "no probe has run" and nothing else.
+
+## `mod termination` › `const IDENTITY_NAMES: u8 = 1 << 1;`
+
+That `pidfd_open` answered with a descriptor for a process that was
+there.
+
+Its absence is every way this host can fail to name a process, told
+apart from none of them: the call is not offered, or a policy refuses
+it, or a policy answered `ESRCH` for a process the probe knows is there,
+or the call ended the child that made it and there was no report at all.
+All four land in the same place — `NO_HELPER_IDENTITY`, the platform row
+DESIGN §15 describes — and the difference between them is not one this
+process can act on differently.
+
+## `mod termination` › `const IDENTITY_SIGNALS: u8 = 1 << 2;`
+
+That `pidfd_send_signal(..., SIGKILL, ...)` answered zero through a
+descriptor naming a process that was there.
+
+This is what makes an `ESRCH` from that call evidence in
+`signal_helper`. The arguments are the teardown's own — the signal a
+teardown sends and the null `siginfo_t` pointer it passes — because a
+filter selects on arguments, and a probe that sent signal `0` would
+establish nothing about a policy that permits `0` and refuses `SIGKILL`.
+
+## `mod termination` › `const IDENTITY_COLLECTS: u8 = 1 << 3;`
+
+That `waitid(P_PIDFD, ..., WEXITED)` collected that process.
+
+The same for `collect_helper`'s `ECHILD`, and with the same argument:
+the wait is the consuming one a teardown makes, not the
+`WNOHANG | WNOWAIT` an acquisition probe passes.
+
+## `mod termination` › `fn established_identity_calls() -> Result<u8, libc::c_int> {`
+
+What this host's identity system calls answered where being killed for
+asking was survivable, remembered for the life of the process.
+
+`Err(errno)` is a probe this process could not run or complete: no
+descriptor for its report pipe, no child to run it in, no descriptor for
+the call under test, no way to take an inherited `SIGCHLD` disposition
+off the child. Every one of those is a resource or a state of *this
+process* and none is an answer about the host, so none is remembered and
+the launch that asked fails on it exactly as it fails on any other
+shortage — the same reading `open_helper_identity` gives `EMFILE`. That
+is why the answer is an `AtomicU8` rather than a `OnceLock<Result<..>>`:
+a `OnceLock` would remember the failure too, and a descriptor table that
+was full once is not a host without identities.
+
+Two threads racing here both probe and both store the same answer. The
+cost is one extra forked child; the alternative is a lock held across a
+`fork`.
+
+## `mod termination` › `fn identity_calls_answer(what: u8) -> bool {`
+
+Whether the probe found this host answering `what` for a process whose
+state it already knew.
+
+A call made before any probe has run answers `false`, which is the
+reading that keeps an errno from standing as a fact on its own. Every
+call site reaches this only with an identity in hand, and an identity is
+only ever handed out by an `open_helper_identity` that has already
+probed — but the safe answer is the one that does not depend on that
+remaining true.
+
+## `mod termination` › `fn probe_identity_calls() -> Result<u8, libc::c_int> {`
+
+Make every identity system call once, in a forked child, against a
+process of that child's own.
+
+**A policy that kills is survived rather than detected.** The child dies
+where the parent would have; the parent reads the end of the report pipe
+instead of dying, and a report that never arrived is read as "make none
+of these calls here". That reading is deliberately wider than
+`SIGSYS`: any way the child failed to reach its write is a way this
+process must not make the call itself, and the cost of being wrong is
+the documented pid fallback rather than a dead supervisor.
+
+**A policy that lies is caught by disagreement with a known fate.** The
+target is the child's own and it is there, so a truthful `pidfd_open`
+names it, a truthful `pidfd_send_signal` returns zero, and a truthful
+`waitid` collects it. A policy that writes `ESRCH` or `ECHILD` instead
+produces an answer the probe can see is false, and the bit stays clear.
+
+The report is read before the child is collected, because the pipe is
+what carries the answer and the child's own end is what closes it.
+
+## `mod termination` › `fn report_identity_calls(report_fd: libc::c_int) -> ! {`
+
+The probe itself, in a child of this process.
+
+Everything here is a system call or `_exit`, as in every other helper
+this module forks. It writes its report last, so a fatal denial at any
+of the three calls arrives at the parent as the same absence.
+
+## `mod termination` › `fn default_child_disposition() -> bool {`
+
+Put `SIGCHLD` back to its default disposition, dropping whatever handler
+and flags this process inherited.
+
+This probe exists for embedders whose `SIGCHLD` handler reaps with a
+wildcard wait, and a disposition is inherited across `fork`. Left
+inherited, that handler would run in the probe child when its own target
+exits and collect the target before the collecting call under test
+reached it — reporting that this host will not collect through a
+descriptor, on precisely the hosts this module is for. `SIG_IGN` and
+`SA_NOCLDWAIT` auto-reap the same way and are cleared by the same
+assignment, since both are flags of the disposition being replaced.
+
+A failure here is reported as a blocked probe and not as an answer: it
+is a state of this process.
+
+## `mod termination` › `fn identity_calls_against(target: libc::pid_t) -> [u8; IDENTITY_REPORT_LEN] {`
+
+The three calls, in the order a launch and its teardown make them.
+
+`target` is a child of the probe that nothing here has collected, so
+each call has a process to answer about and the truthful answer to each
+is known before it is made. Whether it has reached its own `_exit` yet
+does not change any of them: `pidfd_open` names a live process and a
+zombie alike, `pidfd_send_signal` answers zero for both, and the
+consuming `waitid` collects it either way.
+
+Where the collecting call did not collect, the target is still the
+probe's own uncollected child and is collected by number. That wait
+cannot reach a stranger for the reason `collect_unnamed_helper` gives.
+
+## `mod termination` › `fn blocked_byte(errno: libc::c_int) -> u8 {`
+
+The errno of a probe step that could not be performed, and zero for
+every other failure.
+
+The distinction is the same one `open_helper_identity` draws between a
+resource this process ran out of and a call this host does not offer:
+`EMFILE`, `ENFILE`, `ENOMEM` and `EAGAIN` from `pidfd_open` say nothing
+about the facility, and `EINVAL` from the disposition reset says nothing
+about it either. `ENOSYS`, `ENODEV`, `EPERM`, `EACCES` and an `ESRCH` a
+policy wrote are answers, and answers leave the bit clear rather than
+failing the launch.
+
+An errno wider than a byte is reported as a blocked probe all the same,
+which fails the launch rather than recording a fact about the host.
+
 ## `mod termination` › `const NO_HELPER_IDENTITY: libc::c_int = -1;`
 
 The answer where nothing but a number can name a helper.
@@ -1203,15 +1378,19 @@ then the `kill` and the `waitpid` they have always been. Row
 `HELPER-END-BY-PID-WHERE-THERE-IS-NO-IDENTITY` is what remains there,
 and DESIGN §15 states it as best effort rather than leaving it implied.
 
-A policy reaches it two ways, and only one of them is this constant.
-Where the refused call is `pidfd_open` itself, or a call a probe makes,
-acquisition answers `NO_HELPER_IDENTITY` and no descriptor is held.
-Where the refusal selects on arguments the probes do not pass — a
-filter that permits the probe's signal `0` and refuses the teardown's
-`SIGKILL` — nothing at acquisition can see it, and `signal_helper` and
-`collect_helper` reach the same place when their own call is refused.
-Neither route is available to an acquisition that failed for want of a
-descriptor: see `open_helper_identity`.
+A policy reaches it three ways, and only the first is this constant.
+Where the call the policy acts on is `pidfd_open` itself — refused,
+answered falsely, or made fatal — the forked probe finds nothing named
+and acquisition answers `NO_HELPER_IDENTITY` without making the call
+here at all. Where the refusal selects on arguments the acquisition
+probes do not pass — a filter that permits the probe's signal `0` and
+refuses the teardown's `SIGKILL` — nothing at acquisition can see it,
+and `signal_helper` and `collect_helper` reach the same place when their
+own call is refused. And where the policy writes `ESRCH` or `ECHILD`
+from the teardown's own call, those two read the forked probe's answer
+rather than the errno, and reach the same place again. None of the three
+is available to an acquisition that failed for want of a descriptor: see
+`open_helper_identity`.
 
 ## `mod termination` › `const HELPER_IDENTITY_ENDED: libc::c_int = -2;`
 
@@ -1248,6 +1427,15 @@ carries that decision. What this does narrow is the window that
 mattered: a helper's entire startup, up to `HELPER_READY_BUDGET`, and
 then however long its teardown takes.
 
+**The first question is asked somewhere else.** `established_identity_calls`
+is consulted before `pidfd_open` is called here, because a policy can
+make that call fatal and a process killed for a system call has no
+branch left to take. Where the probe named nothing, this answers
+`NO_HELPER_IDENTITY` without making the call — and where the probe could
+not be run at all, `Err(errno)`, which is the shortage reading below.
+Everything after that statement is on a host where a child made the call
+and lived.
+
 **Only a refusal of the operation itself answers `NO_HELPER_IDENTITY`.**
 An acquisition here has three ways to fail, and they mean three
 different things. `ESRCH` from `pidfd_open`, and `ECHILD` from the
@@ -1255,7 +1443,10 @@ collection probe, are the kernel answering *about this helper*: it has
 ended and been collected, which is proof the call works and proof the
 number is free. `ENOSYS`, `ENODEV`, `EINVAL` and a policy's `EPERM` or
 `EACCES` are this host not offering the call, which is the one thing the
-number is a fallback for. Reading the first as the second — which the
+number is a fallback for. The first reading holds because the probe
+found this call naming a process that was there; on a host where a
+policy writes `ESRCH` from `pidfd_open`, this statement is never
+reached. Reading the first as the second — which the
 first form of this function did, closing the descriptor on any probe
 failure — hands the teardown back the number of a helper it has just
 established is gone.
@@ -1357,9 +1548,15 @@ Where the call was made and refused, the number is what is left. A
 policy that refuses `pidfd_send_signal` for `SIGKILL` while permitting
 the signal `0` acquisition probed with cannot be seen before the signal
 is sent, so it is answered here, where it happens: `ESRCH` is the
-kernel's answer about the helper and stops the teardown, and any other
-errno is the call refused for these arguments, which leaves this host
-exactly where a host with no identity at all stands. Falling through to
+kernel's answer about the helper and stops the teardown — but only where
+the forked probe found this host returning zero from this call for a
+process that was there. A policy can write `ESRCH` itself, and on a host
+where it does, this call establishes nothing; measured under a filter
+answering `ESRCH` for `pidfd_send_signal(..., SIGKILL, ...)` alone, both
+acquisition probes answered `Available`, no signal was delivered, and
+the teardown blocked on a helper still running. Any other errno is the
+call refused for these arguments. Either way this host stands exactly
+where a host with no identity at all stands. Falling through to
 the `kill` is that host's documented end. Not falling through is a
 launch that signals nothing and then blocks in the collection call on a
 helper still running — measured: `-9` from a watchdog at the head that
@@ -1383,13 +1580,53 @@ then reads `errno`, so the answer has to be in `errno` and not only in
 the return value.
 
 As in `signal_helper`, a wait that was made and refused falls through to
-the number. `ECHILD` is the kernel answering about this helper and
+the number. `ECHILD` is the kernel answering about this helper where the
+forked probe found this host collecting through a descriptor at all, and
 `EINTR` is this call to make again; both keep the number out of reach.
 Anything else is the consuming wait refused for arguments the
-`WNOHANG | WNOWAIT` probe did not pass, and the `waitpid` below is then
-the only way the helper is collected at all — measured: the head that
+`WNOHANG | WNOWAIT` probe did not pass — or an `ECHILD` a policy wrote
+itself, measured as a real reaper left behind after `cancel` — and the
+`waitpid` below is then the only way the helper is collected at all — measured: the head that
 did not fall through left it behind, `exit 101`, where its base exited
 `0`.
+
+## `fn spawn_reaper() -> Result<Reaper, String>` › `collect_unnamed_helper(pid);`
+
+The half of ending a helper that closing its pipe does not do.
+
+The launch still fails, and still signals nothing: a helper this launch
+cannot name is not one it may signal by number, which is what the
+`Err(errno)` reading exists for. What changed is that it no longer
+discards the child as well. The message says which of the two happened
+so an operator reading it is not left to infer the other.
+
+The same arm in `spawn_guard` is the same decision.
+
+## `mod termination` › `fn collect_unnamed_helper(pid: libc::pid_t) -> libc::pid_t {`
+
+Collect a helper this launch could not name, by number, after its
+command pipe has been closed and it has been left to end on that.
+
+Closing the pipe lets the helper exit; it does not collect it, and a
+child nothing collects is one this process keeps for the rest of its
+life. Measured at the head before this one: three reaper launches that
+could not take an identity left three zombies, and three guard launches
+left three more, where the branch's base left none.
+
+**Why a wait by number is safe where a `kill` by number is not.**
+`waitpid` reaches none but this process's own children, and the helper
+is still one of them — an uncollected child's number is not re-issued,
+so the number cannot have become another process's while this call is
+the thing that would collect it. Either it collects the helper, or an
+embedding host's wildcard wait got there first and it answers `ECHILD`
+and collects nothing. Nothing between the fork and this wait forks a
+child of this process, so there is no statement at which the number
+could come back as another one. The `kill` has no equivalent property,
+which is why nothing is signalled on this path.
+
+The wait blocks. That is the same wait `close_and_wait_reporting` makes
+on every other teardown path in this module, and the helper it waits for
+has just had the pipe it reads its coordinator's life from closed.
 
 ## `mod termination` › `fn collect_through_identity(identity: libc::id_t, status: &mut libc::c_int) -> libc::pid_t {`
 
@@ -2594,6 +2831,85 @@ failure is quoted in the pull request body and the run exited `101`.
 ## `mod tests` › `fn a_refused_collection_is_answered_where_the_wait_is_made() {`
 
 Subprocess entry for the refused-collection check above.
+
+## `mod tests` › `fn the_identity_calls_this_host_offers_are_established_before_one_is_made() {`
+
+The direction the policy tests cannot assert.
+
+Every reading of an identity errno below now rests on the probe, and a
+probe that reported nothing would leave all of them false without
+failing one policy test: each would fall back to the number, which is
+what a policy test asserts anyway. So this runs on a host with no policy
+and requires all three bits, and requires the answer to have been
+remembered.
+
+## `mod tests` › `fn kill_the_caller_of_pidfd_open() {`
+
+`SECCOMP_RET_KILL_PROCESS` for `pidfd_open` and nothing else — the
+disposition a disallowed call draws by default under systemd's
+`SystemCallFilter=`, and the one a returning-errno filter cannot model.
+
+## `mod tests` › `fn abandoned_child() -> libc::pid_t {`
+
+Whether this process has a child nothing collected.
+
+There is no clock in it. With every helper collected there is no child
+left and the blocking wait answers `ECHILD` at once; an abandoned helper
+is either already a zombie or is ending on its closed command pipe, and
+the same wait returns it. A `WNOHANG` poll would have needed a sleep and
+would have measured the scheduler.
+
+## `mod tests` › `fn fatal_identity_policy_helper() {`
+
+A real `spawn_reaper` under a policy that ends the process which asks
+for a name.
+
+Reaching the statement after the launch is the whole assertion: a
+`pidfd_open` made in this process never returns. At the head before this
+one the test executable died on `SIGSYS`, captured as `signal: 31
+(SIGSYS) (core dumped)`. The launch then has to *succeed* on the number,
+because that is what the branch's base did under the identical fixture,
+and the identity has to be `NO_HELPER_IDENTITY` so that a launch which
+passed for some other reason is not read as this one passing.
+
+## `mod tests` › `fn fill_descriptors_leaving(spare: usize) -> (Vec<libc::c_int>, libc::rlimit) {`
+
+The descriptor shortage `reaper_identity_under_a_descriptor_shortage_helper`
+builds, with the count of spare slots named rather than fixed, because
+the reaper's two pipes and the guard's four need different ones.
+
+## `mod tests` › `fn identity_shortage_child_cleanup_helper() {`
+
+That a launch which could not name its helper collected it anyway, at
+both launch sites.
+
+Four descriptors are the reaper's two pipes and eight are the guard's
+four; both are opened before the launch's `fork`, so the identity is the
+first descriptor the launch cannot have. Three launches at each site,
+because one leaked child is a race and three are a rule, and both sites
+are measured before either is asserted so the message names whichever of
+them leaked. The existing shortage test checks the returned error and
+cannot see this.
+
+## `mod tests` › `fn forged_esrch_identity_helper() {`
+
+That an `ESRCH` a policy wrote is not read as the helper having ended.
+
+The order matters. The policy is pinned first through a descriptor
+opened by hand, so the errno under test is this filter's and not another
+call's; the helper is asserted still running, so the answer cannot be
+the kernel's own; and `signal_helper` is called and asserted **before**
+any collection, because a wait through an identity on a helper nothing
+has killed does not return, and a test that hangs reports nothing.
+
+## `mod tests` › `fn forged_echild_identity_helper() {`
+
+That an `ECHILD` a policy wrote is not read as the helper having been
+collected.
+
+A real `spawn_reaper` and a real `cancel`, because the leak this is
+about is the teardown's and not a fixture's. At the head before this one
+the reaper the launch forked was left behind.
 
 ## `mod tests` › `fn helper_ready_failure_helper() {`
 

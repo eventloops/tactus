@@ -6,9 +6,12 @@
   the kernel cannot re-issue where the platform has one — on Linux a pid file descriptor taken at
   the fork — instead of through its pid. Where there is no such name, ending a helper is best
   effort against an embedding host that reaps this process's children, and `DESIGN.md` §15 now
-  states that boundary rather than leaving it implied. Where the platform has one and the launch
-  could not take it — a descriptor the process had run out of — the launch now fails instead of
-  falling back to the pid.
+  states that boundary rather than leaving it implied. Whether the platform has one is established
+  by making the calls once in a forked child, because a syscall policy may kill the caller rather
+  than refuse it, and may write the errnos that otherwise say a helper has ended. Where the
+  platform has one and the launch could not take it — a descriptor the process had run out of —
+  the launch now fails instead of falling back to the pid, and collects the helper it could not
+  name.
 - Relicensed to Apache-2.0 with a NOTICE file; earlier releases keep the terms recorded in their
   own tagged metadata and source notices (decided 2026-09-01).
 - The G2 checkpoint: the v0.2 parallel-execution machinery (worktree-per-task isolation, the
