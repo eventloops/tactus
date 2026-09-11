@@ -45,11 +45,15 @@
 //! `read_only_git`, which `quiescence` uses; measured, a role process running
 //! `git show HEAD:f` in the snapshot read the replacement, and `git status
 //! --porcelain` called an untouched snapshot modified. Both runners' `compose`
-//! and both free read functions now name the same constant, so an exact
-//! snapshot is exact on disk and exact for every process upstroke starts over
-//! it. `design/15_design_event_log_resume_run_layout.md`, "What an exact
-//! snapshot is exact against", is the product sentence: a snapshot is exact
-//! against the objects the repository holds, and that is not configurable.
+//! name the same constant, and so does `read_only_git` -- which is the whole of
+//! the free read path, because `read_only_git_ok` reaches Git only through it
+//! -- so an exact snapshot is exact on disk and exact for every process
+//! upstroke starts over it.
+//! `design/15_design_event_log_resume_run_layout.md`, "What an exact snapshot
+//! is exact against", is the product sentence: a snapshot is exact against the
+//! objects the repository holds, and no adapter, image or overlay can turn that
+//! off. The v0.1 conductor's runner reads the other graph, which costs this
+//! nothing: no snapshot of this manager is ever taken on that path.
 //!
 //! **What a [`Snapshot`] holds together** (§5, §6): its fields are private
 //! and it has one constructor, [`Snapshot::new`], visible to the parent only.
