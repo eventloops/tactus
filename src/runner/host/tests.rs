@@ -261,21 +261,6 @@ fn environment_composition_fixtures() {
     }
 }
 
-/// Every role composes the replacement isolation, from any base and under any
-/// overlay (PR #130, pass 3's P1).
-///
-/// `HostRunner::run` clears the ambient environment and installs exactly what
-/// this returns, so a pair that is not composed here reaches no child. The base
-/// carries a value of its own and the overlay restates the key, because the
-/// pair is upserted *after* the overlay precisely so that neither can decide
-/// it: a snapshot is exact against the objects the repository holds
-/// (`design/15`, "What an exact snapshot is exact against"), and that is not a
-/// property an adapter gets a vote on.
-///
-/// Witnessed failing with the upsert removed from `compose`
-/// (`Some("whatever-the-operator-exported")`, the base's own value surviving,
-/// since this key is deliberately not a reserved one that gets stripped) and
-/// with it moved above the overlay loop (`Some("0")`).
 #[test]
 fn every_composed_environment_disables_replacement_objects() {
     let mut rows = 0_usize;

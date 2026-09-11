@@ -123,6 +123,25 @@ Fixture hostility as distinct-value counts, not as a comment.
 One variable, one entry: a duplicated key is an environment
 whose meaning depends on which end the child's runtime reads.
 
+## `fn every_composed_environment_disables_replacement_objects() {`
+
+Every role composes the replacement isolation, from any base and under
+any overlay (PR #130, pass 3's P1).
+
+`HostRunner::run` clears the ambient environment and installs exactly
+what `compose` returns, so a pair that is not composed there reaches no
+child. The base carries a value of its own and one of the two overlays
+restates the key, because the pair is upserted *after* the overlay
+precisely so that neither can decide it: an exact snapshot is measured
+against the objects the repository holds (`design/15`, "What an exact
+snapshot is exact against"), and that is not a property an adapter gets
+a vote on.
+
+Witnessed failing with the upsert removed from `compose`
+(`Some("whatever-the-operator-exported")` -- the base's own value
+surviving, since this key is deliberately not a reserved one that gets
+stripped) and with it moved above the overlay loop (`Some("0")`).
+
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 
 "set but empty" and "unset" are different environments, and CLIs

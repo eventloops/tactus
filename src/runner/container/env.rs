@@ -210,14 +210,6 @@ impl ContainerEnvironment {
             .collect()
     }
 
-    /// The environment a role process executes in inside the container.
-    ///
-    /// [`NO_REPLACEMENT_OBJECTS`] last, after the overlay, for the reason
-    /// `HostEnvironment::compose` states: the judged tree is the objects the
-    /// repository holds, and the image's own `ENV` is a base this runner did
-    /// not write. The Git view the container receives carries the repository's
-    /// refs, `refs/replace/*` among them, so a container process is exposed to
-    /// exactly the rewriting a host process is.
     pub fn compose(
         &self,
         scope: &RoleScope<'_>,
@@ -439,6 +431,36 @@ mod tests {
         assert_eq!(refused, 5 * 6, "five roles crossed with six reserved keys");
         assert_eq!(allowed, 5);
         assert_eq!(ExecutionRole::all().len(), 5);
+    }
+
+    #[test]
+    fn every_composed_environment_disables_replacement_objects() {
+        let mut base = image_base();
+        base.push((NO_REPLACEMENT_OBJECTS.0.to_owned(), String::new()));
+        let environment = ContainerEnvironment::from_image(base);
+        let volumes = volumes();
+        let layout = BoundaryLayout::new();
+        let mut rows = 0_usize;
+        for role in ExecutionRole::all() {
+            let agent = binding(&role);
+            let scope = scope(&role, agent.as_ref(), &volumes, &layout);
+            for overlay in [
+                Vec::new(),
+                vec![(NO_REPLACEMENT_OBJECTS.0.to_owned(), "0".to_owned())],
+            ] {
+                let composed = environment
+                    .compose(&scope, &overlay)
+                    .unwrap_or_else(|error| panic!("{role} was refused: {error}"));
+                assert_eq!(
+                    value(&composed, NO_REPLACEMENT_OBJECTS.0),
+                    Some(NO_REPLACEMENT_OBJECTS.1),
+                    "{role} (overlay {overlay:?}): the container would read whatever \
+                     `git replace` points at the judged objects"
+                );
+                rows += 1;
+            }
+        }
+        assert_eq!(rows, ExecutionRole::all().len() * 2);
     }
 
     #[test]

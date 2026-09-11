@@ -95,19 +95,6 @@ impl HostEnvironment {
         supplied
     }
 
-    /// The environment a role process executes in.
-    ///
-    /// The overlay is applied before [`NO_REPLACEMENT_OBJECTS`] and not after,
-    /// so no base and no overlay can turn the replacement mechanism back on for
-    /// a gate, a reviewer or an implementer. `HostRunner::run` clears the
-    /// ambient environment and installs exactly this vector, so a variable the
-    /// operator exported does not reach a child either; the pair has to be
-    /// composed here or it is nowhere. It is asserted rather than made a
-    /// reserved key because the reserved keys are values this boundary *reads
-    /// from its host* and re-supplies role-scoped, while this one is a constant
-    /// the runner states -- and because an overlay restating it would be
-    /// harmless, where an overlay restating `PATH` is the hijack `preflight`
-    /// exists to refuse.
     pub fn compose(
         &self,
         role: &ExecutionRole,

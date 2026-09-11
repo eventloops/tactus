@@ -168,6 +168,30 @@ also make this step *output-equivalent to deleting it*, because
 So the reserved keys arrive from one place — this function's supply
 step, which is role-scoped — or not at all.
 
+Then [`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs), **after**
+the overlay and not before it. `HostRunner::run` clears the ambient environment
+and installs exactly what this returns, so a pair that is not composed here
+reaches no child: a gate or a reviewer inside an exact snapshot would read
+whatever `git replace` points at the judged objects, and measured on git 2.43 it
+did — `git show HEAD:f` returned the replacement and `git status --porcelain`
+called an untouched snapshot modified. `design/15`'s "What an exact snapshot is
+exact against" is the product sentence; the pair is one constant named at each
+of the four boundaries that starts a child which can run Git.
+
+It is **asserted, not reserved**, and the two are different things. The reserved
+keys are values this boundary reads *from its host* and re-supplies role-scoped,
+which is why they are stripped from the base first and why `preflight` refuses
+an overlay that restates one — a gate permitted to set `PATH` is a hijack. This
+one is a constant the runner states; there is nothing in the base to re-supply,
+an overlay restating it is not a hijack but a no-op, and refusing it would add a
+failure mode without adding a guarantee. The ordering is what supplies the
+guarantee: last write wins, and this is the last write. Git 2.43 reads the
+*presence* of the variable rather than its value (measured: `=0` and `=false`
+both disable replacement as `=1` does), so the value `1` is correct under either
+reading and an overlay could not re-enable the mechanism even if it outranked
+this step — the ordering is what makes that true of a future Git that does read
+the value.
+
 ### Errors
 
 [`UpstrokeError::Refused`] naming the key when the overlay names a

@@ -428,6 +428,13 @@ carry in a gate's environment, and would make this step
 output-equivalent to deleting it, because [`Self::reserved_values`]
 reads its values back out of the same base.
 
+[`NO_REPLACEMENT_OBJECTS`](../../../../src/workspace_manager.rs) last, after the
+overlay, for the reason `host-v1` states in its own notes. The Git view a
+container receives carries the repository's refs, `refs/replace/*` among them,
+so a container gate is exposed to exactly the rewriting a host gate is; and the
+base here is an image's `ENV`, which this runner did not write, so an image
+declaring the key is one more reason the runner's own write comes last.
+
 ### Errors
 
 [`UpstrokeError::Refused`] naming the key when the overlay names a
@@ -446,6 +453,16 @@ omitted — see `withheld_credential_locations`. After the supplied
 ones and before the overlay, so the two sets cannot collide (a key in
 one is by construction not in the other) and the overlay's own
 reserved-key refusal still governs.
+
+## `fn every_composed_environment_disables_replacement_objects() {`
+
+The container boundary composes the replacement isolation too, from an
+image base it did not write and under any overlay (PR #130, pass 3's
+P1). An image is free to declare `ENV GIT_NO_REPLACE_OBJECTS=` and this
+boundary has to outrank it.
+
+Witnessed failing with the upsert removed from `compose`: `Some("")` for
+every role, the image's own value.
 
 ## `impl ContainerEnvironment` › `pub fn certify_path(&self, composed: &[(String, String)]) -> Result<(), UpstrokeError> {`
 
