@@ -235,17 +235,25 @@ directory that cannot be listed, an index or a repository git cannot read — is
 never an empty set, because a candidate set that silently narrows turns an ambiguous name into an
 accepted one. Only "there is no repository here" falls back to the filesystem: metadata that is
 missing is not metadata that cannot be examined, and a `.git` file that names a gitdir git will not
-resolve is the second of those. Every external probe, every file read and every directory listing in
-`validate-pr-branch.sh` goes through three audited helpers: the first refuses any exit status its
-caller has not enumerated as an answer, and each of them checks that the private copy it wrote was
-read back whole, because owning a file establishes nothing about reading it. `test-pr-policy.sh`
+resolve — or holds a NUL where a `gitdir:` line should be — is the second of those. Every external
+probe, every file read and every directory listing in `validate-pr-branch.sh` goes through three
+audited helpers, and all three now obtain their bytes from **one capture primitive**: it opens its
+own destination and takes the open's status, runs the producer and keeps the producer's status, reads
+both private copies back as far as the sentinel byte it wrote, and hands nothing over unless all of
+that held. Each of those four was a round's P1 on its own — a helper that checked three of them
+reused the previous capture's bytes when its destination would not open, and one that took its names
+from a glob after a separate command's exit 0 read an unreadable directory as an empty one. Owning a
+file establishes nothing about reading it, and a successful producer establishes nothing about a
+successful read. `test-pr-policy.sh`
 holds the rest of the file to an **allowlist** — below the audited region a command may only be a
 shell builtin from a short list or a function the file defines, and nothing may redirect from a path
 — because five rounds of closing unsafe calls one at a time produced more of them each round, and
 the ban list that replaced those cases was itself walked past by an assignment prefix, a `command
 --`, and a reader it did not name. That check is a text scan over one file: it bounds what is
 written in the validator, not what bash can be made to do, and what it buys is that **the reviewed
-surface is the audited region**, which the gate caps at 200 lines.
+surface is the audited region**, which the gate caps at 250 lines. It is a helper and not a
+guarantee: a command word written entirely inside quotes leaves nothing on the line for a text scan
+to read, and a command reached through an `eval` of a string it cannot see is outside any such scan.
 
 **A directory handed in as a listing is answered out of git's records, not out of the checkout.**
 The directory form locates the repository and the path within it and then reads `git ls-files -s`
@@ -261,7 +269,11 @@ finding nobody had filed. A listing path is reduced to its components before it 
 `reviews/findings`, `reviews/findings/`, `reviews/findings/.`, `reviews//findings` and
 `reviews/./findings` are one listing and answer alike, and the path the index is asked about is built
 from **those** components and never from where the filesystem takes them; a `..` after a named
-component is refused rather than guessed at. The filesystem is the whole of the evidence in one
+component is refused rather than guessed at. The work tree's root is matched against those components
+by inode, so a link above the repository costs nothing — but the path **through** that root is
+matched by recorded mode, because an inode comparison cannot see one: `reviews` committed as a link
+to the work tree's own root is `-ef` that root, and taking it as one named the listing `findings` and
+answered it out of the root's own directory, past the `120000` the index records. The filesystem is the whole of the evidence in one
 place only: a listing with no repository over it, which is how the validator is run against a scratch
 directory, and a path inside a work tree that git records nothing at, under **or above** — an
 ordinary untracked scratch directory, and the temporary files a caller builds the three listings in.

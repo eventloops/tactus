@@ -2045,6 +2045,73 @@ if [[ -L "$symlink_probe" ]]; then
   else
     echo 'note: skipping the link-above-the-work-tree case (no symlink could be made)' >&2
   fi
+
+  # A SYMLINK TO THE WORK TREE'S OWN ROOT IS THE SAME RULE AT THE INODE. `-ef`
+  # FOLLOWS a link, so with `reviews` committed as a link to `.` the prefix
+  # `<repo>/reviews` IS the work tree root by inode: taking the deepest such
+  # match named the listing `findings`, answered it out of the root's own
+  # `findings/`, and never consulted the 120000 the index records for `reviews`.
+  # The checkout is clean, the tree listings hold nothing under
+  # `reviews/findings` and refuse at exit 1, and the directory conformed at exit
+  # 0 -- the last counter-example to the equivalence on a clean checkout. The
+  # root is matched by inode; the path through it is matched by RECORDED MODE,
+  # and this is the half that asserts the second.
+  root_loop_repo="$fixture_dir/repo-symlink-to-the-root"
+  new_repo "$root_loop_repo"
+  echo seed > "$root_loop_repo/seed.txt"
+  git -C "$root_loop_repo" add -A && git -C "$root_loop_repo" commit -q -m base
+  root_loop_base="$(git -C "$root_loop_repo" rev-parse HEAD)"
+  mkdir -p "$root_loop_repo/findings"
+  echo fixture > "$root_loop_repo/findings/P2_correctness_202609110001_root-loop.md"
+  ln -s . "$root_loop_repo/reviews"
+  git -C "$root_loop_repo" add -A \
+    && git -C "$root_loop_repo" commit -q -m 'reviews is a symlink to the work tree root'
+  root_loop_head="$(git -C "$root_loop_repo" rev-parse HEAD)"
+  if ! git -C "$root_loop_repo" ls-tree "$root_loop_head" | grep -q '^120000 blob .*reviews$' \
+    || [[ -n "$(git -C "$root_loop_repo" status --porcelain)" ]]; then
+    echo 'the fixture was meant to COMMIT reviews as a link to the root, cleanly' >&2
+    exit 1
+  fi
+  both_apis 'a symlink to the work tree root names no findings directory' \
+    "$root_loop_repo" "$root_loop_base" "$root_loop_head" 'fix-P2/correctness_root-loop' 1
+  spelling_case 'a symlink to the work tree root, every spelling' \
+    'fix-P2/correctness_root-loop' 1 "$root_loop_repo/reviews/findings"
+  # And the real directory the link comes back to still answers for its OWN
+  # name, so the case above is a rule about the path and not a listing read as
+  # empty.
+  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_root-loop' \
+    "$root_loop_repo/findings" >/dev/null 2>&1; then
+    echo 'the directory the link comes back to must still resolve the finding it holds' >&2
+    exit 1
+  fi
+
+  # AND THE SAME THING AT THE LAST COMPONENT. `reviews` is a tracked directory
+  # and `reviews/findings` a committed link to `..`, so the LISTING PATH ITSELF
+  # is the work tree root by inode while the index records it as a 120000 blob.
+  # Found by sweeping shapes for more counter-examples rather than by review, and
+  # it was one: trees 1, directory 0 on the unrepaired file.
+  last_loop_repo="$fixture_dir/repo-listing-loops-to-the-root"
+  new_repo "$last_loop_repo"
+  echo seed > "$last_loop_repo/seed.txt"
+  git -C "$last_loop_repo" add -A && git -C "$last_loop_repo" commit -q -m base
+  last_loop_base="$(git -C "$last_loop_repo" rev-parse HEAD)"
+  mkdir -p "$last_loop_repo/reviews"
+  echo fixture > "$last_loop_repo/P2_correctness_202609110002_loops-to-the-root.md"
+  echo keep > "$last_loop_repo/reviews/keep.txt"
+  ln -s .. "$last_loop_repo/reviews/findings"
+  git -C "$last_loop_repo" add -A \
+    && git -C "$last_loop_repo" commit -q -m 'reviews/findings is a link to the work tree root'
+  last_loop_head="$(git -C "$last_loop_repo" rev-parse HEAD)"
+  if [[ -n "$(git -C "$last_loop_repo" status --porcelain)" ]]; then
+    echo 'the loop-to-the-root fixture was meant to be a clean checkout' >&2
+    exit 1
+  fi
+  both_apis 'a listing path that loops back to the work tree root holds no finding' \
+    "$last_loop_repo" "$last_loop_base" "$last_loop_head" \
+    'fix-P2/correctness_loops-to-the-root' 1
+  spelling_case 'a listing that loops to the root, every spelling' \
+    'fix-P2/correctness_loops-to-the-root' 1 "$last_loop_repo/reviews/findings"
 fi
 
 # And a real findings directory answers the same in every spelling, which is what
@@ -2214,6 +2281,38 @@ else
     echo "the control was meant to refuse an ambiguous name; got $worktrees_control_rc" >&2
     exit 1
   fi
+
+  # METADATA WITH A NUL IN IT IS UNEXAMINABLE TOO, AND THAT IS A STATUS AND NOT A
+  # FLAG. A NUL appended after the newline of that same `.git` file makes both
+  # discovery probes exit 128 -- the same 128 a directory that is no repository
+  # gives. read_file reported the NUL correctly and repository_above never looked
+  # at the report: the gitdir pointer read as empty, the walk found no repository
+  # above, and the filesystem answered for a listing whose index still records
+  # the twin. Exit 0 `conforms`, with empty stderr, on the checkout the control
+  # refuses at exit 1. A flag one of three callers may skip is not a contract, so
+  # the NUL is a status now and `if ! read_file` consumes it.
+  cp -- "$worktrees_wt/.git" "$fixture_dir/worktrees-git-file"
+  printf '\0' >> "$worktrees_wt/.git"
+  worktrees_nul_rc=0
+  worktrees_nul_out="$(worktrees_verdict)" || worktrees_nul_rc=$?
+  cp -- "$fixture_dir/worktrees-git-file" "$worktrees_wt/.git"
+  if [[ "$worktrees_nul_rc" == 0 ]]; then
+    echo 'a NUL in a linked worktree .git file conformed: the filesystem fallback again' >&2
+    printf '%s\n' "$worktrees_nul_out" >&2
+    exit 1
+  fi
+  if ! grep -q 'cannot be examined' <<< "$worktrees_nul_out"; then
+    echo 'metadata holding a NUL must refuse SAYING SO, not silently' >&2
+    printf '%s\n' "$worktrees_nul_out" >&2
+    exit 1
+  fi
+  worktrees_restored_rc=0
+  worktrees_restored_out="$(worktrees_verdict)" || worktrees_restored_rc=$?
+  if [[ "$worktrees_restored_rc" != 1 ]] \
+    || ! grep -q 'names 2 findings' <<< "$worktrees_restored_out"; then
+    echo "taking the NUL off must restore the verdict; got $worktrees_restored_rc" >&2
+    exit 1
+  fi
   if [[ "$(id -u)" -eq 0 ]] || ! chmod 000 "$worktrees_repo/.git/worktrees" 2>/dev/null \
     || git -C "$worktrees_wt/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     chmod 755 "$worktrees_repo/.git/worktrees" 2>/dev/null || true
@@ -2288,21 +2387,27 @@ if [[ -L "$symlink_probe" ]]; then
 fi
 inject_probe="$fixture_dir/inject-probe.sh"
 cat > "$inject_probe" <<'INJECT'
-# inject-probe.sh <hooked-command> <private-file> <trigger> <validator> <branch> <listing>...
+# inject-probe.sh <hooked-command> <private-file> <trigger> <mode> <validator> <branch> <listing>...
 # Runs the validator with <hooked-command> wrapped so that, ONCE THE PRIVATE FILE
-# HOLDS <trigger>, it loses read permission. The trigger is what makes this the
+# HOLDS <trigger>, its mode becomes <mode>. The trigger is what makes this the
 # reviewer's injection and not a blunt one: the copy of the FIRST listing is left
-# alone, the copy of the second goes unreadable after the real command wrote it
-# at exit 0, and a helper that reads that as an empty listing drops one twin and
-# conforms.
-hooked="$1"; private="$2"; trigger="$3"; shift 3
+# alone and the copy of the second is interfered with after the real command
+# wrote it at exit 0.
+#
+# MODE 000 IS THE READ BACK AND MODE 400 IS THE WRITE. A copy that cannot be read
+# back was round 10's P1 -- the helper returned success with empty bytes. A copy
+# that cannot be OPENED FOR WRITING is round 12's: the redirection fails, the
+# status assignment inside the group never runs, and THE PREVIOUS CAPTURE'S BYTES
+# are still there with their sentinel on the end. One trigger fires at the first
+# capture and the failure lands on the second.
+hooked="$1"; private="$2"; trigger="$3"; mode="$4"; shift 4
 eval "$hooked"'() {
   command '"$hooked"' "$@"
   local rc=$? d
   for d in "${TMPDIR:-/tmp}"/branch-name-policy.*; do
     if [[ -r "$d/'"$private"'" ]] \
       && command grep -q -- "'"$trigger"'" "$d/'"$private"'" 2>/dev/null; then
-      chmod 000 "$d/'"$private"'" 2>/dev/null
+      chmod '"$mode"' "$d/'"$private"'" 2>/dev/null
     fi
   done
   return $rc
@@ -2313,14 +2418,22 @@ out="$("$BASH" "$@" 2>&1)" || rc=$?
 printf '%s\n' "$rc"
 printf '%s\n' "$out"
 INJECT
-inject_case() {  # inject_case <hooked> <private-file> <trigger> <label> <branch> <listing>...
-  local hooked="$1" private="$2" trigger="$3" label="$4" out rc
+# inject_output <hooked> <private-file> <trigger> <mode> <branch> <listing>...
+# -> the exit code on the first line and the run's output below it.
+inject_output() {
+  local hooked="$1" private="$2" trigger="$3" mode="$4"
   shift 4
-  out="$(TMPDIR="$inject_dir" PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" BASH="$BASH" \
-    "$BASH" "$inject_probe" "$hooked" "$private" "$trigger" "$branch_validator" "$@" 2>&1)"
+  TMPDIR="$inject_dir" PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" BASH="$BASH" \
+    "$BASH" "$inject_probe" "$hooked" "$private" "$trigger" "$mode" "$branch_validator" "$@" 2>&1
+}
+
+inject_case() {  # inject_case <hooked> <private-file> <trigger> <mode> <label> <branch> <listing>...
+  local hooked="$1" private="$2" trigger="$3" mode="$4" label="$5" out rc
+  shift 5
+  out="$(inject_output "$hooked" "$private" "$trigger" "$mode" "$@")"
   rc="${out%%$'\n'*}"
   if [[ "$rc" == 0 ]]; then
-    echo "$label: a private copy that could not be read back conformed at exit 0" >&2
+    echo "$label: an interfered-with private copy conformed at exit 0" >&2
     printf '%s\n' "$out" >&2
     exit 1
   fi
@@ -2338,7 +2451,16 @@ else
     echo "the injection control was meant to refuse an ambiguous name; got $inject_control_rc" >&2
     exit 1
   fi
-  inject_case cat slurp 202609100002 'read_file' 'fix-P2/correctness_shared-name' \
+  inject_case cat slurp 202609100002 000 'read_file' 'fix-P2/correctness_shared-name' \
+    "$fixture_dir/inject-twin-a.txt" "$fixture_dir/inject-twin-b.txt"
+  # AND THE SAME COPY UNWRITABLE, which is the other half and was a P1 of its
+  # own: the first listing's bytes are left readable and the SECOND capture
+  # cannot open its destination, so the group never runs, `copy_status` stays 0,
+  # and the first listing's bytes pass the sentinel check a second time. Measured
+  # against the unrepaired file: exit 0 `conforms`, over `slurp: Permission
+  # denied`, where the same pair refuses at exit 1.
+  inject_case cat slurp 202609100001 400 'read_file, destination unwritable' \
+    'fix-P2/correctness_shared-name' \
     "$fixture_dir/inject-twin-a.txt" "$fixture_dir/inject-twin-b.txt"
   # git's own output, on the shape where losing it INVENTS a finding rather than
   # merely dropping one: reviews/findings is a committed symlink whose target
@@ -2346,8 +2468,113 @@ else
   # regular file holding that name. Read the recorded mode and it is a 120000
   # blob and no listing; lose it and the file's BYTES resolve a fix-P*/ branch.
   if [[ -n "$inject_symlink_repo" ]]; then
-    inject_case git git.out 120000 'git_probe' 'fix-P2/correctness_invented-by-a-lost-record' \
+    inject_case git git.out 120000 000 'git_probe' \
+      'fix-P2/correctness_invented-by-a-lost-record' \
       "$inject_symlink_repo/reviews/findings"
+  fi
+  # git's destination unwritable, on the shape where the LOST RECORD drops a
+  # whole listing: a file listing naming one twin, and a repository directory
+  # recording the other. The trigger is the work tree root `--show-toplevel`
+  # writes, so the capture that fails is the `ls-files` after it -- which read
+  # the toplevel back as its records, found no entry, and answered the empty set.
+  # Measured against the unrepaired file: exit 0 `conforms` where the pair
+  # refuses at exit 1.
+  inject_toplevel_repo="$fixture_dir/repo-injected-toplevel"
+  new_repo "$inject_toplevel_repo"
+  commit_finding "$inject_toplevel_repo" 'P2_correctness_202609100002_shared-name.md' 'one twin'
+  inject_toplevel_control_rc=0
+  inject_toplevel_control_out="$(TMPDIR="$inject_dir" PR_NUMBER= \
+    LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/reviews/findings" 2>&1)" \
+    || inject_toplevel_control_rc=$?
+  if [[ "$inject_toplevel_control_rc" != 1 ]] \
+    || ! grep -q 'names 2 findings' <<< "$inject_toplevel_control_out"; then
+    echo "the git-destination control was meant to refuse; got $inject_toplevel_control_rc" >&2
+    exit 1
+  fi
+  inject_case git git.out repo-injected-toplevel 400 'git_probe, destination unwritable' \
+    'fix-P2/correctness_shared-name' \
+    "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/reviews/findings"
+fi
+
+# ---- a directory's NAMES and its STATUS must come from one run of one command ------------------
+#
+# `ls` was run for its status and a GLOB then supplied the names, and the two are
+# not one read: `chmod 000` on the directory AFTER the real `ls` exited 0 left
+# `nullglob` expanding to nothing, list_dir returning success with no entries,
+# one twin dropped and the ambiguous name conforming at exit 0 where the pair
+# refuses at exit 1. A SUCCESSFUL PRODUCER IS NOT A SUCCESSFUL READ.
+#
+# The hook wraps BOTH enumerators -- the `ls` the defect used and the `find` that
+# replaced it -- and the fixture asserts it FIRED, because a hook that matches
+# nothing would pass this file forever while proving nothing.
+enumerate_dir="$fixture_dir/enumerated-outside-a-repository"
+mkdir -p "$enumerate_dir"
+echo two > "$enumerate_dir/P2_correctness_202609100002_shared-name.md"
+enumerate_probe="$fixture_dir/enumerate-probe.sh"
+cat > "$enumerate_probe" <<'ENUMERATE'
+# enumerate-probe.sh <directory> <validator> <branch> <listing>...
+# Every enumerating command runs for real and the directory goes unreadable
+# straight afterwards, which is the reviewer's injection: the command's own
+# status says nothing about a second look at the same directory.
+export ENUMERATE_TARGET="$1"; shift
+export ENUMERATE_FIRED="$ENUMERATE_TARGET.fired"
+: > "$ENUMERATE_FIRED"
+_enumerated() {
+  local rc=$?
+  chmod 000 "$ENUMERATE_TARGET" 2>/dev/null
+  printf 'x' >> "$ENUMERATE_FIRED"
+  return $rc
+}
+ls()   { command ls "$@"; _enumerated; }
+find() { command find "$@"; _enumerated; }
+export -f _enumerated ls find
+rc=0
+out="$("$BASH" "$@" 2>&1)" || rc=$?
+chmod 755 "$ENUMERATE_TARGET" 2>/dev/null
+printf '%s\n' "$rc"
+printf '%s\n' "$out"
+ENUMERATE
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo 'note: skipping the enumerated-directory cases (running as root)' >&2
+else
+  enumerate_control_rc=0
+  enumerate_control_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$fixture_dir/inject-twin-a.txt" "$enumerate_dir" 2>&1)" || enumerate_control_rc=$?
+  if [[ "$enumerate_control_rc" != 1 ]] \
+    || ! grep -q 'names 2 findings' <<< "$enumerate_control_out"; then
+    echo "the enumeration control was meant to refuse; got $enumerate_control_rc" >&2
+    exit 1
+  fi
+  enumerate_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" BASH="$BASH" \
+    "$BASH" "$enumerate_probe" "$enumerate_dir" "$branch_validator" \
+    'fix-P2/correctness_shared-name' "$fixture_dir/inject-twin-a.txt" "$enumerate_dir" 2>&1)"
+  enumerate_rc="${enumerate_out%%$'\n'*}"
+  read -r enumerate_fired < <(wc -c < "$enumerate_dir.fired")
+  if (( enumerate_fired == 0 )); then
+    echo 'the enumeration hook never fired, so this case proves nothing' >&2
+    exit 1
+  fi
+  if [[ "$enumerate_rc" == 0 ]]; then
+    echo 'a directory made unreadable after its enumerator ran conformed at exit 0' >&2
+    printf '%s\n' "$enumerate_out" >&2
+    exit 1
+  fi
+  # AND THE LISTING'S OWN PRIVATE COPY IS READ BACK THROUGH THE SENTINEL, which
+  # is what makes list_dir a caller of the one capture rather than a fourth way
+  # in: the copy goes unreadable after the enumerator wrote it at exit 0, and the
+  # refusal has to be the LISTING that could not be read rather than the verdict
+  # the candidate set would otherwise have given.
+  enumerate_copy_out="$(inject_output find dir.out 202609100002 000 \
+    'fix-P2/correctness_shared-name' "$fixture_dir/inject-twin-a.txt" "$enumerate_dir")"
+  enumerate_copy_rc="${enumerate_copy_out%%$'\n'*}"
+  if [[ "$enumerate_copy_rc" == 0 ]] \
+    || ! grep -q 'could not be listed' <<< "$enumerate_copy_out"; then
+    echo "a listing whose private copy went unreadable must refuse saying so; got $enumerate_copy_rc" >&2
+    printf '%s\n' "$enumerate_copy_out" >&2
+    exit 1
   fi
 fi
 
@@ -2590,6 +2817,8 @@ if [[ -L "$symlink_probe" ]]; then
   register_equivalence "$repo_p" "$p_base" "$p_head"
   register_equivalence "$repo_r" "$r_base" "$r_head"
   register_equivalence "$repo_k" "$k_base" "$k_head"
+  register_equivalence "$root_loop_repo" "$root_loop_base" "$root_loop_head"
+  register_equivalence "$last_loop_repo" "$last_loop_base" "$last_loop_head"
   if [[ -n "${behind_base:-}" ]]; then
     register_equivalence "$behind_repo" "$behind_base" "$behind_head"
   fi
@@ -2610,6 +2839,8 @@ equivalence_branches=(
   'fix-P3/liveness_written-five-ways'
   'fix-P1/correctness_never-filed-anywhere'
   'fix-P3/correctness_shared-name'
+  'fix-P2/correctness_root-loop'
+  'fix-P2/correctness_loops-to-the-root'
 )
 
 equivalence_pairs=0
@@ -2657,12 +2888,19 @@ fi
 #
 # WHAT IT IS AND IS NOT, because the body used to claim more than this. It is a
 # TEXT SCAN over one file. It bounds what is WRITTEN in the validator; it does
-# not bound what bash can be made to do, and it is not a sandbox -- a command
-# word that is entirely inside quotes, or one reached through an `eval` of a
-# string this cannot see, is outside its reach. What it buys is the only thing
-# claimed for it: THE REVIEWED SURFACE IS THE AUDITED REGION, capped below at a
-# size that can be read in one sitting, instead of every call site in a
-# 1400-line file.
+# not bound what bash can be made to do, and it is not a sandbox. What it buys is
+# the only thing claimed for it: THE REVIEWED SURFACE IS THE AUDITED REGION,
+# capped below at a size that can be read in one sitting, instead of every call
+# site in a 1500-line file.
+#
+# THE RESIDUALS ARE LISTED RATHER THAN DENIED, and the list shortens as they are
+# closed. A command word that is ENTIRELY inside quotes leaves nothing on the
+# bare line to read -- `"$reader"` on its own is invisible here -- and a command
+# reached through an `eval` of a string this cannot see is outside any text scan.
+# Two more were on this list until the review that executed them: a command
+# substitution inside `[[ … ]]`, whose words this skipped because the test itself
+# holds no command, and one inside a `case` WORD, skipped up to the `)` that ends
+# a label. Bash runs both, and both are caught below now.
 #
 # THE INSTRUMENT IS TESTED FIRST, because a rule that matches nothing would pass
 # this file forever while proving nothing: each shape below is appended to a COPY
@@ -2735,17 +2973,45 @@ shape_violations() {  # shape_violations <script> -> "<line>: <text>" per violat
         masked = masked c; bare = bare c; i++
       }
       if (audited) { next }
+      # ARITHMETIC HOLDS NEITHER A COMMAND NOR A REDIRECTION, and it is taken out
+      # of both readings before either is made: `(( i < n ))` is a comparison,
+      # and read as an open it reported every `<` the file writes in arithmetic.
+      gsub(/\$\(\([^)]*\)\)/, " ", bare)
+      gsub(/\(\([^)]*\)\)/, " ", bare)
+      gsub(/\$\(\([^)]*\)\)/, " ", masked)
+      gsub(/\(\([^)]*\)\)/, " ", masked)
       # A redirection FROM a path. `<<` and `<<<` are a heredoc and a here-string
       # and open nothing; `<&` duplicates a descriptor this shell already holds.
       if (masked ~ /(^|[^<])<[[:space:]]*[^<&[:space:]]/) { print FNR ": " $0; next }
-      # Arithmetic holds no command.
-      gsub(/\$\(\([^)]*\)\)/, " ", bare)
-      gsub(/\(\([^)]*\)\)/, " ", bare)
-      cmdpos = 1; intest = 0; i = 1; n = length(bare)
+      cmdpos = 1; intest = 0; depth = 0; i = 1; n = length(bare)
       while (i <= n) {
         c = substr(bare, i, 1)
         if (c == " " || c == "\t") { i++; continue }
-        if (c == ";" || c == "&" || c == "|" || c == "(" || c == ")") {
+        # A COMMAND SUBSTITUTION IS CODE WHEREVER IT IS WRITTEN, AND TWO PLACES
+        # THIS SKIPS ARE PLACES BASH DOES NOT. `[[ … ]]` holds no command of its
+        # own, so its words are skipped; a `case` label is skipped up to its
+        # `)`. `[[ -n "$(git ls-files -sz -- .)" ]]` and `case "$(git rev-parse
+        # HEAD)" in` are both of those, both run the command, and both were
+        # reported clean. So `$(` suspends whichever skip is in force and its
+        # matching `)` restores it, tracked by depth so a plain `(` -- a
+        # subshell, or a `(pattern)` case label -- restores nothing.
+        if (c == "(") {
+          depth++
+          substitution[depth] = (substr(bare, i - 1, 1) == "$")
+          if (substitution[depth]) {
+            test_stack[depth] = intest; label_stack[depth] = want_label
+            intest = 0; want_label = 0
+          }
+          cmdpos = 1; i++; continue
+        }
+        if (c == ")") {
+          if (depth > 0) {
+            if (substitution[depth]) { intest = test_stack[depth]; want_label = label_stack[depth] }
+            depth--
+          }
+          cmdpos = 1; i++; continue
+        }
+        if (c == ";" || c == "&" || c == "|") {
           if (c == ";" && substr(bare, i + 1, 1) == ";" && !intest) {
             want_label = (incase > 0)
           }
@@ -2823,7 +3089,16 @@ shape_probe 'until git status; do :; done'
 shape_probe 'time git status'
 shape_probe '! git diff --quiet'
 shape_probe 'probe() { case x in a) git status ;; esac; }'
-# THE FOUR THE LAST ROUND'S REVIEW EXECUTED, and the two shapes they are.
+# THE TWO THIS ROUND'S REVIEW EXECUTED, and the third of the same shape. Bash
+# runs every one of these substitutions; the scan reported no violation.
+shape_probe 'unchecked_git() { [[ -n "$(git ls-files -sz -- .)" ]] || true; }'
+shape_probe 'unchecked_read() { [[ -n "$(cat -- "$1")" ]] || true; }'
+shape_probe 'case "$(git rev-parse HEAD)" in *) : ;; esac'
+shape_probe 'probe() { if [[ -z "$(cat "$f")" ]]; then :; fi; }'
+shape_probe 'probe() { [[ "$(git rev-parse HEAD)" == x ]] || true; }'
+# And arithmetic is not a redirection, but a redirection beside it still is.
+shape_probe 'if (( 1 < 2 )); then read -r l < "$f"; fi'
+# THE FOUR THE ROUND BEFORE EXECUTED, and the two shapes they are.
 shape_probe 'unchecked_git() { LC_ALL=C git ls-files -sz -- . || true; }'
 shape_probe 'unchecked_read() { sed -n p -- "$1" || true; }'
 shape_probe 'probe() { command -- git status; }'
@@ -2870,12 +3145,20 @@ if [[ -n "$shape_found" ]]; then
 fi
 
 # The audited region has to stay small enough that reading it is the whole audit.
+#
+# THE CAP HAS MOVED ONCE, FROM 200 TO 250, in the round that made `capture` the
+# only way any helper reaches bytes: 133 lines of code became 158, because
+# checking that a destination opened, that the producer ran, and that both copies
+# read back to their sentinel is four checks where each helper used to make three
+# and the three were not the same three. A cap is a reviewer's reading time and
+# not a budget to spend, so the number is stated here rather than adjusted
+# quietly, and the pull request that moves it again says why in its body.
 shape_region_lines="$(awk '
   /^# ==== AUDITED HELPERS BEGIN/ { inside = 1 }
   inside { n = n + 1 }
   /^# ==== AUDITED HELPERS END/ { inside = 0 }
   END { print n }' "$branch_validator")"
-if (( shape_region_lines > 200 )); then
+if (( shape_region_lines > 250 )); then
   echo "the audited helpers have grown to $shape_region_lines lines, which is no longer an audit" >&2
   exit 1
 fi

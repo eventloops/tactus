@@ -267,11 +267,11 @@
 # is the rule itself.
 #
 # EVERY FALSE ACCEPTANCE THIS FILE HAS GIVEN WAS A FAILED PROBE ANSWERED AS AN
-# ABSENCE, AND THAT IS WHY THERE ARE NOW EXACTLY THREE WAYS OUT OF IT. Five
-# review rounds each found more of one defect than the round before -- a git
-# command, a file read or a directory listing whose status was discarded, and
-# whose failure was then read as "nothing there", "empty" or "end of input",
-# every one of which CONFORMS:
+# ABSENCE, AND THAT IS WHY THERE IS NOW EXACTLY ONE WAY OUT OF IT. Six review
+# rounds each found more of one defect than the round before -- a git command, a
+# file read or a directory listing whose status was discarded, and whose failure
+# was then read as "nothing there", "empty" or "end of input", every one of which
+# CONFORMS:
 #
 #   `nul=$?` inside `{ ...; nul=$?; }` makes the GROUP succeed, so the `||` that
 #   was meant to catch a failed open never ran and every non-zero read status
@@ -285,16 +285,27 @@
 #   it, so `chmod 000 .git/HEAD` made both discovery probes exit 128, "no
 #   repository" was inferred, and the fallback conformed with empty stderr.
 #
-#   And -- last round, in the helpers written to end this -- a private copy that
-#   went UNREADABLE between the command that wrote it and the read that parsed
-#   it. `cat` had copied a listing at exit 0; `read … < copy` then failed to
-#   open, reported the same 1 it reports at end of input, and the helper returned
-#   SUCCESS WITH EMPTY BYTES. Owning the file establishes nothing about reading
-#   it.
+#   A private copy that went UNREADABLE between the command that wrote it and the
+#   read that parsed it. `cat` had copied a listing at exit 0; `read … < copy`
+#   then failed to open, reported the same 1 it reports at end of input, and the
+#   helper returned SUCCESS WITH EMPTY BYTES. Owning the file establishes nothing
+#   about reading it.
 #
-# So there are three helpers and the call sites are gone. `git_probe` is the
+#   And -- last round, IN THE HELPERS WRITTEN TO END THIS, three of them at once
+#   and each at a different sub-step. The REDIRECTION that opens a capture's
+#   destination reports its failure to nobody inside the group, so a copy that
+#   would not open left the status at 0 and the PREVIOUS capture's bytes, sentinel
+#   and all, to be parsed as this one's. `list_dir` took its names from a GLOB
+#   after a separate `ls` had exited 0, so a directory made unreadable in between
+#   was an empty one. And `repository_above` never looked at the NUL flag
+#   read_file set for it, lost a `.git` file's gitdir pointer, and put the listing
+#   back on the filesystem.
+#
+# Three helpers were not a chokepoint while each had its own way to bytes, so
+# there is ONE CAPTURE PRIMITIVE and they are its callers. `git_probe` is the
 # only place this file runs git, `read_file` the only place it opens a file for
-# reading, and `list_dir` the only place it enumerates a directory.
+# reading, `list_dir` the only place it enumerates a directory -- and `capture`
+# is the only place any of the three obtains a byte.
 # .github/scripts/test-pr-policy.sh FAILS THE BUILD if anything below the
 # AUDITED HELPERS END marker runs a command that is not a shell builtin or a
 # function defined in this file, or redirects from a path. That is a text scan
@@ -317,7 +328,9 @@
 # copy is in a directory this script made, so no rename can land between the
 # check and the parse. THAT THE COPY ITSELF WAS READ IS CHECKED and not assumed:
 # every private file ends with a sentinel byte, and a read that does not reach it
-# is a failure whoever owns the file.
+# is a failure whoever owns the file. AND ITS WHOLE ANSWER IS A STATUS: 0, 1, 2
+# and 3, where 3 is a NUL in the bytes. That was a flag until a caller ignored
+# it, and a flag a caller may ignore is not a contract.
 #
 # A PATH IS NORMALISED BEFORE IT IS JUDGED. `reviews/findings`,
 # `reviews/findings/`, `reviews/findings/.`, `reviews//findings` and
@@ -442,14 +455,19 @@ fail() {
 
 # ==== AUDITED HELPERS BEGIN ===================================================
 #
-# The only three places in this file that run git, open a file for reading, or
-# enumerate a directory. .github/scripts/test-pr-policy.sh asserts that over the
-# rest of the file by shape: below AUDITED HELPERS END nothing may run a command
-# that is not a shell builtin or a function defined here, and nothing may
-# redirect from a path. Keep this region readable in one sitting; that is the
-# whole of its value.
+# The only place this file runs a command, opens a file for reading or
+# enumerates a directory -- and, because three rounds of repairs each left one
+# helper a private route to its bytes, THE ONLY PLACE ANY BYTES ARE CAPTURED.
+# `capture` is that primitive; `git_probe`, `read_file` and `list_dir` are its
+# only callers and have no other route to bytes at all. The block above is the
+# history each contract was written out of; this region is the code.
+#
+# .github/scripts/test-pr-policy.sh asserts over the rest of the file by shape:
+# below AUDITED HELPERS END nothing may run a command that is not a shell
+# builtin or a function defined here, and nothing may redirect from a path. Keep
+# this region readable in one sitting; that is the whole of its value.
 
-# Where a probe's output goes: this script's own directory, mode 700 from mktemp,
+# Where a private copy goes: this script's own directory, mode 700 from mktemp,
 # so a copy taken here cannot be replaced between the check and the parse --
 # which is the defect a caller's path carries and a private file does not.
 probe_dir=''
@@ -458,23 +476,18 @@ remove_probe_dir() {
 }
 trap remove_probe_dir EXIT
 probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/branch-name-policy.XXXXXX")" || {
-  echo "branch-name-policy: no writable temporary directory, so git's output and" >&2
-  echo "  a listing's bytes cannot be captured with their statuses. Refusing" >&2
-  echo "  rather than deciding '$branch' from probes whose failures cannot be" >&2
-  echo "  separated from their answers." >&2
+  echo "branch-name-policy: no writable temporary directory, so no command's" >&2
+  echo "  output can be captured with its status. Refusing rather than deciding" >&2
+  echo "  '$branch' from probes whose failures cannot be separated from their" >&2
+  echo "  answers." >&2
   exit 1
 }
 
-# EVERY PRIVATE FILE THIS SCRIPT WRITES ENDS WITH ONE SENTINEL BYTE, and
-# read_private is the only thing that reads one back. `read` reports end of input
-# and a read error with the same 1, and a redirection whose OPEN fails reports
-# nothing at all to its caller: taking read permission off a private copy AFTER
-# the command that wrote it had succeeded left the old helpers returning success
-# with empty bytes, and the validator conformed. Both halves are needed -- the
-# open is `exec`, whose status is a status, and the sentinel is what says the
-# bytes arrived, so a read that stopped early cannot pass for a file that ended.
-# `private_records` is the NUL-delimited records; `private_tail` what followed
-# the last NUL, sentinel removed.
+# read_private <path>: the sentinel-terminated private copy at <path>, as
+# `private_records` -- its NUL-delimited records -- and `private_tail`, what
+# followed the last NUL with the sentinel taken off. 1 unless the bytes were read
+# all the way to that sentinel. The open is `exec`, whose status is a status;
+# `read` alone reports end of input and a read error with the same 1.
 private_records=()
 private_tail=''
 read_private() {
@@ -493,28 +506,82 @@ read_private() {
   return 0
 }
 
-# git_probe's answers: `probe_status` is git's exit status and one the caller
-# enumerated; `probe_records` its stdout split on NUL, the one byte no pathname
-# holds; `probe_text` the first record without its line ending, for the probes
-# that answer in one word; `probe_stderr` what git said, kept so a refusal can
-# QUOTE it without any decision being taken from it.
-probe_status=0
-probe_text=''
-probe_stderr=''
-probe_records=()
+# capture <stdout-copy> <stderr-copy> <stdin> -- <command>...: run one command
+# and hand its bytes back, or refuse. <stdin> is `fd9` for the one producer that
+# must read the descriptor read_file has already opened, and `none` for a
+# producer that must read nothing. It returns 0 only if ALL FOUR of these held,
+# and a helper that checked three of them was a P1 in each of the last three
+# rounds:
+#
+#   1. THE DESTINATION OPENED. A redirection on a command group reports its
+#      failure to nobody inside the group, so `{ cmd || rc=$?; } > copy` over an
+#      unwritable copy leaves `rc` at 0 -- and the PREVIOUS capture's bytes in
+#      the file, sentinel and all. The open here is `exec`, whose status is a
+#      status, and it truncates, so a destination that opens holds nothing from
+#      before.
+#   2. The producer ran, and ITS status is `capture_status`, for the caller to
+#      enumerate rather than for this to interpret.
+#   3. Both copies read back as far as their sentinel.
+#   4. Nothing is handed back unless 1 to 3 held. `capture_records` and
+#      `capture_tail` are the producer's stdout; `capture_err` is its stderr past
+#      the last NUL, which for the text git writes is all of it, and is QUOTED in
+#      a refusal and never parsed; `capture_error` says which of the four failed.
+capture_status=0
+capture_records=()
+capture_tail=''
+capture_err=''
+capture_error=''
+capture() {
+  local out="$1" err="$2" stdin="$3"
+  shift 3
+  [[ "${1:-}" == -- ]] || {
+    echo "branch-name-policy: internal error: capture was called without --" >&2
+    exit 1
+  }
+  shift
+  capture_status=0
+  capture_records=()
+  capture_tail=''
+  capture_err=''
+  capture_error=''
+  { exec 3> "$out"; } 2>/dev/null \
+    || { capture_error="its output could not be captured: '$out' would not open"; return 1; }
+  { exec 4> "$err"; } 2>/dev/null \
+    || { exec 3>&-; capture_error="its errors could not be captured: '$err' would not open"; return 1; }
+  if [[ "$stdin" == fd9 ]]; then
+    { "$@" || capture_status=$?; printf '\001'; printf '\001' >&2; } >&3 2>&4 <&9
+  else
+    { "$@" || capture_status=$?; printf '\001'; printf '\001' >&2; } >&3 2>&4 </dev/null
+  fi
+  exec 3>&- 4>&-
+  read_private "$err" \
+    || { capture_error='what it printed could not be read back'; return 1; }
+  capture_err="${private_tail%$'\n'}"
+  read_private "$out" \
+    || { capture_error='its output could not be read back to the end'; return 1; }
+  if (( ${#private_records[@]} > 0 )); then
+    capture_records=( "${private_records[@]}" )
+  fi
+  capture_tail="$private_tail"
+  return 0
+}
 
 # git_probe <expected-statuses> -- <git arguments>...
 #
 # <expected-statuses> is a comma-separated list of the exit statuses THIS CALLER
 # READS AS ANSWERS. Any other status refuses the whole run: a status nobody
 # enumerated is not an absence, an empty set or an end of input, and reading it
-# as one of those is every wrong acceptance this gate has given. Stdout goes to a
-# FILE and the status is taken from git itself -- neither `$(...)`, which
-# discards the NUL that delimits `-z` records so two names arrive as one, nor
-# `<(...)`, whose status is not the command's and is what made an unreadable
-# index read as an empty one.
+# as one of those is every wrong acceptance this gate has given. `probe_status`
+# is git's own status; `probe_records` its stdout split on NUL, the one byte no
+# pathname holds; `probe_text` the first record without its line ending, for the
+# probes that answer in one word; `probe_stderr` what git said, kept so a refusal
+# can QUOTE it without any decision being taken from it.
+probe_status=0
+probe_text=''
+probe_stderr=''
+probe_records=()
 git_probe() {
-  local expected="$1" record
+  local expected="$1"
   shift
   [[ "${1:-}" == -- ]] || {
     echo "branch-name-policy: internal error: git_probe was called without --" >&2
@@ -531,30 +598,21 @@ git_probe() {
     echo "  filesystem, which cannot see a recorded mode. '$branch' was not judged." >&2
     exit 1
   }
-  { git "$@" || probe_status=$?; printf '\001'; printf '\001' >&2; } \
-    > "$probe_dir/git.out" 2> "$probe_dir/git.err"
-  read_private "$probe_dir/git.err" || {
-    echo "branch-name-policy: git ran and what it printed could not be read back," >&2
-    echo "  so its answer is not known. '$branch' was not judged." >&2
+  capture "$probe_dir/git.out" "$probe_dir/git.err" none -- git "$@" || {
+    echo "branch-name-policy: git ran and $capture_error, so what it records is not" >&2
+    echo "  known. That is refused rather than read as a repository that records" >&2
+    echo "  nothing. '$branch' was not judged." >&2
     exit 1
   }
-  if (( ${#private_records[@]} > 0 )); then
-    probe_stderr="${private_records[0]}"
-  else
-    probe_stderr="$private_tail"
+  probe_status="$capture_status"
+  probe_stderr="$capture_err"
+  if (( ${#capture_records[@]} > 0 )); then
+    probe_records=( "${capture_records[@]}" )
   fi
-  probe_stderr="${probe_stderr%$'\n'}"
-  read_private "$probe_dir/git.out" || {
-    echo "branch-name-policy: git ran and its output could not be read back, so" >&2
-    echo "  what it records is not known. That is refused rather than read as a" >&2
-    echo "  repository that records nothing. '$branch' was not judged." >&2
-    exit 1
-  }
-  if (( ${#private_records[@]} > 0 )); then
-    probe_records=( "${private_records[@]}" )
-  fi
-  if [[ -n "$private_tail" ]]; then
-    probe_records[${#probe_records[@]}]="$private_tail"
+  # Output that did not end in a NUL: `rev-parse` answers in one line, and no
+  # probe here may lose it.
+  if [[ -n "$capture_tail" ]]; then
+    probe_records[${#probe_records[@]}]="$capture_tail"
   fi
   if (( ${#probe_records[@]} > 0 )); then
     probe_text="${probe_records[0]}"
@@ -575,68 +633,65 @@ git_probe() {
   exit 1
 }
 
-# read_file's answers, valid until the next call: `file_bytes` is the whole file
-# with its final line ending kept; `file_has_nul` says a NUL was found, which is
-# a refusal at every call site because no filename holds one.
-file_bytes=''
-file_has_nul=0
-file_error=''
-
-# read_file <path>: 0 the whole file was read, 1 it could not be read to the end,
-# 2 it could not be opened.
+# read_file <path>, whose whole answer is its STATUS: 0 the file was read and
+# `file_bytes` holds all of it; 1 it could not be read to the end, with
+# `file_error` saying how; 2 it could not be opened; 3 it holds a NUL, which no
+# filename and no `gitdir:` line can, so it is a refusal at every call site. THE
+# NUL IS A STATUS AND NOT A FLAG: as a flag it was set correctly and one of the
+# three callers never looked at it.
 #
 # ONE OPEN OF THE CALLER'S PATH, BY THIS SHELL, and everything parsed afterwards
-# is the private copy. A path is not a value: it can hold different bytes at
-# every open, and a check on bytes that are then re-read is a check on bytes
-# nobody parsed -- measured on a listing replaced by rename between the two. And
-# END-OF-INPUT IS SEPARATED FROM A READ ERROR, which `read` reports with the same
-# 1: the copy is made by `cat` from the descriptor this shell already opened --
-# it opens nothing itself -- and the refusal comes from ITS status.
-# `/proc/self/mem` is the case: openable, readable to `-r`, every read fails.
+# is the private copy: a path is not a value, and a check on bytes that are then
+# re-read is a check on bytes nobody parsed. `cat` copies from the descriptor
+# this shell already opened and opens nothing itself, so no rename can put a
+# different inode behind it -- and a read that fails is ITS non-zero status,
+# where `read` reports a read error and end of input with the same 1.
+file_bytes=''
+file_error=''
 read_file() {
-  local path="$1" copy_status=0
+  local path="$1" rc=0
   file_bytes=''
-  file_has_nul=0
   file_error=''
   { exec 9< "$path"; } 2>/dev/null || return 2
-  { cat <&9 || copy_status=$?; printf '\001'; printf '\001' >&2; } \
-    > "$probe_dir/slurp" 2> "$probe_dir/slurp.err"
+  capture "$probe_dir/slurp" "$probe_dir/slurp.err" fd9 -- cat || rc=$?
   exec 9<&-
-  if (( copy_status != 0 )); then
-    if read_private "$probe_dir/slurp.err"; then
-      file_error="${private_tail%$'\n'}"
-    fi
-    return 1
-  fi
-  read_private "$probe_dir/slurp" || {
-    file_error='the private copy of it could not be read back to its end'
-    return 1
-  }
-  if (( ${#private_records[@]} > 0 )); then
-    file_has_nul=1
-    return 0
-  fi
-  file_bytes="$private_tail"
+  if (( rc != 0 )); then file_error="$capture_error"; return 1; fi
+  if (( capture_status != 0 )); then file_error="$capture_err"; return 1; fi
+  if (( ${#capture_records[@]} > 0 )); then return 3; fi
+  file_bytes="$capture_tail"
   return 0
 }
 
 # list_dir <directory>: its entry names, in `dir_entries`. Reached only where
 # there is no repository over the listing, or where git records nothing at, under
-# or above it. `ls` is run FOR ITS STATUS, because a directory that is readable
-# and not listable must refuse rather than read as empty and a glob that matched
-# nothing cannot say which happened. The NAMES come from the glob, because `ls`
-# writes one name per line and A NEWLINE IS LEGAL IN A FILENAME: from `ls`,
-# `noise<LF>P2_<category>_<ts>_<desc>.md` arrives as two names, the second either
-# absent from the directory or a name that is no finding answering for one. Both
-# skip a dot name, and both are right to: a finding's name begins with `P`.
+# or above it. THE NAMES AND THE STATUS COME FROM ONE RUN OF ONE COMMAND, because
+# they used not to: `ls` was run for its status and a GLOB supplied the names, so
+# a directory made unreadable after `ls` had exited 0 expanded to nothing and
+# conformed. `find -print0` answers both at once, and delimits names with the one
+# byte a name cannot hold -- which `ls` cannot, writing one name per line where A
+# NEWLINE IS LEGAL IN A FILENAME.
 dir_entries=()
 list_dir() {
-  local dir="$1" path
+  local dir="$1" record
   dir_entries=()
-  ls -1 -- "$dir" >/dev/null || return 1
-  for path in "$dir"/*; do
-    dir_entries[${#dir_entries[@]}]="${path##*/}"
-  done
+  # A leading dash is part of a name and not a set of options.
+  case "$dir" in
+    -*) dir="./$dir" ;;
+  esac
+  capture "$probe_dir/dir.out" "$probe_dir/dir.err" none -- \
+    find "$dir" -mindepth 1 -maxdepth 1 -print0 || return 1
+  if (( capture_status != 0 )); then capture_error="$capture_err"; return 1; fi
+  # Every name `find` writes ends with a NUL, so bytes after the last one are a
+  # name that arrived without its separator: a listing read in part.
+  if [[ -n "$capture_tail" ]]; then
+    capture_error='a name arrived without the separator after it'
+    return 1
+  fi
+  if (( ${#capture_records[@]} > 0 )); then
+    for record in "${capture_records[@]}"; do
+      dir_entries[${#dir_entries[@]}]="${record##*/}"
+    done
+  fi
   return 0
 }
 # ==== AUDITED HELPERS END =====================================================
@@ -726,14 +781,14 @@ legacy_exempt() {
   [[ -f "$legacy_file" ]] || return 1
   [[ "$pr" =~ ^[0-9]+$ ]] || return 1
   read_file "$legacy_file" || read_status=$?
+  if (( read_status == 3 )); then
+    fail "the migration list '$legacy_file' holds a NUL byte, so its lines cannot
+  be read as '<pull-request number> <head branch>' records."
+  fi
   if (( read_status != 0 )); then
     fail "the migration list '$legacy_file' could not be read, so whether pull
   request #$pr is exempt from the branch vocabulary is not known. A gate that
   cannot see its input refuses rather than deciding it saw nothing."
-  fi
-  if (( file_has_nul )); then
-    fail "the migration list '$legacy_file' holds a NUL byte, so its lines cannot
-  be read as '<pull-request number> <head branch>' records."
   fi
   while read -r listed_pr listed_branch _; do
     listed_branch="${listed_branch%$'\r'}"
@@ -876,6 +931,14 @@ repository_above() {
         return 2
       fi
     elif [[ -f "$gitdir" ]]; then
+      # EVERY STATUS read_file ANSWERS WITH IS CONSUMED HERE, and `if !` is what
+      # consumes them: 1 unreadable, 2 unopenable and 3 a NUL in the bytes are
+      # each metadata this cannot examine. The third was a FLAG read_file set
+      # correctly and this ignored: a NUL appended to a linked worktree's `.git`
+      # made both discovery probes exit 128, the pointer read as empty, the walk
+      # went on up and found no repository, and the filesystem then answered for
+      # a listing whose index still recorded the twin -- exit 0 `conforms`, with
+      # nothing on stderr.
       if ! read_file "$gitdir"; then
         unexaminable_git="$gitdir"
         return 2
@@ -922,9 +985,26 @@ listing_world=''
 listing_toplevel=''
 listing_relpath=''
 
+# recorded_tree <work-tree root> <path within it>: does the index record ENTRIES
+# UNDER that path -- is it a DIRECTORY in the ledger? A path the index records AT
+# its own name is a blob and no directory, whatever the checkout materialised
+# there; a path it records nowhere is not a directory of the ledger's either.
+recorded_tree() {
+  local where="$1" rel="$2" record name
+  git_probe '0' -- -C "$where" ls-files -sz -- ":(literal)$rel"
+  (( ${#probe_records[@]} > 0 )) || return 1
+  for record in "${probe_records[@]}"; do
+    name="${record#*$'\t'}"
+    if [[ "$name" == "$rel" ]]; then
+      return 1
+    fi
+  done
+  return 0
+}
+
 locate_listing() {
   local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
-  local prefixes rests
+  local prefixes rests shallow deep named_root segment nameable
   listing_world=''
   listing_toplevel=''
   listing_relpath=''
@@ -1045,21 +1125,76 @@ locate_listing() {
       *) prefix="$prefix/$component" ;;
     esac
   done
-  index=${#prefixes[@]}
-  while (( index > 0 )); do
-    index=$(( index - 1 ))
+  # THE ROOT IS MATCHED BY INODE AND THE PATH THROUGH IT BY RECORDED MODE, and
+  # the second half is the half an inode comparison cannot do. `-ef` FOLLOWS a
+  # symlink, so with `reviews` a committed symlink to the work tree's own root
+  # the prefix `<repo>/reviews` IS that root by inode: taking the deepest match
+  # named the listing `findings`, answered it out of the root's own `findings/`,
+  # and walked straight past the 120000 the index records for `reviews`. On a
+  # clean checkout of that commit the three tree listings hold no finding under
+  # `reviews/findings` and refuse at exit 1; the directory conformed at exit 0.
+  #
+  # So the root is the SHALLOWEST prefix that is it, and then the caller's
+  # components are walked one at a time. A DEEPER prefix may be the root again --
+  # `../../repo/reviews/findings` spelled from inside `repo/reviews` comes back
+  # to it, and the shortest name is the one the index can hold -- but the walk
+  # reaches that re-entry only THROUGH COMPONENTS THE RECORDS CALL DIRECTORIES.
+  # A component recorded as anything else, or recorded as nothing at all, stops
+  # the walk where it stands: no index entry is named by a path through it, the
+  # longer name stays, and recorded_kind_of is what says so.
+  #
+  # A `.` or a `..` is stepped over rather than asked about. Neither names an
+  # index entry, and a segment holding one is not a path git can be asked about
+  # at all -- `a/..` is `a`'s parent only when `a` is a directory. They reach
+  # here only from the leading `..` of a spelling like `../../repo/reviews`,
+  # which is an ordinary one.
+  shallow=-1
+  deep=-1
+  index=0
+  while (( index < ${#prefixes[@]} )); do
     if [[ "${prefixes[index]}" -ef "$top" ]]; then
-      listing_world=records
-      listing_toplevel="$top"
-      listing_relpath="${rests[index]}"
-      return 0
+      if (( shallow < 0 )); then
+        shallow=$index
+      fi
+      deep=$index
     fi
+    index=$(( index + 1 ))
   done
-  echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
-  echo "  of the path as it was written names that root, so what the index records" >&2
-  echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
-  echo "  the repository's own directory. '$branch' was not judged." >&2
-  return 1
+  if (( shallow < 0 )); then
+    echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
+    echo "  of the path as it was written names that root, so what the index records" >&2
+    echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
+    echo "  the repository's own directory. '$branch' was not judged." >&2
+    return 1
+  fi
+  named_root=$shallow
+  segment=''
+  nameable=1
+  index=$(( shallow + 1 ))
+  while (( index <= deep )); do
+    component="${rests[index - 1]%%/*}"
+    if [[ -n "$segment" ]]; then
+      segment="$segment/$component"
+    else
+      segment="$component"
+    fi
+    case "$component" in
+      .|..) nameable=0 ;;
+    esac
+    if (( nameable )); then
+      recorded_tree "$top" "$segment" || break
+    fi
+    if [[ "${prefixes[index]}" -ef "$top" ]]; then
+      named_root=$index
+      segment=''
+      nameable=1
+    fi
+    index=$(( index + 1 ))
+  done
+  listing_world=records
+  listing_toplevel="$top"
+  listing_relpath="${rests[named_root]}"
+  return 0
 }
 
 # WHAT GIT RECORDS FOR THE LISTING, and nothing about what the checkout holds.
@@ -1314,6 +1449,9 @@ read_listing() {
       echo "branch-name-policy: findings listing '$listing' is a directory whose entries" >&2
       echo "  could not be listed, so the names in it are not known. That is refused" >&2
       echo "  rather than read as a directory with nothing in it." >&2
+      if [[ -n "$capture_error" ]]; then
+        indent "$capture_error"
+      fi
       return 1
     }
     if (( ${#dir_entries[@]} > 0 )); then
@@ -1367,6 +1505,16 @@ read_listing() {
       echo "branch-name-policy: findings listing '$listing' could not be opened" >&2
       return 1
     fi
+    # A NUL IS NOT A SEPARATOR AND NOT PART OF A NAME, so a listing holding one
+    # is a caller who wrote records where lines were asked for. read_file says so
+    # with a status, which is what stops a caller reading past it.
+    if (( read_status == 3 )); then
+      echo "branch-name-policy: findings listing '$listing' holds a NUL byte, which" >&2
+      echo "  no filename can contain and no line ending is, so its records cannot be" >&2
+      echo "  read as names. Write it with LF or CRLF line endings, one finding" >&2
+      echo "  filename per line." >&2
+      return 1
+    fi
     if (( read_status != 0 )); then
       echo "branch-name-policy: findings listing '$listing' could not be read to the" >&2
       echo "  end, so the names in it are not known. That is refused rather than read" >&2
@@ -1375,15 +1523,6 @@ read_listing() {
       if [[ -n "$file_error" ]]; then
         indent "$file_error"
       fi
-      return 1
-    fi
-    # A NUL IS NOT A SEPARATOR AND NOT PART OF A NAME, so a listing holding one
-    # is a caller who wrote records where lines were asked for.
-    if (( file_has_nul )); then
-      echo "branch-name-policy: findings listing '$listing' holds a NUL byte, which" >&2
-      echo "  no filename can contain and no line ending is, so its records cannot be" >&2
-      echo "  read as names. Write it with LF or CRLF line endings, one finding" >&2
-      echo "  filename per line." >&2
       return 1
     fi
     out="$file_bytes"
