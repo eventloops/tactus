@@ -923,7 +923,7 @@ listing_toplevel=''
 listing_relpath=''
 
 locate_listing() {
-  local path="$1" anchor entered=0 said top prefix rest component index above=0
+  local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
   local prefixes rests
   listing_world=''
   listing_toplevel=''
@@ -998,6 +998,16 @@ locate_listing() {
   # tree's root. What is left is the listing's name in the index, and no part of
   # it has been resolved on the filesystem.
   #
+  # A RELATIVE PATH IS EXTENDED BY `$PWD` FIRST, and lexically: the components a
+  # caller names are the ones they typed PLUS the ones the shell is standing in,
+  # and a chain that starts at `.` cannot reach a root above it. Run from
+  # `reviews/`, the listing `findings` is `reviews/findings` in the index and
+  # nothing else -- and a chain of `.` then `findings` matches no root, which
+  # refused an ordinary by-hand invocation the previous head accepted. `$PWD` is
+  # the shell's own spelling of where it is, so this stays the caller's
+  # components throughout; the INODE match below is what lets that spelling and
+  # the physical root git reports be the same directory.
+  #
   # Deepest first rather than shallowest, because the shortest name is the one
   # the index can hold: `../../repo/reviews/findings` run from `repo/reviews`
   # meets the root at `..` on the way down and would be named
@@ -1007,12 +1017,17 @@ locate_listing() {
   # link points back inside the same work tree.
   prefixes=()
   rests=()
-  if [[ "$path" == /* ]]; then
+  case "$path" in
+    /*) spelled="$path" ;;
+    .) spelled="${PWD:-.}" ;;
+    *) spelled="${PWD:-.}/$path" ;;
+  esac
+  if [[ "$spelled" == /* ]]; then
     prefix='/'
-    rest="${path#/}"
+    rest="${spelled#/}"
   else
     prefix='.'
-    rest="$path"
+    rest="$spelled"
   fi
   while :; do
     prefixes[${#prefixes[@]}]="$prefix"

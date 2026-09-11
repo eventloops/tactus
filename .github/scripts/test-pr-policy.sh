@@ -2446,6 +2446,37 @@ if [[ -L "$symlink_probe" ]]; then
   fi
 fi
 
+# A RELATIVE LISTING IS RELATIVE TO WHERE THE SHELL IS STANDING, and the
+# components a caller names are the ones they typed PLUS the ones `$PWD` holds.
+# Run from a checkout's `reviews/`, the listing `findings` is `reviews/findings`
+# in the index and nothing else -- and a prefix chain that starts at `.` reaches
+# no root above it, which refused an ordinary by-hand invocation that every
+# earlier head accepted. Three spellings of one directory, from three different
+# working directories, and each must resolve the finding that is there.
+relative_repo="$fixture_dir/repo-relative-listing"
+new_repo "$relative_repo"
+commit_finding "$relative_repo" 'P3_liveness_202609100015_named-relatively.md' 'a real finding'
+relative_case() {  # relative_case <label> <cwd> <listing>
+  if ! ( cd "$2" && PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P3/liveness_named-relatively' "$3" >/dev/null 2>&1 ); then
+    echo "a relative listing must resolve the finding it holds: $1" >&2
+    exit 1
+  fi
+}
+relative_case 'from the work tree root' "$relative_repo" 'reviews/findings'
+relative_case 'from reviews/'           "$relative_repo/reviews" 'findings'
+relative_case 'from the directory itself' "$relative_repo/reviews/findings" '.'
+# And a relative path that is NOT the ledger's directory still holds nothing:
+# the rule is about naming the path, not about accepting every relative one.
+relative_miss_rc=0
+( cd "$relative_repo/reviews" && PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  "$BASH" "$branch_validator" 'fix-P3/liveness_not-in-this-directory' 'findings' >/dev/null 2>&1 ) \
+  || relative_miss_rc=$?
+if [[ "$relative_miss_rc" != 1 ]]; then
+  echo "a relative listing must still refuse a name it does not hold; got $relative_miss_rc" >&2
+  exit 1
+fi
+
 # AND THE LONG WAY ROUND IS THE SAME PATH. The work tree's root is matched
 # against the caller's own components, and a spelling that passes the root on
 # the way down and comes back to it -- `../../<repo>/reviews/findings` from
