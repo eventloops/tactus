@@ -69,6 +69,18 @@ use crate::topology::effects::{
 };
 use crate::topology::paths::GitPath;
 
+// The replacement-isolation witnesses run a **role process** over a snapshot,
+// which is the half `command`'s own isolation never covered. They need the
+// production runner and the production request builder, not a `Command` of
+// their own: what is being asserted is that `HostEnvironment::compose` puts the
+// pair in the vector `HostRunner::run` installs after `env_clear`.
+use crate::agent::ProcessOutput;
+use crate::runner::host::{HostEnvironment, HostRunner, KeyCase};
+use crate::runner::invocation::{AttemptRole, InvocationId};
+use crate::runner::{CommandSpec, Runner};
+use crate::topology::events::{AttemptNumber, GenerationId};
+use crate::topology::registry::TaskKey;
+
 /// A harness that answers `Proceed` and records everything.
 fn harness() -> (HarnessEffects, Arc<Mutex<HookHarness>>) {
     let shared = Arc::new(Mutex::new(HookHarness::new()));
@@ -5816,6 +5828,200 @@ fn a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree() {
         .manager
         .remove_snapshot(&mut NoHooks, &snapshot)
         .expect("Snapshot.Remove + Snapshot.RemoveIntent");
+}
+
+/// A base that does not carry [`NO_REPLACEMENT_OBJECTS`], so a role process
+/// composed from it cannot pass by inheriting the operator's own value.
+///
+/// `HostEnvironment::from_process` is the production base and `HostRunner::run`
+/// clears the ambient environment before installing what `compose` returned; a
+/// suite that took the process environment unfiltered would be asserting about
+/// whatever the machine running it happened to export.
+fn base_without_replacement_isolation() -> HostEnvironment {
+    let case = KeyCase::current();
+    let base: Vec<(OsString, OsString)> = std::env::vars_os()
+        .filter(|(key, _)| !case.same_key(key, std::ffi::OsStr::new(NO_REPLACEMENT_OBJECTS.0)))
+        .collect();
+    HostEnvironment::with_base(base, case)
+}
+
+/// One `git` gate, run through the production runner in `workspace`.
+fn gate_in(runner: &HostRunner, workspace: &Path, args: &[&str]) -> ProcessOutput {
+    let request = crate::runner::gate_request(
+        CommandSpec {
+            program: "git".to_owned(),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            env: Vec::new(),
+            stdin: Vec::new(),
+        },
+        workspace.to_path_buf(),
+        std::time::Duration::from_secs(120),
+        InvocationId::attempt(
+            TaskKey(0),
+            GenerationId(0),
+            AttemptNumber(1),
+            AttemptRole::Gate(0),
+            0,
+        ),
+    );
+    let output = runner.run(&request).expect("the gate ran");
+    assert_eq!(
+        output.code,
+        Some(0),
+        "git {args:?} in {}: {output:?}",
+        workspace.display()
+    );
+    output
+}
+
+/// A **role process** inside a snapshot reads the judged tree too (PR #130,
+/// pass 3's P1, `PR130-REVIEW3-REPLACEMENT-ISOLATION-STOPS-AT-THE-MANAGER`).
+///
+/// `a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree`
+/// pins the snapshot's *filesystem*, and that was the whole of the guarantee:
+/// it asserts bytes and the raw commit and never runs a role process, so it
+/// could not see that a gate or a reviewer inside the snapshot got the
+/// environment its runner composes -- which clears the ambient one -- and read
+/// the replacement through Git. Measured on git 2.43 before the repair: `git
+/// show HEAD:replaced.txt` printed `B` and `git status --porcelain` reported
+/// `M  replaced.txt` against a checkout nothing had touched, so a gate reading
+/// the tree through Git judged one tree and a gate reading the filesystem
+/// judged another.
+///
+/// The witness is the production [`HostRunner`] over the production
+/// [`WorkspaceManager`] snapshot, because the composition is exactly what was
+/// missing: a unit assertion on `compose` alone would not have caught a runner
+/// that composed the pair and then dropped it. The base deliberately carries no
+/// `GIT_NO_REPLACE_OBJECTS`, so nothing here can pass by inheritance.
+///
+/// Witnessed failing with the pair removed from `HostEnvironment::compose`:
+/// `git show` printed `B`, and `git status --porcelain` printed `M
+/// replaced.txt`.
+#[test]
+fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
+    let fixture = Fixture::created("replace-role-process");
+    let file = fixture.base.join("replaced.txt");
+
+    fs::write(&file, "A\n").expect("the judged content");
+    git(&fixture.base, &["add", "replaced.txt"]);
+    git(&fixture.base, &["commit", "-q", "-m", "the judged tree"]);
+    let judged_commit = git(&fixture.base, &["rev-parse", "HEAD"]);
+    let judged_tree = git(&fixture.base, &["rev-parse", "HEAD^{tree}"]);
+
+    fs::write(&file, "B\n").expect("the other content");
+    git(&fixture.base, &["add", "replaced.txt"]);
+    git(&fixture.base, &["commit", "-q", "-m", "the other tree"]);
+    let other_commit = git(&fixture.base, &["rev-parse", "HEAD"]);
+    let other_tree = git(&fixture.base, &["rev-parse", "HEAD^{tree}"]);
+    assert_ne!(judged_tree, other_tree, "two distinct trees");
+
+    git(
+        &fixture.base,
+        &["checkout", "--detach", "--quiet", &judged_commit],
+    );
+    git(&fixture.base, &["replace", &judged_tree, &other_tree]);
+    assert_eq!(
+        git(&fixture.base, &["replace", "-l"]),
+        judged_tree,
+        "the replacement is in place"
+    );
+
+    let snapshot = fixture
+        .manager
+        .add_snapshot(
+            &mut NoHooks,
+            &SnapshotName::gates(1, 1),
+            &SnapshotInput::Tree {
+                tree: oid(&judged_tree),
+                parent: oid(&other_commit),
+            },
+        )
+        .expect("the judged tree is a tree of this repository");
+
+    // The fixture pins `core.autocrlf=false` and `core.eol=lf`, so what a role
+    // process reads back is the blob and not the platform's line endings.
+    assert_eq!(
+        fs::read_to_string(snapshot.path().join("replaced.txt")).expect("the checkout"),
+        "A\n",
+        "the manager's own commands already materialise the judged tree"
+    );
+
+    let runner = HostRunner::new().with_environment(base_without_replacement_isolation());
+    let shown = gate_in(&runner, snapshot.path(), &["show", "HEAD:replaced.txt"]);
+    assert_eq!(
+        shown.stdout, "A\n",
+        "a gate reading the snapshot through Git read the object `git replace` \
+         points at, not the tree the snapshot was taken of"
+    );
+    let status = gate_in(&runner, snapshot.path(), &["status", "--porcelain"]);
+    assert_eq!(
+        status.stdout.trim(),
+        "",
+        "a gate saw the untouched snapshot as dirty, because Git compared its \
+         index against the replacing tree"
+    );
+
+    fixture
+        .manager
+        .remove_snapshot(&mut NoHooks, &snapshot)
+        .expect("Snapshot.Remove + Snapshot.RemoveIntent");
+}
+
+/// Quiescence answers about the tree the worktree holds, not about whatever
+/// `git replace` points that tree at (PR #130, pass 3's P1).
+///
+/// `quiescence` reaches Git through the free [`read_only_git`], which is
+/// outside [`WorkspaceManager::command`] and so was outside the isolation the
+/// manager's own commands had. `Quiescence::HoldsTree` is answered by
+/// `diff-index --cached --quiet <tree>`, and Git resolves `<tree>` through
+/// `refs/replace/*` like any other name: measured on git 2.43, that exit code
+/// moves from 0 to 1 the moment a replacement of the recorded tree is
+/// installed, and an untouched worktree becomes a `TreeMismatch` that routes to
+/// forced removal and a fresh add.
+///
+/// Witnessed failing with the pair removed from `read_only_git`:
+/// `Err(TreeMismatch { expected: <head tree>, difference: "2 path(s) differ:
+/// a.txt, b.txt" })` over a worktree nothing had written to.
+#[test]
+fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
+    let fixture = Fixture::created("replace-quiescence");
+    let slot = fixture.add_task(&mut NoHooks, "q", 1);
+    let path = fixture
+        .manager
+        .slot_target(&slot)
+        .expect("the worktree path");
+
+    let held = git(&path, &["rev-parse", "HEAD^{tree}"]);
+    let other = git(&fixture.base, &["rev-parse", &format!("{}^{{tree}}", fixture.seed)]);
+    assert_ne!(held, other, "two distinct trees");
+
+    assert!(
+        matches!(
+            fixture
+                .manager
+                .verify_worktree(&mut NoHooks, &slot, &Quiescence::HoldsTree(held.clone()))
+                .expect("verify"),
+            Ok(())
+        ),
+        "the worktree holds its own tree before anything is installed"
+    );
+
+    git(&fixture.base, &["replace", &held, &other]);
+    assert_eq!(
+        git(&fixture.base, &["replace", "-l"]),
+        held,
+        "the replacement is in place"
+    );
+
+    let verdict = fixture
+        .manager
+        .verify_worktree(&mut NoHooks, &slot, &Quiescence::HoldsTree(held.clone()))
+        .expect("verify");
+    assert!(
+        matches!(verdict, Ok(())),
+        "a worktree nothing wrote to is quiescent; Git answered about \
+         `refs/replace/{held}` instead: {verdict:?}"
+    );
 }
 
 /// A full object id of the wrong type for its role is refused as what it is:
