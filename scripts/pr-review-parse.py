@@ -52,10 +52,12 @@ Three rules keep that true.
 
 * **The write is confirmed before the exit status is decided.** `write()` returning EIO is the
   defect the seventh round found, and a buffered write that is never flushed is that defect
-  waiting to happen. The payload is written to a neighbouring `.part` file, flushed, `fsync`ed and
-  CLOSED -- each of which raises rather than returning a status -- and only then renamed over the
-  destination. A destination file therefore never exists in a partial state, whatever the caller
-  does with the exit code.
+  waiting to happen. The payload is written to a staging file THIS INVOCATION CREATED, beside the
+  destination, flushed, `fsync`ed and CLOSED -- each of which raises rather than returning a status
+  -- and only then renamed over the destination. A destination file therefore never exists in a
+  partial state, whatever the caller does with the exit code. The staging name is unique because a
+  fixed one is shared: two parses publishing to one destination overlapped on `OUT.part`, and the
+  slower one renamed the faster one's bytes into place under its own exit 0.
 
 * **Completeness is not signalled in the data.** It is the exit status, which review content
   cannot reach, and -- for the flat rendering the shell reads -- a field count the shell checks
@@ -94,6 +96,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 # ---- what a field may be ------------------------------------------------------------------------
 
@@ -144,8 +147,30 @@ MUST_WORD = re.compile(r"\bMUST\b", re.ASCII)
 # prose review that merely QUOTES a JSON object is prose, because the fence has to open a line of
 # its own.
 IS_JSON_FORM = re.compile(r"^```json|\"role_understanding\"", re.M)
-FENCED_OBJECT = re.compile(r"```json\s*(\{.*?\})\s*```", re.S)
-BARE_OBJECT = re.compile(r"(\{\"role_understanding.*\})", re.S)
+
+# WHICH BLOCK IS THE VERDICT IS DECIDED BEFORE WHETHER IT IS WHOLE, and these two patterns are why
+# that order is written out rather than left to one regex.
+#
+# The pattern this replaces was ```` ```json\s*(\{.*?\})\s*``` ````, and the verdict was
+# `findall(...)[-1]`: the LAST block THAT HOLDS A WHOLE OBJECT. Those are the two operations in the
+# wrong order. A final block missing its closing fence, or its final `}`, is not a match at all, so
+# `[-1]` names an EARLIER one -- and a comment holding a complete `PASS` as an example above the
+# real, truncated `CHANGES_REQUIRED` was judged on the example. The truncated object's own
+# severities are invisible to the stray scan that would otherwise have flagged it, because JSON
+# spells them with escapes: `"severity":"P\u0031"` holds no `P1` to find. A TRUNCATED REVIEW HAS NO
+# VERDICT; IT DOES NOT HAVE ITS PREVIOUS VERDICT. So the last block is identified first, from its
+# opening fence alone, and its completeness is then a question with two answers -- whole, or a
+# failed parse -- neither of which is an earlier block.
+#
+# Both fences are anchored to the start of a line, which is CommonMark's rule for a fence and, over
+# every review comment in this repository, the rule that tells the block's own fences from the
+# backticks a finding quotes INSIDE it: a `failure_sequence` describing a code span carries
+# ```` ``` ```` mid-line, and an unanchored search for the close ends the block inside that string.
+JSON_FENCE_OPEN = re.compile(r"^```json", re.M)
+JSON_FENCE_CLOSE = re.compile(r"^```", re.M)
+# The older bare form has no fence, so its last block runs from the last object opener to the last
+# `}` in the comment. Same rule, same order: identified first, then required to be whole.
+BARE_OBJECT_OPEN = re.compile(r"\{\"role_understanding")
 
 # The prose form, read exactly as the shell read it. `[^ \t\n\r\f\v]` is POSIX `[^[:space:]]` in
 # the `C` locale, which is what the greps were given.
@@ -264,17 +289,45 @@ def finding(one):
     }
 
 
+def last_verdict_block(text):
+    """The text of the workflow form's LAST verdict block, or None when it carries no block at all.
+
+    IDENTIFIED BY ITS OPENING ALONE. Whether the block is whole is decided afterwards, by the
+    caller, and a block that is not whole raises here or there -- never resolves to the block
+    before it. That is the whole point of this being a separate step: a review whose real verdict
+    was cut off does not fall back on the `PASS` it quoted as an example.
+    """
+    opened = list(JSON_FENCE_OPEN.finditer(text))
+    if opened:
+        closed = JSON_FENCE_CLOSE.search(text, opened[-1].end())
+        if closed is None:
+            raise Unparsed("the review's last ```json block does not close")
+        return text[opened[-1].end():closed.start()].strip()
+    opened = list(BARE_OBJECT_OPEN.finditer(text))
+    if opened:
+        end = text.rfind("}")
+        if end < opened[-1].start():
+            raise Unparsed("the review's last verdict object does not close")
+        return text[opened[-1].start():end + 1]
+    return None
+
+
 def parse_json_review(text):
-    """The workflow form: the last fenced JSON object is the verdict, and it is the only source.
+    """The workflow form: the last JSON object is the verdict, and it is the only source.
 
     Anything in the comment outside that object which looks like a finding is for a person, and is
     reported as a stray token rather than counted as a finding.
     """
-    found = FENCED_OBJECT.findall(text) or BARE_OBJECT.findall(text)
-    try:
-        verdict = json.loads(found[-1]) if found else None
-    except ValueError:
-        verdict = None
+    block = last_verdict_block(text)
+    verdict = None
+    if block is not None:
+        try:
+            verdict = json.loads(block)
+        except ValueError as exc:
+            # The last block IS the verdict, and this one does not read as a whole object. Reaching
+            # past it to an earlier one is the defect; reporting it as a review with no findings is
+            # the same defect wearing the other hat. There is no complete result here.
+            raise Unparsed("the review's last verdict object is not whole: %s" % exc)
     if not isinstance(verdict, dict) or not isinstance(verdict.get("findings"), list):
         # The comment announces the workflow form and carries no verdict object this can read.
         # That is a complete description of the review -- it records nothing, and it carries one
@@ -287,7 +340,7 @@ def parse_json_review(text):
             "stray": stray_summary(text),
             "findings": [{"severity": "ERR", "id": "unparsed", "flags": 0}],
         }
-    outside = text.replace(found[-1], "")
+    outside = text.replace(block, "")
     return {
         "kind": "json",
         "reviewed_sha": matching(verdict.get("reviewed_sha"), SHA),
@@ -453,6 +506,15 @@ def write_result(payload, out):
     finds the device full, a `close()` that fails -- each ends the program non-zero with no
     destination file to read. That is the finding this program was written for, and it is closed
     by construction rather than by a check somebody has to remember.
+
+    THE STAGING FILE IS CREATED BY THIS INVOCATION AND BELONGS TO IT. `OUT + ".part"` is one
+    pathname shared by every process writing to one destination, and two of them overlapping is not
+    a theoretical shape: A flushes its blocking review and pauses in `fsync`, B truncates the same
+    staging file and writes a clean `PASS` over it, A wakes and renames B's bytes into A's
+    destination -- exit 0, publishing a verdict out of an input it never read. `mkstemp` creates
+    with `O_EXCL` under a name nothing else holds, in the destination's own directory so the rename
+    stays within one filesystem and stays atomic. Standards section 8: a unique staging path, never
+    a fixed temporary name concurrent writers can collide on.
     """
     if out is None:
         sys.stdout.buffer.write(payload)
@@ -462,12 +524,19 @@ def write_result(payload, out):
         # has already reported success.
         sys.stdout.close()
         return
-    part = out + ".part"
+    handle_fd, part = tempfile.mkstemp(
+        dir=os.path.dirname(out) or os.curdir, prefix=os.path.basename(out) + ".", suffix=".part"
+    )
     try:
-        with open(part, "wb") as handle:
+        with os.fdopen(handle_fd, "wb") as handle:
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+        # `mkstemp` creates 0600, and the destination is what a plain create would have left there.
+        # Making the staging path unique is not also a licence to change what the caller reads.
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(part, 0o666 & ~mask)
         os.replace(part, out)
     except OSError:
         try:

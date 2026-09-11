@@ -124,6 +124,22 @@
 #                                from outside its verdict object and misses every severity the
 #                                object spells with a JSON escape. Detection is inside the one
 #                                parser now, so a file it cannot read has no format at all
+#   MUT-RETARGET-ANSWER-UNCHECKED  a helper's ANSWER is a write, and the write's failure was
+#                                discarded: `{ echo yes; return 0; }` left the caller an empty
+#                                string and a status of 0, `[[ "$x" == yes ]]` read that as "the
+#                                base did not change", and a pull request retargeted since its
+#                                review enqueued. The same case covers every channel that carries
+#                                an answer back: the retarget `yes`/`no`, the ruleset's two flags,
+#                                the comment id, and the lane's severity set -- each names its
+#                                permissive answer and blocks on everything else
+#   MUT-VERDICT-REVIVED-BY-TRUNCATION  the workflow form's verdict was the last block THAT PARSED
+#                                rather than the last block, so a final object missing its closing
+#                                fence or its final `}` was stepped over and the `PASS` quoted
+#                                above it as an example became the verdict -- with the real
+#                                object's `"P\u0031"` invisible to the stray scan
+#   MUT-STAGING-PATH-SHARED      the staging pathname was derived from the destination, so every
+#                                invocation publishing to one destination used one file: two of
+#                                them overlapping renamed one's bytes under the other's exit 0
 #   MUT-HERESTRING-FAILURE-AS-ANSWER  a value was fed to a command through `<<<`, which spills to
 #                                a temporary file once it outgrows a pipe buffer: a file bash
 #                                cannot create is a redirection that failed, the command never
@@ -159,6 +175,14 @@ expect MUT-LANE-LABEL-INPUT "$(lane_for fix/sampler-kill-and-inspection)" featur
 expect MUT-P3-LANE-DEFERS "$(must_fix_for findings-p3)" "P0 P1 P2 P3"
 expect MUT-P3-LANE-DEFERS "$(must_fix_for findings-p1p2)" "P0 P1 P2"
 expect MUT-P3-LANE-DEFERS "$(must_fix_for feature)" "P0 P1"
+# A lane this does not know is not a lane with nothing to fix in it: `[[ "  " == *" P1 "* ]]` is
+# false, so an empty must-fix set makes every severity in every review deferrable. The permissive
+# answer is said, never fallen into.
+for unknown in "" lane:feature findings feature-ish FEATURE; do
+  if must_fix_for "$unknown" > "$tmp/lane.out" 2>&1; then
+    error "MUT-P3-LANE-DEFERS: lane [$unknown] was answered with [$(cat "$tmp/lane.out")]"
+  fi
+done
 
 # --- whose review counts ------------------------------------------------------------------------
 # A User owner stands in for the reviewer; that is the pre-organization behaviour and it stays.
@@ -304,6 +328,8 @@ unset UPSTROKE_AUDIT_REVIEWER
 # other two by `for x in $(gh api ...)`, which iterates zero times either way. A pull request whose
 # reviewer had blocked it enqueued on an older PASS because of the first. The stub `gh` here fails
 # every call, and each helper must report that rather than answer.
+empty_path_early="$tmp/empty-path-early"
+mkdir -p "$empty_path_early"
 failing="$tmp/failing-gh"
 mkdir -p "$failing"
 printf '#!/usr/bin/env bash\necho "GH-FAILED $*" >&2\nexit 1\n' > "$failing/gh"
@@ -337,10 +363,54 @@ expect MUT-TIMELINE-LOOKUP-SUPPRESSED \
 expect MUT-TIMELINE-LOOKUP-SUPPRESSED \
   "$( (PATH="$silent:$PATH"; repo=o/r; base_changed_after 999 2026-09-01T00:00:00Z) )" no
 
+# --- the answer itself is a write, and a write is a thing that can fail --------------------------
+# THE LOOKUP SUCCEEDING IS NOT THE ANSWER ARRIVING. `{ echo yes; return 0; }` discarded the status
+# of the one write that carries the blocking answer out of this helper: with that write failing,
+# the helper exited 0 having said nothing, the caller's `[[ "$retargeted" == yes ]]` read the empty
+# string as "the base did not change", and a pull request retargeted since its review was enqueued
+# -- exit 0, one merge call. `/dev/full` is a real device whose every write returns ENOSPC, so this
+# is the failure itself and not a stand-in for it.
+full_status=0
+( PATH="$timeline:$PATH"; repo=o/r; base_changed_after 999 2026-09-01T00:00:00Z > /dev/full ) 2>/dev/null \
+  || full_status=$?
+((full_status != 0)) \
+  || error 'MUT-RETARGET-ANSWER-UNCHECKED: a [yes] whose write failed was reported as an answer'
+# The other branch is held to the same rule, so the case above is about the write and not about
+# which answer it was carrying.
+full_status=0
+( PATH="$timeline:$PATH"; repo=o/r; base_changed_after 999 2026-09-09T00:00:00Z > /dev/full ) 2>/dev/null \
+  || full_status=$?
+((full_status != 0)) \
+  || error 'MUT-RETARGET-ANSWER-UNCHECKED: a [no] whose write failed was reported as an answer'
+
+# AND AN ANSWER THAT ARRIVED IS ONE OF TWO WORDS. Everything else -- the empty string a partial or
+# discarded write leaves behind most of all -- used to fall into `no`, which is the answer that
+# lets a merge happen. The permissive answer has to be said. `retarget_blocker` sets a variable and
+# runs no command, for the reason `audit_state` does, so these cases run it with an EMPTY PATH:
+# a rewrite that reaches for an external command fails here whatever it reaches for.
+blocker_of() {  # blocker_of ANSWER: the blocker that answer calls for, or nothing
+  retarget_why="not-set"
+  retarget_blocker "$1"
+  printf '%s' "$retarget_why"
+}
+expect MUT-RETARGET-ANSWER-UNCHECKED "$(PATH="$empty_path_early" blocker_of no)" ""
+expect MUT-RETARGET-ANSWER-UNCHECKED "$(PATH="$empty_path_early" blocker_of yes)" retargeted-after-review
+for junk in "" " " YES Yes yes-ish "yes " " yes" no-ish "no " 0 1 true false; do
+  expect "MUT-RETARGET-ANSWER-UNCHECKED [$junk]" "$(PATH="$empty_path_early" blocker_of "$junk")" \
+    timeline-answer-unreadable
+done
+
 if (PATH="$failing:$PATH"; repo=o/r; ruleset_state) > "$tmp/rs.out" 2>&1; then
   error "MUT-RULESET-LOOKUP-SUPPRESSED: an unreadable ruleset list was answered, got [$(cat "$tmp/rs.out")]"
 fi
 expect MUT-RULESET-LOOKUP-SUPPRESSED "$( (PATH="$silent:$PATH"; repo=o/r; ruleset_state) )" "0 0"
+# The same helper's answer is also a write, and its caller splits it by expansion: `${x%% *}` on
+# anything but two flags and a space yields a `strict_up_to_date` that `((...))` reads as 0, which
+# drops the BEHIND blocker for every pull request in the run.
+ruleset_full_status=0
+( PATH="$silent:$PATH"; repo=o/r; ruleset_state > /dev/full ) 2>/dev/null || ruleset_full_status=$?
+((ruleset_full_status != 0)) \
+  || error "MUT-RETARGET-ANSWER-UNCHECKED: a ruleset state whose write failed reported success"
 
 # --- a list is not complete until the API says it is --------------------------------------------
 # GitHub pages every collection and defaults this endpoint to 30. Thirty rulesets in any state hid
@@ -511,7 +581,7 @@ case "$*" in
   *check-runs*)               printf 'upstroke-ci\t10\tsuccess\nupstroke-pr-policy\t11\tsuccess\n' ;;
   *"/pulls?state=open"*)      exit "${STUB_PULLS_STATUS:-0}" ;;
   *timeline*)                 ;;                                 # no base change
-  *"/comments?per_page=100"*) [[ -n "${STUB_REVIEW_BODY:-}" ]] && echo "2026-09-01T00:00:00Z 5001"
+  *"/comments?per_page=100"*) [[ -n "${STUB_REVIEW_BODY:-}" ]] && echo "2026-09-01T00:00:00Z ${STUB_REVIEW_ID:-5001}"
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
@@ -537,6 +607,22 @@ got="$(run_lookup 0)"
 contains MUT-REVIEW-LOOKUP-SUPPRESSED "$got" "blockers=no-review"
 [[ "$got" == *review-lookup-failed* ]] && error "MUT-REVIEW-LOOKUP-SUPPRESSED: a completed lookup was reported as failed"
 
+# The third answer that channel can carry. A comment id is a number, and the two API paths built
+# from it are the last thing it passes through; a value that is neither empty nor a number is a
+# lookup that came back with something nobody checked, and it is not a review to go and fetch.
+printf '```json\n{"verdict":"PASS","findings":[]}\n```\n' > "$tmp/id-check-review.md"
+for bad_id in "not-a-number" "-5001" "5001;x" "P1" "0x10" "5001.0"; do
+  got="$(STUB_REVIEW_BODY="$tmp/id-check-review.md" STUB_REVIEW_ID="$bad_id" run_lookup 0)"
+  contains "MUT-RETARGET-ANSWER-UNCHECKED id [$bad_id]" "$got" "review-id-unreadable"
+  contains "MUT-RETARGET-ANSWER-UNCHECKED id [$bad_id]" "$got" "NOT-READY"
+  [[ "$got" == *GH-UNSTUBBED* ]] \
+    && error "MUT-RETARGET-ANSWER-UNCHECKED: the audit fetched a comment id it could not read: [$got]"
+done
+# and a number still reaches the fetch, so the case above is about the shape of the id.
+got="$(STUB_REVIEW_BODY="$tmp/id-check-review.md" run_lookup 0)"
+[[ "$got" == *review-id-unreadable* ]] \
+  && error "MUT-RETARGET-ANSWER-UNCHECKED: a numeric comment id was refused"
+
 run_stub() {  # run_stub ARG...: "<exit status>|<output, on one line>", against the stub above
   local out status=0
   out="$(PATH="$lookup:$PATH" bash scripts/pr-ready-audit.sh "$@" 2>&1)" || status=$?
@@ -554,6 +640,35 @@ contains MUT-PR-LOOKUP-SUPPRESSED "$got" "NOT-READY"
 # failure and not about the stub.
 got="$(run_stub 999)"
 [[ "$got" == *pr-lookup-failed* ]] && error "MUT-PR-LOOKUP-SUPPRESSED: a readable pull request was reported unreadable"
+
+# A ruleset state that is not two flags is not a ruleset state. `ruleset_state` can only write the
+# four, so this drives `main` with the helper replaced -- which is what a partial write, or a
+# rewrite of that helper, would leave it holding. `${rulesets%% *}` on anything else yields a
+# `strict_up_to_date` that `((...))` reads as 0, and that drops the BEHIND blocker for every pull
+# request in the run, so the value is checked whole before it is split.
+ruleset_answer_run() {  # ruleset_answer_run ANSWER: "<status>|<output>" with ruleset_state saying ANSWER
+  local out status=0
+  out="$(
+    RULESET_ANSWER="$1"
+    ruleset_state() { printf '%s\n' "$RULESET_ANSWER"; }
+    PATH="$lookup:$PATH" main --reviewer eventloops 999 2>&1
+  )" || status=$?
+  printf '%s|%s' "$status" "$(printf '%s' "$out" | tr '\n' ' ')"
+}
+for bad_rulesets in "" "0" "1" "0 0 0" "yes no" "0  0" " 0 0"; do
+  got="$(ruleset_answer_run "$bad_rulesets")"
+  contains "MUT-RETARGET-ANSWER-UNCHECKED rulesets [$bad_rulesets]" "$got" \
+    "2|refusing: eventloops/upstroke's ruleset state read back as [$bad_rulesets]"
+  [[ "$got" == *"#999"* ]] \
+    && error "MUT-RETARGET-ANSWER-UNCHECKED: the audit judged a pull request on a ruleset state it could not read"
+done
+# The four real answers still run, so the case above is about the shape and not about the check.
+for good_rulesets in "0 0" "0 1" "1 0" "1 1"; do
+  got="$(ruleset_answer_run "$good_rulesets")"
+  contains "MUT-RETARGET-ANSWER-UNCHECKED rulesets [$good_rulesets]" "$got" "#999"
+  [[ "$got" == *"ruleset state read back"* ]] \
+    && error "MUT-RETARGET-ANSWER-UNCHECKED: [$good_rulesets] was refused as a ruleset state"
+done
 
 # With no arguments the audit walks the open pull requests. An unread list became an empty one: a
 # header, no rows, exit 0 -- which is what "every pull request was audited and none was ready"
@@ -670,6 +785,61 @@ expect "MUT-JSON-SPLIT-BY-REGEX/MUT-NULL-WITNESS/MUT-MUST-UNSEEN/MUT-BAD-SEVERIT
 expect MUT-PARSE-PAYLOAD-COUNT "$(parse_nul review "$tmp/json.md")" \
   '0|review|json|4ad962f000000000000000000000000000000001|CHANGES_REQUIRED|5157509000000000000000000000000000000002|P1|5|P3|A-DEFERRABLE|0|P2|B-WITNESSED|1|P2|C-MUST|2|ERR|bad-severity:D-BAD|0|P3|E.DOTTED|0|'
 
+# --- an incomplete final verdict is not a licence to take the previous one -----------------------
+# THE LAST BLOCK IS THE VERDICT, AND WHETHER IT IS WHOLE IS ASKED AFTER IT HAS BEEN IDENTIFIED.
+# The pattern this replaces matched only blocks that HOLD A WHOLE OBJECT and then took the last of
+# those, which is the two operations in the wrong order: with the final closing fence removed, or
+# the final `}`, the real verdict was not a match at all and `[-1]` named the `PASS` quoted above
+# it as an example. The severity is written `P\u0031`, as the review that found this wrote it,
+# because a JSON escape carries no `P1` for the stray scan to catch -- so nothing else was left to
+# block: the parser reported PASS with zero findings and exit 0, and the audit READY with a merge
+# call. A truncated review has no verdict; it does not have its previous verdict.
+revived_head=4ad962f000000000000000000000000000000001
+revived_base=5157509000000000000000000000000000000002
+{ printf 'Reviewed head: %s\n\nAn earlier pass, kept as an example of the shape:\n\n' "$revived_head"
+  printf '```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[]}\n```\n' \
+    "$revived_head" "$revived_base"
+  printf '\nUnedited verdict:\n\n```json\n'
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}' \
+    "$revived_head" "$revived_base"
+  printf '\n'; } > "$tmp/revived-body.txt"
+{ cat "$tmp/revived-body.txt"; printf '```\n'; } > "$tmp/revived-whole.md"
+cp "$tmp/revived-body.txt" "$tmp/revived-no-fence.md"
+{ head -c -2 "$tmp/revived-body.txt"; printf '\n```\n'; } > "$tmp/revived-no-brace.md"
+# Whole, the real verdict is the one that counts and its escaped severity is a finding.
+expect MUT-VERDICT-REVIVED-BY-TRUNCATION "$(review_rows "$tmp/revived-whole.md")" \
+  "0|json/$revived_head/CHANGES_REQUIRED/$revived_base/-;P1:CRITICAL:0"
+# Cut either way, there is no verdict at all -- not the one above it.
+for cut in no-fence no-brace; do
+  got="$(review_rows "$tmp/revived-$cut.md")"
+  [[ "$got" == 0\|* ]] \
+    && error "MUT-VERDICT-REVIVED-BY-TRUNCATION [$cut]: a truncated review parsed, got [$got]"
+  [[ "$got" == *PASS* ]] \
+    && error "MUT-VERDICT-REVIVED-BY-TRUNCATION [$cut]: an earlier PASS was revived, got [$got]"
+  # and nothing was written where a caller ignoring the status would read it
+  expect "MUT-VERDICT-REVIVED-BY-TRUNCATION [$cut] payload" \
+    "$(parse_nul review "$tmp/revived-$cut.md")" '1|'
+done
+# Through main, because the parser refusing is only half of it: READY and a merge call is what the
+# audit did with the revived PASS.
+for cut in no-fence no-brace; do
+  got="$(STUB_REVIEW_BODY="$tmp/revived-$cut.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+  contains "MUT-VERDICT-REVIVED-BY-TRUNCATION [$cut]" "$got" "review-parse-failed"
+  contains "MUT-VERDICT-REVIVED-BY-TRUNCATION [$cut]" "$got" "NOT-READY"
+  [[ "$got" == *"verdict=PASS"* ]] \
+    && error "MUT-VERDICT-REVIVED-BY-TRUNCATION [$cut]: the audit read PASS out of a truncated review"
+done
+# The same comment whole still reaches the audit as the blocking review it is, so the cases above
+# are about the truncation and not about the fixture.
+got="$(STUB_REVIEW_BODY="$tmp/revived-whole.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-VERDICT-REVIVED-BY-TRUNCATION "$got" "open-P1:CRITICAL"
+# A block whose fences the review quotes INSIDE it is still that one block: a `failure_sequence`
+# describing a code span carries ``` mid-line, and a close matched anywhere ends the block there.
+printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"SPAN","severity":"P2","failure_sequence":"append ```a code span``` and a blank line"}]}\n```\n' \
+  "$revived_head" "$revived_head" > "$tmp/inner-fence.md"
+expect MUT-VERDICT-REVIVED-BY-TRUNCATION "$(review_rows "$tmp/inner-fence.md")" \
+  "0|json/$revived_head/CHANGES_REQUIRED/-/-;P2:SPAN:0"
+
 # A pretty-printed object with "}, {" between findings is the same object to a parser.
 cat > "$tmp/pretty.md" <<'EOF'
 Reviewed head: 4ad962f000000000000000000000000000000001
@@ -782,6 +952,34 @@ expect MUT-PARSE-WRITE-UNCHECKED "$(ls "$tmp/denied.out".* 2>/dev/null | wc -l)"
 # denied write and not about the fixture.
 expect MUT-PARSE-WRITE-UNCHECKED "$(parse_nul review "$tmp/prose-numbered-p1.md" "$tmp/denied.out")" \
   '0|review|prose|c3a6665000000000000000000000000000000003|PASS|-|-|1|P1|-|0|'
+# --- the staging file belongs to the invocation that created it ---------------------------------
+# `OUT + ".part"` is ONE PATHNAME SHARED BY EVERY INVOCATION writing to one destination, and two
+# of them overlapping publishes one's bytes under the other's exit 0: A flushed a blocking review
+# and paused in `fsync`, B truncated the same staging file and wrote a clean `PASS` over it, A woke
+# and renamed B's bytes into place -- A exit 0 publishing PASS with no findings, from an input
+# carrying CHANGES_REQUIRED and a P1; B then exit 1, its staging pathname gone. Standards section 8
+# says it directly: a unique staging path, never a fixed temporary name concurrent writers collide
+# on. The pull request carries the `strace`-timed race; this is the same property without timing.
+#
+# A DIRECTORY standing at the fixed pathname is the whole case: a parse that still reaches for
+# `OUT.part` cannot open it and exits non-zero, and one that creates its own staging name never
+# looks. It needs no permission trick, so it is the same case for a run as root.
+mkdir -p "$tmp/stage"
+staged_out="$tmp/stage/payload.nul"
+mkdir -p "$staged_out.part"
+expect MUT-STAGING-PATH-SHARED "$(parse_nul review "$tmp/prose-numbered-p1.md" "$staged_out")" \
+  '0|review|prose|c3a6665000000000000000000000000000000003|PASS|-|-|1|P1|-|0|'
+[[ -d "$staged_out.part" ]] \
+  || error "MUT-STAGING-PATH-SHARED: the parse wrote through the fixed staging pathname"
+# and it leaves nothing behind beside the destination: a staging file per invocation is not a
+# staging file per invocation left lying there.
+expect MUT-STAGING-PATH-SHARED "$(ls "$tmp/stage" | grep -vcx 'payload.nul\|payload.nul.part')" 0
+rmdir "$staged_out.part"
+# The published bytes are this invocation's own, and its permissions are what a plain create
+# leaves: making the staging name unique is not also a change to what the caller reads.
+expect MUT-STAGING-PATH-SHARED "$(stat -c %a "$staged_out")" "$(
+  : > "$tmp/stage/plain"; stat -c %a "$tmp/stage/plain")"
+
 # And the destination the parse could not open at all: nothing is written there either.
 mkdir -p "$tmp/unwritable"
 : > "$tmp/unwritable/out"

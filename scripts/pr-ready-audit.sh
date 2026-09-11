@@ -95,6 +95,17 @@
 # run before the first pull request is judged. Every list request is paginated, because a first
 # page is not a list and 30 rows of nothing hid an active ruleset on page two.
 #
+# A HELPER'S ANSWER IS A WRITE, and the value that comes back is checked against the answers there
+# are rather than against the one that blocks. `base_changed_after` said `yes` through an `echo`
+# whose status `return 0` discarded, so a failed write left the caller an empty string and
+# `[[ "$retargeted" == yes ]]` read it as "the base did not change": exit 0, and a pull request
+# retargeted since its review enqueued. Every one of these channels now names its permissive
+# answer explicitly and blocks on everything else -- `timeline-answer-unreadable` for a retarget
+# answer that is neither `yes` nor `no`, `review-id-unreadable` for a comment id that is not a
+# number, a refusal for a ruleset state that is not two flags, and a refusal from `must_fix_for`
+# for a lane it does not know (an empty must-fix set makes every severity deferrable). The
+# permissive answer has to be SAID; it is never the one everything else falls into.
+#
 # Reading "I could not look" as "there is nothing there" is precisely how a blocked pull request
 # enqueues, and it has happened here more than once: a comment page whose failure was swallowed
 # dropped the newest review and let an older PASS win; an unpaginated ruleset list dropped the
@@ -180,6 +191,12 @@ must_fix_for() {
     findings-p3) echo "P0 P1 P2 P3" ;;
     findings-p1p2) echo "P0 P1 P2" ;;
     feature) echo "P0 P1" ;;
+    # A lane this does not know is not a lane with nothing to fix in it. An empty must-fix set
+    # makes EVERY severity deferrable -- `[[ "  " == *" P1 "* ]]` is false -- which is the
+    # permissive answer, and the permissive answer has to be said rather than fallen into. The
+    # three above are everything `lane_for` returns; anything else is a caller that cannot be
+    # answered, and the run stops rather than auditing with no severity to fix.
+    *) return 1 ;;
   esac
 }
 
@@ -567,14 +584,43 @@ latest_review_id() {
 # gates the enqueue, and `for when in $(gh api ...)` iterates zero times whether the timeline
 # holds no base change or the request failed, so a swallowed failure would enqueue a pull request
 # retargeted since its review. Same defect as the comment lookup above, same consequence.
+#
+# THE ANSWER IS A WRITE, AND A WRITE IS A THING THAT CAN FAIL. `{ echo yes; return 0; }` discarded
+# the status of the one write that carries the blocking answer: with that `echo` failing, the
+# helper exited 0 having said nothing, the caller's `[[ "$retargeted" == yes ]]` read the empty
+# string as "the base did not change", and a pull request retargeted since its review was
+# enqueued. `return` with no argument is the status of the write, so the only path out of here
+# carrying `yes` is one on which `yes` was written. The callers do the other half: an answer that
+# is not exactly `yes` or `no` is not an answer, and is never the benign one.
 base_changed_after() {
   local timeline when
   timeline="$(gh api "repos/$repo/issues/$1/timeline?per_page=100" --paginate \
     --jq '.[] | select(.event == "base_ref_changed") | .created_at')" || return 1
   for when in $timeline; do
-    [[ "$when" > "$2" ]] && { echo yes; return 0; }
+    [[ "$when" > "$2" ]] && { printf '%s\n' yes; return; }
   done
-  echo no
+  printf '%s\n' no
+}
+
+# retarget_blocker ANSWER: sets `retarget_why` to the blocker ANSWER calls for, or to the empty
+# string when ANSWER is exactly `no`. Both readers of `base_changed_after` go through it, so
+# neither of them can be the one that forgets.
+#
+# A CHANNEL WITH TWO WORDS IN IT HAS EXACTLY TWO ANSWERS. `[[ "$x" == yes ]]` made every other
+# string `no` -- the empty string a failed write leaves behind most of all -- and `no` is the
+# answer that lets a merge happen. The permissive answer is the one that has to be SAID; it is not
+# the one everything else falls into.
+#
+# It SETS A VARIABLE rather than printing one, and it runs no command at all, for the reason
+# `audit_state` does: an answer that travels back through a write is this same finding one layer
+# down, and `$(...)` would hand the caller an empty string for a helper that failed as readily as
+# for one that said nothing. There is no write here to fail.
+retarget_blocker() {
+  case "$1" in
+    no) retarget_why="" ;;
+    yes) retarget_why="retargeted-after-review" ;;
+    *) retarget_why="timeline-answer-unreadable" ;;
+  esac
 }
 
 # ---- the audit ----------------------------------------------------------------------------------
@@ -673,9 +719,19 @@ main() {
     echo "  would audit as though no ruleset required an up-to-date branch." >&2
     exit 2
   fi
-  # Split by expansion: `read ... <<< "$rulesets"` is a here-string bash may not be able to spill,
-  # and a `read` that never ran leaves both variables holding whatever they held before. Two
-  # fields, one space, written by `ruleset_state` itself.
+  # The answer is exactly two flags and one space, and it is checked whole before it is split --
+  # the same rule the timeline's `yes`/`no` gets, for the same reason. `${rulesets%% *}` on any
+  # other string yields a `strict_up_to_date` that `((...))` reads as 0, which drops the BEHIND
+  # blocker for every pull request in the run, so "not one of the four answers" must not resolve
+  # to the permissive one. Split by expansion after that: `read ... <<< "$rulesets"` is a
+  # here-string bash may not be able to spill, and a `read` that never ran leaves both variables
+  # holding whatever they held before.
+  case "$rulesets" in
+    "0 0"|"0 1"|"1 0"|"1 1") ;;
+    *) echo "refusing: $repo's ruleset state read back as [$rulesets], which is not an answer." >&2
+       echo "  It decides whether a BEHIND pull request blocks, and no reading of it is safe." >&2
+       exit 2 ;;
+  esac
   strict_up_to_date="${rulesets%% *}"
   has_queue="${rulesets##* }"
 
@@ -786,6 +842,12 @@ audit_one() {
     blockers+=("review-lookup-failed")
   elif [[ -z "$review_id" ]]; then
     blockers+=("no-review")
+  elif [[ ! "$review_id" =~ ^[0123456789]+$ ]]; then
+    # The third answer this channel can carry. A comment id is a number, it is the last thing
+    # between here and two API paths built from it, and a value that is neither empty nor a
+    # number is a lookup that returned something nobody has checked -- not a review to fetch.
+    # Spelled out rather than written as a range, for the reason `valid_login` spells its set out.
+    blockers+=("review-id-unreadable")
   else
     local parse_file parse_status=0 at_status=0 body_status=0 stray="-" where i
     review_file="$(mktemp)"
@@ -855,11 +917,12 @@ audit_one() {
     # changed after the review was posted is a diff the review never saw, and the workflow
     # form's base commit must lie on the current base branch (and, off master, not on master,
     # since the integration branch carries master's history too).
-    local retargeted
+    local retargeted retarget_why=""
     if ! retargeted="$(base_changed_after "$pr" "$review_at")"; then
       blockers+=("timeline-lookup-failed")
-    elif [[ "$retargeted" == yes ]]; then
-      blockers+=("retargeted-after-review")
+    else
+      retarget_blocker "$retargeted"
+      [[ -n "$retarget_why" ]] && blockers+=("$retarget_why")
     fi
   fi
 
@@ -1077,14 +1140,17 @@ audit_one() {
         # queue on the new base with both contexts re-run there but without a review of that
         # diff, and it is visible on the pull request's timeline as a base change after the
         # review, which the next audit reports.
-        local base_now retargeted_now
+        local base_now retargeted_now retarget_why=""
         base_now="$(gh pr view "$pr" --repo "$repo" --json baseRefName --jq .baseRefName)"
         if ! retargeted_now="$(base_changed_after "$pr" "$review_at")"; then
           echo "      could not re-read the timeline to check the base: not enqueued"
           state=BASE-MOVED
-        elif [[ "$base_now" != "$base" || "$retargeted_now" == yes ]]; then
-          echo "      base changed since the audit read $base: not enqueued"
-          state=BASE-MOVED
+        else
+          retarget_blocker "$retargeted_now"
+          if [[ "$base_now" != "$base" || -n "$retarget_why" ]]; then
+            echo "      base changed since the audit read $base (${retarget_why:-base=$base_now}): not enqueued"
+            state=BASE-MOVED
+          fi
         fi
       fi
     fi
