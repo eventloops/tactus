@@ -89,12 +89,13 @@
 #   forbids.
 #
 # So the caller passes the MERGE-BASE tree, the head tree, and the pull
-# request's own commits, and this script never looks at the working tree. Each
-# listing is a file of finding filenames, one per line, or a directory to list
-# when running by hand. They are taken as one SET: a filename in more than one
-# of them is one finding and not two, a name that resolves in any of them
-# resolves, and a name that matches two distinct findings across them is still
-# ambiguous and still refused.
+# request's own commits; this script judges the listings it is handed and goes
+# looking for no finding of its own. Each listing is a file of finding
+# filenames, one per line -- LF or CRLF, a carriage return being a line ending
+# and never part of a name -- or a directory to list when running by hand. They
+# are taken as one SET: a filename in more than one of them is one finding and
+# not two, a name that resolves in any of them resolves, and a name that matches
+# two distinct findings across them is still ambiguous and still refused.
 #
 # THE FIRST LISTING IS THE MERGE BASE AND NOT THE TARGET BRANCH'S CURRENT HEAD.
 # Rooting it at the target's current head let master decide the verdict in the
@@ -129,9 +130,20 @@
 # `120000 blob` and not a finding either. findings-in-range.sh's mode filter
 # refuses both; the DIRECTORY-listing path here did not, because bash's -e and
 # -f FOLLOW a symlink, so a link to any regular file resolved at exit 0 exactly
-# what the workflow's path refused at exit 1. The documented by-hand API and the
-# workflow now implement one rule: the mode filter there, an explicit -L test
-# here.
+# what the workflow's path refused at exit 1.
+#
+# THE MODE GIT RECORDS DECIDES A TRACKED ENTRY, AND NOT WHAT THE CHECKOUT
+# MATERIALISED. That is what makes the two APIs answer alike, and a filesystem
+# test cannot: under core.symlinks=false -- git's own setting, and what git uses
+# wherever the filesystem will not carry a link -- a committed symlink is
+# checked out AS A REGULAR FILE holding the link target, `git status` stays
+# empty and the recorded mode stays 120000. `-L` has nothing left to see, and
+# the same commit conformed at exit 0 through the directory listing while the
+# tree listings refused it at exit 1. So for each name `ls` reports, a directory
+# listing takes the mode git records for it, which is the filter
+# findings-in-range.sh applies to the very same entry. The filesystem decides
+# only for an entry git does not track, where there is no recorded mode and a
+# symlink is skipped by -L.
 #
 # With no listing at all only the grammar is checked, which is how the fixtures
 # exercise it without a repository. With one listing, that listing alone is the
@@ -289,6 +301,25 @@ check_listing "$merge_base_findings"
 check_listing "$head_findings"
 check_listing "$range_findings"
 
+# git_index_entries <directory>: `<mode> <object> <stage><TAB><name>` for every
+# entry git RECORDS in that directory, one per line, and NOTHING AT ALL when the
+# directory is not inside a work tree -- which is every by-hand listing that is
+# not a checkout, and where the filesystem is all there is to go on.
+#
+# A failure INSIDE a work tree is propagated: an index this cannot read is the
+# same refusal as a listing it cannot read, and for the same reason.
+#
+# `-z` so a name is never quoted or escaped. An entry below a subdirectory comes
+# out as `sub/name` and matches no name `ls -1` reports, which is the right
+# answer twice over: the subdirectory is not a finding whatever it holds, and
+# what it holds is not in this listing.
+git_index_entries() {
+  local dir="$1"
+  command -v git >/dev/null 2>&1 || return 0
+  [[ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null || true)" == true ]] || return 0
+  git -C "$dir" ls-files -sz -- . | tr '\000' '\n'
+}
+
 # read_listing <listing>: the finding filenames in one listing, one per line,
 # from whichever form the caller passed. A read that FAILS returns non-zero and
 # never an empty set; the existence test above cannot stand in for this, because
@@ -300,17 +331,57 @@ check_listing "$range_findings"
 # reviews/findings/P2_correctness_<ts>_<desc>.md/ -- a directory, holding no
 # finding -- and a symlink of the same name each resolved
 # fix-P2/correctness_<desc>. The `ls` still runs, so an unlistable directory
-# still fails rather than reading as empty; each name is then kept only if it is
-# a regular file AND not a symlink, which is the rule git's mode filter applies
-# in findings-in-range.sh.
+# still fails rather than reading as empty; `ls` says WHICH NAMES ARE IN THE
+# LISTING and what each name IS is decided below.
 read_listing() {
-  local listing="$1" out entry
+  local listing="$1" out entry recorded record mode name recorded_regular recorded_other
   if [[ -d "$listing" ]]; then
     out="$(ls -1 -- "$listing")" || return 1
+    # WHAT GIT RECORDS DECIDES A TRACKED ENTRY, NOT WHAT THE CHECKOUT
+    # MATERIALISED, because only that answers the same question the workflow's
+    # mode filter answers. Under core.symlinks=false a committed symlink is
+    # checked out as a REGULAR FILE holding the link target -- `git status`
+    # empty, recorded mode still 120000 -- so -L sees nothing, and the very
+    # commit the tree listings refused at exit 1 conformed here at exit 0.
+    recorded="$(git_index_entries "$listing")" || {
+      echo "branch-name-policy: git could not report what it records for '$listing'" >&2
+      return 1
+    }
+    # Two sets rather than a lookup per name: bash 3.2 has no associative array
+    # and this file runs wherever the suite is run by hand. A name is wrapped in
+    # newlines on both sides, so a membership test is exact and not a prefix. A
+    # CONFLICTED entry is recorded at SEVERAL stages: an ordinary content
+    # conflict is a regular blob at every stage and stays a finding, while a
+    # regular file conflicting with a symlink is recorded at both kinds, lands
+    # in both sets, and is not a finding -- the non-regular set is tested first.
+    recorded_regular=$'\n'
+    recorded_other=$'\n'
+    while IFS= read -r record; do
+      [[ -n "$record" ]] || continue
+      mode="${record%% *}"
+      name="${record#*$'\t'}"
+      case "$mode" in
+        100644|100755) recorded_regular+="$name"$'\n' ;;
+        *) recorded_other+="$name"$'\n' ;;
+      esac
+    done <<< "$recorded"
     while IFS= read -r entry; do
       [[ -n "$entry" ]] || continue
-      # A SYMLINK IS NOT A FINDING, and it is tested FIRST because -e and -f
-      # both follow one: a link named like a finding and pointing at any
+      # A 120000 blob, a 040000 tree or a 160000 submodule is not a finding,
+      # whatever the checkout put there.
+      if [[ "$recorded_other" == *$'\n'"$entry"$'\n'* ]]; then
+        continue
+      fi
+      # And a 100644 or 100755 blob IS one, which is the other half of agreeing
+      # with the tree listings: the ledger is what was committed.
+      if [[ "$recorded_regular" == *$'\n'"$entry"$'\n'* ]]; then
+        printf '%s\n' "$entry"
+        continue
+      fi
+      # An UNTRACKED name has no recorded mode -- git knows nothing about it, or
+      # there is no repository at all -- so the filesystem is the only witness
+      # left. A SYMLINK IS NOT A FINDING, and it is tested FIRST because -e and
+      # -f both follow one: a link named like a finding and pointing at any
       # regular file resolved a fix-P*/ branch here while git's mode filter
       # refused the identical commit. Testing -L first also keeps a DANGLING
       # link a non-finding rather than a read failure, which is what git says
@@ -332,6 +403,27 @@ read_listing() {
     return 0
   elif [[ -f "$listing" ]]; then
     out="$(cat -- "$listing")" || return 1
+    # CRLF IS A LINE ENDING HERE AND NEVER PART OF A NAME. A listing written on
+    # Windows leaves a carriage return on the end of every name, none of them
+    # matches a finding, and the set NARROWS IN SILENCE -- which is precisely
+    # how an ambiguous name becomes an accepted one. Measured on two listings
+    # naming one description: exit 1 `names 2 findings` with LF throughout, exit
+    # 0 `conforms` with the second listing converted to CRLF, the twin gone and
+    # nothing said. So a CRLF listing is the same listing, as
+    # .github/legacy-branches.txt is already read either way above. The trailing
+    # strip is the LAST line's ending: `$(...)` has eaten its newline already
+    # and left the carriage return behind.
+    out="${out//$'\r\n'/$'\n'}"
+    out="${out%$'\r'}"
+    # A carriage return that is NOT a line ending is neither a line ending nor
+    # part of a name this could match, and guessing which would narrow the set
+    # again. A listing this cannot read is a refusal.
+    if [[ "$out" == *$'\r'* ]]; then
+      echo "branch-name-policy: findings listing '$listing' holds a carriage return" >&2
+      echo "  that is not a CRLF line ending, so its names cannot be read. Write it" >&2
+      echo "  with LF or CRLF line endings, one finding filename per line." >&2
+      return 1
+    fi
   else
     echo "branch-name-policy: findings listing '$listing' is neither a file nor a directory" >&2
     return 1

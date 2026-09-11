@@ -310,6 +310,48 @@ if [[ -c /dev/null ]]; then
   fi
 fi
 
+# ---- a CRLF listing is the same listing --------------------------------------------------
+#
+# The file listing is documented input, and one written on Windows ends every
+# name with a carriage return. `P2_..._shared-name.md\r` then matches no finding
+# and the set NARROWS IN SILENCE, which is the way an ambiguous name becomes an
+# accepted one: with both listings LF the name matches two findings and is
+# refused at exit 1; convert only the SECOND to CRLF and it conformed at exit 0,
+# one twin gone and nothing said about it. Both endings must give one answer,
+# and a CRLF listing must still RESOLVE a name rather than being refused
+# wholesale -- otherwise "handled" is indistinguishable from "rejected". A
+# carriage return that is NOT a line ending is neither a line ending nor part of
+# a name, so it refuses and says so.
+twin_lf_a="$fixture_dir/twin-lf-a.txt"
+twin_lf_b="$fixture_dir/twin-lf-b.txt"
+twin_crlf_a="$fixture_dir/twin-crlf-a.txt"
+twin_crlf_b="$fixture_dir/twin-crlf-b.txt"
+twin_lone_cr="$fixture_dir/twin-lone-cr.txt"
+printf 'P2_correctness_202609100001_shared-name.md\n' > "$twin_lf_a"
+printf 'P2_correctness_202609100002_shared-name.md\n' > "$twin_lf_b"
+printf 'P2_correctness_202609100001_shared-name.md\r\n' > "$twin_crlf_a"
+printf 'P2_correctness_202609100002_shared-name.md\r\n' > "$twin_crlf_b"
+printf 'P2_correctness_202609100001_shared-name.md\rP2_correctness_202609100002_shared-name.md\n' \
+  > "$twin_lone_cr"
+
+line_ending_case() {  # line_ending_case <name> <want-exit> <want-text> <listing>...
+  local name="$1" want_rc="$2" want_text="$3" rc=0 out
+  shift 3
+  out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' "$@" 2>&1)" || rc=$?
+  if [[ "$rc" != "$want_rc" ]] || ! grep -qF "$want_text" <<< "$out"; then
+    echo "expected exit $want_rc and '$want_text': $name (got $rc)" >&2
+    exit 1
+  fi
+}
+
+line_ending_case 'LF throughout, the control'  1 'names 2 findings' "$twin_lf_a" "$twin_lf_b"
+line_ending_case 'the second listing is CRLF'  1 'names 2 findings' "$twin_lf_a" "$twin_crlf_b"
+line_ending_case 'both listings are CRLF'      1 'names 2 findings' "$twin_crlf_a" "$twin_crlf_b"
+line_ending_case 'a CRLF listing resolves'     0 'conforms'         "$twin_crlf_a"
+line_ending_case 'a carriage return that is not a line ending' \
+  1 'holds a carriage return' "$twin_lf_a" "$twin_lone_cr"
+
 # bulk-fix-P<n>/ carries no finding, and never batches a severity that is
 # repaired one at a time.
 branch_pass 'bulk P3' 'bulk-fix-P3/docs-fixes'
@@ -916,6 +958,39 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
   if ! grep -q 'names no finding' <<< "$dangling_out"; then
     echo 'a dangling symlink must read as no finding, not as a listing that cannot be examined' >&2
     exit 1
+  fi
+
+  # THE SAME COMMIT AGAIN, CHECKED OUT WHERE THE FILESYSTEM CARRIES NO SYMLINK.
+  # `core.symlinks=false` is git's own setting and what git uses wherever a link
+  # cannot be made: the 120000 blob is materialised as a REGULAR FILE holding
+  # the link target, `git status --porcelain` stays empty, and the recorded mode
+  # is still 120000. A filesystem -L test has nothing left to see, so the
+  # directory listing conformed at exit 0 on the very commit the tree listings
+  # refuse at exit 1 -- the two answers to one question this whole section
+  # exists to close, back again one repair later. What git RECORDS decides an
+  # entry, and this is the case that says so.
+  k_materialised='reviews/findings/P2_correctness_202609101200_not-a-finding.md'
+  git -C "$repo_k" config core.symlinks false
+  rm "$repo_k/$k_materialised"
+  git -C "$repo_k" checkout -- "$k_materialised"
+  if [[ -L "$repo_k/$k_materialised" ]] || [[ ! -f "$repo_k/$k_materialised" ]] \
+    || [[ "$(git -C "$repo_k" ls-files -s -- "$k_materialised" | cut -d' ' -f1)" != 120000 ]]; then
+    echo 'note: skipping the core.symlinks=false case (this git left the link a link)' >&2
+  else
+    if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+      "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
+      "$repo_k/reviews/findings" >/dev/null 2>&1; then
+      echo 'a committed symlink checked out as a regular file resolved through the directory listing' >&2
+      exit 1
+    fi
+    # And it is still a filter and not a listing read as empty: the regular file
+    # beside it resolves, through a checkout that materialised neither as a link.
+    if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+      "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+      "$repo_k/reviews/findings" >/dev/null 2>&1; then
+      echo 'the regular file beside the materialised symlink must still resolve' >&2
+      exit 1
+    fi
   fi
 else
   echo 'note: skipping the symlink cases (this filesystem will not create one)' >&2

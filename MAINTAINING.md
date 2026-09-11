@@ -220,7 +220,12 @@ deletes its file, so a pull request that has done its job carries none at the he
 the finding it repairs carries none at the branch point; and one that files it in one commit and
 repairs it in the next carries none at either end, which is the single-pull-request path the absence
 of `fix/` depends on. The boundary is the merge base and **not the target branch's current head**,
-so advancing `master` cannot change a pull request's verdict on an unchanged head.
+which keeps `master` merely advancing out of the verdict — but **it does not make the verdict a
+function of the head**, and nothing does. The merge base moves as soon as `master` absorbs a commit
+the branch also carries, and a name that was ambiguous can resolve with no push to the branch. That
+is the right answer rather than a hole: whether a description picks out one finding or two is a
+property of **the ledger**, which other pull requests legitimately change, and what the check
+answers is whether the name resolves to exactly one filed finding in the listings it is handed.
 
 There is no `fix/` prefix. A bug worth a branch is worth a finding, so a repair names the finding it
 closes, and a bug that is not filed yet is filed by the same pull request that repairs it — which is
