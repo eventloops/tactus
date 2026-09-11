@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A Unix private helper (the cleanup reaper, the job-control guard) is now ended through a name
+  the kernel cannot re-issue where the platform has one — on Linux a pid file descriptor taken at
+  the fork — instead of through its pid. Where there is no such name, ending a helper is best
+  effort against an embedding host that reaps this process's children, and `DESIGN.md` §15 now
+  states that boundary rather than leaving it implied.
 - Relicensed to Apache-2.0 with a NOTICE file; earlier releases keep the terms recorded in their
   own tagged metadata and source notices (decided 2026-09-01).
 - The G2 checkpoint: the v0.2 parallel-execution machinery (worktree-per-task isolation, the

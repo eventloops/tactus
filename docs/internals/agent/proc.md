@@ -883,6 +883,31 @@ Set by the monitor before it kills groups. No later spawn may begin.
 Set before a suspend snapshot and cleared only after continuation.
 New launches wait outside the lock for the complete transition.
 
+## `struct Reaper` › `identity: libc::c_int,`
+
+The name of the forked reaper that a reused number cannot impersonate,
+taken in the parent the instant `fork` returns, or `-1` where the
+platform or the kernel has none.
+
+`pid` alone cannot end a helper safely. An embedding host may reap this
+process's children from its own `SIGCHLD` handler with a wildcard wait
+— the reason `install_reaper_dispositions` scrubs that handler out of
+the reaper's own child — and a helper collected there leaves its number
+for the kernel to hand to another of that host's forks. A `SIGKILL` and
+a `waitpid` aimed at the number then reach that stranger, and no
+observation the parent can make tells the two cases apart: a
+`waitpid(pid, WNOHANG)` answering zero proves only that the number
+names some unreaped child of this process, never that it names the
+helper. On Linux the identity is a pid file descriptor, which names the
+process; the descriptor is closed where the handle's other descriptors
+are closed.
+
+## `struct Guard` › `identity: libc::c_int,`
+
+The same name for the forked job-control guard, on the same terms.
+`abort_setup` and both of `spawn_guard`'s own setup failures end the
+guard through it.
+
 ## `struct Guard` › `_command_keepalive_fd: libc::c_int,`
 
 Keep one parent-side reader open so a guard crash turns the next arm
@@ -1085,14 +1110,14 @@ not a position.
 
 ## `fn spawn_reaper() -> Result<Reaper, String>` › `let end = describe_helper_end(reaper.abandon());`
 
-The teardown is master's, unchanged and in master's order; what
-it answered becomes the diagnostic. Nothing is asked of the pid
-before it, so this adds no window in which a number could be
-reaped elsewhere and reused (row
-`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`). The
-helper's report and the pipe's close arrive on the pipe, which the
-parent already owned and was already reading, so neither asks the
-kernel anything about the pid either.
+The teardown's order is master's; what it answered becomes the
+diagnostic. Nothing is asked of the pid before it, so this adds no
+window in which a number could be reaped elsewhere and re-issued.
+Its two calls are `abandon`'s, which go through the identity taken
+at the fork where there is one. The helper's report and the pipe's
+close arrive on the pipe, which the parent already owned and was
+already reading, so neither asks the kernel anything about the pid
+either.
 
 ## `fn install_reaper_dispositions() -> bool` › `if !scrub_private_helper_dispositions() {`
 
@@ -1157,6 +1182,84 @@ Returns `Some(true)` only after the guard sent SIGSTOP and this
 process subsequently resumed. `Some(false)` means a concurrent
 continue/termination cancelled the stop before it was issued.
 
+## `mod termination` › `fn open_helper_identity(pid: libc::pid_t) -> libc::c_int {`
+
+A name for a helper this process has just forked that a reused number
+cannot impersonate, or `-1`.
+
+Called as the next parent statement after `fork` returns, at both
+helper fork sites, because the window this leaves is the window it
+cannot close: between the `fork` and this call the child may exit, an
+embedding host may collect it and the kernel may re-issue its number.
+Closing that window needs the descriptor to come back from the fork
+itself — `clone3` with `CLONE_PIDFD` — which replaces the fork
+primitive, and row `HELPER-IDENTITY-TAKEN-AFTER-THE-FORK-NOT-BY-IT`
+carries that decision. What this does narrow is the window that
+mattered: a helper's entire startup, up to `HELPER_READY_BUDGET`, and
+then however long its teardown takes.
+
+`-1` is not a failure path. A kernel without `pidfd_open`, a policy
+that refuses it, and every non-Linux Unix all answer `-1`, and the
+signal and the wait below are then the `kill` and the `waitpid` they
+have always been. Row
+`HELPER-END-BY-PID-WHERE-THERE-IS-NO-IDENTITY` is what remains there,
+and DESIGN §15 states it as best effort rather than leaving it implied.
+
+## `mod termination` › `fn identity_can_collect(identity: libc::c_int) -> bool {`
+
+Whether this kernel will collect through the descriptor as well as
+signal through it.
+
+`pidfd_open` arrived in Linux 5.3 and `waitid`'s `P_PIDFD` in 5.4, so a
+kernel between the two answers a descriptor that can carry a signal and
+cannot carry the wait. An identity is both or neither: a half one would
+leave the collect on the number while the signal was safe, which is the
+harder of the two to reason about and the one that can block a launch
+on a stranger. The probe passes `WNOHANG | WNOWAIT`, so it collects
+nothing and leaves the helper in whatever state it is in.
+
+## `mod termination` › `fn signal_helper(pid: libc::pid_t, identity: libc::c_int, signal: libc::c_int) -> libc::c_int {`
+
+Send `signal` to the helper, answering what `kill` answers.
+
+Through the identity where there is one, so the signal cannot reach a
+process the descriptor does not name: `pidfd_send_signal` answers
+`ESRCH` for a descriptor whose process has already been collected,
+where a `kill` on the same number would have answered `0` and killed
+whoever holds it now.
+
+## `mod termination` › `fn collect_helper(`
+
+Collect the helper, blocking, answering what `waitpid(pid, status, 0)`
+answers: the pid, or `-1` with `errno` set.
+
+Through the identity where there is one. The hazard is the wait's and
+not only the signal's: a `waitpid` on a re-issued number collects
+another of the host's children, takes its exit status away from the
+code that was waiting for it, and blocks this launch for as long as
+that stranger runs.
+
+## `mod termination` › `fn collect_through_identity(identity: libc::id_t, status: &mut libc::c_int) -> libc::pid_t {`
+
+`waitid(P_PIDFD, ...)`, in the shape `waitpid` answers in.
+
+`WEXITED` alone, matching the `0` options of the `waitpid` it stands
+in for: a stopped or continued helper is not a state either wait
+reports.
+
+## `mod termination` › `fn wait_status_of(code: libc::c_int, value: libc::c_int) -> libc::c_int {`
+
+The status `waitpid` would have filled for the state change `waitid`
+reported as `(si_code, si_status)`.
+
+`waitid` answers a decoded outcome and `waitpid` a packed status word,
+and `describe_helper_end` reads the packed one through
+`libc::WIFEXITED` and its neighbours. This is that packing. That it is
+the kernel's own packing is not claimed here in arithmetic:
+`a_wait_through_an_identity_answers_the_status_waitpid_answers` forks
+pairs of children that end identically, collects one of each pair each
+way, and holds the two status words equal.
+
 ## `mod termination` › `struct HelperEnd {`
 
 What ending a helper that never acknowledged its startup actually
@@ -1171,12 +1274,14 @@ signal whose result the caller depends on and what row
 
 **Nothing here is a claim about which process the number named.** A
 pid cannot be tied to the helper that was forked with it while an
-embedding host may reap this process's children — that is the open
-design question of row
-`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`, and no
-observation the parent can make settles it. So these are the words for
-what two system calls answered, and a reader draws the same inference
-from them that they could draw from the calls themselves: no more.
+embedding host may reap this process's children, and no observation the
+parent can make settles it. What settles it is not an observation: the
+identity taken at the fork, which the calls these fields record go
+through where the platform has one, and which
+`HELPER-END-BY-PID-WHERE-THERE-IS-NO-IDENTITY` says they do not where
+it has none. So these stay the words for what two system calls
+answered, and a reader draws the same inference from them that they
+could draw from the calls themselves: no more.
 
 ## `struct HelperEnd` › `kill_errno: libc::c_int,`
 
@@ -1989,15 +2094,17 @@ The words a READY failure carries are the words for what `kill`
 and `waitpid` answered, and the outcomes a reader needs told apart
 are told apart: a helper that had already ended itself, one that
 was still there and was killed, and one the parent could not
-signal or could not collect.
+signal or could not collect. The fixtures are status words, so this
+test is the same on either side of the identity: `wait_status_of`
+answers in the same encoding `waitpid` fills.
 
 An exit status is the difference that matters. A helper that ends
 before READY does so through one of its own `_exit(1)` paths, so
 "already exited with status 1" says it failed setting itself up,
 where "killed by signal 9" says it was still working when the
 parent gave up. Nothing here infers which process the number
-named; that is row
-`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`.
+named; which process the end reached is
+`the_end_of_a_helper_follows_its_identity_and_not_its_number`.
 
 Witnessed against two mutations: the `WIFSIGNALED` and
 `WIFEXITED` arms swapped, and `kill_errno` replaced by a constant
@@ -2007,6 +2114,72 @@ Witnessed against two mutations: the `WIFSIGNALED` and
 
 `waitpid` fills a status word, so the fixtures are built the
 way the kernel builds them rather than by the code under test.
+
+## `mod tests` › `fn the_end_of_a_helper_follows_its_identity_and_not_its_number() {`
+
+The state a re-issued pid leaves the parent in, built rather than waited
+for: the number names a stranger, the identity still names the helper.
+
+The kernel cannot be asked to re-issue a particular number — it
+allocates cyclically and would have to wrap the whole pid space — so the
+test constructs the state a wrap produces. A helper is forked and its
+identity taken the way `spawn_reaper` takes one; it is then collected by
+someone other than the teardown, which is what an embedding host's
+wildcard wait does to it. A second child stands in for the fork the
+number goes to. The handle the teardown is then handed carries that
+child's number beside the dead helper's identity, and the assertion is
+on the stranger: still running, still uncollected, after the teardown
+has run.
+
+The reap here is a pid-directed `waitpid` and not the wildcard a host
+would use. What the sequence needs is that the helper is collected by
+something other than the teardown; which wait collected it changes
+nothing about the number being free, and a wildcard wait in a test that
+shares its process with the rest of the suite would collect other tests'
+children.
+
+Witnessed against the repair withdrawn at its two call sites — both
+`if identity >= 0` guards made unreachable, leaving the `kill` and the
+`waitpid` on the number that were there before it: "the helper's
+teardown reached the stranger now holding its number: the look for the
+stranger answered -1 (status 0, errno 10) and the teardown reported
+kill_errno 0, waited 3556525, wait_errno 0". The teardown killed the
+stranger and collected it, so the test's own look found no child at all.
+
+## `mod tests` › `fn statuses_for(exit_code: Option<libc::c_int>) -> (libc::c_int, libc::c_int) {`
+
+One child ended the way `exit_code` names, collected by `waitpid`, and
+a second ended the same way and collected through its identity: the two
+status words, in that order. The `waitpid` half calls the kernel
+directly rather than `collect_helper` with no identity, so the
+comparison below has an oracle outside the code under test.
+
+## `mod tests` › `fn a_wait_through_an_identity_answers_the_status_waitpid_answers() {`
+
+`wait_status_of` against the kernel rather than against itself. An exit
+and a signal, because they are the two encodings a `WEXITED` wait can
+report. Witnessed against the `CLD_EXITED` arm losing its shift: `left:
+7, right: 1792`.
+
+## `mod tests` › `fn reaper_identity_helper() {`
+
+That a launched reaper really carries an identity, and that the identity
+names that reaper and not some other process.
+
+In a fresh process for the reason `reaper_handshake_helper` is: it forks
+a real reaper, which installs process-wide dispositions in its child.
+`/proc/self/fdinfo` is what says which process a descriptor names, on
+its `Pid:` line. Without this the repair could be inert — every
+`open_helper_identity` answering `-1` and every end falling back to the
+number — and nothing else in the suite would notice, because the pid
+fallback is a supported answer and not a failure.
+
+Witnessed against `open_helper_identity` taking no descriptor at all:
+"the reaper this launch forked carries no identity".
+
+## `mod tests` › `fn a_launched_reaper_is_named_by_a_descriptor_and_not_only_by_its_number() {`
+
+Subprocess entry for the reaper-identity check above.
 
 ## `mod tests` › `fn helper_ready_failure_helper() {`
 
