@@ -200,9 +200,17 @@ export PATH="/usr/bin:/bin:$PATH"
 # legal in a filename and `ls` writes one name per line. These two settings are
 # what keep that glob honest, and it is the only one in this file: a pattern
 # that matches nothing has to be an empty list rather than the pattern itself --
-# `dir/*` standing for itself is a name that is not there -- and GLOBIGNORE
-# arrives from the ENVIRONMENT and would drop names from a listing in silence,
-# which is the narrowing every rule below refuses.
+# `dir/*` standing for itself is a name that is not there -- and a GLOBIGNORE
+# that matches drops names from the expansion in silence, which is the narrowing
+# every rule below refuses.
+#
+# Measured on bash 5.2.21 rather than assumed, because the obvious sentence is
+# wrong: a GLOBIGNORE INHERITED from the environment is INERT, and stays inert
+# until something assigns it -- `GLOBIGNORE="$GLOBIGNORE"` is enough to wake it,
+# and then `dir/*` loses every name the pattern matches. The value is inherited
+# whether or not it is honoured, so it is unset here rather than left lying
+# where an assignment could wake it. `unset` leaves the glob complete; that was
+# executed too.
 shopt -s nullglob
 unset GLOBIGNORE
 
