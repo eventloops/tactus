@@ -5587,6 +5587,15 @@ mod termination {
                 "the identity does not name the reaper this launch forked ({}):\n{fdinfo}",
                 reaper.pid
             );
+            // SAFETY: `reaper.identity` is the descriptor this launch took and
+            // still owns; `F_GETFD` reads flags and changes nothing.
+            let flags = unsafe { libc::fcntl(reaper.identity, libc::F_GETFD) };
+            assert!(flags >= 0, "read the identity's descriptor flags");
+            assert_ne!(
+                flags & libc::FD_CLOEXEC,
+                0,
+                "the identity would have been visible to an exec'd agent"
+            );
             reaper.cancel();
             assert_eq!(
                 PENDING_TERMINATION.load(Ordering::SeqCst),

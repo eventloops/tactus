@@ -1036,10 +1036,20 @@ results are kept rather than discarded.
 
 ## `impl Reaper` › `fn close_and_wait_reporting(self) -> (libc::pid_t, libc::c_int, libc::c_int) {`
 
-[`close_and_wait`](Self::close_and_wait), keeping what the final
-`waitpid` answered: the pid it returned or `-1`, the errno it left
-in that case, and the status it filled otherwise. The loop, the
-descriptors it closes and the order are unchanged.
+[`close_and_wait`](Self::close_and_wait), keeping what the final wait
+answered: the pid it returned or `-1`, the errno it left in that case,
+and the status it filled otherwise. The loop, the descriptors it closes
+and the order are unchanged; the identity joins them, closed on the
+way out of each arm and after the errno has been read, because `close`
+is free to overwrite it.
+
+The success arm asks whether anything was collected and not whether the
+number matched. Through the identity the wait answers for the process
+the descriptor names, which is the authority here; the two agree in
+production, and comparing against the number instead would spin on a
+handle where they did not. The `waitpid` this stands in for is passed
+no `WNOHANG`, so it never answers zero, and the arm is the one it
+always was there.
 
 ## `fn spawn_reaper() -> Result<Reaper, String>` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
 
@@ -2173,6 +2183,10 @@ its `Pid:` line. Without this the repair could be inert — every
 `open_helper_identity` answering `-1` and every end falling back to the
 number — and nothing else in the suite would notice, because the pid
 fallback is a supported answer and not a failure.
+
+The descriptor is also close-on-exec, which `pidfd_open` sets and no
+code here has to. A leaked one would hand an agent process a handle on
+the conductor's private reaper, so it is asserted rather than assumed.
 
 Witnessed against `open_helper_identity` taking no descriptor at all:
 "the reaper this launch forked carries no identity".
