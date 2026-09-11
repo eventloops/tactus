@@ -50,14 +50,18 @@ Three rules keep that true.
   last check.** A parse that dies has written nothing, so "the caller has a result" and "the parse
   finished" are the same fact rather than two facts joined by a marker.
 
-* **The write is confirmed before the exit status is decided.** `write()` returning EIO is the
-  defect the seventh round found, and a buffered write that is never flushed is that defect
-  waiting to happen. The payload is written to a staging file THIS INVOCATION CREATED, beside the
-  destination, flushed, `fsync`ed and CLOSED -- each of which raises rather than returning a status
-  -- and only then renamed over the destination. A destination file therefore never exists in a
-  partial state, whatever the caller does with the exit code. The staging name is unique because a
-  fixed one is shared: two parses publishing to one destination overlapped on `OUT.part`, and the
-  slower one renamed the faster one's bytes into place under its own exit 0.
+* **The write is confirmed before the exit status is decided, AND ITS COUNT IS READ.** `write()`
+  returning EIO is the defect the seventh round found; `write()` returning a SMALLER NUMBER is the
+  same defect without an error, and it is the one the twelfth found -- an unbuffered stdout took
+  1,024 bytes of a 3,560-byte result, said so in its return value, and the program exited 0 over a
+  findings list with 2,536 bytes missing. Every write here loops on what it was told was written
+  until the payload is gone or something raises. The payload is written to a staging file THIS
+  INVOCATION CREATED, beside the destination, flushed, `fsync`ed and CLOSED -- each of which raises
+  rather than returning a status -- and only then renamed over the destination. A destination file
+  therefore never exists in a partial state, whatever the caller does with the exit code. The
+  staging name is unique because a fixed one is shared: two parses publishing to one destination
+  overlapped on `OUT.part`, and the slower one renamed the faster one's bytes into place under its
+  own exit 0.
 
 * **Completeness is not signalled in the data.** It is the exit status, which review content
   cannot reach, and -- for the flat rendering the shell reads -- a field count the shell checks
@@ -92,6 +96,7 @@ it should not change, and the corpus of every frontier review in this repository
 and after to establish that it changed none.
 """
 
+import collections
 import json
 import os
 import re
@@ -141,36 +146,45 @@ WITNESS_KEYS = ("witness", "reproduction", "repro", "failing_test", "mutation", 
 MUST_KEY = re.compile(r"(mandatory|deviation|must_)", re.I)
 MUST_WORD = re.compile(r"\bMUST\b", re.ASCII)
 
-# The review forms.
-#
-# `^```json` at the start of a line, or the older bare `role_understanding` object anywhere: a
-# prose review that merely QUOTES a JSON object is prose, because the fence has to open a line of
+# The review forms: a fenced `json` block, or the older bare `role_understanding` object anywhere.
+# A prose review that merely QUOTES a JSON object is prose, because a fence has to open a line of
 # its own.
-IS_JSON_FORM = re.compile(r"^```json|\"role_understanding\"", re.M)
-
-# WHICH BLOCK IS THE VERDICT IS DECIDED BEFORE WHETHER IT IS WHOLE, and these two patterns are why
-# that order is written out rather than left to one regex.
 #
-# The pattern this replaces was ```` ```json\s*(\{.*?\})\s*``` ````, and the verdict was
-# `findall(...)[-1]`: the LAST block THAT HOLDS A WHOLE OBJECT. Those are the two operations in the
-# wrong order. A final block missing its closing fence, or its final `}`, is not a match at all, so
-# `[-1]` names an EARLIER one -- and a comment holding a complete `PASS` as an example above the
-# real, truncated `CHANGES_REQUIRED` was judged on the example. The truncated object's own
-# severities are invisible to the stray scan that would otherwise have flagged it, because JSON
-# spells them with escapes: `"severity":"P\u0031"` holds no `P1` to find. A TRUNCATED REVIEW HAS NO
-# VERDICT; IT DOES NOT HAVE ITS PREVIOUS VERDICT. So the last block is identified first, from its
-# opening fence alone, and its completeness is then a question with two answers -- whole, or a
-# failed parse -- neither of which is an earlier block.
-#
-# Both fences are anchored to the start of a line, which is CommonMark's rule for a fence and, over
-# every review comment in this repository, the rule that tells the block's own fences from the
-# backticks a finding quotes INSIDE it: a `failure_sequence` describing a code span carries
-# ```` ``` ```` mid-line, and an unanchored search for the close ends the block inside that string.
-JSON_FENCE_OPEN = re.compile(r"^```json", re.M)
-JSON_FENCE_CLOSE = re.compile(r"^```", re.M)
 # The older bare form has no fence, so its last block runs from the last object opener to the last
-# `}` in the comment. Same rule, same order: identified first, then required to be whole.
+# `}` in the comment.
+BARE_FORM = re.compile(r"\"role_understanding\"")
 BARE_OBJECT_OPEN = re.compile(r"\{\"role_understanding")
+
+# A FENCE IS A LINE, AND THE LINES ARE READ IN ORDER, BY COMMONMARK'S RULES -- which are the rules
+# GitHub renders these comments by, so they are the rules that decide what a reader of the comment
+# sees as the verdict.
+#
+#   * an opening fence is three or more backticks, or three or more tildes, INDENTED BY UP TO THREE
+#     SPACES, followed by an info string naming the language (a backtick fence's info string holds
+#     no backtick);
+#   * a closing fence is the same character, AT LEAST AS LONG, indented by up to three spaces
+#     INDEPENDENTLY OF THE OPENING FENCE, and holds nothing after it but spaces and tabs -- so a
+#     content line opening ```` ```a code span``` ```` closes nothing, which is how a
+#     `failure_sequence` quoting a code span stays inside its own block. A carriage return is
+#     allowed there too: a comment body GitHub stored with CRLF endings is the same comment, and
+#     the fence the reader saw closed the block;
+#   * the opening fence's indentation is stripped from each line of the content;
+#   * a fence that is never closed runs to the end of the comment, and is NOT closed.
+#
+# https://spec.commonmark.org/0.31.2/#fenced-code-blocks. `^```json` was none of this: one leading
+# space and the real verdict stopped being a block at all, so the block before it -- a `PASS` the
+# comment quoted as an example -- was selected instead, with the real object's escaped
+# `"severity":"P\u0031"` invisible to the stray scan. That is the same revival round 11 closed for
+# a truncated block, arriving through the recogniser instead of through the completeness check,
+# which is why the rule below does not rest on the recogniser being right.
+FENCE_OPEN = re.compile(r"( {0,3})(`{3,}|~{3,})([^\n]*)\Z")
+FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t\r]*\Z")
+# WHAT MAY NOT FOLLOW THE VERDICT. Coarse on purpose: any run of three or more backticks or tildes,
+# anywhere in the tail, at the start of a line or inside one, and either form's object opener. This
+# is the check that has to hold when the recogniser above is wrong, so it is not written in the
+# recogniser's vocabulary -- it asks only whether the comment carries the RAW MATERIAL of another
+# block after the one being read as the verdict, and refuses the parse if it does.
+TAIL_BLOCK_MATERIAL = re.compile(r"`{3,}|~{3,}|\{\"role_understanding")
 
 # The prose form, read exactly as the shell read it. `[^ \t\n\r\f\v]` is POSIX `[^[:space:]]` in
 # the `C` locale, which is what the greps were given.
@@ -254,6 +268,11 @@ def stray_summary(outside):
 
 # ---- the review ---------------------------------------------------------------------------------
 
+# One fenced block of a comment: the character its fence is made of, the info string naming its
+# language, its content with the opening fence's indentation removed, the raw span that content
+# occupies in the comment, the offset just past the block, and whether it was ever closed.
+Block = collections.namedtuple("Block", "fence info content start end after closed")
+
 
 def finding(one):
     """One finding of the workflow form.
@@ -289,40 +308,170 @@ def finding(one):
     }
 
 
-def last_verdict_block(text):
-    """The text of the workflow form's LAST verdict block, or None when it carries no block at all.
+def without_indent(lines, indent):
+    """LINES with up to INDENT leading spaces removed from each, as CommonMark strips them."""
+    cut = []
+    for line in lines:
+        taken = 0
+        while taken < indent and taken < len(line) and line[taken] == " ":
+            taken += 1
+        cut.append(line[taken:])
+    return "\n".join(cut)
 
-    IDENTIFIED BY ITS OPENING ALONE. Whether the block is whole is decided afterwards, by the
-    caller, and a block that is not whole raises here or there -- never resolves to the block
-    before it. That is the whole point of this being a separate step: a review whose real verdict
-    was cut off does not fall back on the `PASS` it quoted as an example.
+
+def fenced_blocks(text):
+    """Every fenced code block of TEXT, in order, with EVERY LINE OF THE COMMENT ACCOUNTED FOR.
+
+    One pass, left to right, holding one piece of state: the fence that is open. That is what makes
+    this a structure rather than a search. A regex that jumps to the last opening fence has no
+    opinion about the lines it flew over, so a fence it does not recognise is a fence that is not
+    there -- and the block before it becomes "the last block". Here a line is either a fence or it
+    is content of the block a fence opened, there is no third thing a line can be, and a fence
+    inside an open block is content because that is where the scan has got to.
+
+    Each block is reported as the character its fence is made of, its info string, its content with
+    the opening fence's indentation removed, THE RAW SPAN THAT CONTENT OCCUPIES IN THE COMMENT --
+    so what is outside the verdict can be taken out of the comment by position rather than by
+    matching the block's text back against it, which removes every copy of it and not the one that
+    was read -- the offset just past the block, and whether it was ever closed.
     """
-    opened = list(JSON_FENCE_OPEN.finditer(text))
-    if opened:
-        closed = JSON_FENCE_CLOSE.search(text, opened[-1].end())
-        if closed is None:
+    blocks = []
+    fence_char = None
+    fence_len = indent = 0
+    info = ""
+    content_from = 0
+    content_start = 0
+    lines = text.split("\n")
+    offset = 0
+    for index, line in enumerate(lines):
+        line_start = offset
+        offset += len(line) + 1
+        if fence_char is None:
+            opening = FENCE_OPEN.match(line)
+            if opening is None:
+                continue
+            if opening.group(2)[0] == "`" and "`" in opening.group(3):
+                continue          # a backtick fence's info string may hold no backtick
+            indent = len(opening.group(1))
+            fence_char = opening.group(2)[0]
+            fence_len = len(opening.group(2))
+            info = opening.group(3).strip()
+            content_from = index + 1
+            content_start = line_start + len(line)
+            continue
+        closing = FENCE_CLOSE.match(line)
+        if (closing is not None and closing.group(1)[0] == fence_char
+                and len(closing.group(1)) >= fence_len):
+            blocks.append(
+                Block(fence_char, info, without_indent(lines[content_from:index], indent),
+                      content_start, line_start, offset, True)
+            )
+            fence_char = None
+    if fence_char is not None:
+        blocks.append(
+            Block(fence_char, info, without_indent(lines[content_from:], indent),
+                  content_start, len(text), len(text), False)
+        )
+    return blocks
+
+
+def outside_block(text, block):
+    """TEXT with the verdict block's content taken out of it, for the stray-token scan.
+
+    BY POSITION, not by matching the block's text back against the comment: `text.replace(block,
+    "")` removes EVERY copy of that text and not the one that was read, and a block whose content
+    was de-indented is no longer a substring of the comment at all, so a review that had its fence
+    indented would have had its whole object scanned for stray severities. The span is narrowed the
+    way `strip()` would have narrowed the text, so what stays behind is what stayed behind before.
+    """
+    start, end = block.start, block.end
+    raw = text[start:end]
+    lead = len(raw) - len(raw.lstrip())
+    trail = len(raw) - len(raw.rstrip())
+    return text[:start + lead] + text[end - trail:]
+
+
+def names_json(info):
+    """Whether an info string names the verdict's language: CommonMark's first word, folded."""
+    words = info.split()
+    return bool(words) and words[0].lower() == "json"
+
+
+def is_verdict_block(block):
+    """Whether BLOCK is the shape the review workflow writes its verdict in.
+
+    A BACKTICK fence, because that is what the workflow writes and narrowing is the safe direction:
+    a tilde fence is read as a block -- it has to be, or a ``` inside one would be mistaken for a
+    fence of the comment's own -- but it is never the verdict. So a ```` ~~~json ```` block appended
+    under the real verdict is a block that follows it, which is a refusal, and not a second verdict
+    quietly replacing the first.
+    """
+    return block.fence == "`" and names_json(block.info)
+
+
+def refuse_tail(tail):
+    """Nothing that could be part of another block may follow the one being read as the verdict."""
+    material = TAIL_BLOCK_MATERIAL.search(tail)
+    if material is not None:
+        raise Unparsed(
+            "the review carries [%s] after the block its verdict was read from"
+            % material.group(0)[:24]
+        )
+
+
+def last_verdict_block(text, blocks):
+    """The workflow form's verdict block, or None when the comment carries no block at all.
+
+    THE VERDICT IS THE COMMENT'S LAST BLOCK. Not the last block of a kind, not the last block that
+    parses, not the last block a pattern recognised: the last one, out of a scan that read every
+    line. Round 11 made a block that does not close a failed parse rather than a licence to take
+    the block before it, and round 12 found the same revival one layer out -- `^```json` does not
+    match an indented fence, CommonMark says an indented fence is a fence, and a real
+    CHANGES_REQUIRED carrying a P1 stopped being a block at all, so the PASS quoted above it as an
+    example became the verdict. Recognising indented fences closes that instance. IT IS NOT WHAT
+    CLOSES THE CLASS.
+
+    What closes the class is that there is no longer a way to reach an earlier block. The verdict
+    is the LAST block, so an earlier one is never a candidate to fall back to; and before the parse
+    goes on, the comment is required to hold NO MATERIAL OF ANOTHER BLOCK after it -- coarsely, in
+    characters rather than in this file's idea of a fence, so the check still holds when the idea
+    of a fence is wrong again. Between them: if the real last block is recognised it is the one that
+    is read, and if it is not recognised its fence characters are sitting in the tail and the parse
+    fails. Neither road ends at the block before it.
+    """
+    if any(names_json(one.info) for one in blocks):
+        last = blocks[-1]
+        if not is_verdict_block(last):
+            raise Unparsed(
+                "the review's last ```json block is not its last block: a [%s%s] block follows it"
+                % (last.fence * 3, last.info[:24] or " plain")
+            )
+        if not last.closed:
             raise Unparsed("the review's last ```json block does not close")
-        return text[opened[-1].end():closed.start()].strip()
+        refuse_tail(text[last.after:])
+        return last
     opened = list(BARE_OBJECT_OPEN.finditer(text))
     if opened:
         end = text.rfind("}")
         if end < opened[-1].start():
             raise Unparsed("the review's last verdict object does not close")
-        return text[opened[-1].start():end + 1]
+        refuse_tail(text[end + 1:])
+        return Block("`", "json", text[opened[-1].start():end + 1],
+                     opened[-1].start(), end + 1, end + 1, True)
     return None
 
 
-def parse_json_review(text):
+def parse_json_review(text, blocks):
     """The workflow form: the last JSON object is the verdict, and it is the only source.
 
     Anything in the comment outside that object which looks like a finding is for a person, and is
     reported as a stray token rather than counted as a finding.
     """
-    block = last_verdict_block(text)
+    block = last_verdict_block(text, blocks)
     verdict = None
     if block is not None:
         try:
-            verdict = json.loads(block)
+            verdict = json.loads(block.content)
         except ValueError as exc:
             # The last block IS the verdict, and this one does not read as a whole object. Reaching
             # past it to an earlier one is the defect; reporting it as a review with no findings is
@@ -340,7 +489,7 @@ def parse_json_review(text):
             "stray": stray_summary(text),
             "findings": [{"severity": "ERR", "id": "unparsed", "flags": 0}],
         }
-    outside = text.replace(block, "")
+    outside = outside_block(text, block)
     return {
         "kind": "json",
         "reviewed_sha": matching(verdict.get("reviewed_sha"), SHA),
@@ -396,7 +545,13 @@ def review_result(args):
     if len(args) != 1:
         raise Unparsed("review takes one file")
     text = read_input(args[0])
-    result = parse_json_review(text) if IS_JSON_FORM.search(text) else parse_prose_review(text)
+    # FORMAT DETECTION IS PART OF THE PARSE, and it reads the same structure the verdict is taken
+    # out of: a comment carrying a `json` block is the workflow form whatever that block's fence is
+    # indented by, and so is one carrying the older bare object. Nothing here can fail on its own,
+    # and there is no fall back to whichever parser approves.
+    blocks = fenced_blocks(text)
+    json_form = any(names_json(one.info) for one in blocks) or BARE_FORM.search(text)
+    result = parse_json_review(text, blocks) if json_form else parse_prose_review(text)
     result["tag"] = "review"
     return result
 
@@ -498,6 +653,34 @@ def rendered(subcommand, result, nul):
     return "".join(one + NUL for one in fields).encode("utf-8")
 
 
+def write_all(stream, payload):
+    """All of PAYLOAD through STREAM, or a failure. Never some of it and a return.
+
+    `write()` RETURNS A BYTE COUNT, AND IT IS NOT ALWAYS THE WHOLE PAYLOAD. Under
+    `PYTHONUNBUFFERED=1` `sys.stdout.buffer` is the raw file object, whose `write` does one
+    `write(2)` and hands back what the kernel took: with the caller's `RLIMIT_FSIZE` at 1024 and a
+    3,560-byte result, `write(1, ..., 3560) = 1024` -- and the count discarded, a flush of an
+    unbuffered stream finishing nothing, the program exited 0 over a payload with 2,536 bytes
+    missing. That is the seventh round's unchecked `printf` again: a short write is a failure that
+    looks exactly like a success, and it truncates a findings list without shortening the count the
+    list declares.
+
+    So the count is read. Every byte is accounted for before this returns, and a write that stops
+    making progress raises rather than reporting what it managed.
+    """
+    view = memoryview(payload)
+    while view:
+        written = stream.write(view)
+        if written is None:
+            raise OSError("the stream would not say how many bytes of the result it wrote")
+        if written <= 0:
+            raise OSError(
+                "the result stopped being written with %d of %d bytes left"
+                % (len(view), len(payload))
+            )
+        view = view[written:]
+
+
 def write_result(payload, out):
     """The single write, confirmed before it counts as one.
 
@@ -505,7 +688,9 @@ def write_result(payload, out):
     place only once the bytes are on the device: a `write()` that returns EIO, a `flush()` that
     finds the device full, a `close()` that fails -- each ends the program non-zero with no
     destination file to read. That is the finding this program was written for, and it is closed
-    by construction rather than by a check somebody has to remember.
+    by construction rather than by a check somebody has to remember. The one step that does NOT
+    raise is a `write()` that took some of the payload and said so, which is why both writes go
+    through `write_all` and neither is the bare `.write()` whose count nobody reads.
 
     THE STAGING FILE IS CREATED BY THIS INVOCATION AND BELONGS TO IT. `OUT + ".part"` is one
     pathname shared by every process writing to one destination, and two of them overlapping is not
@@ -517,7 +702,7 @@ def write_result(payload, out):
     a fixed temporary name concurrent writers can collide on.
     """
     if out is None:
-        sys.stdout.buffer.write(payload)
+        write_all(sys.stdout.buffer, payload)
         sys.stdout.buffer.flush()
         # Closed explicitly: a buffered write that failed must raise HERE, where the exit status
         # is still being decided, and not in an interpreter shutdown handler after this function
@@ -529,7 +714,7 @@ def write_result(payload, out):
     )
     try:
         with os.fdopen(handle_fd, "wb") as handle:
-            handle.write(payload)
+            write_all(handle, payload)
             handle.flush()
             os.fsync(handle.fileno())
         # `mkstemp` creates 0600, and the destination is what a plain create would have left there.

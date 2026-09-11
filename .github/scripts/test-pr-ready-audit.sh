@@ -137,6 +137,21 @@
 #                                fence or its final `}` was stepped over and the `PASS` quoted
 #                                above it as an example became the verdict -- with the real
 #                                object's `"P\u0031"` invisible to the stray scan
+#   MUT-VERDICT-REVIVED-BY-INDENT  the verdict block was recognised by `^```json`, which is not
+#                                CommonMark's rule: a fence may carry up to three leading spaces
+#                                and its closing fence may be indented independently. One space
+#                                before the real `CHANGES_REQUIRED` object and it stopped being a
+#                                block at all, so the `PASS` quoted above it as an example became
+#                                the verdict -- READY and a merge call, with `"P\u0031"` invisible
+#                                to the stray scan. The case pins the recogniser AND the rule that
+#                                stands when a recogniser is wrong again: the verdict is the
+#                                comment's LAST block, and nothing that could be another block's
+#                                material may follow it
+#   MUT-PARSE-SHORT-WRITE        `write()` returned a smaller count than the payload and the count
+#                                was discarded: under `PYTHONUNBUFFERED=1`, with `RLIMIT_FSIZE` at
+#                                1,024 and a 3,560-byte result, `write(1, ..., 3560) = 1024` and
+#                                the program exited 0 over a findings list 2,536 bytes short of
+#                                itself, in both renderings
 #   MUT-STAGING-PATH-SHARED      the staging pathname was derived from the destination, so every
 #                                invocation publishing to one destination used one file: two of
 #                                them overlapping renamed one's bytes under the other's exit 0
@@ -840,6 +855,122 @@ printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","verdict":"CHANGES_RE
 expect MUT-VERDICT-REVIVED-BY-TRUNCATION "$(review_rows "$tmp/inner-fence.md")" \
   "0|json/$revived_head/CHANGES_REQUIRED/-/-;P2:SPAN:0"
 
+# --- an indented fence is a fence, and the block before the verdict is never a candidate ---------
+# THE SAME REVIVAL, ARRIVING THROUGH THE RECOGNISER INSTEAD OF THE COMPLETENESS CHECK. CommonMark
+# lets an opening fence carry up to three leading spaces, lets the closing fence be indented
+# independently of it, and strips the opening fence's indentation from the content
+# (https://spec.commonmark.org/0.31.2/#fenced-code-blocks). `^```json` matched none of that: ONE
+# SPACE before the real `CHANGES_REQUIRED` block and it stopped being a block at all, so the `PASS`
+# quoted above it as an example was selected -- READY and a merge call out of a review carrying a
+# P1, whose `"severity":"P\u0031"` the stray scan cannot see either.
+#
+# Two things are asserted, and the second is the one that matters. Indented fences are recognised;
+# AND the verdict is the comment's LAST block, with nothing that could be another block's material
+# after it -- so a fence shape this parser gets wrong AGAIN is a refusal, never the block before it.
+indented_body() {  # indented_body OPEN-INDENT CLOSE-INDENT FILE
+  local open close
+  printf -v open '%*s' "$1" ''
+  printf -v close '%*s' "$2" ''
+  { printf 'Reviewed head: %s\n\nAn earlier pass, kept as an example of the shape:\n\n' "$revived_head"
+    printf '```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[]}\n```\n' \
+      "$revived_head" "$revived_base"
+    printf '\nUnedited verdict:\n\n%s```json\n' "$open"
+    printf '%s{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}' \
+      "$open" "$revived_head" "$revived_base"
+    printf '\n%s```\n' "$close"; } > "$3"
+}
+# One, two and three spaces, on the opening fence, on the closing fence, and on the two
+# independently: every one of them is the real verdict, and none of them is the example above it.
+for spec in 0:0 1:1 2:2 3:3 1:0 3:0 0:1 0:3 1:3 3:1; do
+  indented_body "${spec%%:*}" "${spec##*:}" "$tmp/indent-$spec.md"
+  expect "MUT-VERDICT-REVIVED-BY-INDENT [open ${spec%%:*}, close ${spec##*:}]" \
+    "$(review_rows "$tmp/indent-$spec.md")" \
+    "0|json/$revived_head/CHANGES_REQUIRED/$revived_base/-;P1:CRITICAL:0"
+done
+# Through main, because the parser reading it right is only half of it: READY with a merge call is
+# what the audit did with the revived PASS.
+for spec in 1:1 2:2 3:3; do
+  got="$(STUB_REVIEW_BODY="$tmp/indent-$spec.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+  contains "MUT-VERDICT-REVIVED-BY-INDENT [$spec]" "$got" "open-P1:CRITICAL"
+  contains "MUT-VERDICT-REVIVED-BY-INDENT [$spec]" "$got" "NOT-READY"
+  [[ "$got" == *"verdict=PASS"* ]] \
+    && error "MUT-VERDICT-REVIVED-BY-INDENT [$spec]: the audit read PASS out of an indented verdict"
+done
+# A fence longer than three backticks opens and closes a block, and a closing fence must be at
+# least as long as the one it closes -- so a shorter run inside the block is content, and a block
+# the comment never closes is a failed parse rather than the block before it.
+printf 'Reviewed head: %s\n\n````json\n{"reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"LONG","severity":"P2","failure_sequence":"a line reading ``` on its own"}]}\n````\n' \
+  "$revived_head" "$revived_head" > "$tmp/long-fence.md"
+expect MUT-VERDICT-REVIVED-BY-INDENT "$(review_rows "$tmp/long-fence.md")" \
+  "0|json/$revived_head/CHANGES_REQUIRED/-/-;P2:LONG:0"
+# THE RULE THAT DOES NOT DEPEND ON THE RECOGNISER. The verdict is the comment's last block: a block
+# that follows it is not a reason to reach back past it, whatever that block is.
+{ cat "$tmp/indent-0:0.md"; printf '\n```text\nA note appended under the verdict.\n```\n'; } \
+  > "$tmp/block-after.md"
+got="$(review_rows "$tmp/block-after.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-VERDICT-REVIVED-BY-INDENT: a comment whose last block is not its verdict parsed, got [$got]"
+[[ "$got" == *PASS* ]] \
+  && error "MUT-VERDICT-REVIVED-BY-INDENT: an earlier PASS was revived past a later block, got [$got]"
+# And material this parser does NOT recognise as a block, which is the case that has to hold when
+# the recogniser is wrong again: four spaces is CommonMark's indented code block and not a fence, a
+# tilde fence is a fence this comment's own fences are not, and the bare form's object opener is
+# neither. Each of them after the verdict is a refusal.
+for trailing in '    ```json%b    {"verdict":"PASS","findings":[]}%b    ```' \
+                '~~~json%b{"verdict":"PASS","findings":[]}%b~~~' \
+                '{"role_understanding":"x","verdict":"PASS","findings":[]}%b%b'; do
+  { cat "$tmp/indent-0:0.md"; printf "\n$trailing\n" '
+' '
+'; } > "$tmp/tail-material.md"
+  got="$(review_rows "$tmp/tail-material.md")"
+  [[ "$got" == 0\|* ]] \
+    && error "MUT-VERDICT-REVIVED-BY-INDENT: a comment carrying block material after its verdict parsed, got [$got]"
+  [[ "$got" == *PASS* ]] \
+    && error "MUT-VERDICT-REVIVED-BY-INDENT: an earlier PASS was revived, got [$got]"
+  expect "MUT-VERDICT-REVIVED-BY-INDENT payload" "$(parse_nul review "$tmp/tail-material.md")" '1|'
+done
+# Detection reads the same structure: a comment whose ONLY verdict block is indented is the
+# workflow form, not prose -- the prose parser would read its `VERDICT:` line from outside the
+# object and miss every severity the object spells with an escape.
+printf 'Reviewed head: %s\n\n   ```json\n   {"reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"ONLY","severity":"P\\u0031"}]}\n   ```\n\nVERDICT: PASS\n' \
+  "$revived_head" "$revived_head" > "$tmp/indent-only.md"
+expect MUT-VERDICT-REVIVED-BY-INDENT "$(review_rows "$tmp/indent-only.md")" \
+  "0|json/$revived_head/CHANGES_REQUIRED/-/-;P1:ONLY:0"
+# And what is OUTSIDE the verdict is found by POSITION. `text.replace(block, "")` removes every
+# copy of the block's text and not the one that was read -- and an indented block's content, with
+# its indentation stripped, is no longer a substring of the comment at all, so it removes nothing
+# and the object's own severities are counted as tokens loose in the prose. A review with one
+# recorded finding would go to a person carrying a stray `P1` it does not have.
+{ printf 'Reviewed head: %s\n\n  ```json\n  {\n' "$revived_head"
+  printf '    "reviewed_sha": "%s",\n    "verdict": "CHANGES_REQUIRED",\n' "$revived_head"
+  printf '    "findings": [{"id": "INSIDE", "severity": "P1"}]\n  }\n  ```\n'; } > "$tmp/indent-stray.md"
+expect MUT-VERDICT-REVIVED-BY-INDENT "$(review_rows "$tmp/indent-stray.md")" \
+  "0|json/$revived_head/CHANGES_REQUIRED/-/-;P1:INSIDE:0"
+# A tilde fence is a block -- it has to be, or a ``` inside one would be read as a fence of the
+# comment's own -- and it is NOT a verdict, because the workflow writes backticks and narrowing is
+# the safe direction. It is still the workflow form, though: reading a comment whose only object is
+# tilde-fenced as PROSE would take its `VERDICT:` line from outside the object and miss every
+# severity the object spells with an escape, which is the defect a detection that cannot fail was
+# written to end. So it is a refusal, not a PASS.
+printf 'Reviewed head: %s\n\n~~~json\n{"reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"TILDE","severity":"P\\u0031"}]}\n~~~\n\nVERDICT: PASS\n' \
+  "$revived_head" "$revived_head" > "$tmp/tilde-only.md"
+got="$(review_rows "$tmp/tilde-only.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-VERDICT-REVIVED-BY-INDENT: a tilde-fenced verdict was given a verdict, got [$got]"
+[[ "$got" == *PASS* ]] \
+  && error "MUT-VERDICT-REVIVED-BY-INDENT: a tilde-fenced review was read as prose and passed, got [$got]"
+# The older bare form is held to the same rule: what follows the object it was read from may not be
+# another block's material either.
+printf 'Reviewed head: %s\n\n{"role_understanding":"x","reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"BARE","severity":"P2"}]}\n' \
+  "$revived_head" "$revived_head" > "$tmp/bare-whole.md"
+expect MUT-VERDICT-REVIVED-BY-INDENT "$(review_rows "$tmp/bare-whole.md")" \
+  "0|json/$revived_head/CHANGES_REQUIRED/-/-;P2:BARE:0"
+{ cat "$tmp/bare-whole.md"; printf '\n```text\nA note appended under the verdict.\n```\n'; } \
+  > "$tmp/bare-tail.md"
+got="$(review_rows "$tmp/bare-tail.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-VERDICT-REVIVED-BY-INDENT: a bare verdict with block material after it parsed, got [$got]"
+
 # A pretty-printed object with "}, {" between findings is the same object to a parser.
 cat > "$tmp/pretty.md" <<'EOF'
 Reviewed head: 4ad962f000000000000000000000000000000001
@@ -999,6 +1130,67 @@ write_status=0
   > /dev/full 2>/dev/null || write_status=$?
 ((write_status != 0)) \
   || error "MUT-PARSE-WRITE-UNCHECKED: a parse whose result went nowhere reported success"
+
+# --- a write that returned a smaller number is not a write ---------------------------------------
+# `write()` RETURNS A BYTE COUNT AND IT IS NOT ALWAYS THE WHOLE PAYLOAD. Under `PYTHONUNBUFFERED=1`
+# `sys.stdout.buffer` is the raw file object, whose `write` does one `write(2)` and hands back what
+# the kernel took. With the process's `RLIMIT_FSIZE` at 1,024 bytes, stdout on a file and a review
+# of 499 numbered findings rendering to 3,560 bytes, `strace` recorded
+# `write(1, ..., 3560) = 1024` and then `+++ exited with 0 +++`: the count discarded, a flush of an
+# unbuffered stream finishing nothing, and a findings list 2,536 bytes short of itself announced as
+# whole -- in both renderings, and with the record count the shell checks still declaring every
+# record the result was built with. That is the seventh round's unchecked write in the one place
+# that was left.
+{ printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n' c3a6665000000000000000000000000000000003
+  for ((n = 1; n <= 499; n++)); do printf '%d. **P1 - a thing that blocks.** Detail.\n\n' "$n"; done
+  printf 'VERDICT: PASS\n'; } > "$tmp/many-findings.md"
+for rendering in --nul --json; do
+  # the control first: with no limit the whole payload is written and the parse exits 0
+  whole_status=0
+  "$parser_python" scripts/pr-review-parse.py review "$rendering" "$tmp/many-findings.md" \
+    > "$tmp/many.whole" 2>/dev/null || whole_status=$?
+  expect "MUT-PARSE-SHORT-WRITE [$rendering] control" "$whole_status" 0
+  whole="$(wc -c < "$tmp/many.whole")"
+  ((whole > 1024)) \
+    || error "MUT-PARSE-SHORT-WRITE [$rendering]: the fixture renders to [$whole] bytes, which the limit would not cut"
+  short_status=0
+  ( trap '' XFSZ; ulimit -f 1
+    PYTHONUNBUFFERED=1 "$parser_python" scripts/pr-review-parse.py review "$rendering" \
+      "$tmp/many-findings.md" > "$tmp/many.short" 2>/dev/null ) || short_status=$?
+  ((short_status != 0)) \
+    || error "MUT-PARSE-SHORT-WRITE [$rendering]: a result whose write stopped part way reported success"
+  # and the write really did stop part way, so the case is about the count and not about a refusal
+  # somewhere else: what landed is some of the payload and not all of it.
+  landed="$(wc -c < "$tmp/many.short")"
+  ((landed > 0 && landed < whole)) \
+    || error "MUT-PARSE-SHORT-WRITE [$rendering]: no short write happened, [$landed] of [$whole] bytes"
+done
+# The class, not the site. The only `write` call in the parser is the one inside `write_all`, which
+# reads what it returns, and the stderr diagnostic, which is not the result channel: any other is a
+# count nobody read. Asked of the SYNTAX TREE, so a sentence in a comment cannot answer for code.
+expect MUT-PARSE-SHORT-WRITE "$("$parser_python" - scripts/pr-review-parse.py <<'WRITESHAPE'
+import ast, sys
+
+
+def dotted(node):
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
+
+
+loose = 0
+for node in ast.walk(ast.parse(open(sys.argv[1]).read())):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == "write" \
+            and dotted(node.func) not in ("stream.write", "sys.stderr.buffer.write"):
+        loose += 1
+print(loose)
+WRITESHAPE
+)" 0
 # An input the parse cannot read is not an empty review, and it is not a review in the other
 # format either: FORMAT DETECTION IS PART OF THE PARSE. `if grep ...; then json; else prose; fi`
 # made a file it could not read into "prose" and CHOSE A PARSER on it -- and the prose parser
