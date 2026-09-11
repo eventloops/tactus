@@ -2721,6 +2721,12 @@ The expectation is written out — two construction sites, both in
 than counted from the tree, because a count read from the tree grows
 with it.
 
+`CONSTRUCTORS` is why the census survived `HostRunner::for_legacy_workspace`
+(PR #271): a second constructor is a second spelling of the same thing this
+counts, and one that the census did not know would have read as *no* runner
+in `src/engine/mod.rs` rather than as a second one. Both spellings are
+counted and both appear in the control.
+
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `const SITES: [(&str, usize); 6] = [`
 
 Where a `HostRunner` is constructed in the engine's production code,
@@ -2728,7 +2734,7 @@ and how many times in each file.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `assert_eq!(`
 
-The injected control contains comments, literals, a typed test function and one later production construction. It must add exactly one count alone and when appended to each of the six source files.
+The injected control contains comments, literals, a typed test function and one later production construction per constructor spelling. It must add exactly `CONSTRUCTORS.len()` counts alone and when appended to each of the six source files.
 
 ## `fn production_reaches_a_spawn_through_one_host_runner_per_run() {` › `let engine = crate::effects::production_code(include_str!("../../engine/mod.rs"));`
 
@@ -2981,8 +2987,11 @@ integer size, and shrinking an empty pipe needs no extra privilege.
 ## `const CONTROL: &str = r##"`
 
 STRIP-CONTROL goes through the same whole-file blanker and counter as
-production. Its only production construction follows a test-only item,
-so truncating at the first #[cfg(test)] also fails this control.
+production. Its production constructions — one per spelling in
+`CONSTRUCTORS` — follow a test-only item, so truncating at the first
+#[cfg(test)] also fails this control, and each spelling is written into a
+comment, a string literal, a raw literal, a byte literal and a test item
+so that no spelling is counted from prose.
 
 ## `let engine = crate::effects::production_code(include_str!("../../engine/mod.rs"));`
 

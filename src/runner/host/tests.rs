@@ -5436,30 +5436,38 @@ fn production_reaches_a_spawn_through_one_host_runner_per_run() {
         "the census and its expectation cover different files"
     );
 
+    const CONSTRUCTORS: [&str; 2] = ["HostRunner::new(", "HostRunner::for_legacy_workspace("];
+
     const CONTROL: &str = r##"
 // STRIP-CONTROL: HostRunner::new();
-/* HostRunner::new(); /* HostRunner::new(); */ */
+/* HostRunner::for_legacy_workspace(); /* HostRunner::new(); */ */
 const TEXT: &str = "HostRunner::new();";
-const RAW: &str = r#"HostRunner::new();"#;
+const RAW: &str = r#"HostRunner::for_legacy_workspace();"#;
 const BYTES: &[u8] = b"HostRunner::new();";
-const RAW_BYTES: &[u8] = br#"HostRunner::new();"#;
+const RAW_BYTES: &[u8] = br#"HostRunner::for_legacy_workspace();"#;
 const QUOTE: char = '"';
 #[cfg(test)]
 pub(super) fn excluded_control() -> Result<((), ()), ()> {
     let runner = HostRunner::new();
+    let legacy = HostRunner::for_legacy_workspace();
     Ok(((), ()))
 }
-fn production_control() { let runner = HostRunner::new(); }
+fn production_control() {
+    let runner = HostRunner::new();
+    let legacy = HostRunner::for_legacy_workspace();
+}
 "##;
     let count_constructions = |source: &str| {
-        crate::effects::production_code(source)
-            .matches("HostRunner::new(")
-            .count()
+        let production = crate::effects::production_code(source);
+        CONSTRUCTORS
+            .iter()
+            .map(|spelling| production.matches(spelling).count())
+            .sum::<usize>()
     };
     assert_eq!(
         count_constructions(CONTROL),
-        1,
-        "the control must count only the production construction"
+        CONSTRUCTORS.len(),
+        "the control must count every constructor's production construction and nothing else"
     );
     let mut counted: Vec<(&str, usize)> = Vec::new();
     for (name, source) in sources {
@@ -5467,7 +5475,7 @@ fn production_control() { let runner = HostRunner::new(); }
         let with_control = format!("{source}\n{CONTROL}");
         assert_eq!(
             count_constructions(&with_control),
-            count + 1,
+            count + CONSTRUCTORS.len(),
             "{name}: the census must ignore prose and test items and count an appended production construction"
         );
         counted.push((name, count));
@@ -5487,7 +5495,9 @@ fn production_control() { let runner = HostRunner::new(); }
             .map(|(_, rest)| rest.lines().take(8).collect::<Vec<_>>().join("\n"))
             .unwrap_or_default();
         assert!(
-            after.contains("HostRunner::new()"),
+            CONSTRUCTORS
+                .iter()
+                .any(|spelling| after.contains(spelling.trim_end_matches('('))),
             "`{facade}` is not one of the two construction sites this census counted"
         );
     }
