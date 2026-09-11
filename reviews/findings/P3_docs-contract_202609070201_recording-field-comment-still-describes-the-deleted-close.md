@@ -1,6 +1,6 @@
 ---
 id: SWEEP-EFFECTS-HARNESS-001-REVIEW-01
-severity: P4
+severity: P3
 disposition: deferred
 category: docs-contract
 pr: 244
