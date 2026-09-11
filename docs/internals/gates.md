@@ -221,6 +221,57 @@ One legacy-scoped gate identity. `TaskKey(0)`, attempt 1, gate `n` —
 the packet's first form with the legacy engine's generation
 (`InvocationId::legacy_attempt`).
 
+## `mod tests` › `fn git_as_the_legacy_workspace_does(dir: &Path, args: &[&str]) -> String {`
+
+A `git` of the shape `src/workspace.rs` runs: no
+[`NO_REPLACEMENT_OBJECTS`](../../src/workspace_manager.rs), whatever this
+suite's own process carries.
+
+The removal is the point. The v0.1 workspace sets no such pair on its
+twenty Git children, so its checkout materialises whatever `refs/replace/*`
+points the recorded tree at; a suite started under an exported
+`GIT_NO_REPLACE_OBJECTS=1` would set the fixture up the *other* way and
+measure nothing.
+
+## `mod tests` › `fn runner_reading(objects: crate::runner::host::ObjectGraph) -> crate::runner::host::HostRunner {`
+
+A host runner whose base carries no `GIT_NO_REPLACE_OBJECTS` of its own,
+reading `objects`.
+
+`HostRunner::run` clears the ambient environment and installs what
+`compose` returned, and `compose`'s base is this process's environment:
+under an exported `GIT_NO_REPLACE_OBJECTS=1` the base would carry the pair
+and both legs of the witness below would read the same object graph.
+Filtering the base is what makes them differ by the one thing under test.
+
+## `mod tests` › `fn a_v1_gate_judges_the_tree_its_own_workspace_materialised() {`
+
+A v0.1 gate judges the tree its own workspace materialised (PR #271,
+round 1's regression finding).
+
+The schema-1..3 path shares `HostRunner` with the schema-4 one, and its
+producer is frozen: `src/workspace.rs`'s Git children set no
+`NO_REPLACEMENT_OBJECTS`, so with `refs/replace/<tree A> -> <tree B>`
+installed its checkout of a commit whose recorded tree is `A` puts `B` on
+disk. Composing the pair for that gate's process puts producer and consumer
+on different object graphs, and `git diff --exit-code HEAD` over a checkout
+nothing has touched exits 1 — a `Fail` on a workspace the engine itself
+wrote. Measured on git 2.43 with the pair composed unconditionally: `Fail`,
+exactly as the `Recorded` leg still records.
+
+So the v0.1 conductor's runner reads the graph its own producer wrote
+(`HostRunner::for_legacy_workspace`, installed at `engine::run` and
+`engine::resume`), and the exact-snapshot rule of `design/15` binds the
+schema-4 path, whose producer removes replacements at both ends. That the
+v0.1 path reads replacements at all is
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, deferred behind the module's
+freeze; this test pins only that this pull request did not change its
+answer.
+
+Both legs run the production `ShellGate::check` over a production
+`Workspace` with a legacy invocation, so what differs between them is one
+field of one environment.
+
 ## `mod tests` › `fn every_shell_spells_its_invocation_the_way_the_record_says() {`
 
 How each shell is asked to run a command line, written from the

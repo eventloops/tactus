@@ -38,7 +38,7 @@ pub(super) fn resume_harness_inner(
     resume_harness_inner_on(
         opts,
         harness,
-        &crate::runner::host::HostRunner::new(),
+        &crate::runner::host::HostRunner::for_legacy_workspace(),
         &contained,
     )
 }

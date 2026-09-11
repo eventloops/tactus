@@ -448,6 +448,21 @@ Infallible because `host-v1`'s record is a constant with nothing to inspect;
 `crate::runner::policy::resolve_host` is the checked entry point and returns the same record, which
 `new_resolves_the_same_record_as_resolve_host` asserts.
 
+## `HostRunner::for_legacy_workspace`
+
+The runner the schema-1..3 conductor installs, and the only thing that separates it from
+[`HostRunner::new`](#hostrunnernew) is which object graph its children read.
+
+`src/workspace.rs` produces the v0.1 workspace and its gate snapshots, sets no
+`NO_REPLACEMENT_OBJECTS` on any of its Git children, and is frozen by `effects/allowlist.toml`'s
+`[[legacy]]` row — `invariants_preserved[1]`, "this module's behaviour untouched". A consumer that
+read a different object graph from that producer failed `git diff --exit-code HEAD` over a checkout
+nothing had touched (measured, git 2.43; PR #271 round 1's regression finding), so this runner reads
+`ObjectGraph::AsReplaced` and the schema-4 path keeps the isolated default. See
+[`ObjectGraph`](host/environment.md) for the whole of that reasoning. `engine::run`,
+`engine::resume` and the two `#[cfg(test)]` coordinator entries beneath them are its call sites, and
+they are all of them: a runner built anywhere else judges the recorded graph.
+
 ## `HostRunner::policy`
 
 Exposed because INV-23 records it in three places — digested into the marker (P1), in full in the

@@ -36,7 +36,7 @@ pub fn run_with(
 }
 
 pub fn run_harness(opts: &RunOptions, harness: &Harness<'_>) -> Result<RunReport, UpstrokeError> {
-    run_harness_on(opts, harness, &HostRunner::new())
+    run_harness_on(opts, harness, &HostRunner::for_legacy_workspace())
 }
 
 fn run_harness_on(
@@ -74,7 +74,7 @@ pub fn resume_harness(
     opts: &ResumeOptions,
     harness: &Harness<'_>,
 ) -> Result<RunReport, UpstrokeError> {
-    resume_harness_on(opts, harness, &HostRunner::new())
+    resume_harness_on(opts, harness, &HostRunner::for_legacy_workspace())
 }
 
 fn resume_harness_on(

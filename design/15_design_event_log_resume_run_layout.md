@@ -85,14 +85,24 @@ check cannot see it: measured on git 2.43, `commit-tree A -p P` records the raw 
 `worktree add --detach` materialises `A`, while a process inside that worktree reading through Git
 sees `B` — `git show HEAD:f` returns the replacement and `git status --porcelain` reports the
 untouched checkout modified. Two trees for one snapshot is not a tree §4's "ground truth is the
-diff" could name, so upstroke removes the ambiguity rather than detecting it: every child it
-starts that can run Git — the engine's own commands and read-only reads, and every gate, reviewer
-and implementer, on the host runner and in a container alike — runs with
-`GIT_NO_REPLACE_OBJECTS=1`. This is not configurable. A replacement graph is a ref outside the
-recorded inputs of a run, so a verdict that depended on one would not be reproducible from the
-record; an operator who wants the replaced history judged rewrites it, and the run judges what the
-repository then holds. The variable is one constant, `NO_REPLACEMENT_OBJECTS` in
-`src/workspace_manager.rs`, named at each of those boundaries.
+diff" could name, so upstroke removes the ambiguity rather than detecting it: every child that
+runs Git over a snapshot — the manager's own commands and read-only reads, and every gate,
+reviewer and implementer the runners start, on the host runner and in a container alike — runs
+with `GIT_NO_REPLACE_OBJECTS=1`. No adapter, image or command overlay can turn it back on: the
+runners compose it last. A replacement graph is a ref outside the recorded inputs of a run, so a
+verdict that depended on one would not be reproducible from the record; an operator who wants the
+replaced history judged rewrites it, and the run judges what the repository then holds. The
+variable is one constant, `NO_REPLACEMENT_OBJECTS` in `src/workspace_manager.rs`, named at each of
+those boundaries.
+
+**Exact snapshots are §5's, and so is this rule.** The released v0.1 path has no exact snapshot:
+its workspace and its ephemeral gate snapshots come from `src/workspace.rs`, which reads whatever
+the replacement graph describes at both ends, and a consumer of that workspace must read what its
+own producer wrote or judge a tree nobody created. So a v0.1 run reads the replaced graph
+throughout and a schema-4 run reads the recorded one throughout; each is internally consistent, and
+the conductor chooses once, where it builds its runner. That the v0.1 path reads replacements at
+all is a defect, recorded as `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` and deferred behind that
+module's freeze; it closes when the schema-4 engine replaces those paths (§21, PR7-PR11).
 
 Every transition is an event `{ts, event, task?, attempt?, rung?, profile?, data}` — including `question_raised`, `question_answered`, `design_defect`, `capacity_snapshot`, `pool_exhausted`, and `spend_down_engaged`. `status`, the ledger, and the capacity view are pure folds over this file.
 

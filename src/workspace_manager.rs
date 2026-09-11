@@ -90,12 +90,19 @@ use crate::util::{DurabilityLedger, DurableStep};
 /// wherever `A` is named while `rev-parse` still prints `A`. An exact snapshot
 /// is defined against the objects the repository holds and never against that
 /// rewriting (`design/15_design_event_log_resume_run_layout.md`, "What an exact
-/// snapshot is exact against"), so this pair is set on **every** child upstroke
-/// starts that can run Git: the manager's own commands
-/// ([`WorkspaceManager::command`]), the manager's read-only reads
-/// ([`read_only_git`]), and every role process either runner spawns
+/// snapshot is exact against"), so this pair is set on every child that runs
+/// Git over one: the manager's own commands ([`WorkspaceManager::command`]),
+/// the manager's read-only reads ([`read_only_git`], which [`read_only_git_ok`]
+/// is the only other way to reach), and every role process either runner spawns
 /// (`HostEnvironment::compose`, `ContainerEnvironment::compose`), which clear
 /// the ambient environment and so would otherwise drop it.
+///
+/// **Not the v0.1 path**, which has no exact snapshot: `src/workspace.rs` reads
+/// the replaced graph at both ends and is frozen (`effects/allowlist.toml`'s
+/// `[[legacy]]` row, `invariants_preserved[1]`), so its conductor's runner
+/// reads that graph too rather than judging a tree its own producer never
+/// wrote -- `crate::runner::host::ObjectGraph`, and
+/// `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` for the deferred defect.
 ///
 /// It is one constant rather than four literals so that the key and the value
 /// cannot be separated and a new spawn site names the fact rather than
@@ -4163,7 +4170,9 @@ impl WorkspaceManager {
     /// filesystem and every process inspecting it through Git see one tree --
     /// the judged one. `design/15_design_event_log_resume_run_layout.md`, "What
     /// an exact snapshot is exact against", is the product sentence that says
-    /// so.
+    /// so, and its second paragraph is why the v0.1 conductor, which takes no
+    /// snapshot from this manager, is the one runner that reads the other
+    /// graph.
     fn command(&self, cwd: &Path, args: &[OsString]) -> Command {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(self.hooks_dir());

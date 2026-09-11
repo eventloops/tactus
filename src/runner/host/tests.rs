@@ -297,6 +297,37 @@ fn every_composed_environment_disables_replacement_objects() {
 }
 
 #[test]
+fn the_v1_conductors_environment_composes_no_replacement_isolation() {
+    let mut rows = 0_usize;
+    for case in KeyCase::ALL {
+        let mut base = synthetic_base();
+        base.push((
+            os(NO_REPLACEMENT_OBJECTS.0),
+            os("whatever-the-operator-exported"),
+        ));
+        let environment = HostEnvironment::with_base(base, *case).reading(ObjectGraph::AsReplaced);
+        for role in ExecutionRole::all() {
+            let composed = environment
+                .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
+                .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+            assert_eq!(
+                value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
+                Some(OsStr::new("whatever-the-operator-exported")),
+                "{role} ({case:?}): the v0.1 conductor's own base is what its \
+                 children read, and this boundary must add nothing to it"
+            );
+            rows += 1;
+        }
+    }
+    assert_eq!(rows, 5 * KeyCase::ALL.len(), "every role, both key cases");
+    assert_eq!(
+        HostRunner::for_legacy_workspace().environment().objects(),
+        ObjectGraph::AsReplaced,
+        "and that is the environment `engine::run` and `engine::resume` install"
+    );
+}
+
+#[test]
 fn a_reserved_key_the_base_does_not_carry_is_not_supplied() {
     let environment =
         HostEnvironment::with_base(vec![(os("PATH"), os("/usr/bin"))], KeyCase::Sensitive);

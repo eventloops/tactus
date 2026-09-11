@@ -532,6 +532,100 @@ mod tests {
         }
     }
 
+    fn git_as_the_legacy_workspace_does(dir: &Path, args: &[&str]) -> String {
+        let out = StdCommand::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=upstroke",
+                "-c",
+                "user.email=u@example.invalid",
+            ])
+            .args(["-c", "core.autocrlf=false", "-c", "core.eol=lf"])
+            .args(args)
+            .env_remove(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0)
+            .output()
+            .expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    fn runner_reading(
+        objects: crate::runner::host::ObjectGraph,
+    ) -> crate::runner::host::HostRunner {
+        use crate::runner::host::{HostEnvironment, HostRunner, KeyCase};
+        let case = KeyCase::current();
+        let base = std::env::vars_os()
+            .filter(|(key, _)| {
+                !case.same_key(
+                    key,
+                    std::ffi::OsStr::new(crate::workspace_manager::NO_REPLACEMENT_OBJECTS.0),
+                )
+            })
+            .collect();
+        HostRunner::new().with_environment(HostEnvironment::with_base(base, case).reading(objects))
+    }
+
+    #[test]
+    fn a_v1_gate_judges_the_tree_its_own_workspace_materialised() {
+        use crate::runner::host::ObjectGraph;
+
+        let repo = temp_repo("legacy-replacement");
+        fs::write(repo.join("f.txt"), "A\n").expect("the recorded content");
+        git_as_the_legacy_workspace_does(&repo, &["add", "f.txt"]);
+        git_as_the_legacy_workspace_does(&repo, &["commit", "-q", "-m", "recorded"]);
+        let recorded_commit = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD"]);
+        let recorded_tree = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD^{tree}"]);
+
+        fs::write(repo.join("f.txt"), "B\n").expect("the replacing content");
+        git_as_the_legacy_workspace_does(&repo, &["add", "f.txt"]);
+        git_as_the_legacy_workspace_does(&repo, &["commit", "-q", "-m", "replacing"]);
+        let replacing_tree = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD^{tree}"]);
+        assert_ne!(recorded_tree, replacing_tree, "two distinct trees");
+
+        git_as_the_legacy_workspace_does(&repo, &["replace", &recorded_tree, &replacing_tree]);
+        git_as_the_legacy_workspace_does(
+            &repo,
+            &["checkout", "--detach", "--quiet", &recorded_commit],
+        );
+
+        // The premise, and the half this pull request must not have changed:
+        // the workspace's own checkout of the recorded tree put the replacing
+        // blob on disk.
+        assert_eq!(
+            fs::read_to_string(repo.join("f.txt")).expect("the checkout"),
+            "B\n",
+            "the v0.1 producer honours `refs/replace/*`; without that this test \
+             measures nothing"
+        );
+
+        let ws = Workspace::open(&repo).expect("open");
+        let judge = gate("git diff --exit-code HEAD -- f.txt", 60);
+
+        let legacy = judge
+            .check(&runner_reading(ObjectGraph::AsReplaced), gate_id(0), &ws)
+            .expect("the gate ran");
+        assert!(
+            matches!(legacy, GateResult::Pass { .. }),
+            "a v0.1 gate over an untouched v0.1 checkout must pass: {legacy:?}"
+        );
+
+        let recorded = judge
+            .check(&runner_reading(ObjectGraph::Recorded), gate_id(1), &ws)
+            .expect("the gate ran");
+        assert!(
+            matches!(recorded, GateResult::Fail { .. }),
+            "and the disagreement this exemption exists to avoid is real: reading \
+             the recorded graph over a checkout the replacing graph wrote must \
+             fail, or the two legs are not measuring the pair: {recorded:?}"
+        );
+    }
+
     #[test]
     fn every_shell_spells_its_invocation_the_way_the_record_says() {
         const LINE: &str = "cargo test --all";

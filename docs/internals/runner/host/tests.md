@@ -142,6 +142,22 @@ Witnessed failing with the upsert removed from `compose`
 surviving, since this key is deliberately not a reserved one that gets
 stripped) and with it moved above the overlay loop (`Some("0")`).
 
+## `fn the_v1_conductors_environment_composes_no_replacement_isolation() {`
+
+The other half of the pair above: the v0.1 conductor's environment adds
+nothing, so a gate over a v0.1 checkout reads the graph that checkout
+was written from (PR #271, round 1's regression finding).
+
+The base carries a value of its own and the assertion is that it
+*survives* — an exemption that stripped the key would be a third graph,
+not the producer's. The last line pins the connection to production:
+`HostRunner::for_legacy_workspace`, which `engine::run` and
+`engine::resume` install, is an environment reading `AsReplaced`.
+
+Witnessed failing with the `ObjectGraph::Recorded` condition removed from
+`compose` (`Some("1")` for every role and both name rules), which is the
+head this repair was written against.
+
 ## `fn a_reserved_key_the_base_does_not_carry_is_not_supplied()` › `let environment =`
 
 "set but empty" and "unset" are different environments, and CLIs
