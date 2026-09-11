@@ -20,6 +20,7 @@ use crate::runner::{HarnessHooks, ProbeTarget, SPAWN_SITE};
 use crate::topology::effects::{HookHarness, Injection, InjectionMode, Platform, SubEffectPoint};
 use crate::topology::events::{AttemptNumber, GenerationId};
 use crate::topology::registry::TaskKey;
+use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 fn os(value: &str) -> OsString {
     OsString::from(value)
@@ -258,6 +259,52 @@ fn environment_composition_fixtures() {
             }
         }
     }
+}
+
+/// Every role composes the replacement isolation, from any base and under any
+/// overlay (PR #130, pass 3's P1).
+///
+/// `HostRunner::run` clears the ambient environment and installs exactly what
+/// this returns, so a pair that is not composed here reaches no child. The base
+/// carries a value of its own and the overlay restates the key, because the
+/// pair is upserted *after* the overlay precisely so that neither can decide
+/// it: a snapshot is exact against the objects the repository holds
+/// (`design/15`, "What an exact snapshot is exact against"), and that is not a
+/// property an adapter gets a vote on.
+///
+/// Witnessed failing with the upsert removed from `compose`
+/// (`Some("whatever-the-operator-exported")`, the base's own value surviving,
+/// since this key is deliberately not a reserved one that gets stripped) and
+/// with it moved above the overlay loop (`Some("0")`).
+#[test]
+fn every_composed_environment_disables_replacement_objects() {
+    let mut rows = 0_usize;
+    for case in KeyCase::ALL {
+        let mut base = synthetic_base();
+        base.push((
+            os(NO_REPLACEMENT_OBJECTS.0),
+            os("whatever-the-operator-exported"),
+        ));
+        let environment = HostEnvironment::with_base(base, *case);
+        for role in ExecutionRole::all() {
+            for overlay in [
+                Vec::new(),
+                vec![(NO_REPLACEMENT_OBJECTS.0.to_owned(), "0".to_owned())],
+            ] {
+                let composed = environment
+                    .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &overlay)
+                    .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+                assert_eq!(
+                    value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
+                    Some(OsStr::new(NO_REPLACEMENT_OBJECTS.1)),
+                    "{role} ({case:?}, overlay {overlay:?}): the child would read \
+                     whatever `git replace` points at the judged objects"
+                );
+                rows += 1;
+            }
+        }
+    }
+    assert_eq!(rows, 5 * 2 * KeyCase::ALL.len(), "every role, both overlays");
 }
 
 #[test]

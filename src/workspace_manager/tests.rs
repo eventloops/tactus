@@ -5980,8 +5980,9 @@ fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
 /// forced removal and a fresh add.
 ///
 /// Witnessed failing with the pair removed from `read_only_git`:
-/// `Err(TreeMismatch { expected: <head tree>, difference: "2 path(s) differ:
-/// a.txt, b.txt" })` over a worktree nothing had written to.
+/// `Err(TreeMismatch { expected: "6640fb01...", difference: "1 path(s) differ:
+/// b.txt" })` over a worktree nothing had written to -- `b.txt` being what the
+/// seed tree the replacement points at does not carry.
 #[test]
 fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
     let fixture = Fixture::created("replace-quiescence");
