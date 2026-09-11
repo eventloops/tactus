@@ -83,17 +83,17 @@
 # This script decides whether to merge, so every uncertainty resolves to NOT-READY. A read that
 # failed, a read that may be short, and a field the review did not record are each an uncertainty,
 # and none of them is an empty result: an unreadable comment page blocks as `review-lookup-failed`,
-# an unreadable timeline as `timeline-lookup-failed`, an unreadable pull request as
-# `pr-lookup-failed`, a review the parser did not finish reading as `review-parse-incomplete`, a
-# parser that exited non-zero as `review-parse-failed`, a review that records no reviewed commit as
+# a review comment the audit could not fetch as `review-fetch-failed`, a parser that exited
+# non-zero as `review-parse-failed`, a parser result that did not arrive whole as
+# `review-parse-incomplete`, an unreadable timeline as `timeline-lookup-failed`, an unreadable
+# pull request as `pr-lookup-failed`, an unreadable pull-request body as `ledger-lookup-failed`
+# and one the parser refused or that did not arrive whole as `ledger-parse-failed` and
+# `ledger-parse-incomplete`, a review that records no reviewed commit as
 # `review-records-no-reviewed-sha`, a finding-file listing that errored as
 # `finding-file-lookup-failed`, and a gate-edit check that could not run as
 # `gate-edit-check-failed`; an unreadable ruleset list or open-pull-request list refuses the whole
 # run before the first pull request is judged. Every list request is paginated, because a first
-# page is not a list and 30 rows of nothing hid an active ruleset on page two. A parse is judged
-# by two of those blockers and not one: END says the parser reached the end of the findings, its
-# exit status says it did not die getting there, and END alone will not do, because END is a row
-# the review's own strings could write and one did.
+# page is not a list and 30 rows of nothing hid an active ruleset on page two.
 #
 # Reading "I could not look" as "there is nothing there" is precisely how a blocked pull request
 # enqueues, and it has happened here more than once: a comment page whose failure was swallowed
@@ -101,20 +101,41 @@
 # BEHIND blocker; an empty `--reviewer` moved trust to the repository's owner. Each was one line,
 # and each called merge.
 #
+# THE REVIEW IS NOT PARSED IN BASH, and that is this file's answer to the same rule rather than
+# another armoured site. Seven consecutive rounds of frontier review found the same defect seven
+# times in this path, each time in a shape nobody had armoured yet -- `|| true`, `pipefail`'s
+# rightmost status, a here-string that could not spill, a redirection that failed before its
+# command ran, `read`'s end-of-input-that-is-also-error, `grep`'s 1-that-is-an-answer, and finally
+# an unchecked `printf` whose `write()` returned EIO while the function around it returned 0, so
+# one finding vanished from a findings list that still announced itself complete. In bash, failure
+# is representable as success: a status that must be remembered, a stream with no end-to-end
+# integrity, `errexit` suspended inside `||`. So both review forms, format detection included, are
+# read by `scripts/pr-review-parse.py`, which either writes the whole result and exits 0 or writes
+# nothing and exits non-zero, and confirms its own write before deciding which. The contract on
+# this side is the whole of it: RUN IT; IF ITS EXIT STATUS IS NOT 0, BLOCK; OTHERWISE READ ITS
+# RESULT FROM THE FILE IT WROTE. Nothing here re-derives, re-scans or repairs what it emitted.
+# There is no in-band completeness marker to forge: the payload declares its own record count,
+# which the parser computed, and a payload that did not arrive whole fails that count.
+#
 # The same rule reaches down to how data is handed to a command. `<<<` spills to a temporary file
 # once it outgrows a pipe buffer, and a temporary file bash cannot create is a redirection that
 # failed: the command never runs and the shell returns 1. That 1 is `grep`'s "no match", so the
-# two are one answer -- and for a compound command (`while ... done <<< "$x"`) the body is simply
-# skipped, which neither a captured status nor `set -e` can see. So nothing in this file feeds
-# `grep` through `<<<` and no compound command is fed through one either; whole-line matching is
-# done by expansion, and a read that needs a file gets a real one whose write is checked. The
-# gate holds both shapes.
+# two are one answer; for a compound command (`while ... done <<< "$x"`) the body is simply
+# skipped, which neither a captured status nor `set -e` can see; and for `read` or `mapfile` the
+# variables it was to fill are left holding whatever they held before. So THIS FILE CONTAINS NO
+# HERE-STRING AND NO HERE-DOCUMENT AT ALL, which is a shape a gate can hold whole rather than one
+# instance at a time: lines are walked by expansion, a fixed program text is written with
+# `printf`, and a read that needs a file gets a real one whose write is checked.
 #
 # Other states: NEEDS-ATTEST (the head moved past the reviewed commit by more than clean merges
 # and ledger pushes: a repair-only push the owner reads and attests under step 5, a merge commit
 # that is not git's own merge of its parents, or a new change that needs another pass), MANUAL
 # (the review is prose the audit cannot judge: findings without ids, or a severity token outside
-# the numbered findings, so a person reads it), and NOT-READY with the blockers listed.
+# the numbered findings, so a person reads it), and NOT-READY with the blockers listed. MANUAL is
+# decided from the blocker array itself, by expansion, with no command in the condition: written
+# as `printf ... | grep -q '^manual:'` it was a failure representable as success one last time --
+# `grep` exiting 2 left `state=READY` with the blocker still in the row, and the audit printed
+# READY, listed the manual blocker beside it and called merge.
 #
 # Exactly one account's review comments count, and anyone else's comment carrying the markers is
 # ignored, so a contributor cannot mint a PASS. Which account that is comes from the caller --
@@ -133,14 +154,14 @@
 # branch diff byte-identical before and after, no gate edited by the pull request, and no branch
 # commit outside the ledger.
 #
-# The pure parts (lane, severity sets, the two review parsers, the frontmatter id match, the
-# newest-check-run choice, the ledger-row parse) are functions, exercised by
-# .github/scripts/test-pr-ready-audit.sh; sourcing this file with PR_READY_AUDIT_LIBRARY=1
-# defines them without running the audit.
+# The pure parts (lane, severity sets, the parser call and the reader for its result, the
+# frontmatter id match, the newest-check-run choice) are functions, exercised by
+# .github/scripts/test-pr-ready-audit.sh along with `scripts/pr-review-parse.py` itself; sourcing
+# this file with PR_READY_AUDIT_LIBRARY=1 defines them without running the audit.
 #
 # Needs: bash, git (a checkout with `origin` pointing at the repository), gh (its built-in --jq
-# does the API-side JSON work), and python3 or python for the verdict JSON; without a python
-# the JSON form fails closed.
+# does the API-side JSON work), and python3 or python, which now reads BOTH review forms and the
+# pull request's ledger; without a python nothing is judged and every pull request blocks.
 
 set -euo pipefail
 
@@ -162,260 +183,61 @@ must_fix_for() {
   esac
 }
 
-# review_kind FILE: "json" when the comment carries a fenced ```json verdict (or the older bare
-# role_understanding object), "prose" otherwise. A prose review that merely quotes JSON is prose.
-# Nothing, and a non-zero status, when the file could not be read.
+# ---- the one parser ------------------------------------------------------------------------------
+
+# Where the parser is, and what runs it. Settled once, at load, from this file's own location, so
+# that a run from any directory finds the parser beside the audit rather than beside the caller.
+audit_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+review_parser="$audit_dir/pr-review-parse.py"
+review_python="$(command -v python3 || command -v python || true)"
+
+# run_review_parser SUBCOMMAND INPUT OUT: read INPUT with scripts/pr-review-parse.py and leave its
+# flat NUL-separated result in OUT. SUBCOMMAND is `review` or `ledger`.
 #
-# A FAILED DETECTION IS NOT A FORMAT, and this is that rule at the point where it decides which
-# parser reads the review. `grep`'s 1 is "this comment carries no fenced object" -- an answer --
-# and its 2 is a file it could not read; `if grep ...; then json; else prose; fi` made the second
-# into the first and CHOSE A PARSER on it. The two parsers do not agree about the same review, so
-# that choice is a verdict: a JSON review whose object says CHANGES_REQUIRED and carries a P1
-# went to the prose parser, which reads the `VERDICT:` line sitting outside the object -- PASS --
-# and never sees a severity the object spells with a JSON escape (`"P1"` holds no `P1` for a
-# grep to find). READY, and a merge call, out of a review that blocks. So the two statuses are
-# kept apart and the unreadable one is no format at all; the caller blocks on it.
-review_kind() {
-  local status=0
-  grep -qE '^```json|"role_understanding"' "$1" || status=$?
-  case "$status" in
-    0) echo json ;;
-    1) echo prose ;;
-    *) return 1 ;;
-  esac
+# ITS EXIT STATUS IS THE WHOLE CONTRACT. The parser builds its result in memory, renders it,
+# checks every field for the record separator, writes the payload to a neighbour of OUT, flushes
+# it, fsyncs it, closes it -- each of which raises rather than returning a status a caller could
+# forget -- and only then renames it over OUT. So OUT never holds half a result, whatever anybody
+# downstream does, and a non-zero status here means there is no result to read. The caller blocks
+# on it and does not look at OUT at all.
+#
+# Without a python there is no parse. That is a narrowing: the prose form used to be read by
+# greps, so it was judged on a machine with no python while the JSON form failed closed. One
+# parser is the point of this round, and half of one is the format-detection defect again -- a
+# review judged by whichever reader happened to be available. 127 is the status the caller reports.
+run_review_parser() {
+  [[ -n "$review_python" ]] || return 127
+  "$review_python" "$review_parser" "$1" --nul --out "$3" "$2"
 }
 
-# parse_verdict_json FILE: the workflow form. Prints tab-separated lines:
-#   META <reviewed_sha or -> <verdict or -> <base_sha or ->  the one object the findings come from
-#   STRAY <tokens> 0                            severity or MUST tokens found outside that object
-#   <severity> <id or -> <bits>                 one per finding; bits: 1 = witness field, 2 = MUST
-#   ERR <reason> 0                              an object or finding the parser cannot judge
-#   END - 0                                     the parser reached the end of the findings
+# read_parser_fields FILE TAG HEAD-COUNT PER-RECORD: fills the global array `fields` from the
+# parser's payload and returns non-zero unless the whole of it arrived.
 #
-# END is the whole point of the contract. Every other line is something the parser found, and a
-# parser that dies partway prints fewer of them -- not an error the caller can see, just a shorter
-# findings list, which is a weaker verdict. `PYTHONIOENCODING=ascii` in the environment and one
-# non-ASCII character in a finding id is enough: META prints, the finding does not, and a PASS
-# carrying a deferred finding audits as a PASS carrying none, which is READY and a merge call.
-# No field is ever empty either: `read` with IFS=tab folds runs of tabs together, so an empty
-# reviewed_sha shifted the verdict into its column and the base into the verdict's.
+# A LIST THAT ENDED IS NOT A LIST THAT WAS READ: `read` returns non-zero at end of input AND on a
+# failed read, and the loop below ends on either, so what it has collected is the fields that
+# happened to arrive. The payload's own last head field is the record count -- computed by the
+# parser from the result it built, not a marker in the data -- and the array must be exactly the
+# length that count implies. Short of that the read did not finish, and the caller blocks.
 #
-# END is necessary and it is not sufficient. It is a row in a protocol built out of the strings
-# the review supplied, so a review can write one, and one did. The caller takes this parser's
-# exit status as well, and no value reaches a row until it has been checked for the protocol's
-# own separators: a marker cannot stand in for a status.
-parse_verdict_json() {
-  local py
-  py="$(command -v python3 || command -v python || true)"
-  if [[ -z "$py" ]]; then
-    printf 'ERR\tno-python\t0\nEND\t-\t0\n'
-    return 0
-  fi
-  "$py" - "$1" <<'PY'
-import json, re, sys
-sys.stdout.reconfigure(newline=chr(10))  # a Windows python writes CRLF to a pipe, and bash would read the CR into the last field
-text = open(sys.argv[1], encoding="utf-8").read()
-# The verdict is the last fenced JSON object; the older bare form has no fence.
-found = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.S) or re.findall(r"(\{\"role_understanding.*\})", text, re.S)
-try:
-    verdict = json.loads(found[-1]) if found else None
-except ValueError:
-    verdict = None
-if not isinstance(verdict, dict) or not isinstance(verdict.get("findings"), list):
-    print("ERR\tunparsed\t0")
-    sys.exit(0)
-# Identity, verdict, base and findings from this one object. Anything in the comment outside the
-# object that looks like a finding is for a person, not for the parser.
+# That also covers the file bash could not open for the loop: a redirection that fails skips the
+# compound command, `fields` stays empty, and an empty array is not the length any payload
+# implies. `fields` is emptied before the redirection rather than inside the loop, so a skipped
+# loop cannot leave the previous pull request's fields standing.
 #
-# Every value that reaches the protocol is checked on the way in, because the protocol is made
-# out of the reviewer's own text. Tab separates its fields and newline its rows, so a string
-# carrying either writes rows of its own: `"base_sha": "<a real base commit>\nEND\t-\t0"` printed
-# a valid META line with the completeness marker behind it, the next print died on an encoding
-# error, and the audit read a finished parse and a clean PASS out of a parser that exited 1.
-# A commit field holds a commit or it holds nothing, and a verdict is one word.
-def field(v):
-    if v is None or isinstance(v, (dict, list, bool)):
-        return None
-    s = str(v).strip()
-    return None if not s or re.search(r"[\x00-\x1f\x7f]", s) else s
-def sha_field(v):
-    s = field(v)
-    return s if s and re.fullmatch(r"[0-9a-fA-F]{7,40}", s) else None
-def verdict_field(v):
-    s = field(v)
-    return s if s and re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]{0,39}", s) else None
-print("META\t" + (sha_field(verdict.get("reviewed_sha")) or "-") + "\t" + (verdict_field(verdict.get("verdict")) or "-") + "\t" + (sha_field(verdict.get("base_sha")) or "-"))
-outside = text.replace(found[-1], "")
-stray = sorted(set(re.findall(r"\b(?:P[0-3]|MUST)\b", outside)))
-if stray:
-    print("STRAY\t" + "/".join(stray) + "\t0")
-def present(v):
-    return v not in (None, False, "", [], {}) and str(v).strip() != ""
-for f in verdict["findings"]:
-    if not isinstance(f, dict):
-        print("ERR\tunparsed\t0")
-        continue
-    sev = str(f.get("severity", "")).strip()
-    raw_id = f.get("id")
-    fid = field(raw_id)
-    if fid is None and raw_id is not None and str(raw_id).strip():
-        # An id that cannot be a protocol field is not narrowed to "no id": no id is a MANUAL
-        # line for a person to read, and this is a finding whose id would have written rows.
-        print("ERR\tbad-id\t0")
-        continue
-    fid = fid or "-"
-    wit = int(any(present(f.get(k)) for k in ("witness", "reproduction", "repro", "failing_test", "mutation", "mutation_witness")))
-    # A MUST deviation is fixed whatever its label (MAINTAINING step 5): any field of the finding
-    # naming MUST as a word, or a field whose name says mandatory/deviation, marks it.
-    must = 0
-    for k, v in f.items():
-        if re.search(r"(mandatory|deviation|must_)", str(k), re.I) and present(v):
-            must = 1
-        if isinstance(v, str) and re.search(r"\bMUST\b", v):
-            must = 1
-    if not re.fullmatch(r"P[0-3]", sev):
-        print("ERR\tbad-severity:" + fid + "\t0")
-        continue
-    print(sev + "\t" + fid + "\t" + str(wit + 2 * must))
-print("END\t-\t0")
-PY
-}
-
-# parse_prose_review FILE: the frontier form, read conservatively. Prints the same shape, with the
-# same END contract and the same rule that no field is ever empty:
-#   META <head from the marker or Reviewed-head line, or -> <last VERDICT or -> -
-#   <severity> - 0     one per numbered "N. **P<n>" finding
-#   STRAY <tokens> 0   any P0-P3 or MUST token outside the numbered findings, PASS included
-#   END - 0            the parser reached the end
-#
-# Each read is taken on its own and its status checked before anything at all is printed. These
-# reads used to end in `|| true`, which made "this grep failed" and "this grep matched nothing"
-# one answer: with exit 2 injected into the numbered-finding read, a prose review carrying a P3
-# and a PASS -- which blocks -- printed META and END with nothing between them, and the audit
-# read a clean PASS out of a parser that had read no findings at all. END is printed last and
-# cannot see an error suppressed beneath it, so the errors are caught where they happen and END
-# is reached only when there were none. grep's 1 is "no match" and is an answer; 2 and above,
-# and a death by signal, are not.
-#
-# A FAILED CHECK IS THE ANSWER, NEVER THE INPUT TO ANOTHER ATTEMPT. Every defect this parser has
-# had is one shape: a check failed, the failure was handed to a fallback that salvaged what it
-# could, and the salvage read as approval. `VERDICT: ::PASS` fails the whole-token check below;
-# stripping the colons off the rejected token produced `PASS`, so the branch that exists to
-# refuse a malformed verdict approved one. Nothing here retries, trims or strips after a check
-# has failed: the value stands exactly as it was read, or the parse refuses.
-#
-# A HERE-STRING IS A FILE BASH MAY NOT BE ABLE TO WRITE, and that is the same rule one layer
-# down. Over a pipe buffer's worth of data `<<<` spills to a temporary file, and one it cannot
-# create is a redirection that failed: the command never runs and the shell returns 1. For
-# `grep` that 1 is "no match" -- an answer -- so a review of 40,000 `é` characters with one
-# standalone `P1` in it, its temp file denied, lost the P1 and parsed clean. For a compound
-# command it is worse: `while ... done <<< "$raw"` is SKIPPED, and the skip is invisible to a
-# captured status and to `set -e` alike, so the findings list simply came up short and nothing
-# said so. Lines are therefore walked by expansion, which has no redirection to fail; the token
-# read is given a real file whose write is checked, because `printf` has no "nothing matched"
-# answer for a 1 to be mistaken for; and the one `<<<` left feeds `sort`, where every non-zero
-# status refuses the parse and none of them means "no match".
-#
-# The second stage of each read is bash's own regex rather than another command in the pipe. A
-# pipeline's status under `pipefail` is its rightmost non-zero one, so `grep(2) | sed | grep(1)`
-# reports 1 -- the failure hidden behind the ordinary "no match" of a later stage, which is the
-# same suppression in a different costume.
-#
-# Those three sets are spelled out character by character, for the reason valid_login spells its
-# one out: a range inside a bash regex is resolved by the locale's collating order and not by
-# ASCII, so `[0-9a-f]` is not the hex alphabet it looks like and `[A-Z_]` is not the upper-case
-# one. THE READS RUN IN `C` so the ranges that feed them are the ranges they look like, and so
-# that one review parses to one answer on every machine: this file's own header forbids
-# locale-dependent output, and leaving the greps wide while the checks were narrow produced
-# exactly that. Under en_US.utf8 `[A-Z_]+` admitted `É`, the check then took the clean tail of
-# what came back, and `VERDICT: FAILÉPASS` parsed as PASS here and as FAIL under `C`. Both halves
-# are closed: `C` for every read, and each check anchored at BOTH ends over a whole token.
-#
-# A CHECK ANCHORED AT ONE END VALIDATES A SUFFIX, NOT A TOKEN. `[A-Z_]+$` matches the tail of
-# `FAILÉPASS` and says PASS, which is a new way to approve a change; `($hex{40})` unanchored
-# searches every line the grep returned, so a first marker with a bad character in it was skipped
-# over and a LATER line's commit came back as "the first". What does not validate whole is never
-# trimmed to the part that does: a head becomes `-`, which blocks, and a verdict keeps every
-# character the grep matched, `VERDICT:` included -- so it cannot be PASS, and it names itself in
-# the blocker.
-parse_prose_review() {
-  local f="$1" head="" verdict="" stray="" raw rest line scratch status=0
-  local hex='[0123456789abcdef]'
-  local upper='[ABCDEFGHIJKLMNOPQRSTUVWXYZ_]'
-  local sev='P[0123]'
-  # Every read below, and bash's own matching, in `C`. `export` because a plain `local` is not in
-  # the environment the greps are given; both are restored when the function returns.
-  local LC_ALL=C
-  export LC_ALL
-
-  # The marker and the whole run after it, not the part of that run that looks like a commit, for
-  # the reason the verdict read takes the whole token: a grep that matches only what is well
-  # formed hands back a listing its own failures have been dropped from, and the FIRST line of
-  # that listing is then not the first marker in the file.
-  raw="$(grep -oE '(head=|Reviewed head: )[^[:space:]]*' "$f")" || status=$?
-  ((status <= 1)) || return 1
-  line="${raw%%$'\n'*}"                                         # the first, as `head -1` took
-  [[ "$line" =~ ^(head=|Reviewed\ head:\ )($hex{40})$ ]] && head="${BASH_REMATCH[2]}"
-
-  status=0
-  # The whole run after the marker, not just the part that looks like a verdict, so that what
-  # follows a good token is in hand to be judged rather than left off the end of the match.
-  raw="$(grep -oE 'VERDICT:\**:? *[^[:space:]]*' "$f")" || status=$?
-  ((status <= 1)) || return 1
-  line="${raw##*$'\n'}"                                         # the last, as `tail -1` took
-  if [[ -n "$line" ]]; then                                     # empty only when there is no VERDICT
-    if [[ "$line" =~ ^VERDICT:[*]*:?\ *($upper+)[*]*$ ]]; then
-      verdict="${BASH_REMATCH[1]}"
-    else
-      # The check failed, and the failed check is the answer. Not one character is stripped off
-      # this token and nothing is tried again on it: the whole matched run stands as the verdict,
-      # `VERDICT:` and all, so it is not PASS, cannot be turned into PASS, and names itself where
-      # the audit prints the blocker. Salvaging the clean word out of `VERDICT: ::PASS` was a new
-      # way to approve a change, minted by the branch that had just rejected it.
-      verdict="$line"
-    fi
-  fi
-
-  printf 'META\t%s\t%s\t-\n' "${head:-"-"}" "${verdict:-"-"}"
-
-  status=0
-  raw="$(grep -oE '^[0-9]+\. \*\*P[0-3]' "$f")" || status=$?
-  ((status <= 1)) || return 1
-  rest="$raw"
-  while [[ -n "$rest" ]]; do                                    # walked by expansion, not fed by `<<<`
-    line="${rest%%$'\n'*}"
-    if [[ "$rest" == *$'\n'* ]]; then rest="${rest#*$'\n'}"; else rest=""; fi
-    [[ -n "$line" ]] || continue
-    # A line the grep returned and this cannot read is a finding, and a finding this does not
-    # print is a blocker the audit never raises. It refuses rather than skipping it.
-    [[ "$line" =~ ^[0123456789]+\.\ \*\*($sev)$ ]] || return 1
-    printf '%s\t-\t0\n' "${BASH_REMATCH[1]}"
-  done
-
-  status=0
-  raw="$(grep -vE '^[0-9]+\. \*\*P[0-3]' "$f")" || status=$?
-  ((status <= 1)) || return 1
-  # The token read wants its input in a file and is given a real one, not a here-document bash
-  # may or may not be able to spill to disk. `printf` has no "nothing matched" answer, so a
-  # non-zero status from the write is unambiguously a write that failed; grep's own 1 is then the
-  # file's emptiness and its 2 a file it could not read. Fed through `<<<`, the failed spill and
-  # the empty answer were one status, and the review that lost its only P1 that way parsed clean.
-  scratch="$(mktemp)" || return 1
-  printf '%s\n' "$raw" > "$scratch" || { rm -f "$scratch"; return 1; }
-  status=0
-  raw="$(grep -oE '\bP[0-3]\b|\bMUST\b' "$scratch")" || status=$?
-  rm -f "$scratch"
-  ((status <= 1)) || return 1
-  status=0
-  # `sort` keeps its here-string: it has no "no match" status for a failed redirection to hide
-  # behind, and the check below refuses the parse on every non-zero one.
-  stray="$(sort -u <<< "$raw" | tr '\n' '/')" || status=$?
-  ((status == 0)) || return 1
-  stray="${stray%/}"
-  [[ -n "$stray" ]] && printf 'STRAY\t%s\t0\n' "$stray"
-
-  printf 'END\t-\t0\n'
-  return 0
+# The fields arrive NUL-separated from a file rather than through `$(...)`, which drops NUL bytes:
+# the separators would vanish and the loop would read one field holding everything.
+read_parser_fields() {
+  local file="$1" tag="$2" head_count="$3" per_record="$4" one count
+  fields=()
+  while IFS= read -r -d '' one; do fields+=("$one"); done < "$file"
+  ((${#fields[@]} >= head_count)) || return 1
+  [[ "${fields[0]}" == "$tag" ]] || return 1
+  count="${fields[$((head_count - 1))]}"
+  # Spelled out rather than written as a range, for the reason valid_login spells its set out: a
+  # range in a bash regex is resolved by the locale'''s collating order and not by ASCII.
+  [[ "$count" =~ ^[0123456789]+$ ]] || return 1
+  # `10#` so a count bash would read as octal is read as the decimal the parser wrote.
+  ((${#fields[@]} == head_count + per_record * 10#$count))
 }
 
 # frontmatter_has_id ID: reads a finding file on stdin and PRINTS `1` when its YAML frontmatter,
@@ -537,23 +359,42 @@ finding_file_count() {
   printf '%s' "$n"
 }
 
+# audit_state MOVED: sets `state` from the `blockers` collected for this pull request and from how
+# far the head has moved past the reviewed commit. It reads two globals and writes one, and it
+# runs NO COMMAND AT ALL -- not a pipeline, not a subshell, not a builtin that can report failure.
+#
+# THAT IS THE WHOLE POINT OF IT BEING A FUNCTION. The manual test was
+# `printf '%s\n' "${blockers[@]:-}" | grep -q '^manual:'` in an `elif`, and a command in a
+# condition has two ways to be false: the answer, and a failure. With `grep` made to exit 2, a
+# pull request whose only blocker was `manual:P1-outside-the-verdict-object` printed READY -- with
+# that blocker listed beside it -- and was enqueued. Both answers come from one walk of the array
+# by expansion now, and the gate runs this with an empty PATH, where no external command exists to
+# be consulted.
+#
+# Order: hard blockers decide first; a repair push only matters once nothing else stands in the
+# way. A draft is NOT-READY, because READY means enqueueable as it stands.
+audit_state() {
+  local moved="$1" hard=0 manual=0 b
+  for b in "${blockers[@]:-}"; do
+    [[ -n "$b" ]] || continue
+    if [[ "$b" == manual:* ]]; then manual=1; else hard=1; fi
+  done
+  if ((hard)); then
+    state=NOT-READY
+  elif [[ "$moved" == repairs || "$moved" == merge-edits:* ]]; then
+    state=NEEDS-ATTEST
+  elif ((manual)); then
+    state=MANUAL
+  else
+    state=READY
+  fi
+}
+
 # newest_per_name: reads "name<TAB>id<TAB>conclusion-or-status" lines, one per check run across
 # every page, and prints "name=value " for the highest id per name. GitHub assigns check-run
 # ids in creation order, so the highest id is the newest run whether or not it ever started.
 newest_per_name() {
   sort -t $'\t' -k1,1 -k2,2n | awk -F'\t' '{ last[$1] = $3 } END { for (n in last) printf "%s=%s ", n, last[n] }'
-}
-
-# ledger_rows_from_body: reads a pull-request body on stdin and prints one line per ledger row,
-# "ID<TAB>severity<TAB>sha-or-location<TAB>disposition".
-ledger_rows_from_body() {
-  awk -F'|' '
-    /^## Review finding ledger/ { inledger = 1; next }
-    /^## / { inledger = 0 }
-    inledger && /^\|/ && $2 !~ /^ *ID *$/ && $2 !~ /^-+$/ && $2 !~ /None yet/ {
-      gsub(/^ +| +$/, "", $2); gsub(/^ +| +$/, "", $3); gsub(/^ +| +$/, "", $4); gsub(/^ +| +$/, "", $10)
-      print $2 "\t" $3 "\t" $4 "\t" $10
-    }'
 }
 
 # ---- GitHub-facing helpers ----------------------------------------------------------------------
@@ -673,15 +514,19 @@ reviewer_login() {
 # so one unrelated comment by a deleted account removed every review on its page from the
 # comparison and let an older PASS win. A comment whose author or body is not a string is not
 # this reviewer's review; it is dropped, and the fetch's own status is what reports failure.
+#
+# Written with `printf` and not a here-document, for the reason nothing in this file is fed by a
+# here-string: bash writes a here-document to a temporary file once it outgrows a pipe buffer, and
+# one it cannot write is a redirection that failed -- `cat` never runs, the substitution that
+# captures it is empty, and an empty jq program is a filter, not an error. `printf` has no
+# "nothing matched" answer for a failed write to be mistaken for.
 review_comment_filter() {
-  cat <<'JQ'
-[ .[]
+  printf '%s\n' '[ .[]
   | select((.user.login? | type) == "string")
   | select((.body? | type) == "string")
   | select((.user.login | ascii_downcase) == (env.UPSTROKE_AUDIT_REVIEWER | ascii_downcase))
   | select(.body | test("<!-- upstroke-frontier-review|Reviewed head: [0-9a-f]{40}"))
-] | last | select(. != null) | "\(.created_at) \(.id)"
-JQ
+] | last | select(. != null) | "\(.created_at) \(.id)"'
 }
 
 # latest_review_id PR: the id of the newest review comment posted by the trusted reviewer.
@@ -702,7 +547,18 @@ latest_review_id() {
     gh api "repos/$repo/issues/$1/comments?per_page=100" --paginate --jq "$(review_comment_filter)")" \
     || return 1
   [[ -n "$matches" ]] || return 0
-  sort <<< "$matches" | tail -1 | awk '{print $2}'
+  # `sort` is given a real file whose write is checked, not a here-string: over a pipe buffer's
+  # worth of candidates `<<<` spills to a temporary file, and one bash cannot create is a
+  # redirection that failed -- the command never runs. `printf` has no "nothing matched" answer,
+  # so a non-zero status from the write is unambiguously a write that failed. The sort itself is
+  # unchanged: `created_at` is ISO-8601 and orders lexicographically, and the pipeline's status is
+  # taken under `pipefail`.
+  local scratch newest
+  scratch="$(mktemp)" || return 1
+  printf '%s\n' "$matches" > "$scratch" || { rm -f "$scratch"; return 1; }
+  newest="$(sort "$scratch" | tail -1 | awk '{print $2}')" || { rm -f "$scratch"; return 1; }
+  rm -f "$scratch"
+  printf '%s' "$newest"
 }
 
 # base_changed_after PR ISO-TIME: prints `yes` when the pull request's base was changed after
@@ -817,7 +673,11 @@ main() {
     echo "  would audit as though no ruleset required an up-to-date branch." >&2
     exit 2
   fi
-  read -r strict_up_to_date has_queue <<< "$rulesets"
+  # Split by expansion: `read ... <<< "$rulesets"` is a here-string bash may not be able to spill,
+  # and a `read` that never ran leaves both variables holding whatever they held before. Two
+  # fields, one space, written by `ruleset_state` itself.
+  strict_up_to_date="${rulesets%% *}"
+  has_queue="${rulesets##* }"
 
   if ((${#prs[@]} == 0)); then
     # Captured and checked rather than read through `< <(...)`, whose status nothing can see. An
@@ -831,7 +691,14 @@ main() {
       echo "  it and exit 0, which reads as: every pull request was audited and none was ready." >&2
       exit 2
     fi
-    [[ -n "$open_prs" ]] && mapfile -t prs <<< "$open_prs"
+    # Walked by expansion rather than `mapfile -t prs <<< "$open_prs"`: a here-string bash cannot
+    # spill leaves `mapfile` unrun and `prs` empty, which is a run that audits nothing and exits 0.
+    local rest_prs="$open_prs" one_pr
+    while [[ -n "$rest_prs" ]]; do
+      one_pr="${rest_prs%%$'\n'*}"
+      if [[ "$rest_prs" == *$'\n'* ]]; then rest_prs="${rest_prs#*$'\n'}"; else rest_prs=""; fi
+      [[ -n "$one_pr" ]] && prs+=("$one_pr")
+    done
   fi
   if ((apply)); then ensure_labels; fi
 
@@ -859,7 +726,16 @@ audit_one() {
       --json headRefName,headRefOid,isDraft,mergeStateStatus,labels,baseRefName,baseRefOid \
       --jq '.headRefName, .headRefOid, (.isDraft|tostring), .mergeStateStatus, ([.labels[].name]|join(" ")), .baseRefName, .baseRefOid')" \
       || meta_status=$?
-    ((meta_status == 0)) && mapfile -t meta <<< "$meta_raw"
+    # Walked by expansion, for the reason the listing above is: a `mapfile` that never ran leaves
+    # `meta` empty, and empty fields are what this loop exists to stop being audited.
+    if ((meta_status == 0)); then
+      local rest_meta="$meta_raw"
+      while :; do
+        meta+=("${rest_meta%%$'\n'*}")
+        [[ "$rest_meta" == *$'\n'* ]] || break
+        rest_meta="${rest_meta#*$'\n'}"
+      done
+    fi
     branch="${meta[0]:-}"; head="${meta[1]:-}"; draft="${meta[2]:-}"; merge_state="${meta[3]:-}"
     labels="${meta[4]:-}"; base="${meta[5]:-}"; base_oid="${meta[6]:-}"
     [[ ( "$merge_state" == UNKNOWN || $meta_status -ne 0 ) && $attempt -lt 3 ]] || break
@@ -900,9 +776,9 @@ audit_one() {
     esac
   done
 
-  # The latest review by the trusted account: its posting time, its kind, and its parse.
-  local review_id review_at review_file kind reviewed="" verdict="" review_base="-"
-  findings=()
+  # The latest review by the trusted account: its posting time, its form, and its parse.
+  local review_id review_at review_file kind="" reviewed="" verdict="" review_base="-"
+  finding_sev=(); finding_id=(); finding_flags=()
   # Three outcomes, kept apart. A lookup that failed is not a pull request without a review: the
   # audit does not know what the reviewer said, so it says so and blocks, rather than proceeding
   # on whatever survived the failure.
@@ -911,54 +787,59 @@ audit_one() {
   elif [[ -z "$review_id" ]]; then
     blockers+=("no-review")
   else
-    review_at="$(gh api "repos/$repo/issues/comments/$review_id" --jq '.created_at')"
+    local parse_file parse_status=0 at_status=0 body_status=0 stray="-" where i
     review_file="$(mktemp)"
-    gh api "repos/$repo/issues/comments/$review_id" --jq '.body' > "$review_file"
-    # Empty is the third answer: the format could not be read. It is not "prose", because a
-    # parser chosen by a failed detection is a parser chosen at random, and the prose one reads
-    # a JSON review as a clean PASS.
-    kind="$(review_kind "$review_file")" || kind=""
-    local sev id wit parse_complete=0 parse_file parse_status=0
-    # The parser's output is written down and its status taken before a single row of it is
-    # read. Through `< <(...)` that status was invisible, so the only thing the audit could look
-    # at was the output -- and the output is built out of the reviewer's own text. A review
-    # recording `base_sha: "<a real base commit>\nEND<tab>-<tab>0"` printed the completeness
-    # marker itself, the parser died on the next line, and a marker the review supplied stood in
-    # for a status nothing looked at. A marker cannot say the parser finished; only its status
-    # can, and the fields it prints are checked for the protocol's separators on the way in.
     parse_file="$(mktemp)"
-    if [[ "$kind" == json ]]; then
-      parse_verdict_json "$review_file" > "$parse_file" || parse_status=$?
-    elif [[ "$kind" == prose ]]; then
-      parse_prose_review "$review_file" > "$parse_file" || parse_status=$?
+    # Both fetches checked. `gh ... > "$review_file"` and `review_at="$(gh ...)"` failed closed
+    # only because `set -e` was watching, and `set -e` is watching nothing the moment either is
+    # rewritten into a condition -- which is how four of the defects in this file were introduced.
+    # What the audit does when it cannot read the review is stated here instead.
+    review_at="$(gh api "repos/$repo/issues/comments/$review_id" --jq '.created_at')" || at_status=$?
+    gh api "repos/$repo/issues/comments/$review_id" --jq '.body' > "$review_file" || body_status=$?
+    if ((at_status != 0 || body_status != 0)); then
+      blockers+=("review-fetch-failed")
     else
-      blockers+=("review-format-unreadable")
+      # ONE PARSER, ONE SUCCESS CONDITION, and this is the whole of the audit's side of it: run
+      # it, and if its status is not 0 there is no result to read. Format detection is inside it,
+      # so a detection that failed cannot choose a parser -- and the two forms do not agree about
+      # the same review, so choosing between them on a failed read is choosing a verdict. Nothing
+      # below re-derives, re-scans or repairs anything the parser emitted.
+      run_review_parser review "$review_file" "$parse_file" || parse_status=$?
+      if ((parse_status != 0)); then
+        blockers+=("review-parse-failed:$parse_status")
+      elif ! read_parser_fields "$parse_file" review 7 3; then
+        # Belt and braces: the parser renames its payload into place whole or not at all, so this
+        # cannot fire unless something outside it truncated the file between the two. A payload
+        # that did not arrive whole is a findings list short by an unknown amount, and every
+        # finding missing from it is a blocker this audit would never raise.
+        blockers+=("review-parse-incomplete")
+      else
+        kind="${fields[1]}"
+        reviewed="${fields[2]}"
+        verdict="${fields[3]}"
+        review_base="${fields[4]}"
+        stray="${fields[5]}"
+        # `-` is how the parser says "the review did not record this"; it is not a value.
+        [[ "$reviewed" == "-" ]] && reviewed=""
+        [[ "$verdict" == "-" ]] && verdict=""
+        if [[ "$stray" != "-" ]]; then
+          where=numbered-findings
+          [[ "$kind" == json ]] && where=verdict-object
+          blockers+=("manual:$stray-outside-the-$where")
+        fi
+        # Three fields per finding, at a fixed offset, because `read_parser_fields` has already
+        # established that there are exactly as many as the payload declared. No `read`, and so
+        # no here-string whose failure would leave the previous finding's severity standing.
+        for ((i = 7; i < ${#fields[@]}; i += 3)); do
+          finding_sev+=("${fields[i]}")
+          finding_id+=("${fields[i + 1]}")
+          finding_flags+=("${fields[i + 2]}")
+        done
+      fi
     fi
-    while IFS=$'\t' read -r sev id wit extra; do
-      case "$sev" in
-        END) parse_complete=1 ;;
-        META) reviewed="$id"; verdict="$wit"; review_base="${extra:-"-"}"
-              # `-` is how the parsers say "the object did not record this"; it is not a value.
-              [[ "$reviewed" == "-" ]] && reviewed=""
-              [[ "$verdict" == "-" ]] && verdict="" ;;
-        STRAY) blockers+=("manual:$id-outside-the-$([[ "$kind" == json ]] && echo verdict-object || echo numbered-findings)") ;;
-        "") ;;
-        *) findings+=("$sev"$'\t'"$id"$'\t'"$wit") ;;
-      esac
-    done < "$parse_file"
     rm -f "$review_file" "$parse_file"
 
-    # The parser's own status, and then its own END. Without the END the stream is whatever the
-    # parser managed to print before it died, which is a findings list short by an unknown amount
-    # -- and every finding it failed to print is a blocker this audit will not raise. A short list
-    # is not a clean review. Without the status the END is only a row in the parser's output, and
-    # the parser's output is made out of the review's strings: one review wrote its own END and
-    # the parse that printed it exited 1.
-    ((parse_status == 0)) || blockers+=("review-parse-failed:$parse_status")
-    ((parse_complete)) || blockers+=("review-parse-incomplete")
-    # A review that does not say which commit it reviewed cannot be checked against the head. This
-    # used to land on a blocker only because `read` with IFS=tab folded the empty field and shifted
-    # a later column into `verdict`; it is stated now rather than inherited from a quirk.
+    # A review that does not say which commit it reviewed cannot be checked against the head.
     [[ -z "$reviewed" ]] && blockers+=("review-records-no-reviewed-sha")
 
     case "$verdict" in
@@ -967,8 +848,8 @@ audit_one() {
       *) blockers+=("verdict:$verdict") ;;
     esac
     [[ "$lane" == findings-p3 && "$verdict" != PASS ]] && blockers+=("verdict-not-pass")
-    [[ "$verdict" == PASS && ${#findings[@]} -gt 0 ]] && blockers+=("pass-with-findings")
-    [[ "$verdict" == CHANGES_REQUIRED && ${#findings[@]} -eq 0 ]] && blockers+=("findings-unparsed:changes-required-lists-none")
+    [[ "$verdict" == PASS && ${#finding_sev[@]} -gt 0 ]] && blockers+=("pass-with-findings")
+    [[ "$verdict" == CHANGES_REQUIRED && ${#finding_sev[@]} -eq 0 ]] && blockers+=("findings-unparsed:changes-required-lists-none")
 
     # The review must be against this pull request's own base (MAINTAINING step 4): a base
     # changed after the review was posted is a diff the review never saw, and the workflow
@@ -1015,7 +896,10 @@ audit_one() {
       for m in $merges; do
         local parents
         if ! parents="$(git rev-list --parents -n 1 "$m")"; then merge_edits="$m"; break; fi
-        if (($(wc -w <<< "$parents") != 3)); then merge_edits="$m"; break; fi
+        # Exactly a commit and two parents, matched by expansion: `wc -w <<< "$parents"` is a
+        # here-string bash may not be able to spill, and an empty substitution in an arithmetic
+        # test is a syntax error rather than an answer.
+        if [[ ! "$parents" =~ ^[^[:space:]]+\ [^[:space:]]+\ [^[:space:]]+$ ]]; then merge_edits="$m"; break; fi
         if ! expected="$(git merge-tree --write-tree "$m^1" "$m^2" 2>/dev/null)"; then
           merge_edits="$m"; break   # a conflict, or a git too old for --write-tree: fail closed
         fi
@@ -1067,11 +951,38 @@ audit_one() {
     fi
   fi
 
-  local rows f disposition nfiles
-  rows="$(gh pr view "$pr" --repo "$repo" --json body --jq .body | ledger_rows_from_body)"
-  for f in "${findings[@]}"; do
-    IFS=$'\t' read -r sev id wit <<< "$f"
-    [[ "$id" == "-" ]] && id=""   # "-" stands in for "no id": a tab-separated read collapses empty fields
+  # The pull request's own ledger, read by the same parser under the same contract. It used to be
+  # an `awk` on the far side of a pipe from `gh`, and the row it returned was looked up with a
+  # second `awk` fed through a here-string: a body `gh` could not fetch, a here-string bash could
+  # not spill, and either `awk` dying all ended the run through `set -e` rather than through
+  # anything that had decided what to do about it. What the audit does is stated here instead, and
+  # the lookup itself is an expansion, so there is no command in it left to fail.
+  local body_file ledger_file ledger_status=0 ledger_body_status=0 disposition nfiles j k
+  ledger_id=(); ledger_disposition=()
+  body_file="$(mktemp)"
+  ledger_file="$(mktemp)"
+  gh pr view "$pr" --repo "$repo" --json body --jq .body > "$body_file" || ledger_body_status=$?
+  if ((ledger_body_status != 0)); then
+    blockers+=("ledger-lookup-failed")
+  else
+    run_review_parser ledger "$body_file" "$ledger_file" || ledger_status=$?
+    if ((ledger_status != 0)); then
+      blockers+=("ledger-parse-failed:$ledger_status")
+    elif ! read_parser_fields "$ledger_file" ledger 2 2; then
+      blockers+=("ledger-parse-incomplete")
+    else
+      for ((j = 2; j < ${#fields[@]}; j += 2)); do
+        ledger_id+=("${fields[j]}")
+        ledger_disposition+=("${fields[j + 1]}")
+      done
+    fi
+  fi
+  rm -f "$body_file" "$ledger_file"
+
+  local sev id wit
+  for ((k = 0; k < ${#finding_sev[@]}; k++)); do
+    sev="${finding_sev[k]}"; id="${finding_id[k]}"; wit="${finding_flags[k]}"
+    [[ "$id" == "-" ]] && id=""   # "-" is how the parser says the finding recorded no id
     if [[ "$sev" == ERR ]]; then
       blockers+=("findings-unparsed:$id")
       continue
@@ -1093,7 +1004,13 @@ audit_one() {
       blockers+=("manual:$sev-without-id")
       continue
     fi
-    disposition="$(awk -F'\t' -v id="$id" '$1 == id { print $4; exit }' <<< "$rows")"
+    # The first row with this id wins, as the `awk`'s `exit` made it win. Compared by expansion:
+    # a here-string bash could not spill left the previous finding's disposition in place, which
+    # is a deferred row standing in for a finding that has none.
+    disposition=""
+    for ((j = 0; j < ${#ledger_id[@]}; j++)); do
+      if [[ "${ledger_id[j]}" == "$id" ]]; then disposition="${ledger_disposition[j]}"; break; fi
+    done
     case "$disposition" in
       deferred)   # the lane rule: an allowed finding is filed and deferred, one file per finding
         if ! nfiles="$(finding_file_count "$id" "$head")"; then
@@ -1113,19 +1030,7 @@ audit_one() {
     esac
   done
 
-  # Hard blockers decide first; a repair push only matters once nothing else stands in the way.
-  # A draft is NOT-READY: READY means enqueueable as it stands.
-  local hard=() b
-  for b in "${blockers[@]:-}"; do
-    [[ -n "$b" && "$b" != manual:* ]] && hard+=("$b")
-  done
-  if ((${#hard[@]})); then
-    state=NOT-READY
-  elif [[ "$moved" == repairs || "$moved" == merge-edits:* ]]; then
-    state=NEEDS-ATTEST
-  elif printf '%s\n' "${blockers[@]:-}" | grep -q '^manual:'; then
-    state=MANUAL
-  fi
+  audit_state "$moved"
 
   local detail l
   detail="verdict=${verdict:-none} reviewed=${reviewed:0:7}${moved:+ moved=$moved}"

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# The pure parts of scripts/pr-ready-audit.sh, exercised against fixtures: the lane and its
-# severity set, the two review parsers (the workflow's fenced JSON verdict and the frontier
-# prose form), the frontmatter id match, the newest-check-run choice and the ledger-row parse.
+# The pure parts of scripts/pr-ready-audit.sh and the whole of scripts/pr-review-parse.py,
+# exercised against fixtures: the lane and its severity set, both review forms (the workflow's
+# fenced JSON verdict and the frontier prose form) and the ledger, all four of which the one
+# parser reads; the reader that takes its payload; the state a set of blockers puts a pull request
+# in; the frontmatter id match and the newest-check-run choice.
 # Everything that talks to GitHub is out of scope here, with one exception: the argument parser and
 # the audit's own refusals are exercised by running the script as a process against a stub `gh`,
 # because the defects they have had live in `main` and no call on the helpers can see them. git is
@@ -63,6 +65,12 @@
 #                                `-` was taken as a label name
 #   MUT-REVIEW-PARSE-TRUNCATED   a parser that died partway printed a shorter findings list, and a
 #                                shorter findings list is a weaker verdict, not an error
+#   MUT-PROSE-READ-SUPPRESSED    a read that failed inside the parse was reported as "nothing
+#                                matched", and the completeness marker was printed over it -- so a
+#                                prose review carrying a P3 under a PASS parsed as a clean PASS
+#                                with no findings. There is no read inside the parse for a status
+#                                to be suppressed on now: the input is read once, and a read that
+#                                failed is a parse that failed
 #   MUT-META-FIELD-COLLAPSE      an empty META field let `read` with IFS=tab shift every column
 #                                after it, so a review recording no commit read as one that did
 #   MUT-PR-LOOKUP-SUPPRESSED     a failed pull-request read left empty fields to be audited
@@ -78,8 +86,16 @@
 #   MUT-REVIEW-FORGES-PROTOCOL   a review string carrying the parser's own separators wrote rows
 #                                of the parser's language, END among them, and the audit read a
 #                                finished parse from a marker instead of from a status
-#   MUT-PROSE-READ-SUPPRESSED    a read that failed inside the prose parser was reported as
-#                                "nothing matched", and END was printed over it
+#   MUT-PARSE-WRITE-UNCHECKED    a protocol write returned EIO and the parse reported success, so
+#                                one finding vanished from a findings list that still announced
+#                                itself complete -- READY, and a merge call
+#   MUT-PARSE-PAYLOAD-COUNT      the payload the audit reads did not declare how many records it
+#                                carries, so a read that stopped part way was a shorter list
+#   MUT-MANUAL-SCAN-FAILS-OPEN   the manual-blocker test was a command in a condition, which has
+#                                two ways to be false: the answer, and a failure. `grep` exiting 2
+#                                left state=READY with the blocker printed beside it
+#   MUT-LEDGER-LOOKUP-SUPPRESSED a pull-request body the audit could not fetch was read as a body
+#                                with no ledger rows in it, which is `no-row` for a filed finding
 #   MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS  the frontmatter read was a pipeline, so under
 #                                `pipefail` the reader's failure (2) stood behind the matcher's
 #                                ordinary "no match" (1) and the caller was handed an answer
@@ -106,13 +122,16 @@
 #   MUT-REVIEW-KIND-UNREADABLE-IS-PROSE  a format detection that could not read the file chose
 #                                the prose parser, which reads a JSON review's `VERDICT:` line
 #                                from outside its verdict object and misses every severity the
-#                                object spells with a JSON escape
+#                                object spells with a JSON escape. Detection is inside the one
+#                                parser now, so a file it cannot read has no format at all
 #   MUT-HERESTRING-FAILURE-AS-ANSWER  a value was fed to a command through `<<<`, which spills to
 #                                a temporary file once it outgrows a pipe buffer: a file bash
 #                                cannot create is a redirection that failed, the command never
 #                                runs, and the shell returns 1 -- `grep`'s "no match". A compound
 #                                command is skipped outright, where neither a captured status nor
-#                                `set -e` can see it
+#                                `set -e` can see it, and `read` or `mapfile` leaves what it was
+#                                to fill holding whatever it held before. The guard is the class:
+#                                the script carries no here-string and no here-document at all
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
@@ -391,10 +410,15 @@ done < <(code_lines | join_continuations)
 # lost the only P1 in a 40,000-character review and printed END over it, the other would have
 # dropped a findings list whole. Whole-line matching is done by expansion instead, and a read
 # that needs a file is given a real one whose write is checked.
+# The guard used to name the two shapes that had gone wrong -- `grep ... <<<` and `done <<<` --
+# and each round found a third. `read ... <<<` leaves the variables it was to fill holding what
+# they held before; `mapfile ... <<<` leaves the array empty, which for a list of pull requests is
+# a run that audits nothing and exits 0; `$(wc -w <<< ...)` leaves an arithmetic test with nothing
+# in it. So the class is named instead of its members: THIS SCRIPT CONTAINS NO HERE-STRING AND NO
+# HERE-DOCUMENT AT ALL. Lines are walked by expansion, a fixed program text is written with
+# `printf`, and a read that needs a file gets a real one whose write is checked.
 expect MUT-HERESTRING-FAILURE-AS-ANSWER \
-  "$(code_lines | grep -E '\bgrep\b.*<<<' | sed 's/^[[:space:]]*//' | tr '\n' ';')" ''
-expect MUT-HERESTRING-FAILURE-AS-ANSWER \
-  "$(code_lines | grep -E '\bdone[[:space:]]*<<<' | sed 's/^[[:space:]]*//' | tr '\n' ';')" ''
+  "$(code_lines | grep -E '<<' | sed 's/^[[:space:]]*//' | tr '\n' ';')" ''
 
 # --- the option parser, through main -------------------------------------------------------------
 # `main` is what these exercise: the defect was in its argument loop and no call on a helper can
@@ -491,7 +515,8 @@ case "$*" in
                               exit "${STUB_COMMENTS_STATUS:-1}" ;;
   *"/issues/comments/5001 --jq .created_at") echo 2026-09-01T00:00:00Z ;;
   *"/issues/comments/5001 --jq .body")       cat "$STUB_REVIEW_BODY" ;;
-  *"--json body"*)            echo "no ledger" ;;
+  *"--json body"*)            (( ${STUB_BODY_STATUS:-0} )) && exit "$STUB_BODY_STATUS"
+                              echo "no ledger" ;;
   "pr view"*)                 (( ${STUB_PRVIEW_STATUS:-0} )) && exit "$STUB_PRVIEW_STATUS"
                               printf 'feature/x\n%s\nfalse\nCLEAN\n\nmaster\n%s\n' "$head" "$head" ;;
   *) echo "GH-UNSTUBBED $*" >&2; exit 97 ;;
@@ -563,48 +588,63 @@ done
 expect MUT-OPTION-LONE-HYPHEN "$(option_like - && echo yes || echo no)" yes
 expect MUT-OPTION-LONE-HYPHEN "$(option_like queue-me && echo yes || echo no)" no
 
-# A parser that died partway, through main, on the real trigger rather than a stand-in: the review
-# carries a finding whose id holds one non-ASCII character, and PYTHONIOENCODING=ascii is in the
-# environment. META prints, the finding raises, the findings list comes back empty -- and a PASS
-# carrying a deferred finding then audits as a PASS carrying none. Without the completeness check
-# there is no blocker left and this is READY with a merge call. The object records no reviewed
-# commit, which keeps the case away from git.
+# A parse that could not be completed, through main. The old parser printed tab-separated rows and
+# an `END` row to say the stream was whole, and a review's own strings could write an `END`: one
+# recording `base_sha: "<a real base commit>\nEND\t-\t0"` printed the completeness marker itself,
+# the parser died on the next field, and the audit read a finished parse and a clean PASS out of a
+# process that exited 1. There is no marker to forge now -- completeness is the exit status, plus
+# a record count the parser computed -- and `PYTHONIOENCODING=ascii`, the environment that used to
+# kill the parser halfway through its output, no longer reaches the output at all: the result is
+# rendered to bytes this program encodes itself.
+#
+# So the same two reviews are run here for the opposite assertion. Each must parse WHOLE, keep its
+# finding, and block for having one; the review that writes `END` into its own base must have that
+# base refused as a commit and nothing else.
 printf '```json\n{"verdict":"PASS","findings":[{"id":"A-DEFERRABL\xc3\x89","severity":"P3"}]}\n```\n' \
   > "$tmp/truncating-review.md"
 got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 PYTHONIOENCODING=ascii run_stub 999)"
-contains MUT-REVIEW-PARSE-TRUNCATED "$got" "blockers="
-contains MUT-REVIEW-PARSE-TRUNCATED "$got" "review-parse-incomplete"
 contains MUT-REVIEW-PARSE-TRUNCATED "$got" "NOT-READY"
-# The same review, parsed whole, keeps its finding and blocks for having one -- so the case above
-# is about the death, not about the review.
+contains MUT-REVIEW-PARSE-TRUNCATED "$got" "pass-with-findings"
+[[ "$got" == *review-parse-incomplete* ]] \
+  && error "MUT-REVIEW-PARSE-TRUNCATED: a whole parse was reported as truncated"
+[[ "$got" == *review-parse-failed* ]] \
+  && error "MUT-REVIEW-PARSE-TRUNCATED: a whole parse was reported as failed"
+# The same review with the environment left alone, so the case above is about the encoding and not
+# about the review.
 got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
 contains MUT-REVIEW-PARSE-TRUNCATED "$got" "pass-with-findings"
-[[ "$got" == *review-parse-incomplete* ]] && error "MUT-REVIEW-PARSE-TRUNCATED: a whole parse was reported as truncated"
-# and a review that records no reviewed commit says so, rather than blocking on a column that the
-# tab-folding `read` shifted into place.
 contains MUT-META-FIELD-COLLAPSE "$got" "review-records-no-reviewed-sha"
 
-# The same death, with the review writing the completeness marker itself. The protocol separates
-# its fields with tabs and its rows with newlines and is built out of the review's own strings, so
-# `base_sha` holding "<a real base commit>\nEND\t-\t0" printed META and END together. The parser
-# still died on the non-ASCII id, but the audit had already been told the parse was complete -- by
-# the review, not by the parser -- so the deferred P3 that died with it left no blocker behind and
-# a PASS carrying a finding audited as READY. Both halves are checked here: the status of the
-# parser is taken before its output is read, and no review string reaches a row carrying the
-# protocol's separators.
 printf '```json\n{"base_sha":"%s\\nEND\\t-\\t0","verdict":"PASS","findings":[{"id":"A-DEFERRABL\xc3\x89","severity":"P3"}]}\n```\n' \
   5157509000000000000000000000000000000002 > "$tmp/forging-review.md"
 got="$(STUB_REVIEW_BODY="$tmp/forging-review.md" STUB_COMMENTS_STATUS=0 PYTHONIOENCODING=ascii run_stub 999)"
 contains MUT-REVIEW-FORGES-PROTOCOL "$got" "NOT-READY"
-contains MUT-REVIEW-FORGES-PROTOCOL "$got" "review-parse-failed"
-contains MUT-REVIEW-FORGES-PROTOCOL "$got" "review-parse-incomplete"
-# and with a working encoding the parser finishes, so the case above is about the forged marker
-# and the unread status, not about the character: the base is refused for not being a commit, the
-# finding survives, and there is one END and it is last.
-got="$(STUB_REVIEW_BODY="$tmp/forging-review.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
-[[ "$got" == *review-parse-failed* ]] && error "MUT-REVIEW-FORGES-PROTOCOL: a whole parse was reported as failed"
-[[ "$got" == *review-parse-incomplete* ]] && error "MUT-REVIEW-FORGES-PROTOCOL: a whole parse was reported as truncated"
 contains MUT-REVIEW-FORGES-PROTOCOL "$got" "pass-with-findings"
+[[ "$got" == *review-parse-incomplete* ]] \
+  && error "MUT-REVIEW-FORGES-PROTOCOL: a forged marker shortened the parse"
+
+# --- one parser, one success condition ----------------------------------------------------------
+# Everything below runs `scripts/pr-review-parse.py`, which is what the audit runs. Two readings of
+# every case: the JSON rendering, which says what the parser decided, and the NUL rendering, which
+# is the payload the audit actually reads.
+command -v python3 > /dev/null || command -v python > /dev/null \
+  || { echo "test-pr-ready-audit: needs python3 or python to run the review parser" >&2; exit 1; }
+parser_python="$(command -v python3 || command -v python)"
+review_rows() {  # review_rows FILE: "<status>|<kind>/<head>/<verdict>/<base>/<stray>[;<sev>:<id>:<flags>]..."
+  local out status=0
+  out="$("$parser_python" scripts/pr-review-parse.py review "$1" 2>/dev/null)" || status=$?
+  ((status == 0)) || { printf '%s|' "$status"; return 0; }
+  printf '%s|%s' "$status" "$(
+    printf '%s' "$out" | jq -j '"\(.kind)/\(.reviewed_sha//"-")/\(.verdict//"-")/\(.base_sha//"-")/\(.stray//"-")",
+      ([.findings[] | ";\(.severity):\(.id//"-"):\(.flags)"] | add // "")'
+  )"
+}
+parse_nul() {  # parse_nul SUBCOMMAND FILE [OUT]: "<status>|<the payload, NULs shown as |>"
+  local out="${3:-$tmp/nul.out}" status=0
+  : > "$out"
+  "$parser_python" scripts/pr-review-parse.py "$1" --nul --out "$out" "$2" 2>/dev/null || status=$?
+  printf '%s|%s' "$status" "$(tr '\0' '|' < "$out")"
+}
 
 # --- the workflow form: a fenced JSON verdict ---------------------------------------------------
 cat > "$tmp/json.md" <<'EOF'
@@ -621,17 +661,14 @@ Unedited verdict:
 {"reviewed_sha":"4ad962f000000000000000000000000000000001","base_sha":"5157509000000000000000000000000000000002","verdict":"CHANGES_REQUIRED","findings":[{"id":"A-DEFERRABLE","severity":"P3","reproduction":null,"witness":false},{"id":"B-WITNESSED","severity":"P2","failing_test":"a_test_that_fails"},{"id":"C-MUST","severity":"P2","correction":"This is a MUST deviation of standards section 7"},{"id":"D-BAD","severity":"P9"},{"id":"E.DOTTED","severity":"P3","location":"src/x.rs:1"}]}
 ```
 EOF
-expect MUT-QUOTED-JSON-IS-JSON "$(review_kind "$tmp/json.md")" json
-got="$(parse_verdict_json "$tmp/json.md" | tr '\t' '|')"
-want='META|4ad962f000000000000000000000000000000001|CHANGES_REQUIRED|5157509000000000000000000000000000000002
-STRAY|P1|0
-P3|A-DEFERRABLE|0
-P2|B-WITNESSED|1
-P2|C-MUST|2
-ERR|bad-severity:D-BAD|0
-P3|E.DOTTED|0
-END|-|0'
-expect "MUT-JSON-SPLIT-BY-REGEX/MUT-NULL-WITNESS/MUT-MUST-UNSEEN/MUT-BAD-SEVERITY-PASSES/MUT-STRAY-TOKEN-UNSEEN/MUT-VERDICT-FROM-PROSE" "$got" "$want"
+expect "MUT-JSON-SPLIT-BY-REGEX/MUT-NULL-WITNESS/MUT-MUST-UNSEEN/MUT-BAD-SEVERITY-PASSES/MUT-STRAY-TOKEN-UNSEEN/MUT-VERDICT-FROM-PROSE/MUT-QUOTED-JSON-IS-JSON" \
+  "$(review_rows "$tmp/json.md")" \
+  '0|json/4ad962f000000000000000000000000000000001/CHANGES_REQUIRED/5157509000000000000000000000000000000002/P1;P3:A-DEFERRABLE:0;P2:B-WITNESSED:1;P2:C-MUST:2;ERR:bad-severity:D-BAD:0;P3:E.DOTTED:0'
+# The same result as the audit reads it: seven fields, the seventh the finding count, then three
+# per finding. The count is the parser's own and the audit checks the payload against it, so a
+# payload that stopped arriving is not a shorter findings list.
+expect MUT-PARSE-PAYLOAD-COUNT "$(parse_nul review "$tmp/json.md")" \
+  '0|review|json|4ad962f000000000000000000000000000000001|CHANGES_REQUIRED|5157509000000000000000000000000000000002|P1|5|P3|A-DEFERRABLE|0|P2|B-WITNESSED|1|P2|C-MUST|2|ERR|bad-severity:D-BAD|0|P3|E.DOTTED|0|'
 
 # A pretty-printed object with "}, {" between findings is the same object to a parser.
 cat > "$tmp/pretty.md" <<'EOF'
@@ -647,12 +684,8 @@ Reviewed head: 4ad962f000000000000000000000000000000001
 }
 ```
 EOF
-got="$(parse_verdict_json "$tmp/pretty.md" | tr '\t' '|')"
-want='META|4ad962f000000000000000000000000000000001|CHANGES_REQUIRED|-
-P3|FIRST|0
-P1|SECOND|0
-END|-|0'
-expect MUT-JSON-SPLIT-BY-REGEX "$got" "$want"
+expect MUT-JSON-SPLIT-BY-REGEX "$(review_rows "$tmp/pretty.md")" \
+  '0|json/4ad962f000000000000000000000000000000001/CHANGES_REQUIRED/-/-;P3:FIRST:0;P1:SECOND:0'
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
@@ -673,286 +706,236 @@ I found no MUST deviation.
 VERDICT: CHANGES_REQUIRED
 </details>
 EOF
-expect MUT-QUOTED-JSON-IS-JSON "$(review_kind "$tmp/prose.md")" prose
-got="$(parse_prose_review "$tmp/prose.md" | tr '\t' '|')"
-want='META|c3a6665000000000000000000000000000000003|CHANGES_REQUIRED|-
-P2|-|0
-P3|-|0
-STRAY|MUST/P1|0
-END|-|0'
-expect "MUT-PROSE-HEADING-FINDING/MUT-PROSE-LAST-VERDICT" "$got" "$want"
+expect "MUT-PROSE-HEADING-FINDING/MUT-PROSE-LAST-VERDICT/MUT-QUOTED-JSON-IS-JSON" \
+  "$(review_rows "$tmp/prose.md")" \
+  '0|prose/c3a6665000000000000000000000000000000003/CHANGES_REQUIRED/-/MUST/P1;P2:-:0;P3:-:0'
 
-# Both parsers end with END, and nothing else does. END is what tells the audit the findings list
-# it just read is the whole list: a parser that dies partway prints a shorter one, which is not an
-# error the caller can see, only a weaker verdict. `PYTHONIOENCODING=ascii` in the environment and
-# one non-ASCII character in a finding id is enough to do it -- META prints, the finding raises --
-# and a PASS carrying a deferred finding then audits as a PASS carrying none, which is READY.
-expect MUT-REVIEW-PARSE-TRUNCATED "$(parse_verdict_json "$tmp/json.md" | tail -1)" "$(printf 'END\t-\t0')"
-expect MUT-REVIEW-PARSE-TRUNCATED "$(parse_prose_review "$tmp/prose.md" | tail -1)" "$(printf 'END\t-\t0')"
-printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[{"id":"A-DEFERRABL\xc3\x89","severity":"P3"}]}\n```\n' \
-  4ad962f000000000000000000000000000000001 4ad962f000000000000000000000000000000001 \
-  5157509000000000000000000000000000000002 > "$tmp/nonascii.md"
-# The parser exits non-zero here, which is exactly the point: nothing downstream of it looks.
-got="$(PYTHONIOENCODING=ascii parse_verdict_json "$tmp/nonascii.md" 2>/dev/null | tr '\t' '|')" || true
-contains MUT-REVIEW-PARSE-TRUNCATED "$got" "META|4ad962f000000000000000000000000000000001|PASS"
-[[ "$got" == *"END|-|0"* ]] && error "MUT-REVIEW-PARSE-TRUNCATED: a parser that died partway still claimed to have finished"
-# and with a working encoding the same review parses whole, so the case above is about the death
-# and not about the character.
-got="$(parse_verdict_json "$tmp/nonascii.md" | tr '\t' '|')"
-contains MUT-REVIEW-PARSE-TRUNCATED "$got" "END|-|0"
-contains MUT-REVIEW-PARSE-TRUNCATED "$got" "P3|A-DEFERRABL"
+# A prose review that quotes a JSON object stays prose: the fence has to open a line of its own.
+printf 'Reviewed head: %s\nThe object {"verdict":"PASS","findings":[]} is an example.\nVERDICT: CHANGES_REQUIRED\n' \
+  "4ad962f000000000000000000000000000000001" > "$tmp/quoted.md"
+expect MUT-QUOTED-JSON-IS-JSON "$(review_rows "$tmp/quoted.md")" \
+  '0|prose/4ad962f000000000000000000000000000000001/CHANGES_REQUIRED/-/-'
 
-# No META field is ever empty. `read` with IFS=tab folds runs of tabs into one, so an empty
-# reviewed_sha shifted the verdict into its column and the base into the verdict's -- the audit
-# then reported a verdict of `-` and a reviewed commit of `PASS`, blocked for the wrong reason,
-# and would have gone whichever way the shifted columns happened to fall.
+# No field is ever empty, and no field is ever missing. `-` is how the parser says "the review did
+# not record this"; a tab-separated protocol folded an empty field and shifted the verdict into the
+# commit's column, so the audit reported a reviewed commit of `PASS`.
 printf 'Reviewed head: %s\n\n```json\n{"verdict":"PASS","findings":[]}\n```\n' \
   4ad962f000000000000000000000000000000001 > "$tmp/no-sha.md"
-expect MUT-META-FIELD-COLLAPSE "$(parse_verdict_json "$tmp/no-sha.md" | head -1 | tr '\t' '|')" 'META|-|PASS|-'
+expect MUT-META-FIELD-COLLAPSE "$(review_rows "$tmp/no-sha.md")" '0|json/-/PASS/-/-'
+expect MUT-META-FIELD-COLLAPSE "$(parse_nul review "$tmp/no-sha.md")" '0|review|json|-|PASS|-|-|0|'
 printf '<!-- upstroke-frontier-review pr=1 -->\nno reviewed head anywhere\n' > "$tmp/no-head.md"
-expect MUT-META-FIELD-COLLAPSE "$(parse_prose_review "$tmp/no-head.md" | head -1 | tr '\t' '|')" 'META|-|-|-'
-# The reader must see four fields on every META line whatever they hold.
-while IFS=$'\t' read -r f1 f2 f3 f4; do
-  expect MUT-META-FIELD-COLLAPSE "$f1/$f2/$f3/$f4" 'META/-/PASS/-'
-done < <(parse_verdict_json "$tmp/no-sha.md" | head -1)
+expect MUT-META-FIELD-COLLAPSE "$(review_rows "$tmp/no-head.md")" '0|prose/-/-/-/-'
 
-# A review string that carries the protocol's separators writes no rows. The base is not a commit
-# and is refused as one; the object's own END is the only END and it is last. Unrepaired, the
-# forged END printed on the line after META and a finding row printed after it, which is a parser
-# that carried on past the end it had announced.
+# A review string that carries a separator writes no record. The base is not a commit and is
+# refused as one -- not trimmed to the part of it that is -- and the finding survives.
 printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","base_sha":"%s\\nEND\\t-\\t0","verdict":"PASS","findings":[{"id":"A-DEFERRABLE","severity":"P3"}]}\n```\n' \
   4ad962f000000000000000000000000000000001 4ad962f000000000000000000000000000000001 \
   5157509000000000000000000000000000000002 > "$tmp/forged-base.md"
-got="$(parse_verdict_json "$tmp/forged-base.md" | tr '\t' '|')"
-want='META|4ad962f000000000000000000000000000000001|PASS|-
-P3|A-DEFERRABLE|0
-END|-|0'
-expect MUT-REVIEW-FORGES-PROTOCOL "$got" "$want"
+expect MUT-REVIEW-FORGES-PROTOCOL "$(review_rows "$tmp/forged-base.md")" \
+  '0|json/4ad962f000000000000000000000000000000001/PASS/-/-;P3:A-DEFERRABLE:0'
 # A finding id is a field of the same protocol and is held to the same rule. It is refused rather
 # than trimmed to "no id": no id is a MANUAL line for a person, and this is an id that wrote rows.
 printf '```json\n{"verdict":"PASS","findings":[{"id":"A\\tEND\\t-\\t0","severity":"P3"}]}\n```\n' \
   > "$tmp/forged-id.md"
-got="$(parse_verdict_json "$tmp/forged-id.md" | tr '\t' '|')"
-expect MUT-REVIEW-FORGES-PROTOCOL "$got" 'META|-|PASS|-
-ERR|bad-id|0
-END|-|0'
+expect MUT-REVIEW-FORGES-PROTOCOL "$(review_rows "$tmp/forged-id.md")" '0|json/-/PASS/-/-;ERR:bad-id:0'
+# And the separator this protocol actually uses. A NUL cannot appear in a field the parser emits;
+# where the review puts one there, the parse REFUSES rather than emitting a field that would make
+# a record boundary of its own.
+"$parser_python" - "$tmp/nul-verdict.md" <<'PY'
+import sys
+open(sys.argv[1], "wb").write(
+    b"<!-- upstroke-frontier-review pr=1 head=c3a6665000000000000000000000000000000003 -->"
+    b"\n\nVERDICT: PA\x00SS\n"
+)
+PY
+got="$(parse_nul review "$tmp/nul-verdict.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-REVIEW-FORGES-PROTOCOL: a field holding the record separator was emitted, got [$got]"
+expect MUT-REVIEW-FORGES-PROTOCOL "${got#*|}" ''
 
-# --- a read that failed inside the prose parser -------------------------------------------------
-# The prose parser's reads used to end in `|| true`, which made "this grep failed" and "this grep
-# matched nothing" one answer, and END was printed afterwards regardless -- an outer marker cannot
-# see an error already suppressed beneath it. With exit 2 injected into the numbered-finding read
-# and every other command intact, this review -- which blocks, for carrying a P3 under a PASS --
-# parsed as META and END with nothing between them: a clean PASS, from a parser that had read no
-# findings at all.
-cat > "$tmp/prose-numbered.md" <<'EOF'
-<!-- upstroke-frontier-review pr=232 head=c3a6665000000000000000000000000000000003 -->
-1. **P3 — A deferrable thing.** Detail.
-
-VERDICT: PASS
-EOF
-expect MUT-PROSE-READ-SUPPRESSED "$(parse_prose_review "$tmp/prose-numbered.md" | tr '\t' '|')" \
-  'META|c3a6665000000000000000000000000000000003|PASS|-
-P3|-|0
-END|-|0'
-real_grep="$(command -v grep)"
-grep_stub="$tmp/grep-stub"
-mkdir -p "$grep_stub"
-cat > "$grep_stub/grep" <<'STUB'
-#!/usr/bin/env bash
-# exit 2 for the numbered-finding read, and be the real grep for every other call.
-oe=0; pat=0
-for a in "$@"; do
-  [[ "$a" == "-oE" ]] && oe=1
-  [[ "$a" == '^[0-9]+\. \*\*P[0-3]' ]] && pat=1
-done
-(( oe && pat )) && exit 2
-exec "$REAL_GREP" "$@"
-STUB
-chmod +x "$grep_stub/grep"
-prose_status=0
-got="$(
-  export REAL_GREP="$real_grep" PATH="$grep_stub:$PATH"
-  hash -r
-  parse_prose_review "$tmp/prose-numbered.md" 2>/dev/null
-)" || prose_status=$?
-[[ "$prose_status" == 0 ]] \
-  && error "MUT-PROSE-READ-SUPPRESSED: a parser whose findings read exited 2 reported success"
-[[ "$got" == *END* ]] \
-  && error "MUT-PROSE-READ-SUPPRESSED: END was printed over a read that failed, got [$got]"
-
-# A prose review that quotes a JSON object stays prose.
-printf 'Reviewed head: %s\nThe object {"verdict":"PASS","findings":[]} is an example.\nVERDICT: CHANGES_REQUIRED\n' \
-  "4ad962f000000000000000000000000000000001" > "$tmp/quoted.md"
-expect MUT-QUOTED-JSON-IS-JSON "$(review_kind "$tmp/quoted.md")" prose
-
-# A FORMAT DETECTION THAT FAILED IS NOT A FORMAT. `grep`'s 1 is "this comment carries no fenced
-# object", an answer; its 2 is a file it could not read. `if grep ...; then json; else prose; fi`
-# made the second into the first and CHOSE A PARSER on it -- and the two parsers do not agree
-# about the same review. The JSON form's own verdict object says CHANGES_REQUIRED and carries a
-# P1; sent to the prose parser it loses both, because the `VERDICT:` line the prose parser reads
-# sits outside the object and says PASS, and a severity the object spells with a JSON escape
-# (`"P1"`) holds no `P1` for any grep to find.
-kind_stub="$tmp/kind-stub"
-mkdir -p "$kind_stub"
-cat > "$kind_stub/grep" <<'STUB'
-#!/usr/bin/env bash
-# exit 2 for the format-detection read, and be the real grep for every other call.
-qe=0; pat=0
-for a in "$@"; do
-  [[ "$a" == "-qE" ]] && qe=1
-  [[ "$a" == '^```json|"role_understanding"' ]] && pat=1
-done
-(( qe && pat )) && exit 2
-exec "$REAL_GREP" "$@"
-STUB
-chmod +x "$kind_stub/grep"
+# --- the parse is whole or it is nothing --------------------------------------------------------
+# THE FINDING THIS ROUND WAS WRITTEN FOR. The old parser printed one record per finding and
+# checked none of those writes: with `write()` made to return EIO on the row carrying a P1, the
+# function around it still returned 0, `END` printed after the gap, and a review that blocks
+# audited as a clean PASS -- READY, and a merge call. There is one write now, it is confirmed
+# before the exit status is decided, and the destination is renamed into place only after the
+# bytes are on the device. `/dev/full` fails every write on any machine, with no ptrace needed;
+# the pull request carries the `strace`-injected EIO as well.
+printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n1. **P1 - a thing that blocks.** Detail.\n\nVERDICT: PASS\n' \
+  c3a6665000000000000000000000000000000003 > "$tmp/prose-numbered-p1.md"
+expect MUT-PARSE-WRITE-UNCHECKED "$(review_rows "$tmp/prose-numbered-p1.md")" \
+  '0|prose/c3a6665000000000000000000000000000000003/PASS/-/-;P1:-:0'
+# `--out`, which is how the audit runs it, with the write denied by `ulimit -f 0` -- a real
+# `write()` that fails, on any machine, with no ptrace needed. Two assertions, and the second is
+# the one the finding was about: the status says the parse failed, AND THE DESTINATION IS NOT
+# WRITTEN, so there is no half a result for a caller to read even if it ignored the status.
+: > "$tmp/denied.out"
+write_status=0
+( trap '' XFSZ; ulimit -f 0
+  "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/denied.out" \
+    "$tmp/prose-numbered-p1.md" 2>/dev/null ) || write_status=$?
+((write_status != 0)) \
+  || error "MUT-PARSE-WRITE-UNCHECKED: a parse whose result could not be written reported success"
+expect MUT-PARSE-WRITE-UNCHECKED "$(wc -c < "$tmp/denied.out")" 0
+expect MUT-PARSE-WRITE-UNCHECKED "$(ls "$tmp/denied.out".* 2>/dev/null | wc -l)" 0
+# The same call with the write allowed writes the whole payload, so the case above is about the
+# denied write and not about the fixture.
+expect MUT-PARSE-WRITE-UNCHECKED "$(parse_nul review "$tmp/prose-numbered-p1.md" "$tmp/denied.out")" \
+  '0|review|prose|c3a6665000000000000000000000000000000003|PASS|-|-|1|P1|-|0|'
+# And the destination the parse could not open at all: nothing is written there either.
+mkdir -p "$tmp/unwritable"
+: > "$tmp/unwritable/out"
+chmod a-w "$tmp/unwritable"
+out_status=0
+"$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/unwritable/out" \
+  "$tmp/prose-numbered-p1.md" 2>/dev/null || out_status=$?
+chmod u+w "$tmp/unwritable"
+if ((EUID != 0)); then    # root writes into a directory with no write bit, so the case is not one
+  ((out_status != 0)) \
+    || error "MUT-PARSE-WRITE-UNCHECKED: a parse that could not open its destination reported success"
+  expect MUT-PARSE-WRITE-UNCHECKED "$(wc -c < "$tmp/unwritable/out")" 0
+fi
+# The rendering the gate itself reads, to stdout, held to the same rule.
+write_status=0
+"$parser_python" scripts/pr-review-parse.py review --nul "$tmp/prose-numbered-p1.md" \
+  > /dev/full 2>/dev/null || write_status=$?
+((write_status != 0)) \
+  || error "MUT-PARSE-WRITE-UNCHECKED: a parse whose result went nowhere reported success"
+# An input the parse cannot read is not an empty review, and it is not a review in the other
+# format either: FORMAT DETECTION IS PART OF THE PARSE. `if grep ...; then json; else prose; fi`
+# made a file it could not read into "prose" and CHOSE A PARSER on it -- and the prose parser
+# reads a JSON review's `VERDICT:` line from outside its verdict object and misses every severity
+# the object spells with a JSON escape (`"P1"` holds no `P1` to find).
 printf '```json\n{"verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}\n```\n\nVERDICT: PASS\n' \
   > "$tmp/escaped-severity.md"
-# Read whole, this is a blocking review: a P1 in a feature lane, from an object that says so.
-expect MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$(review_kind "$tmp/escaped-severity.md")" json
-expect MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$(parse_verdict_json "$tmp/escaped-severity.md" | tr '\t' '|')" \
-  'META|-|CHANGES_REQUIRED|-
-P1|CRITICAL|0
-END|-|0'
-# The prose parser reads the same file as a clean PASS carrying nothing, which is what makes the
-# choice of parser a verdict rather than a formatting detail.
-expect MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$(parse_prose_review "$tmp/escaped-severity.md" | tr '\t' '|')" \
-  'META|-|PASS|-
-END|-|0'
-kind_status=0
-got="$(
-  export REAL_GREP="$real_grep" PATH="$kind_stub:$PATH"
-  hash -r
-  review_kind "$tmp/escaped-severity.md" 2>/dev/null
-)" || kind_status=$?
-((kind_status != 0)) \
-  || error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a detection that exited 2 answered with a format [$got]"
-[[ -z "$got" ]] \
-  || error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a failed detection named a parser [$got]"
-# And through main, because the helper refusing is only half of it: the audit must not fall
-# through to the prose parser on the way past. Neither parser runs, nothing is read out of the
-# review, and the audit says which of its reads did not happen.
-got="$(
-  export REAL_GREP="$real_grep"
-  STUB_REVIEW_BODY="$tmp/escaped-severity.md" STUB_COMMENTS_STATUS=0 \
-    PATH="$kind_stub:$lookup:$PATH" bash scripts/pr-ready-audit.sh 999 2>&1 | tr '\n' ' '
-)"
-contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "review-format-unreadable"
+expect MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$(review_rows "$tmp/escaped-severity.md")" \
+  '0|json/-/CHANGES_REQUIRED/-/-;P1:CRITICAL:0'
+#
+# It is also where MUT-PROSE-READ-SUPPRESSED now lives. That case was a read INSIDE the prose
+# parser whose failure was reported as "nothing matched", with the completeness marker printed
+# over it: a review carrying a P3 under a PASS parsed as a clean PASS with no findings. There is
+# no read inside the parse to suppress a status on any more -- the input is read once, whole, and
+# a read that failed is a parse that failed, which is these cases.
+for unreadable in "$tmp/no-such-review.md" "$tmp"; do
+  got="$(review_rows "$unreadable")"
+  [[ "$got" == 0\|* ]] \
+    && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE/MUT-PROSE-READ-SUPPRESSED: an input the parse could not read was given a format, got [$got]"
+done
+# Bytes that are not UTF-8 are not text with the bad bytes dropped, for the same reason.
+printf '```json\n{"verdict":"PASS","findings":[]}\n```\n\xff\xfe\n' > "$tmp/not-utf8.md"
+got="$(review_rows "$tmp/not-utf8.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE/MUT-PROSE-READ-SUPPRESSED: bytes that are not UTF-8 parsed as a review, got [$got]"
+# Through main, because the helper refusing is only half of it: the audit must block on the status
+# rather than reading whatever the file holds.
+got="$(STUB_REVIEW_BODY="$tmp/not-utf8.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "review-parse-failed"
 contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "NOT-READY"
 [[ "$got" == *"verdict=PASS"* ]] \
-  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a verdict was read out of a review no parser read"
-# The same review with the detection working is judged by the JSON parser and blocks on its P1,
-# so the case above is about the failed detection and not about the review.
-got="$(
-  STUB_REVIEW_BODY="$tmp/escaped-severity.md" STUB_COMMENTS_STATUS=0 \
-    PATH="$lookup:$PATH" bash scripts/pr-ready-audit.sh 999 2>&1 | tr '\n' ' '
-)"
+  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a verdict was read out of a review the parser refused"
+# The same review readable is judged by the JSON parser and blocks on its P1, so the case above is
+# about the refusal and not about the review.
+got="$(STUB_REVIEW_BODY="$tmp/escaped-severity.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
 contains MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$got" "open-P1:CRITICAL"
-[[ "$got" == *review-format-unreadable* ]] \
+[[ "$got" == *review-parse-failed* ]] \
   && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a readable review was reported unreadable"
 
+# A PAYLOAD THAT STOPPED ARRIVING IS NOT A SHORTER FINDINGS LIST. `read` ends a loop at end of
+# input and at a failed read alike, so the audit cannot tell the two apart by looking; it checks
+# what arrived against the record count the parser computed. Truncating the payload after the
+# first finding is what a short read looks like from inside the loop.
+"$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/short.payload" "$tmp/json.md"
+truncate -s 60 "$tmp/short.payload"
+short_status=0
+( fields=(); read_parser_fields "$tmp/short.payload" review 7 3 ) || short_status=$?
+((short_status != 0)) \
+  || error "MUT-REVIEW-PARSE-TRUNCATED: a payload that stopped arriving was read as a whole one"
+# The whole payload passes the same check, so the case above is about the truncation.
+expect MUT-REVIEW-PARSE-TRUNCATED "$(
+  "$parser_python" scripts/pr-review-parse.py review --nul --out "$tmp/whole.payload" "$tmp/json.md"
+  fields=(); read_parser_fields "$tmp/whole.payload" review 7 3 && echo "${#fields[@]}"
+)" 22
+# A payload of another kind, and one whose declared count does not match what it carries, are both
+# refused: the tag and the count are checked before a field is read as anything.
+printf 'ledger\0' > "$tmp/wrong-tag.payload"
+( fields=(); read_parser_fields "$tmp/wrong-tag.payload" review 7 3 ) \
+  && error "MUT-REVIEW-PARSE-TRUNCATED: a payload of the wrong kind was read as a review"
+printf 'review\0json\0-\0PASS\0-\0-\09\0' > "$tmp/lying-count.payload"
+( fields=(); read_parser_fields "$tmp/lying-count.payload" review 7 3 ) \
+  && error "MUT-REVIEW-PARSE-TRUNCATED: a payload declaring more records than it carries was read"
+
+# --- a check that failed is the answer, not the input to another attempt --------------------------
 # A verdict is a whole token, in every locale. `[A-Z_]+$` matches the TAIL of a dirty token, and
 # `[A-Z_]` inside a grep is whatever the locale's collating order says it is: under en_US.utf8 the
 # grep carried `FAIL\xc3\x89PASS` through and the check took the clean `PASS` off its end, so a
-# review that says FAIL approved the change -- while the same file under `C` blocked. One answer
-# everywhere, and the token that is not a verdict is carried whole -- `VERDICT:` and all, because
-# a prefix stripped off a refused token is the salvage step below -- so the blocker names it.
+# review that says FAIL approved the change -- while the same file under `C` blocked. The parser is
+# a program now and its character classes are code-point ranges, which mean the same thing
+# everywhere; the token that is not a verdict is still carried whole, `VERDICT:` and all, so the
+# blocker names it.
 printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\nVERDICT: FAIL\xc3\x89PASS\n' \
   c3a6665000000000000000000000000000000003 > "$tmp/prose-suffix.md"
-suffix_want="$(printf 'META|c3a6665000000000000000000000000000000003|VERDICT: FAIL\xc3\x89PASS|-\nEND|-|0')"
-# The ambient locale, and then `$locales` -- `C` and every UTF-8 locale this machine has, built
-# for the login check above. The defect is a disagreement between them, so one alone cannot see it.
-expect MUT-PROSE-VERDICT-SUFFIX "$(parse_prose_review "$tmp/prose-suffix.md" | tr '\t' '|')" "$suffix_want"
+suffix_want="$(printf '0|prose/c3a6665000000000000000000000000000000003/VERDICT: FAIL\xc3\x89PASS/-/-')"
+expect MUT-PROSE-VERDICT-SUFFIX "$(review_rows "$tmp/prose-suffix.md")" "$suffix_want"
 for loc in "${locales[@]}"; do
-  got="$(LC_ALL="$loc" parse_prose_review "$tmp/prose-suffix.md" | tr '\t' '|')"
+  got="$(LC_ALL="$loc" review_rows "$tmp/prose-suffix.md")"
   expect "MUT-PROSE-VERDICT-SUFFIX under $loc" "$got" "$suffix_want"
 done
 # A verdict wrapped in the emphasis a frontier review writes is still that verdict, and the last
 # line still wins: the whole-token rule must not refuse the form the reviews actually use.
 printf 'head=%s\n**VERDICT: CHANGES_REQUIRED**\n**VERDICT: PASS**\n' \
   c3a6665000000000000000000000000000000003 > "$tmp/prose-emphasis.md"
-# `| head -1` is not how a line is taken from a parser here: it closes the pipe at the first line,
-# the parser still printing takes SIGPIPE, and under `pipefail` this file's own `set -e` ends the
-# run at 141 -- the trap the script under test was repaired for, in the gate that proves it.
-got="$(parse_prose_review "$tmp/prose-emphasis.md" | tr '\t' '|')"
-expect MUT-PROSE-VERDICT-SUFFIX "${got%%$'\n'*}" 'META|c3a6665000000000000000000000000000000003|PASS|-'
+expect MUT-PROSE-VERDICT-SUFFIX "$(review_rows "$tmp/prose-emphasis.md")" \
+  '0|prose/c3a6665000000000000000000000000000000003/PASS/-/-'
 # The head is the FIRST marker, and a first marker that does not read whole is not a licence to
 # take the second: the audit would then check the pull request's head against a commit the review
 # never named. `-` blocks; the later line does not stand in for it.
 printf 'head=c3a6665\xc3\x8900000000000000000000000000000003\nReviewed head: %s\n' \
   4ad962f000000000000000000000000000000001 > "$tmp/prose-head.md"
 for loc in "${locales[@]}"; do
-  got="$(LC_ALL="$loc" parse_prose_review "$tmp/prose-head.md" | tr '\t' '|')"
-  expect "MUT-PROSE-HEAD-NOT-FIRST under $loc" "${got%%$'\n'*}" 'META|-|-|-'
+  got="$(LC_ALL="$loc" review_rows "$tmp/prose-head.md")"
+  expect "MUT-PROSE-HEAD-NOT-FIRST under $loc" "$got" '0|prose/-/-/-/-'
 done
-
-# --- a check that failed is the answer, not the input to another attempt --------------------------
-# The whole-token check refuses `VERDICT: ::PASS`, and the branch it falls into used to strip the
+# The whole-token check refuses `VERDICT: ::PASS`, and the branch it fell into used to strip the
 # leading colons and asterisks off what it had just refused -- so the rejecting branch minted the
-# `PASS` the check exists to withhold. Nothing is stripped now: the whole matched run stands, and
+# `PASS` the check exists to withhold. Nothing is stripped: the whole matched run stands, and
 # because every one of these begins with `VERDICT:` it cannot be the token the audit lets through.
-# `**VERDICT: PASS**`, the form the reviews are actually written in, is pinned above and stays.
 for junk in ': ::PASS' ': :PASS' ': **PASS' ': *PASS'; do
   printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\nVERDICT%s\n' \
     c3a6665000000000000000000000000000000003 "$junk" > "$tmp/prose-salvage.md"
-  got="$(parse_prose_review "$tmp/prose-salvage.md" | tr '\t' '|')"
-  [[ "$got" == *'|PASS|'* ]] \
-    && error "MUT-PROSE-VERDICT-SALVAGE: [VERDICT$junk] was salvaged into PASS, got [$got]"
-  contains MUT-PROSE-VERDICT-SALVAGE "$got" 'META|c3a6665000000000000000000000000000000003|VERDICT'
-  for loc in "${locales[@]}"; do
-    got="$(LC_ALL="$loc" parse_prose_review "$tmp/prose-salvage.md" | tr '\t' '|')"
-    [[ "$got" == *'|PASS|'* ]] \
+  for loc in ambient "${locales[@]}"; do
+    if [[ "$loc" == ambient ]]; then got="$(review_rows "$tmp/prose-salvage.md")"
+    else got="$(LC_ALL="$loc" review_rows "$tmp/prose-salvage.md")"; fi
+    [[ "$got" == *'/PASS/'* ]] \
       && error "MUT-PROSE-VERDICT-SALVAGE under $loc: [VERDICT$junk] was salvaged into PASS, got [$got]"
+    contains MUT-PROSE-VERDICT-SALVAGE "$got" '/VERDICT'
   done
 done
 
-# --- a here-string bash could not write, read as "nothing matched" -------------------------------
-# `<<<` is a here-document: over a pipe buffer's worth of data bash writes it to a TEMPORARY FILE,
-# and a temporary file it cannot create is a redirection that failed -- the command never runs and
-# the shell returns 1. `ulimit -f` denies exactly that file and nothing else: 512 bytes is more
-# than any fixture below needs written legitimately and far less than either here-document. SIGXFSZ
-# is ignored so the failure arrives as a status rather than a signal, which is the shape an ENOSPC
-# on the temp directory has. Both fixtures are also parsed with no limit at all, so what is under
-# test is the denied write and not the fixture.
-#
-# The stray-token read: a review carrying the head, a PASS and one standalone `P1`, padded past the
-# buffer. The P1 is a MANUAL blocker. Fed through `<<<`, the failed spill returned grep's 1, the
-# token was dropped and `END` printed over it: a clean PASS, which is READY.
+# --- a review too big for a pipe buffer ---------------------------------------------------------
+# `<<<` is a here-document, and bash writes one to a TEMPORARY FILE once it outgrows a pipe
+# buffer; a temporary file it cannot create is a redirection that failed, so the command never
+# runs and the shell returns 1 -- `grep`'s "no match" -- and a compound command fed by one is
+# skipped outright, with a status of 0 that neither a captured status nor `set -e` can see. Both
+# shapes were live in the prose parser: one lost the only `P1` in a 40,000-character review and
+# printed `END` over it, the other would have dropped a findings list whole. There is no
+# here-string in the parse path at all now, and `ulimit -f` denies the temporary file these used
+# to need, so a parser that still wanted one would be caught here.
 { printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\nVERDICT: PASS\n\n' \
     c3a6665000000000000000000000000000000003
   for _ in $(seq 1 400); do printf '\xc3\xa9%.0s' $(seq 1 100); printf '\n'; done
   printf '\nA standalone P1 in running text.\n'; } > "$tmp/prose-big-stray.md"
-expect MUT-HERESTRING-FAILURE-AS-ANSWER "$(parse_prose_review "$tmp/prose-big-stray.md" | tr '\t' '|')" \
-  'META|c3a6665000000000000000000000000000000003|PASS|-
-STRAY|P1|0
-END|-|0'
-big_status=0
-got="$(trap '' XFSZ; ulimit -f 1; parse_prose_review "$tmp/prose-big-stray.md" 2>/dev/null)" || big_status=$?
-((big_status != 0)) \
-  || error "MUT-HERESTRING-FAILURE-AS-ANSWER: a parser whose token read could not be written reported success"
-[[ "$got" == *END* ]] \
-  && error "MUT-HERESTRING-FAILURE-AS-ANSWER: END was printed over a read that never happened, got [$got]"
-# and the finding itself: it is in the parse, or the parse refuses. What it may not be is missing
-# from a parse that reports success, which is a MANUAL blocker the audit never raises.
-[[ "$got" == *STRAY* || "$big_status" != 0 ]] \
-  || error "MUT-HERESTRING-FAILURE-AS-ANSWER: the standalone P1 went missing from a parse that reported success, got [$got]"
-
-# The numbered-finding read, where the here-string fed a COMPOUND command: bash skips the loop
-# body, the status is 0, and `set -e` sees nothing. Every finding in the review is then missing
-# from a parse that says it finished -- a PASS carrying 8000 deferrable findings, audited as a
-# PASS carrying none.
+big_want='0|prose/c3a6665000000000000000000000000000000003/PASS/-/P1'
+expect MUT-HERESTRING-FAILURE-AS-ANSWER "$(review_rows "$tmp/prose-big-stray.md")" "$big_want"
+expect MUT-HERESTRING-FAILURE-AS-ANSWER \
+  "$(trap '' XFSZ; ulimit -f 1; review_rows "$tmp/prose-big-stray.md")" "$big_want"
 { printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n' \
     c3a6665000000000000000000000000000000003
   for i in $(seq 1 8000); do printf '%d. **P3 - a deferrable thing.** Detail.\n' "$i"; done
   printf '\nVERDICT: PASS\n'; } > "$tmp/prose-many-findings.md"
-many_status=0
-got="$(trap '' XFSZ; ulimit -f 1; parse_prose_review "$tmp/prose-many-findings.md" 2>/dev/null)" || many_status=$?
-expect MUT-HERESTRING-FAILURE-AS-ANSWER "$many_status" 0
-expect MUT-HERESTRING-FAILURE-AS-ANSWER "$(grep -c '^P3' <<< "$got")" 8000
-expect MUT-HERESTRING-FAILURE-AS-ANSWER "$(tail -1 <<< "$got" | tr '\t' '|')" 'END|-|0'
-# and the same fixture with no limit, so the count above is the review's and not the limit's.
 expect MUT-HERESTRING-FAILURE-AS-ANSWER \
-  "$(parse_prose_review "$tmp/prose-many-findings.md" | grep -c '^P3')" 8000
+  "$(trap '' XFSZ; ulimit -f 1; review_rows "$tmp/prose-many-findings.md" | grep -o 'P3:-:0' | wc -l)" 8000
+expect MUT-HERESTRING-FAILURE-AS-ANSWER \
+  "$(review_rows "$tmp/prose-many-findings.md" | grep -o 'P3:-:0' | wc -l)" 8000
 
 # --- the frontmatter id match ------------------------------------------------------------------
 printf -- '---\nid: OTHER-ID\nseverity: P2\n---\n\nThe prose below repeats a line.\nid: TARGET-ID\n' > "$tmp/prose-id.md"
@@ -1199,6 +1182,42 @@ expect MUT-FINDING-SYMLINK-AS-FILE \
 expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count REGULAR-ID HEAD) )" 1
 expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count SYMLINK-ID HEAD) )" 0
 
+# --- the state comes from the blockers, and from nothing that can fail --------------------------
+# THE SECOND OF THIS ROUND'S TWO P1s. `printf '%s\n' "${blockers[@]:-}" | grep -q '^manual:'` in
+# the `elif` gave a manual blocker two ways to be absent: it was not there, or the scan did not
+# happen. With `grep` made to exit 2 a pull request whose only blocker was
+# `manual:P1-outside-the-verdict-object` printed `READY ... blockers=manual:P1-outside-the-verdict-object`,
+# was enqueued, and exited 0.
+#
+# `audit_state` runs no command at all, so these cases run it with an EMPTY PATH: not `grep`
+# broken, but no external command reachable from the function under test. A rewrite that reaches
+# for one fails here whatever it reaches for.
+empty_path="$tmp/empty-path"
+mkdir -p "$empty_path"
+state_of() {  # state_of MOVED BLOCKER...: the state those blockers put a pull request in
+  local moved="$1"; shift
+  blockers=("$@")
+  state=""
+  audit_state "$moved"
+  printf '%s' "$state"
+}
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" manual:P1-outside-the-verdict-object)" MANUAL
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" manual:a manual:b)" MANUAL
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "")" READY
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" "")" READY
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" no-review)" NOT-READY
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" manual:a no-review)" NOT-READY
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of repairs manual:a)" NEEDS-ATTEST
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of merge-edits:abc1234 manual:a)" NEEDS-ATTEST
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of repairs no-review)" NOT-READY
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of ledger-only)" READY
+# A hard blocker that merely CONTAINS the manual prefix is still hard: the test is the prefix, on
+# the whole element, and `grep '^manual:'` over a printed list was matching line starts in text
+# the elements themselves could have supplied.
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" "open-P1:a-manual:thing")" NOT-READY
+expect MUT-MANUAL-SCAN-FAILS-OPEN "$(PATH="$empty_path" state_of "" "verdict:x
+manual:y")" NOT-READY
+
 # --- the newest check run per name -------------------------------------------------------------
 got="$(printf 'upstroke-ci\t100\tsuccess\nupstroke-ci\t250\tfailure\nupstroke-pr-policy\t120\tsuccess\nupstroke-ci\t90\tsuccess\n' | newest_per_name | tr ' ' '\n' | grep . | sort | tr '\n' ' ')"
 expect MUT-CHECK-RUN-FIRST-SUCCESS "$got" "upstroke-ci=failure upstroke-pr-policy=success "
@@ -1224,10 +1243,31 @@ Text with a | pipe.
 
 | not | a | ledger | row |
 EOF
-got="$(ledger_rows_from_body < "$tmp/body.md" | tr '\t' '|')"
-want='A-DEFERRABLE|P3|4ad962f / src/x.rs:1|deferred
-B-FIXED|P2|4ad962f / src/y.rs:2|fixed'
-expect MUT-LEDGER-HEADER-AS-ROW "$got" "$want"
+ledger_rows() {  # ledger_rows FILE: "<status>|<id>:<disposition>;..."
+  local out status=0
+  out="$("$parser_python" scripts/pr-review-parse.py ledger "$1" 2>/dev/null)" || status=$?
+  ((status == 0)) || { printf '%s|' "$status"; return 0; }
+  printf '%s|%s' "$status" "$(printf '%s' "$out" | jq -j '[.rows[] | "\(.id):\(.disposition)"] | join(";")')"
+}
+expect MUT-LEDGER-HEADER-AS-ROW "$(ledger_rows "$tmp/body.md")" \
+  '0|A-DEFERRABLE:deferred;B-FIXED:fixed'
+# The payload the audit reads, whose second field is the row count: the same rule as the review's,
+# so a ledger that stopped arriving is not a pull request with fewer rows in it.
+expect MUT-PARSE-PAYLOAD-COUNT "$(parse_nul ledger "$tmp/body.md")" \
+  '0|ledger|2|A-DEFERRABLE|deferred|B-FIXED|fixed|'
+# A body the audit could not fetch is not a body with no ledger in it. It used to be `gh pr view
+# ... | ledger_rows_from_body` captured into a variable, so a failed fetch ended the whole run
+# through `set -e` -- not a decision about this pull request, just an exit -- and any rewrite of
+# that line into a condition would have made it "no ledger rows", which is `no-row` for a finding
+# that has a row. It is a blocker on this pull request now, and it is stated.
+got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 STUB_BODY_STATUS=1 run_stub 999)"
+contains MUT-LEDGER-LOOKUP-SUPPRESSED "$got" "ledger-lookup-failed"
+contains MUT-LEDGER-LOOKUP-SUPPRESSED "$got" "NOT-READY"
+# and the same run with the body readable does not report the failure, so the case above is about
+# the fetch and not about the review.
+got="$(STUB_REVIEW_BODY="$tmp/truncating-review.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+[[ "$got" == *ledger-lookup-failed* ]] \
+  && error "MUT-LEDGER-LOOKUP-SUPPRESSED: a readable body was reported unreadable"
 
 if ((failed)); then
   echo "test-pr-ready-audit: FAILED" >&2
