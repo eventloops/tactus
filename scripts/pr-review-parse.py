@@ -69,13 +69,37 @@ Three rules keep that true.
   same tab-and-newline channel as the data it certified, so a reviewer-supplied `base_sha` holding
   "<a real commit>\\nEND\\t-\\t0" printed a valid-looking completeness marker of its own.
 
-FORMAT DETECTION IS PART OF THE PARSE, for the same reason. There are two review forms -- the
-workflow's fenced JSON verdict and the `<!-- upstroke-frontier-review -->` prose -- and they do
-not agree about the same review: a JSON review whose object says CHANGES_REQUIRED and carries a P1
-reads, to the prose parser, as the `VERDICT: PASS` line sitting outside the object with no
-findings at all. Choosing between them on a detection that FAILED is choosing a verdict at random.
-Here the detection happens after the file is in memory and cannot fail on its own; there is one
-success condition for both forms, and no fall back to whichever parser approves.
+AMBIGUITY REFUSES. That is the rule this program reaches a verdict by, and it replaces the
+search that used to reach one. There are two review forms -- the workflow's fenced JSON verdict
+and the `<!-- upstroke-frontier-review -->` prose -- and they do not agree about the same review:
+a JSON review whose object says CHANGES_REQUIRED and carries a P1 reads, to the prose parser, as
+the `VERDICT: PASS` line sitting outside the object with no findings at all. So every question
+below is answered by counting rather than by finding, and every count that is not one is a
+refusal:
+
+  * the comment holds EXACTLY ONE place a verdict could be read from, or there is no result.
+    Zero is not a reason to try the other parser; two is not a reason to pick one of them --
+    whether the second is a quoted example, a block inside a blockquote, or a block inside an
+    HTML comment;
+  * every run of three or more backticks or tildes in the comment was consumed by the structure
+    scan as a fence of a block that scan found. One that was not means the comment's block
+    structure is NOT what this program thinks it is, and there is no result;
+  * nothing but whitespace follows the block the verdict is read from, and no `VERDICT:` line
+    stands outside it. Not "nothing this program recognises as a block" -- nothing;
+  * and the form is not chosen by which parser gets an answer. A comment carrying the prose
+    form's marker is the prose form, and one carrying a verdict block as well is a comment
+    claiming to be both, which is a refusal rather than a choice.
+
+Three rounds of review put three more spellings of one fenced block through the recogniser this
+file used to trust: one leading space, then `> ` before the fence, then the fence hidden in an
+HTML comment. A recogniser made cleverer each time is a recogniser that is wrong in a way nobody
+has thought of yet. A count does not have to be clever: what it cannot resolve, it refuses, and a
+refusal costs the reviewer one re-post where a missed CHANGES_REQUIRED costs a merged P1.
+
+A REAL COMMONMARK PARSE WOULD BE BETTER, and there is none to use: Python's standard library ships
+no Markdown parser, `markdown-it-py` and the rest are dependencies, and this repository takes none
+for a gate script. What is here is therefore NOT an approximation of the specification -- two of
+those have now failed -- but a structure scan whose every unresolved character is a refusal.
 
 THE TWO RENDERINGS are built from the same validated result:
 
@@ -146,14 +170,23 @@ WITNESS_KEYS = ("witness", "reproduction", "repro", "failing_test", "mutation", 
 MUST_KEY = re.compile(r"(mandatory|deviation|must_)", re.I)
 MUST_WORD = re.compile(r"\bMUST\b", re.ASCII)
 
-# The review forms: a fenced `json` block, or the older bare `role_understanding` object anywhere.
-# A prose review that merely QUOTES a JSON object is prose, because a fence has to open a line of
-# its own.
-#
-# The older bare form has no fence, so its last block runs from the last object opener to the last
-# `}` in the comment.
-BARE_FORM = re.compile(r"\"role_understanding\"")
-BARE_OBJECT_OPEN = re.compile(r"\{\"role_understanding")
+# THE FORM IS THE COMMENT'S OWN MARKER, not whichever parser gets an answer out of it. The prose
+# form writes this marker, every prose review in the repository carries it, and no workflow-form
+# review does; a comment carrying it AND a verdict block is a comment claiming to be both forms,
+# which is a refusal. "I could not read the JSON, so I will try prose" is how a blocking review
+# became a PASS: the object said CHANGES_REQUIRED with a P1 spelled `"P\u0031"`, and the prose
+# parser read the `VERDICT: PASS` line sitting outside it with no findings at all.
+PROSE_MARKER = re.compile(r"<!-- upstroke-frontier-review")
+# The prose form's verdict, looked for OUTSIDE a workflow verdict block. No workflow-form review in
+# the repository carries one, and one that did would be a comment saying two different things.
+PROSE_VERDICT = re.compile(r"VERDICT:")
+
+# The older bare form's object opener, with whatever a writer left between the brace and the key.
+# `\{\"role_understanding` was this pattern without the `\s*`, and ONE SPACE walked past it: a
+# comment holding a complete fenced `PASS` example and then a real `{ "role_understanding":...}`
+# object saying CHANGES_REQUIRED read as the example, with the object's `"P\u0031"` invisible to
+# the stray scan. The bare form has no fence, so its object runs from the opener to the last `}`.
+BARE_OBJECT_OPEN = re.compile(r"\{\s*\"role_understanding\"")
 
 # A FENCE IS A LINE, AND THE LINES ARE READ IN ORDER, BY COMMONMARK'S RULES -- which are the rules
 # GitHub renders these comments by, so they are the rules that decide what a reader of the comment
@@ -179,12 +212,17 @@ BARE_OBJECT_OPEN = re.compile(r"\{\"role_understanding")
 # which is why the rule below does not rest on the recogniser being right.
 FENCE_OPEN = re.compile(r"( {0,3})(`{3,}|~{3,})([^\n]*)\Z")
 FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t\r]*\Z")
-# WHAT MAY NOT FOLLOW THE VERDICT. Coarse on purpose: any run of three or more backticks or tildes,
-# anywhere in the tail, at the start of a line or inside one, and either form's object opener. This
-# is the check that has to hold when the recogniser above is wrong, so it is not written in the
-# recogniser's vocabulary -- it asks only whether the comment carries the RAW MATERIAL of another
-# block after the one being read as the verdict, and refuses the parse if it does.
-TAIL_BLOCK_MATERIAL = re.compile(r"`{3,}|~{3,}|\{\"role_understanding")
+# WHAT A FENCE IS MADE OF, ASKED IN CHARACTERS. Three or more backticks or tildes is the only way
+# CommonMark opens a fenced block, so this run is present wherever a fence is -- whatever the rest
+# of the line looks like: indented past three spaces, behind a blockquote's `> `, behind a list
+# marker, inside an HTML comment. It is what the structure scan is CHECKED AGAINST rather than
+# trusted about: every one of these runs must have been consumed by that scan as a fence of a block
+# it found, and one that was not means the comment's block structure is not what this program
+# thinks it is. That check cannot be written in the recogniser's own vocabulary, or it agrees with
+# the recogniser by construction -- which is how a tail check enumerating
+# `\{\"role_understanding` missed `{ "role_understanding` and let an earlier PASS stand as the
+# verdict.
+FENCE_RUN = re.compile(r"`{3,}|~{3,}")
 
 # The prose form, read exactly as the shell read it. `[^ \t\n\r\f\v]` is POSIX `[^[:space:]]` in
 # the `C` locale, which is what the greps were given.
@@ -269,9 +307,12 @@ def stray_summary(outside):
 # ---- the review ---------------------------------------------------------------------------------
 
 # One fenced block of a comment: the character its fence is made of, the info string naming its
-# language, its content with the opening fence's indentation removed, the raw span that content
-# occupies in the comment, the offset just past the block, and whether it was ever closed.
-Block = collections.namedtuple("Block", "fence info content start end after closed")
+# language, its content with the opening fence's indentation removed, THE OFFSET ITS OPENING FENCE
+# LINE STARTS AT, the raw span that content occupies in the comment, the offset just past the
+# block, and whether it was ever closed. `outer` is what lets the whole block -- its fences as well
+# as its content -- be taken out of the comment, so that what is left is exactly the material the
+# structure scan did not account for.
+Block = collections.namedtuple("Block", "fence info content outer start end after closed")
 
 
 def finding(one):
@@ -340,6 +381,7 @@ def fenced_blocks(text):
     fence_len = indent = 0
     info = ""
     content_from = 0
+    outer = 0
     content_start = 0
     lines = text.split("\n")
     offset = 0
@@ -357,6 +399,7 @@ def fenced_blocks(text):
             fence_len = len(opening.group(2))
             info = opening.group(3).strip()
             content_from = index + 1
+            outer = line_start
             content_start = line_start + len(line)
             continue
         closing = FENCE_CLOSE.match(line)
@@ -364,13 +407,13 @@ def fenced_blocks(text):
                 and len(closing.group(1)) >= fence_len):
             blocks.append(
                 Block(fence_char, info, without_indent(lines[content_from:index], indent),
-                      content_start, line_start, offset, True)
+                      outer, content_start, line_start, offset, True)
             )
             fence_char = None
     if fence_char is not None:
         blocks.append(
             Block(fence_char, info, without_indent(lines[content_from:], indent),
-                  content_start, len(text), len(text), False)
+                  outer, content_start, len(text), len(text), False)
         )
     return blocks
 
@@ -397,90 +440,134 @@ def names_json(info):
     return bool(words) and words[0].lower() == "json"
 
 
-def is_verdict_block(block):
-    """Whether BLOCK is the shape the review workflow writes its verdict in.
+def spans_outside(text, blocks):
+    """The spans of TEXT that no block the structure scan found covers -- FENCE LINES INCLUDED.
 
-    A BACKTICK fence, because that is what the workflow writes and narrowing is the safe direction:
-    a tilde fence is read as a block -- it has to be, or a ``` inside one would be mistaken for a
-    fence of the comment's own -- but it is never the verdict. So a ```` ~~~json ```` block appended
-    under the real verdict is a block that follows it, which is a refusal, and not a second verdict
-    quietly replacing the first.
+    A block's fence lines belong to the block, not to the comment around it, so they are taken out
+    with its content. What is left is exactly the material that scan did not account for, and it is
+    where everything below looks: a fence run there is a fence this program did not read as one.
     """
-    return block.fence == "`" and names_json(block.info)
+    spans = []
+    pos = 0
+    for one in blocks:
+        if one.outer > pos:
+            spans.append((pos, one.outer))
+        pos = max(pos, one.after)
+    spans.append((pos, len(text)))
+    return spans
 
 
-def refuse_tail(tail):
-    """Nothing that could be part of another block may follow the one being read as the verdict."""
-    material = TAIL_BLOCK_MATERIAL.search(tail)
-    if material is not None:
+def unresolved_material(text, blocks):
+    """Every piece of fence material the structure scan did not turn into a block of its own.
+
+    THIS IS THE CHECK THAT HOLDS WHEN THE RECOGNISER IS WRONG AGAIN, and it is the whole of this
+    program's answer to three rounds that each found one more spelling of a fenced block. One
+    leading space; then `> ` in front of the fence, which is a fence inside a CommonMark blockquote
+    and was no fence at all here; then the fence inside an HTML comment. Each time the recogniser
+    was made to understand one more shape, and each time the next round found the next shape.
+
+    So the recogniser is not asked to be right -- it is asked to ACCOUNT FOR EVERY FENCE RUN IN THE
+    COMMENT. Three or more backticks or tildes is the only way a fenced block opens, so a run of
+    them that the scan did not consume as a fence of some block means this program's idea of where
+    the blocks are is not the reader's. There is no result from a comment like that.
+
+    A tilde-fenced `json` block is material for the same reason from the other side: it is a block,
+    because a ``` inside one would otherwise be read as a fence of the comment's own, but it is
+    never the verdict -- the workflow writes backticks -- so a comment carrying one is a comment
+    whose verdict this program cannot be sure it is reading.
+    """
+    stale = []
+    for start, end in spans_outside(text, blocks):
+        for run in FENCE_RUN.finditer(text, start, end):
+            stale.append("%s at line %d" % (run.group(0)[:8], text.count("\n", 0, run.start()) + 1))
+    for one in blocks:
+        if one.fence != "`" and names_json(one.info):
+            stale.append("%s%s at line %d"
+                         % (one.fence * 3, one.info[:16], text.count("\n", 0, one.outer) + 1))
+    return stale
+
+
+def verdict_candidates(text, blocks):
+    """Every place in TEXT a workflow verdict could be read from, in the order they appear.
+
+    A candidate is a backtick-fenced block whose info string names `json` -- the shape the review
+    workflow writes -- or the older bare form's object, which has no fence and runs from its opener
+    to the last `}` in the comment. Both are looked for over the WHOLE comment and not from one end
+    of it: the caller requires exactly one, so there is no last, no first, and no earlier block to
+    fall back to. An opener inside a block the scan found is that block's content and not a
+    candidate, which is why a workflow verdict object -- whose own first key is `role_understanding`
+    -- is one candidate rather than two.
+    """
+    found = [one for one in blocks if one.fence == "`" and names_json(one.info)]
+    close = text.rfind("}")
+    for start, end in spans_outside(text, blocks):
+        for opener in BARE_OBJECT_OPEN.finditer(text, start, end):
+            at = opener.start()
+            found.append(Block("`", "json", text[at:close + 1], at, at, close + 1, close + 1,
+                               close >= at))
+    found.sort(key=lambda one: one.outer)
+    return found
+
+
+def the_verdict_block(text, candidates):
+    """The ONE block this comment's verdict is read from, or a refusal. There is no third answer.
+
+    EXACTLY ONE, AND NOTHING LOOSE AROUND IT. Round 11 made a block that does not close a failed
+    parse rather than a licence to take the block before it; round 12 found the same revival
+    arriving through the recogniser, and closed it by taking the comment's LAST block; round 13
+    found three more ways to make the last block the wrong one -- a bare object the tail check's
+    enumeration missed, a real block hidden from the recogniser inside a blockquote, and a second
+    block hidden from a reader inside an HTML comment.
+
+    Taking the last block was still a search. This is not: the comment either holds one place a
+    verdict could be read from, or it does not read. A second place is a refusal whether it is a
+    quoted example, a blockquoted block or a hidden one -- this program does not have to tell them
+    apart, and every attempt to tell them apart has been the defect.
+
+    The two checks after the count are the same rule pointed outwards. Nothing but WHITESPACE may
+    follow the block -- not "nothing this program recognises as a block", which is the enumeration
+    that failed; and no `VERDICT:` may stand outside it, because a comment carrying a verdict object
+    and a verdict line says two things and this program would be choosing between them.
+    """
+    if len(candidates) != 1:
         raise Unparsed(
-            "the review carries [%s] after the block its verdict was read from"
-            % material.group(0)[:24]
+            "the review carries %d places a verdict could be read from, and exactly one is read"
+            % len(candidates)
         )
+    block = candidates[0]
+    if not block.closed:
+        raise Unparsed("the review's verdict block does not close")
+    tail = text[block.after:]
+    if tail.strip():
+        raise Unparsed(
+            "the review carries [%s] after the block its verdict is read from"
+            % tail.strip()[:24]
+        )
+    if PROSE_VERDICT.search(text[:block.outer]) is not None:
+        raise Unparsed(
+            "the review carries a VERDICT: line outside the block its verdict is read from"
+        )
+    return block
 
 
-def last_verdict_block(text, blocks):
-    """The workflow form's verdict block, or None when the comment carries no block at all.
-
-    THE VERDICT IS THE COMMENT'S LAST BLOCK. Not the last block of a kind, not the last block that
-    parses, not the last block a pattern recognised: the last one, out of a scan that read every
-    line. Round 11 made a block that does not close a failed parse rather than a licence to take
-    the block before it, and round 12 found the same revival one layer out -- `^```json` does not
-    match an indented fence, CommonMark says an indented fence is a fence, and a real
-    CHANGES_REQUIRED carrying a P1 stopped being a block at all, so the PASS quoted above it as an
-    example became the verdict. Recognising indented fences closes that instance. IT IS NOT WHAT
-    CLOSES THE CLASS.
-
-    What closes the class is that there is no longer a way to reach an earlier block. The verdict
-    is the LAST block, so an earlier one is never a candidate to fall back to; and before the parse
-    goes on, the comment is required to hold NO MATERIAL OF ANOTHER BLOCK after it -- coarsely, in
-    characters rather than in this file's idea of a fence, so the check still holds when the idea
-    of a fence is wrong again. Between them: if the real last block is recognised it is the one that
-    is read, and if it is not recognised its fence characters are sitting in the tail and the parse
-    fails. Neither road ends at the block before it.
-    """
-    if any(names_json(one.info) for one in blocks):
-        last = blocks[-1]
-        if not is_verdict_block(last):
-            raise Unparsed(
-                "the review's last ```json block is not its last block: a [%s%s] block follows it"
-                % (last.fence * 3, last.info[:24] or " plain")
-            )
-        if not last.closed:
-            raise Unparsed("the review's last ```json block does not close")
-        refuse_tail(text[last.after:])
-        return last
-    opened = list(BARE_OBJECT_OPEN.finditer(text))
-    if opened:
-        end = text.rfind("}")
-        if end < opened[-1].start():
-            raise Unparsed("the review's last verdict object does not close")
-        refuse_tail(text[end + 1:])
-        return Block("`", "json", text[opened[-1].start():end + 1],
-                     opened[-1].start(), end + 1, end + 1, True)
-    return None
-
-
-def parse_json_review(text, blocks):
-    """The workflow form: the last JSON object is the verdict, and it is the only source.
+def parse_json_review(text, candidates):
+    """The workflow form: the comment's one verdict object, and it is the only source.
 
     Anything in the comment outside that object which looks like a finding is for a person, and is
     reported as a stray token rather than counted as a finding.
     """
-    block = last_verdict_block(text, blocks)
-    verdict = None
-    if block is not None:
-        try:
-            verdict = json.loads(block.content)
-        except ValueError as exc:
-            # The last block IS the verdict, and this one does not read as a whole object. Reaching
-            # past it to an earlier one is the defect; reporting it as a review with no findings is
-            # the same defect wearing the other hat. There is no complete result here.
-            raise Unparsed("the review's last verdict object is not whole: %s" % exc)
+    block = the_verdict_block(text, candidates)
+    try:
+        verdict = json.loads(block.content)
+    except ValueError as exc:
+        # THE ONE CANDIDATE IS THE VERDICT, and this one does not read as a whole object. Reaching
+        # past it to another block is the defect; reporting it as a review with no findings is the
+        # same defect wearing the other hat. There is no complete result here.
+        raise Unparsed("the review's verdict object is not whole: %s" % exc)
     if not isinstance(verdict, dict) or not isinstance(verdict.get("findings"), list):
-        # The comment announces the workflow form and carries no verdict object this can read.
-        # That is a complete description of the review -- it records nothing, and it carries one
-        # finding the audit cannot judge -- so it is a result, and every part of it blocks.
+        # The comment carries a verdict block and it holds no verdict object this can read. That
+        # is a complete description of the review -- it records nothing, and it carries one finding
+        # the audit cannot judge -- so it is a result, and every part of it blocks.
         return {
             "kind": "json",
             "reviewed_sha": None,
@@ -541,17 +628,44 @@ def parse_prose_review(text):
 
 
 def review_result(args):
-    """review FILE: the one review this pull request is judged on, in whichever form it is in."""
+    """review FILE: the one review this pull request is judged on, in whichever form it is in.
+
+    THE ORDER HERE IS THE POINT. The comment's block structure is established first and checked
+    against the comment's own characters; only then is a form chosen, and the form is chosen by the
+    comment's marker rather than by which parser gets an answer. Every branch that cannot be
+    resolved ends in a refusal, and none of them ends in the other parser:
+
+      * fence material this program could not read as a block -> no result. The structure is not
+        what it thinks it is, so nothing built on that structure can be trusted;
+      * the prose form's marker AND a verdict block -> no result. The comment claims to be both
+        forms, and they do not agree about the same review;
+      * the prose form's marker and nothing else -> the prose parser, which is the form the comment
+        says it is rather than the one left over;
+      * no marker -> the workflow form, which must yield exactly one verdict block. ZERO IS A
+        REFUSAL, not a reason to try prose: that fall back is how a real CHANGES_REQUIRED hidden
+        from the recogniser -- one leading space, a `> ` before the fence -- became the
+        `VERDICT: PASS` line written outside it.
+    """
     if len(args) != 1:
         raise Unparsed("review takes one file")
     text = read_input(args[0])
-    # FORMAT DETECTION IS PART OF THE PARSE, and it reads the same structure the verdict is taken
-    # out of: a comment carrying a `json` block is the workflow form whatever that block's fence is
-    # indented by, and so is one carrying the older bare object. Nothing here can fail on its own,
-    # and there is no fall back to whichever parser approves.
     blocks = fenced_blocks(text)
-    json_form = any(names_json(one.info) for one in blocks) or BARE_FORM.search(text)
-    result = parse_json_review(text, blocks) if json_form else parse_prose_review(text)
+    stale = unresolved_material(text, blocks)
+    if stale:
+        raise Unparsed(
+            "the review carries fence material this parse could not read as a block: [%s]"
+            % stale[0]
+        )
+    candidates = verdict_candidates(text, blocks)
+    if PROSE_MARKER.search(text) is not None:
+        if candidates:
+            raise Unparsed(
+                "the review carries the prose form's marker and %d verdict block(s)"
+                % len(candidates)
+            )
+        result = parse_prose_review(text)
+    else:
+        result = parse_json_review(text, candidates)
     result["tag"] = "review"
     return result
 

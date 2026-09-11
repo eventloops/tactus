@@ -147,6 +147,24 @@
 #                                stands when a recogniser is wrong again: the verdict is the
 #                                comment's LAST block, and nothing that could be another block's
 #                                material may follow it
+#   MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN  the parse CHOSE between the places a verdict could be read
+#                                from instead of refusing a comment that offers more than one.
+#                                Three spellings of one fenced block, each making the WRONG block
+#                                the one that was read: `{ "role_understanding"` with a space
+#                                after the brace, which the tail check's enumeration of "block
+#                                material" did not list; the real block inside a blockquote's
+#                                `> `, which the recogniser did not see at all, so format
+#                                detection fell back to prose and took the `VERDICT: PASS` written
+#                                outside it; and a second block hidden inside an HTML comment,
+#                                which a reader never sees and the scanner read as the last block.
+#                                All three reached READY, exit 0 and one merge call out of a
+#                                review carrying a P1 spelled `"P\u0031"`, which the stray scan
+#                                cannot see either. A recogniser made cleverer closes the spelling
+#                                in front of it; the count closes the class: EXACTLY ONE place a
+#                                verdict may be read from, every fence run in the comment
+#                                accounted for by the structure scan, nothing but whitespace after
+#                                the block, no `VERDICT:` line outside it, and the form taken from
+#                                the comment's marker rather than from whichever parser answers
 #   MUT-PARSE-SHORT-WRITE        `write()` returned a smaller count than the payload and the count
 #                                was discarded: under `PYTHONUNBUFFERED=1`, with `RLIMIT_FSIZE` at
 #                                1,024 and a 3,560-byte result, `write(1, ..., 3560) = 1024` and
@@ -811,10 +829,12 @@ expect MUT-PARSE-PAYLOAD-COUNT "$(parse_nul review "$tmp/json.md")" \
 # call. A truncated review has no verdict; it does not have its previous verdict.
 revived_head=4ad962f000000000000000000000000000000001
 revived_base=5157509000000000000000000000000000000002
-{ printf 'Reviewed head: %s\n\nAn earlier pass, kept as an example of the shape:\n\n' "$revived_head"
-  printf '```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[]}\n```\n' \
+example_pass() {  # example_pass: the clean `PASS` block these revivals all reached back to
+  printf 'An earlier pass, kept as an example of the shape:\n\n'
+  printf '```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[]}\n```\n\n' \
     "$revived_head" "$revived_base"
-  printf '\nUnedited verdict:\n\n```json\n'
+}
+{ printf 'Reviewed head: %s\n\nUnedited verdict:\n\n```json\n' "$revived_head"
   printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}' \
     "$revived_head" "$revived_base"
   printf '\n'; } > "$tmp/revived-body.txt"
@@ -848,6 +868,23 @@ done
 # are about the truncation and not about the fixture.
 got="$(STUB_REVIEW_BODY="$tmp/revived-whole.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
 contains MUT-VERDICT-REVIVED-BY-TRUNCATION "$got" "open-P1:CRITICAL"
+# AND THE SHAPE EVERY ONE OF THESE REVIVALS REACHED BACK INTO: a complete `PASS` example above the
+# real verdict. Round 11 got to it through a final block that did not close, round 12 through an
+# indented fence, round 13 through a `> ` and through an HTML comment -- four ways to make the
+# example the block that was read. The comment offers two places a verdict could be read from, and
+# a parse that picks one of them is picking a verdict: there is no result here.
+{ example_pass; cat "$tmp/revived-body.txt"; printf '```\n'; } > "$tmp/two-blocks.md"
+got="$(review_rows "$tmp/two-blocks.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: a comment offering two verdicts parsed, got [$got]"
+[[ "$got" == *PASS* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: the example PASS was chosen, got [$got]"
+expect MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN "$(parse_nul review "$tmp/two-blocks.md")" '1|'
+got="$(STUB_REVIEW_BODY="$tmp/two-blocks.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN "$got" "review-parse-failed"
+contains MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN "$got" "NOT-READY"
+[[ "$got" == *"verdict=PASS"* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: the audit read PASS out of an ambiguous comment"
 # A block whose fences the review quotes INSIDE it is still that one block: a `failure_sequence`
 # describing a code span carries ``` mid-line, and a close matched anywhere ends the block there.
 printf 'Reviewed head: %s\n\n```json\n{"reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"SPAN","severity":"P2","failure_sequence":"append ```a code span``` and a blank line"}]}\n```\n' \
@@ -871,9 +908,7 @@ indented_body() {  # indented_body OPEN-INDENT CLOSE-INDENT FILE
   local open close
   printf -v open '%*s' "$1" ''
   printf -v close '%*s' "$2" ''
-  { printf 'Reviewed head: %s\n\nAn earlier pass, kept as an example of the shape:\n\n' "$revived_head"
-    printf '```json\n{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[]}\n```\n' \
-      "$revived_head" "$revived_base"
+  { printf 'Reviewed head: %s\n' "$revived_head"
     printf '\nUnedited verdict:\n\n%s```json\n' "$open"
     printf '%s{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}' \
       "$open" "$revived_head" "$revived_base"
@@ -903,39 +938,90 @@ printf 'Reviewed head: %s\n\n````json\n{"reviewed_sha":"%s","verdict":"CHANGES_R
   "$revived_head" "$revived_head" > "$tmp/long-fence.md"
 expect MUT-VERDICT-REVIVED-BY-INDENT "$(review_rows "$tmp/long-fence.md")" \
   "0|json/$revived_head/CHANGES_REQUIRED/-/-;P2:LONG:0"
-# THE RULE THAT DOES NOT DEPEND ON THE RECOGNISER. The verdict is the comment's last block: a block
-# that follows it is not a reason to reach back past it, whatever that block is.
-{ cat "$tmp/indent-0:0.md"; printf '\n```text\nA note appended under the verdict.\n```\n'; } \
-  > "$tmp/block-after.md"
+# THE RULE THAT DOES NOT DEPEND ON THE RECOGNISER. A block that follows the verdict is not a
+# reason to reach back past it, whatever that block is -- and with the example `PASS` sitting above
+# it, reaching back is exactly what there is to catch.
+{ example_pass; cat "$tmp/indent-0:0.md"
+  printf '\n```text\nA note appended under the verdict.\n```\n'; } > "$tmp/block-after.md"
 got="$(review_rows "$tmp/block-after.md")"
 [[ "$got" == 0\|* ]] \
   && error "MUT-VERDICT-REVIVED-BY-INDENT: a comment whose last block is not its verdict parsed, got [$got]"
 [[ "$got" == *PASS* ]] \
   && error "MUT-VERDICT-REVIVED-BY-INDENT: an earlier PASS was revived past a later block, got [$got]"
-# And material this parser does NOT recognise as a block, which is the case that has to hold when
-# the recogniser is wrong again: four spaces is CommonMark's indented code block and not a fence, a
-# tilde fence is a fence this comment's own fences are not, and the bare form's object opener is
-# neither. Each of them after the verdict is a refusal.
+# And a `PASS` written in every spelling of a block this parser is NOT sure about, which is the
+# case that has to hold when the recogniser is wrong again. Four spaces is CommonMark's indented
+# code block and not a fence; a tilde fence is a fence this comment's own fences are not; the bare
+# form's object opener is neither -- AND ITS OPENER MAY CARRY WHITESPACE, which is the spelling
+# that walked past an enumerated tail check; a `> ` puts a real fenced block inside a blockquote,
+# where the recogniser saw nothing at all; an HTML comment hides a fenced block from the reader
+# while leaving it a block to the scanner; a list marker indents one by two spaces. Each of them
+# beside the verdict is a refusal, and none of them is a PASS.
 for trailing in '    ```json%b    {"verdict":"PASS","findings":[]}%b    ```' \
                 '~~~json%b{"verdict":"PASS","findings":[]}%b~~~' \
-                '{"role_understanding":"x","verdict":"PASS","findings":[]}%b%b'; do
+                '{"role_understanding":"x","verdict":"PASS","findings":[]}%b%b' \
+                '{ "role_understanding":"x","verdict":"PASS","findings":[]}%b%b' \
+                '{%b  "role_understanding":"x","verdict":"PASS","findings":[]}%b' \
+                '> ```json%b> {"verdict":"PASS","findings":[]}%b> ```' \
+                '<!--%b```json%b{"verdict":"PASS","findings":[]}%b```%b-->' \
+                '- an example:%b%b  ```json%b  {"verdict":"PASS","findings":[]}%b  ```' \
+                '```json%b{"verdict":"PASS","findings":[]}%b```'; do
   { cat "$tmp/indent-0:0.md"; printf "\n$trailing\n" '
+' '
+' '
 ' '
 '; } > "$tmp/tail-material.md"
   got="$(review_rows "$tmp/tail-material.md")"
   [[ "$got" == 0\|* ]] \
-    && error "MUT-VERDICT-REVIVED-BY-INDENT: a comment carrying block material after its verdict parsed, got [$got]"
+    && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN [$trailing]: a comment carrying a second verdict parsed, got [$got]"
   [[ "$got" == *PASS* ]] \
-    && error "MUT-VERDICT-REVIVED-BY-INDENT: an earlier PASS was revived, got [$got]"
-  expect "MUT-VERDICT-REVIVED-BY-INDENT payload" "$(parse_nul review "$tmp/tail-material.md")" '1|'
+    && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN [$trailing]: a second PASS was chosen, got [$got]"
+  expect "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN payload" "$(parse_nul review "$tmp/tail-material.md")" '1|'
+  # and through main, because the parser refusing is only half of it
+  got="$(STUB_REVIEW_BODY="$tmp/tail-material.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+  contains "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN [$trailing]" "$got" "review-parse-failed"
+  [[ "$got" == *"verdict=PASS"* ]] \
+    && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN [$trailing]: the audit read PASS out of it"
+done
+# The same spellings BEFORE the verdict, because a second place is a second place wherever it is:
+# an enumerated tail check only ever looked after the block it had already chosen.
+for leading in '```json%b{"verdict":"PASS","findings":[]}%b```' \
+               '{ "role_understanding":"x","verdict":"PASS","findings":[]}%b%b' \
+               '> ```json%b> {"verdict":"PASS","findings":[]}%b> ```' \
+               '~~~json%b{"verdict":"PASS","findings":[]}%b~~~' \
+               '<!--%b```json%b{"verdict":"PASS","findings":[]}%b```%b-->'; do
+  { printf "$leading\n\n" '
+' '
+' '
+' '
+'; cat "$tmp/indent-0:0.md"; } > "$tmp/head-material.md"
+  got="$(review_rows "$tmp/head-material.md")"
+  [[ "$got" == 0\|* ]] \
+    && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN [$leading, before]: a comment carrying a second verdict parsed, got [$got]"
+  [[ "$got" == *PASS* ]] \
+    && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN [$leading, before]: a second PASS was chosen, got [$got]"
 done
 # Detection reads the same structure: a comment whose ONLY verdict block is indented is the
 # workflow form, not prose -- the prose parser would read its `VERDICT:` line from outside the
 # object and miss every severity the object spells with an escape.
-printf 'Reviewed head: %s\n\n   ```json\n   {"reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"ONLY","severity":"P\\u0031"}]}\n   ```\n\nVERDICT: PASS\n' \
+printf 'Reviewed head: %s\n\n   ```json\n   {"reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"ONLY","severity":"P\\u0031"}]}\n   ```\n' \
   "$revived_head" "$revived_head" > "$tmp/indent-only.md"
 expect MUT-VERDICT-REVIVED-BY-INDENT "$(review_rows "$tmp/indent-only.md")" \
   "0|json/$revived_head/CHANGES_REQUIRED/-/-;P1:ONLY:0"
+# A `VERDICT:` LINE OUTSIDE THE OBJECT IS MATERIAL TOO. The same comment with `VERDICT: PASS`
+# written under it says two different things -- the object blocks, the line approves -- and the
+# two forms disagree about which one a reader sees. Choosing between them is what the prose fall
+# back did; there is nothing to choose here, because the comment does not read.
+{ cat "$tmp/indent-only.md"; printf '\nVERDICT: PASS\n'; } > "$tmp/verdict-line-outside.md"
+got="$(review_rows "$tmp/verdict-line-outside.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: a comment carrying a verdict object and a verdict line parsed, got [$got]"
+[[ "$got" == *PASS* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: the line outside the object was taken, got [$got]"
+# and written ABOVE the object, where a tail check never looked
+{ printf 'VERDICT: PASS\n\n'; cat "$tmp/indent-only.md"; } > "$tmp/verdict-line-above.md"
+got="$(review_rows "$tmp/verdict-line-above.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: a verdict line above the object parsed, got [$got]"
 # And what is OUTSIDE the verdict is found by POSITION. `text.replace(block, "")` removes every
 # copy of the block's text and not the one that was read -- and an indented block's content, with
 # its indentation stripped, is no longer a substring of the comment at all, so it removes nothing
@@ -970,6 +1056,30 @@ expect MUT-VERDICT-REVIVED-BY-INDENT "$(review_rows "$tmp/bare-whole.md")" \
 got="$(review_rows "$tmp/bare-tail.md")"
 [[ "$got" == 0\|* ]] \
   && error "MUT-VERDICT-REVIVED-BY-INDENT: a bare verdict with block material after it parsed, got [$got]"
+
+# THE FORM IS THE COMMENT'S OWN MARKER, and neither parser is what is left when the other fails.
+# A comment carrying the prose form's marker AND a verdict block claims to be both forms, and the
+# two do not agree about the same review: this is finding 2's shape with the fence spelled so the
+# recogniser DOES see it, which is the half that must refuse for the same reason the half it
+# cannot see does.
+printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n```json\n{"reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"BOTH","severity":"P\\u0031"}]}\n```\n\nVERDICT: PASS\n' \
+  "$revived_head" "$revived_head" > "$tmp/both-forms.md"
+got="$(review_rows "$tmp/both-forms.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: a comment claiming both forms parsed, got [$got]"
+[[ "$got" == *PASS* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: a comment claiming both forms was read as prose, got [$got]"
+# And the other half of "detection is not a fall back": a comment with NO prose marker and no
+# verdict block is the workflow form with nothing to read, which is a refusal. "I could not read
+# the JSON, so I will try prose" is how a blocking review became a PASS, and there is no longer a
+# road from zero blocks to the prose parser.
+printf 'Reviewed head: %s\n\nNo verdict block anywhere.\n\nVERDICT: PASS\n' \
+  "$revived_head" > "$tmp/no-block-no-marker.md"
+got="$(review_rows "$tmp/no-block-no-marker.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: a workflow comment with no verdict block parsed, got [$got]"
+[[ "$got" == *PASS* ]] \
+  && error "MUT-VERDICT-AMBIGUOUS-BLOCK-CHOSEN: a comment with no verdict block fell back to prose, got [$got]"
 
 # A pretty-printed object with "}, {" between findings is the same object to a parser.
 cat > "$tmp/pretty.md" <<'EOF'
@@ -1011,8 +1121,9 @@ expect "MUT-PROSE-HEADING-FINDING/MUT-PROSE-LAST-VERDICT/MUT-QUOTED-JSON-IS-JSON
   "$(review_rows "$tmp/prose.md")" \
   '0|prose/c3a6665000000000000000000000000000000003/CHANGES_REQUIRED/-/MUST/P1;P2:-:0;P3:-:0'
 
-# A prose review that quotes a JSON object stays prose: the fence has to open a line of its own.
-printf 'Reviewed head: %s\nThe object {"verdict":"PASS","findings":[]} is an example.\nVERDICT: CHANGES_REQUIRED\n' \
+# A prose review that quotes a JSON object stays prose: the fence has to open a line of its own,
+# and the comment says which form it is in by carrying the prose form's marker.
+printf '<!-- upstroke-frontier-review pr=1 -->\nReviewed head: %s\nThe object {"verdict":"PASS","findings":[]} is an example.\nVERDICT: CHANGES_REQUIRED\n' \
   "4ad962f000000000000000000000000000000001" > "$tmp/quoted.md"
 expect MUT-QUOTED-JSON-IS-JSON "$(review_rows "$tmp/quoted.md")" \
   '0|prose/4ad962f000000000000000000000000000000001/CHANGES_REQUIRED/-/-'
@@ -1026,6 +1137,15 @@ expect MUT-META-FIELD-COLLAPSE "$(review_rows "$tmp/no-sha.md")" '0|json/-/PASS/
 expect MUT-META-FIELD-COLLAPSE "$(parse_nul review "$tmp/no-sha.md")" '0|review|json|-|PASS|-|-|0|'
 printf '<!-- upstroke-frontier-review pr=1 -->\nno reviewed head anywhere\n' > "$tmp/no-head.md"
 expect MUT-META-FIELD-COLLAPSE "$(review_rows "$tmp/no-head.md")" '0|prose/-/-/-/-'
+# A verdict block holding JSON that is not a verdict object is a COMPLETE description of a review
+# that records nothing -- one finding the audit cannot judge, and every field absent. It is a
+# result rather than a refusal because the audit blocks on every `ERR` row it reads, and "there is
+# a review and it says nothing readable" is what a person has to be told.
+printf '```json\n[]\n```\n' > "$tmp/not-an-object.md"
+expect MUT-BAD-SEVERITY-PASSES "$(review_rows "$tmp/not-an-object.md")" '0|json/-/-/-/-;ERR:unparsed:0'
+got="$(STUB_REVIEW_BODY="$tmp/not-an-object.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-BAD-SEVERITY-PASSES "$got" "NOT-READY"
+contains MUT-BAD-SEVERITY-PASSES "$got" "findings-unparsed:unparsed"
 
 # A review string that carries a separator writes no record. The base is not a commit and is
 # refused as one -- not trimmed to the part of it that is -- and the finding survives.
@@ -1196,10 +1316,19 @@ WRITESHAPE
 # made a file it could not read into "prose" and CHOSE A PARSER on it -- and the prose parser
 # reads a JSON review's `VERDICT:` line from outside its verdict object and misses every severity
 # the object spells with a JSON escape (`"P1"` holds no `P1` to find).
-printf '```json\n{"verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}\n```\n\nVERDICT: PASS\n' \
+printf '```json\n{"verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}\n```\n' \
   > "$tmp/escaped-severity.md"
 expect MUT-REVIEW-KIND-UNREADABLE-IS-PROSE "$(review_rows "$tmp/escaped-severity.md")" \
   '0|json/-/CHANGES_REQUIRED/-/-;P1:CRITICAL:0'
+# The same review with a `VERDICT: PASS` line written under it is a comment that says both things,
+# and the prose reading of it is the clean PASS with no findings -- the escape hides the P1 from
+# the stray scan. It is not read either way.
+{ cat "$tmp/escaped-severity.md"; printf '\nVERDICT: PASS\n'; } > "$tmp/escaped-severity-both.md"
+got="$(review_rows "$tmp/escaped-severity-both.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: a comment saying CHANGES_REQUIRED and PASS parsed, got [$got]"
+[[ "$got" == *PASS* ]] \
+  && error "MUT-REVIEW-KIND-UNREADABLE-IS-PROSE: the prose PASS was taken over the object, got [$got]"
 #
 # It is also where MUT-PROSE-READ-SUPPRESSED now lives. That case was a read INSIDE the prose
 # parser whose failure was reported as "nothing matched", with the completeness marker printed
@@ -1272,14 +1401,14 @@ for loc in "${locales[@]}"; do
 done
 # A verdict wrapped in the emphasis a frontier review writes is still that verdict, and the last
 # line still wins: the whole-token rule must not refuse the form the reviews actually use.
-printf 'head=%s\n**VERDICT: CHANGES_REQUIRED**\n**VERDICT: PASS**\n' \
+printf '<!-- upstroke-frontier-review pr=1 -->\nhead=%s\n**VERDICT: CHANGES_REQUIRED**\n**VERDICT: PASS**\n' \
   c3a6665000000000000000000000000000000003 > "$tmp/prose-emphasis.md"
 expect MUT-PROSE-VERDICT-SUFFIX "$(review_rows "$tmp/prose-emphasis.md")" \
   '0|prose/c3a6665000000000000000000000000000000003/PASS/-/-'
 # The head is the FIRST marker, and a first marker that does not read whole is not a licence to
 # take the second: the audit would then check the pull request's head against a commit the review
 # never named. `-` blocks; the later line does not stand in for it.
-printf 'head=c3a6665\xc3\x8900000000000000000000000000000003\nReviewed head: %s\n' \
+printf '<!-- upstroke-frontier-review pr=1 -->\nhead=c3a6665\xc3\x8900000000000000000000000000000003\nReviewed head: %s\n' \
   4ad962f000000000000000000000000000000001 > "$tmp/prose-head.md"
 for loc in "${locales[@]}"; do
   got="$(LC_ALL="$loc" review_rows "$tmp/prose-head.md")"
