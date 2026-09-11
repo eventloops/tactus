@@ -84,13 +84,8 @@ jobs:
             printf '%s' "$PR_HEAD" > "$RUNNER_TEMP/pr-head"
             printf '%s' "$PR_BRANCH" > "$RUNNER_TEMP/pr-branch"
           fi
-          # The number is the identity a legacy exemption is bound to, so it
-          # is carried to the branch step like the head and the branch name.
-          # On merge_group it is the one parsed out of the queue ref above.
-          printf '%s' "$PR_NUMBER" > "$RUNNER_TEMP/pr-number"
           [[ -s "$RUNNER_TEMP/pr-head" ]] || { echo "no head SHA for pull request $PR_NUMBER" >&2; exit 1; }
           [[ -s "$RUNNER_TEMP/pr-branch" ]] || { echo "no head branch for pull request $PR_NUMBER" >&2; exit 1; }
-          [[ -s "$RUNNER_TEMP/pr-number" ]] || { echo "no number for the pull request under review" >&2; exit 1; }
 
       - name: Validate title, evidence sections, and finding ledger
         shell: bash
@@ -162,8 +157,6 @@ jobs:
           # answered out of git's records instead of out of the checkout.
           bash .github/scripts/findings-in-range.sh \
             "$TARGET_SHA" "$head_sha" "$RUNNER_TEMP/findings"
-          export PR_NUMBER
-          PR_NUMBER="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-number")"
           bash .github/scripts/validate-pr-branch.sh \
             "$(cat "$RUNNER_TEMP/pr-branch")" \
             "$RUNNER_TEMP/findings/merge-base-findings" \

@@ -297,14 +297,10 @@ An unrecognised prefix fails rather than defaulting, which is the point of the c
 existed, every prefix outside two `codex/` shapes fell into the audit's catch-all and was silently
 given the most expensive review and the loosest fix set. `test`, `chore`, `perf`, `security` and
 `build` are valid title types with no branch prefix; needing one is a gap to raise here, not a name
-to work around. The rule binds new branches, so `.github/legacy-branches.txt` lists the pull
-requests that predate it as `<number> <head branch>`: a listed pull request is accepted with a
-warning, entries are only ever removed, and the file reaching zero is the signal the migration
-finished. **An entry is the pull request and not the name** — both fields must match, because a bare
-branch name exempts anyone who later types it, and a list whose contents no longer decide who is
-exempt has stopped being a migration list. Renaming a head branch is not a migration either: GitHub
-closes the pull request, so a branch that must leave the list leaves it by way of a replacement pull
-request carrying the same head.
+to work around. **Every head branch is in the vocabulary.** There is no exemption and no list: the
+rule shipped with a migration list of the pull requests that predated it, that list was only ever
+shortened, and it reached zero open pull requests — so a name outside the vocabulary is refused
+whoever opened the pull request and whatever its number.
 
 The lane the audit derives from a prefix is a **separate** mapping, and it is unchanged: it still
 reads `codex/findings-p3-*`, `codex/findings-*` and everything else. A `findings/`, `fix-P<n>/` or

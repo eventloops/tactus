@@ -91,21 +91,11 @@ P2_correctness_202609101200_filed-and-repaired-in-one-range.md
 P2_correctness_202609101200_filed-and-repaired-in-one-range.md
 EOF
 
-# The migration list is `<pull-request number> <head branch>`, and an entry is
-# the pull request rather than the name.
-cat > "$fixture_dir/legacy.txt" <<'EOF'
-# a comment, and a blank line, are not branches
-
-222 codex/findings-p3-1a57a2730a12
-135 sweep/workspace-manager-fixture
-EOF
-
 # branch_pass / branch_fail resolve against the MERGE-BASE listing alone, which
 # is what a caller that passes one listing gets.
 branch_pass() {
   local name="$1" branch="$2"
-  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" >/dev/null 2>&1; then
+  if ! "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" >/dev/null 2>&1; then
     echo "expected branch to pass: $name ($branch)" >&2
     exit 1
   fi
@@ -113,8 +103,7 @@ branch_pass() {
 
 branch_fail() {
   local name="$1" branch="$2"
-  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" >/dev/null 2>&1; then
+  if "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" >/dev/null 2>&1; then
     echo "expected branch to fail: $name ($branch)" >&2
     exit 1
   fi
@@ -124,8 +113,7 @@ branch_fail() {
 # passes and what a real pull request is judged by.
 pair_pass() {
   local name="$1" branch="$2"
-  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" \
+  if ! "$BASH" "$branch_validator" "$branch" \
     "$fixture_dir/findings.txt" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to pass against base and head: $name ($branch)" >&2
     exit 1
@@ -134,8 +122,7 @@ pair_pass() {
 
 pair_fail() {
   local name="$1" branch="$2"
-  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" \
+  if "$BASH" "$branch_validator" "$branch" \
     "$fixture_dir/findings.txt" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to fail against base and head: $name ($branch)" >&2
     exit 1
@@ -146,8 +133,7 @@ pair_fail() {
 # which is what the workflow passes and what a real pull request is judged by.
 triple_pass() {
   local name="$1" branch="$2"
-  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" \
+  if ! "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" \
     "$fixture_dir/head-findings.txt" "$fixture_dir/range-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to pass over the range: $name ($branch)" >&2
     exit 1
@@ -156,8 +142,7 @@ triple_pass() {
 
 triple_fail() {
   local name="$1" branch="$2"
-  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" \
+  if "$BASH" "$branch_validator" "$branch" "$fixture_dir/findings.txt" \
     "$fixture_dir/head-findings.txt" "$fixture_dir/range-findings.txt" >/dev/null 2>&1; then
     echo "expected branch to fail over the range: $name ($branch)" >&2
     exit 1
@@ -278,16 +263,14 @@ cp "$fixture_dir/head-findings.txt" "$unreadable"
 if [[ "$(id -u)" -ne 0 ]] && chmod 000 "$unreadable" 2>/dev/null && [[ ! -r "$unreadable" ]]; then
   # The review's own reproduction: both listings readable is an ambiguous
   # refusal, and making one unreadable must not leave a single match behind.
-  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
+  if "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
     "$fixture_dir/findings.txt" "$unreadable" >/dev/null 2>&1; then
     echo 'expected an unreadable second listing to refuse, not to conform' >&2
     exit 1
   fi
   # And a failure on the FIRST listing must not be masked by a good second one
   # that resolves the name on its own.
-  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it' \
+  if "$BASH" "$branch_validator" 'fix-P2/correctness_filed-by-the-pull-request-that-repairs-it' \
     "$unreadable" "$fixture_dir/head-findings.txt" >/dev/null 2>&1; then
     echo 'expected an unreadable first listing to refuse, not to be masked' >&2
     exit 1
@@ -302,8 +285,7 @@ fi
 # existence-and-permission checks cannot see: the refusal has to come from the
 # read itself.
 if [[ -c /dev/null ]]; then
-  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter' \
+  if "$BASH" "$branch_validator" 'fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter' \
     "$fixture_dir/findings.txt" /dev/null >/dev/null 2>&1; then
     echo 'expected a listing that is neither a file nor a directory to refuse' >&2
     exit 1
@@ -347,8 +329,7 @@ printf 'P2_correctness_202609100002_shared-name.md\nREADME.md\n' > "$twin_lf_b_p
 line_ending_case() {  # line_ending_case <name> <want-exit> <want-text> <listing>...
   local name="$1" want_rc="$2" want_text="$3" rc=0 out
   shift 3
-  out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' "$@" 2>&1)" || rc=$?
+  out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' "$@" 2>&1)" || rc=$?
   if [[ "$rc" != "$want_rc" ]] || ! grep -qF "$want_text" <<< "$out"; then
     echo "expected exit $want_rc and '$want_text': $name (got $rc)" >&2
     exit 1
@@ -403,8 +384,7 @@ printf 'P2_correctness_202609100002_shared-name.md\0README.md\0' > "$toctou_dir/
 toctou_hooked() {
   (
     export SWAP_TARGET="$toctou_b" SWAP_AFTER="$1" SWAP_FROM="$2" \
-      SWAP_COUNTER="$toctou_dir/opens" PR_NUMBER='' \
-      LEGACY_BRANCHES="$fixture_dir/legacy.txt"
+      SWAP_COUNTER="$toctou_dir/opens"
     shift 3
     printf '0\n' > "$SWAP_COUNTER"
     _touches() {
@@ -494,8 +474,7 @@ branch_fail 'bulk upper case' 'bulk-fix-P3/Docs-Fixes'
 
 # The grammar holds with no findings listing, which is how a caller with no
 # repository checks a name.
-if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P1/correctness_never-filed' >/dev/null 2>&1; then
+if ! "$BASH" "$branch_validator" 'fix-P1/correctness_never-filed' >/dev/null 2>&1; then
   echo 'expected the grammar alone to pass without a findings listing' >&2
   exit 1
 fi
@@ -503,58 +482,86 @@ fi
 # A listing that does not exist is a caller error, and it must be refused before
 # the resolution runs rather than read as a finding that was never filed. The
 # branch here needs no resolution at all, so only an eager check fails it.
-if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'feature/pr9-repair-execution' \
+if "$BASH" "$branch_validator" 'feature/pr9-repair-execution' \
   "$fixture_dir/no-such-listing" >/dev/null 2>&1; then
   echo 'expected a findings listing that does not exist to fail' >&2
   exit 1
 fi
 
-# ---- an exemption is a pull request, not a name -------------------------------------------
+# ---- the migration list is retired, and its entries are refused ---------------------------
 #
-# Keyed on the branch name alone, the list exempted anybody who typed it: nothing
-# stops a fork creating `codex/findings-p3-1a57a2730a12` today and opening a NEW
-# pull request, and a lookup handed only that name cannot tell it from the pull
-# request the entry was written for. The list's contents would then no longer
-# decide who is exempt, and the population would no longer be the migration it
-# claims to describe. Both fields must match the same line.
-legacy_pass() {  # legacy_pass <name> <pr-number> <branch>
-  local name="$1" pr="$2" branch="$3"
-  if ! PR_NUMBER="$pr" LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" >/dev/null 2>&1; then
-    echo "expected the exemption to apply: $name (#$pr $branch)" >&2
+# The rule shipped with a migration list of the pull requests that predated it,
+# `<number> <head branch>`. A listed pull request was accepted with a warning,
+# and PR_NUMBER was the identity the entry was matched on: the number was the
+# whole of what bought the exemption, because a bare name would have exempted
+# anyone who later typed it. That list reached zero open pull requests and the
+# owner ruled on 2026-09-09 that every head branch conforms, so the entries it
+# carried are the cases that must now be REFUSED -- each under the number it was
+# listed with, which is the input that used to buy it the opposite verdict.
+# The refusal is asserted by TEXT and not just by exit code, so an entry that
+# started failing for some other reason -- a listing this run could not build,
+# a caller error -- would not be read as the rule binding.
+retired_entry() {  # retired_entry <name> <pr-number> <branch> <refusal text>
+  local name="$1" pr="$2" branch="$3" want="$4" out rc=0
+  out="$(PR_NUMBER="$pr" "$BASH" "$branch_validator" "$branch" 2>&1)" || rc=$?
+  if (( rc == 0 )); then
+    echo "expected a retired entry to be refused: $name (#$pr $branch)" >&2
+    exit 1
+  fi
+  if ! grep -qF "$want" <<< "$out"; then
+    echo "a retired entry must be refused for its prefix: $name (#$pr $branch)" >&2
+    printf '%s\n' "$out" >&2
     exit 1
   fi
 }
 
-legacy_fail() {  # legacy_fail <name> <pr-number> <branch>
-  local name="$1" pr="$2" branch="$3"
-  if PR_NUMBER="$pr" LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" >/dev/null 2>&1; then
-    echo "expected the exemption NOT to apply: $name (#$pr $branch)" >&2
+retired_entry 'the first listed pull request' 135 'sweep/workspace-manager-fixture' \
+  "'sweep/' is not a known branch prefix"
+retired_entry 'a listed codex/findings-p3 entry' 222 'codex/findings-p3-1a57a2730a12' \
+  "'codex/' is not a known branch prefix"
+retired_entry 'a listed codex/findings entry' 179 'codex/findings-9dc6604a62e3' \
+  "'codex/' is not a known branch prefix"
+retired_entry 'a listed codex/sweep entry' 189 'codex/sweep-1dcb506fe31f' \
+  "'codex/' is not a known branch prefix"
+# The two the list picked up when fix/ was retired. Their prefix has a refusal
+# of its own, and it is the one they must get: the entry is gone, and so is the
+# prefix it was written on.
+retired_entry 'a stranded fix/ entry' 139 'fix/rundir-unreadable-is-not-empty' \
+  "'fix/' was retired from the vocabulary"
+retired_entry 'the other stranded fix/ entry' 145 'fix/sampler-kill-and-inspection' \
+  "'fix/' was retired from the vocabulary"
+
+# And the identity itself is inert, on BOTH verdicts and for every shape the old
+# lookup distinguished: the number an entry carried, a number that was never
+# listed, no identity at all, and a non-numeric one. A conforming name conforms
+# under all of them and a retired name is refused under all of them, so nothing
+# is left for an identity to buy.
+for pr_identity in '' '135' '222' '999' 'abc' '-e135'; do
+  if ! PR_NUMBER="$pr_identity" \
+    "$BASH" "$branch_validator" 'ci/pages-nojekyll' >/dev/null 2>&1; then
+    echo "a conforming name was refused with PR_NUMBER=[$pr_identity]" >&2
     exit 1
   fi
-}
+  if PR_NUMBER="$pr_identity" \
+    "$BASH" "$branch_validator" 'sweep/workspace-manager-fixture' >/dev/null 2>&1; then
+    echo "a retired name conformed with PR_NUMBER=[$pr_identity]" >&2
+    exit 1
+  fi
+done
 
-legacy_pass 'the pull request the entry was written for' 222 'codex/findings-p3-1a57a2730a12'
-legacy_pass 'the second listed pull request'             135 'sweep/workspace-manager-fixture'
-# The one that matters: the same branch name, a different pull request. This is
-# every future pull request, fork or not, that reuses a listed name.
-legacy_fail 'the same name, a new pull request'          999 'codex/findings-p3-1a57a2730a12'
-legacy_fail 'a listed number, a different branch'        222 'codex/findings-p3-deadbeefcafe'
-legacy_fail 'the numbers crossed over'                   135 'codex/findings-p3-1a57a2730a12'
-# No identity is no exemption. A caller checking a name by hand is not judging a
-# pull request, and the safe answer for one is the rule itself.
-legacy_fail 'no pull-request identity'                   ''  'codex/findings-p3-1a57a2730a12'
-legacy_fail 'a non-numeric identity'                     'abc' 'codex/findings-p3-1a57a2730a12'
-# The fields are compared and never handed to a pattern matcher, so a name that
-# begins with a dash is a name and not a set of grep options.
-legacy_fail 'short option injection'  222 '-ecodex/findings-p3-1a57a2730a12'
-legacy_fail 'long option injection'   222 '--regexp=codex/findings-p3-1a57a2730a12'
-# Still an exact match on the branch field, and comments are still not entries.
-legacy_fail 'legacy as a substring'   222 'codex/findings-p3-1a57a2730a12-extra'
-legacy_fail 'legacy comment line'     222 '# a comment, and a blank line, are not branches'
-legacy_fail 'unlisted codex branch'   222 'codex/findings-p3-deadbeefcafe'
+# The override that pointed the validator at a list of its own is inert too. A
+# file naming the branch, handed over under the variable that used to name it,
+# and the number beside it: the verdict is still a refusal, so the exemption
+# cannot be reached from the environment either.
+cat > "$fixture_dir/stale-exemption-list.txt" <<'EOF'
+222 codex/findings-p3-1a57a2730a12
+135 sweep/workspace-manager-fixture
+EOF
+if PR_NUMBER=222 LEGACY_BRANCHES="$fixture_dir/stale-exemption-list.txt" \
+  "$BASH" "$branch_validator" 'codex/findings-p3-1a57a2730a12' >/dev/null 2>&1; then
+  echo 'LEGACY_BRANCHES still buys an exemption' >&2
+  exit 1
+fi
 
 # ---- the listings themselves, built from real repositories ---------------------------------
 #
@@ -616,8 +623,7 @@ verdict() {
     echo 99
     return 0
   fi
-  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" \
+  "$BASH" "$branch_validator" "$branch" \
     "$out/merge-base-findings" "$out/head-findings" "$out/range-findings" \
     >/dev/null 2>&1 || rc=$?
   echo "$rc"
@@ -640,8 +646,7 @@ verdict() {
 both_apis() {
   local label="$1" repo="$2" target="$3" head="$4" branch="$5" want="$6" tree_rc dir_rc=0
   tree_rc="$(verdict "$repo" "$target" "$head" "$branch")"
-  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" "$branch" "$repo/reviews/findings" >/dev/null 2>&1 || dir_rc=$?
+  "$BASH" "$branch_validator" "$branch" "$repo/reviews/findings" >/dev/null 2>&1 || dir_rc=$?
   if [[ "$tree_rc" != "$dir_rc" ]]; then
     echo "$label ($branch): the tree listings answered $tree_rc, the directory $dir_rc" >&2
     exit 1
@@ -668,8 +673,7 @@ spelling_case() {  # spelling_case <label> <branch> <want-exit> <path>
   local label="$1" branch="$2" want="$3" path="$4" spelling rc
   while IFS= read -r spelling; do
     rc=0
-    PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" "$branch" "$spelling" >/dev/null 2>&1 || rc=$?
+    "$BASH" "$branch_validator" "$branch" "$spelling" >/dev/null 2>&1 || rc=$?
     if [[ "$rc" != "$want" ]]; then
       echo "$label: '$spelling' answered $rc and $want was expected" >&2
       exit 1
@@ -723,8 +727,7 @@ b_head="$(git -C "$repo_b" rev-parse HEAD)"
 
 ( cd "$repo_b" && "$BASH" "$range_script" "$b_base" "$b_head" "$repo_b/out" >/dev/null 2>&1 ) \
   || { echo 'findings-in-range.sh failed on the hidden-twin repository' >&2; exit 1; }
-if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P2/correctness_a-new-bug' \
+if "$BASH" "$branch_validator" 'fix-P2/correctness_a-new-bug' \
   "$repo_b/out/merge-base-findings" "$repo_b/out/head-findings" "$repo_b/out/range-findings" \
   >/dev/null 2>&1; then
   echo 'a finding hidden on a merged side branch made an ambiguous name conform' >&2
@@ -775,8 +778,7 @@ git -C "$repo_d" add -A && git -C "$repo_d" commit -q -m 'the branch changes som
 d_head="$(git -C "$repo_d" rev-parse HEAD)"
 ( cd "$repo_d" && "$BASH" "$range_script" "$d_base" "$d_head" "$repo_d/out" >/dev/null 2>&1 ) \
   || { echo 'findings-in-range.sh failed on the untouched-finding repository' >&2; exit 1; }
-if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P1/liveness_untouched-by-this-branch' \
+if ! "$BASH" "$branch_validator" 'fix-P1/liveness_untouched-by-this-branch' \
   "$repo_d/out/merge-base-findings" "$repo_d/out/head-findings" "$repo_d/out/range-findings" \
   >/dev/null 2>&1; then
   echo 'a finding the branch never touched must still resolve, from the base tree' >&2
@@ -980,13 +982,11 @@ dir_input="$fixture_dir/findings-dir"
 mkdir -p "$dir_input/P2_correctness_202609101200_missing-repair.md"
 echo placeholder > "$dir_input/P2_correctness_202609101200_missing-repair.md/placeholder"
 echo fixture > "$dir_input/P3_liveness_202609101300_a-real-finding.md"
-if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P2/correctness_missing-repair' "$dir_input" >/dev/null 2>&1; then
+if "$BASH" "$branch_validator" 'fix-P2/correctness_missing-repair' "$dir_input" >/dev/null 2>&1; then
   echo 'a subdirectory named like a finding must not resolve when a directory is the listing' >&2
   exit 1
 fi
-if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' "$dir_input" >/dev/null 2>&1; then
+if ! "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' "$dir_input" >/dev/null 2>&1; then
   echo 'a regular file in a directory listing must still resolve' >&2
   exit 1
 fi
@@ -1001,8 +1001,7 @@ fi
 twin_dir="$fixture_dir/twin-dir"
 mkdir -p "$twin_dir"
 echo fixture > "$twin_dir/P2_performance_202609071000_split-twin.md"
-if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
+if ! "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
   "$fixture_dir/findings.txt" "$twin_dir" >/dev/null 2>&1; then
   : # both twins visible, so the name is ambiguous and refused, which is the control
 else
@@ -1010,8 +1009,7 @@ else
   exit 1
 fi
 if [[ "$(id -u)" -ne 0 ]] && chmod 600 "$twin_dir" 2>/dev/null && [[ ! -x "$twin_dir" ]]; then
-  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
+  if "$BASH" "$branch_validator" 'fix-P2/performance_split-twin' \
     "$fixture_dir/findings.txt" "$twin_dir" >/dev/null 2>&1; then
     echo 'an unsearchable directory listing narrowed an ambiguous name into a pass' >&2
     exit 1
@@ -1120,8 +1118,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
   # The same commit judged the documented by-hand way: that working tree's
   # reviews/findings/ handed straight in as the listing. This is the path that
   # accepted, and it must now agree with the one above.
-  if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
+  if "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
     "$repo_k/reviews/findings" >/dev/null 2>&1; then
     echo 'a symlink named like a finding resolved when a directory was the listing' >&2
     exit 1
@@ -1133,8 +1130,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
     echo "the regular file beside the symlink must still resolve from the trees; got $k_real" >&2
     exit 1
   fi
-  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+  if ! "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
     "$repo_k/reviews/findings" >/dev/null 2>&1; then
     echo 'the regular file beside the symlink must still resolve from a directory listing' >&2
     exit 1
@@ -1147,8 +1143,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
   mkdir -p "$dangling_dir"
   ln -s ./nothing-is-here "$dangling_dir/P2_correctness_202609101200_not-a-finding.md"
   dangling_rc=0
-  dangling_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' "$dangling_dir" 2>&1)" \
+  dangling_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' "$dangling_dir" 2>&1)" \
     || dangling_rc=$?
   if [[ "$dangling_rc" != 1 ]]; then
     echo "a dangling symlink named like a finding must be refused; got $dangling_rc" >&2
@@ -1176,16 +1171,14 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
     || [[ "$(git -C "$repo_k" ls-files -s -- "$k_materialised" | cut -d' ' -f1)" != 120000 ]]; then
     echo 'note: skipping the core.symlinks=false case (this git left the link a link)' >&2
   else
-    if PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
+    if "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
       "$repo_k/reviews/findings" >/dev/null 2>&1; then
       echo 'a committed symlink checked out as a regular file resolved through the directory listing' >&2
       exit 1
     fi
     # And it is still a filter and not a listing read as empty: the regular file
     # beside it resolves, through a checkout that materialised neither as a link.
-    if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+    if ! "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
       "$repo_k/reviews/findings" >/dev/null 2>&1; then
       echo 'the regular file beside the materialised symlink must still resolve' >&2
       exit 1
@@ -1203,8 +1196,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
     if [[ "$(id -u)" -ne 0 ]] && chmod 000 "$repo_k/.git/config" 2>/dev/null \
       && ! git -C "$repo_k/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       unreadable_rc=0
-      unreadable_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-        "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
+      unreadable_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
         "$repo_k/reviews/findings" 2>&1)" || unreadable_rc=$?
       # The other API cannot be built at all where git cannot read the
       # repository, which is `verdict`'s 99. Neither may report conformance.
@@ -1221,8 +1213,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
       # A repository git CAN read is still not a refusal, so the case above is
       # about the unreadable config and not about the directory being in a
       # repository at all.
-      if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-        "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+      if ! "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
         "$repo_k/reviews/findings" >/dev/null 2>&1; then
         echo 'restoring the config must restore the verdict' >&2
         exit 1
@@ -1346,8 +1337,7 @@ git -C "$recorded_repo" add -A \
   && git -C "$recorded_repo" commit -q -m 'two findings share a description'
 rm "$recorded_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
 recorded_rc=0
-recorded_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+recorded_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
   "$recorded_repo/reviews/findings" 2>&1)" || recorded_rc=$?
 if [[ "$recorded_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$recorded_out"; then
   echo "a finding the index records and the checkout lacks must still be a candidate; got $recorded_rc" >&2
@@ -1399,8 +1389,7 @@ else
     exit 1
   fi
   phrase_rc=0
-  phrase_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  phrase_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$phrase_wt/reviews/findings" 2>&1)" || phrase_rc=$?
   chmod 600 "$phrase_repo/.git/config"
   if [[ "$phrase_rc" == 0 ]]; then
@@ -1414,8 +1403,7 @@ else
   # And a readable repository at the same path is not refused for its name: the
   # index records both twins, so the name is ambiguous and says which two.
   phrase_ok_rc=0
-  phrase_ok_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  phrase_ok_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$phrase_wt/reviews/findings" 2>&1)" || phrase_ok_rc=$?
   if [[ "$phrase_ok_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$phrase_ok_out"; then
     echo "restoring the config must restore the verdict; got $phrase_ok_rc" >&2
@@ -1449,8 +1437,7 @@ unexaminable_twin='reviews/findings/P2_correctness_202609100002_shared-name.md'
 
 # unexaminable_verdict <checkout> -> the exit code, with stderr on stdout
 unexaminable_verdict() {
-  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$1/reviews/findings" 2>&1
 }
 
@@ -1530,8 +1517,7 @@ fi
 stray_parent="$fixture_dir/stray-git"
 mkdir -p "$stray_parent/.git" "$stray_parent/listing"
 echo real > "$stray_parent/listing/P3_liveness_202609100003_a-real-finding.md"
-if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+if ! "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
   "$stray_parent/listing" >/dev/null 2>&1; then
   echo 'an empty directory named .git above a by-hand listing must not refuse it' >&2
   exit 1
@@ -1689,8 +1675,7 @@ if [[ ! -e "$unreadable_stream" ]] || [[ "$stream_probe_rc" == 0 ]]; then
   echo 'note: skipping the failed-read case (this platform has no stream that fails to read)' >&2
 else
   stream_rc=0
-  stream_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  stream_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$twin_lf_a" "$unreadable_stream" 2>&1)" || stream_rc=$?
   if [[ "$stream_rc" == 0 ]]; then
     echo 'a listing that could not be read conformed, which is the empty-set fallback again' >&2
@@ -1737,8 +1722,7 @@ git -C "$inside_repo" add -A \
 # reason.
 rm "$inside_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
 inside_verdict() {  # inside_verdict -> the exit code, with stderr on stdout
-  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$inside_repo/reviews/findings" 2>&1
 }
 inside_control_rc=0
@@ -1814,8 +1798,7 @@ else
   git -C "$pointed_repo" add -A \
     && git -C "$pointed_repo" commit -q -m 'two findings share a description'
   pointed_verdict() {
-    PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
       "$pointed_wt/reviews/findings" 2>&1
   }
   if ! git -C "$pointed_repo" worktree add -q --detach "$pointed_wt" HEAD 2>/dev/null \
@@ -1904,8 +1887,7 @@ else
     rm "$invented_repo/reviews/findings"
     git -C "$invented_repo" checkout -- reviews/findings
     invented_verdict() {
-      PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-        "$BASH" "$branch_validator" 'fix-P2/correctness_invented-by-a-read-failure' \
+      "$BASH" "$branch_validator" 'fix-P2/correctness_invented-by-a-read-failure' \
         "$invented_repo/reviews/findings" 2>&1
     }
     if [[ -L "$invented_repo/reviews/findings" ]] || [[ ! -f "$invented_repo/reviews/findings" ]]; then
@@ -1994,8 +1976,7 @@ if [[ -L "$symlink_probe" ]]; then
 
   # The same name through the REAL directory the link points at resolves, so the
   # case above is a rule about the path and not a listing read as empty.
-  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_no-ledger-entry' \
+  if ! "$BASH" "$branch_validator" 'fix-P2/correctness_no-ledger-entry' \
     "$repo_r/elsewhere/findings" >/dev/null 2>&1; then
     echo 'the directory the link points at must still resolve the name it holds' >&2
     exit 1
@@ -2036,8 +2017,7 @@ if [[ -L "$symlink_probe" ]]; then
   new_repo "$repo_s"
   commit_finding "$repo_s" 'P3_liveness_202609100007_under-a-linked-parent.md' 'a real finding'
   if ln -s outer "$outer_link" 2>/dev/null && [[ -L "$outer_link" ]]; then
-    if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" 'fix-P3/liveness_under-a-linked-parent' \
+    if ! "$BASH" "$branch_validator" 'fix-P3/liveness_under-a-linked-parent' \
       "$outer_link/repo-under-a-linked-parent/reviews/findings" >/dev/null 2>&1; then
       echo 'a symlink ABOVE the work tree must not refuse a listing inside it' >&2
       exit 1
@@ -2079,8 +2059,7 @@ if [[ -L "$symlink_probe" ]]; then
   # And the real directory the link comes back to still answers for its OWN
   # name, so the case above is a rule about the path and not a listing read as
   # empty.
-  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_root-loop' \
+  if ! "$BASH" "$branch_validator" 'fix-P2/correctness_root-loop' \
     "$root_loop_repo/findings" >/dev/null 2>&1; then
     echo 'the directory the link comes back to must still resolve the finding it holds' >&2
     exit 1
@@ -2131,15 +2110,14 @@ spelling_case 'and a name it does not hold, every spelling' \
 # LEADING run of `..` is a starting directory, above every component this judges,
 # and is accepted.
 dotdot_rc=0
-dotdot_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P3/liveness_written-five-ways' \
+dotdot_out="$("$BASH" "$branch_validator" 'fix-P3/liveness_written-five-ways' \
   "$spelling_repo/reviews/findings/../findings" 2>&1)" || dotdot_rc=$?
 if [[ "$dotdot_rc" != 1 ]] || ! grep -q "holds a '\.\.' after a named component" <<< "$dotdot_out"; then
   echo "a '..' after a named component must be refused, saying so; got $dotdot_rc" >&2
   exit 1
 fi
-if ! ( cd "$spelling_repo/reviews" && PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P3/liveness_written-five-ways' \
+if ! ( cd "$spelling_repo/reviews" && "$BASH" "$branch_validator" \
+  'fix-P3/liveness_written-five-ways' \
   '../reviews/findings' >/dev/null 2>&1 ); then
   echo 'a LEADING .. is a starting directory and must still resolve' >&2
   exit 1
@@ -2171,8 +2149,7 @@ if [[ -L "$symlink_probe" ]]; then
   git -C "$renamed_repo" add -A && git -C "$renamed_repo" commit -q -m 'one twin, committed'
   printf 'P2_correctness_202609100001_shared-name.md\n' > "$fixture_dir/renamed-twin-a.txt"
   renamed_verdict() {
-    PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
       "$fixture_dir/renamed-twin-a.txt" "$renamed_repo/reviews/findings" 2>&1
   }
   renamed_control_rc=0
@@ -2230,8 +2207,7 @@ if [[ -L "$symlink_probe" ]]; then
     # And the path the link itself names is a 120000 blob, which is not a
     # listing either: the two ways of asking are one answer.
     behind_direct_rc=0
-    behind_direct_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+    behind_direct_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
       "$behind_repo/elsewhere/findings" 2>&1)" || behind_direct_rc=$?
     if [[ "$behind_direct_rc" != 1 ]] || ! grep -q 'as mode 120000' <<< "$behind_direct_out"; then
       echo "the link's own path must be refused on its recorded mode; got $behind_direct_rc" >&2
@@ -2262,8 +2238,7 @@ echo two > "$worktrees_repo/reviews/findings/P2_correctness_202609100002_shared-
 git -C "$worktrees_repo" add -A \
   && git -C "$worktrees_repo" commit -q -m 'two findings share a description'
 worktrees_verdict() {
-  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$worktrees_wt/reviews/findings" 2>&1
 }
 if ! git -C "$worktrees_repo" worktree add -q --detach "$worktrees_wt" HEAD 2>/dev/null \
@@ -2423,7 +2398,7 @@ INJECT
 inject_output() {
   local hooked="$1" private="$2" trigger="$3" mode="$4"
   shift 4
-  TMPDIR="$inject_dir" PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" BASH="$BASH" \
+  TMPDIR="$inject_dir" BASH="$BASH" \
     "$BASH" "$inject_probe" "$hooked" "$private" "$trigger" "$mode" "$branch_validator" "$@" 2>&1
 }
 
@@ -2444,7 +2419,7 @@ else
   # The controls first: both listings answer, and the answer is a refusal for
   # the RIGHT reason, so a refusal under injection is not the same refusal.
   inject_control_rc=0
-  inject_control_out="$(TMPDIR="$inject_dir" PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  inject_control_out="$(TMPDIR="$inject_dir" \
     "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$fixture_dir/inject-twin-a.txt" "$fixture_dir/inject-twin-b.txt" 2>&1)" || inject_control_rc=$?
   if [[ "$inject_control_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$inject_control_out"; then
@@ -2483,8 +2458,7 @@ else
   new_repo "$inject_toplevel_repo"
   commit_finding "$inject_toplevel_repo" 'P2_correctness_202609100002_shared-name.md' 'one twin'
   inject_toplevel_control_rc=0
-  inject_toplevel_control_out="$(TMPDIR="$inject_dir" PR_NUMBER= \
-    LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+  inject_toplevel_control_out="$(TMPDIR="$inject_dir" \
     "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/reviews/findings" 2>&1)" \
     || inject_toplevel_control_rc=$?
@@ -2540,15 +2514,14 @@ if [[ "$(id -u)" -eq 0 ]]; then
   echo 'note: skipping the enumerated-directory cases (running as root)' >&2
 else
   enumerate_control_rc=0
-  enumerate_control_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  enumerate_control_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
     "$fixture_dir/inject-twin-a.txt" "$enumerate_dir" 2>&1)" || enumerate_control_rc=$?
   if [[ "$enumerate_control_rc" != 1 ]] \
     || ! grep -q 'names 2 findings' <<< "$enumerate_control_out"; then
     echo "the enumeration control was meant to refuse; got $enumerate_control_rc" >&2
     exit 1
   fi
-  enumerate_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" BASH="$BASH" \
+  enumerate_out="$(BASH="$BASH" \
     "$BASH" "$enumerate_probe" "$enumerate_dir" "$branch_validator" \
     'fix-P2/correctness_shared-name' "$fixture_dir/inject-twin-a.txt" "$enumerate_dir" 2>&1)"
   enumerate_rc="${enumerate_out%%$'\n'*}"
@@ -2653,8 +2626,7 @@ if [[ -L "$symlink_probe" ]]; then
   printf 'P3_liveness_202609100013_named-by-a-tracked-listing.md\n' > "$tracked_listing_repo/listing.txt"
   git -C "$tracked_listing_repo" add -A \
     && git -C "$tracked_listing_repo" commit -q -m 'a tracked file listing'
-  if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P3/liveness_named-by-a-tracked-listing' \
+  if ! "$BASH" "$branch_validator" 'fix-P3/liveness_named-by-a-tracked-listing' \
     "$tracked_listing_repo/listing.txt" >/dev/null 2>&1; then
     echo 'a tracked regular file must still be read as a file listing' >&2
     exit 1
@@ -2663,8 +2635,7 @@ if [[ -L "$symlink_probe" ]]; then
   rm "$tracked_listing_repo/listing.txt"
   ln -s decoy.txt "$tracked_listing_repo/listing.txt"
   tracked_listing_rc=0
-  tracked_listing_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P3/liveness_named-by-a-tracked-listing' \
+  tracked_listing_out="$("$BASH" "$branch_validator" 'fix-P3/liveness_named-by-a-tracked-listing' \
     "$tracked_listing_repo/listing.txt" 2>&1)" || tracked_listing_rc=$?
   if [[ "$tracked_listing_rc" != 1 ]] \
     || ! grep -q 'checkout does not hold one there' <<< "$tracked_listing_out"; then
@@ -2684,8 +2655,8 @@ relative_repo="$fixture_dir/repo-relative-listing"
 new_repo "$relative_repo"
 commit_finding "$relative_repo" 'P3_liveness_202609100015_named-relatively.md' 'a real finding'
 relative_case() {  # relative_case <label> <cwd> <listing>
-  if ! ( cd "$2" && PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-    "$BASH" "$branch_validator" 'fix-P3/liveness_named-relatively' "$3" >/dev/null 2>&1 ); then
+  if ! ( cd "$2" && "$BASH" "$branch_validator" \
+    'fix-P3/liveness_named-relatively' "$3" >/dev/null 2>&1 ); then
     echo "a relative listing must resolve the finding it holds: $1" >&2
     exit 1
   fi
@@ -2696,8 +2667,8 @@ relative_case 'from the directory itself' "$relative_repo/reviews/findings" '.'
 # And a relative path that is NOT the ledger's directory still holds nothing:
 # the rule is about naming the path, not about accepting every relative one.
 relative_miss_rc=0
-( cd "$relative_repo/reviews" && PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P3/liveness_not-in-this-directory' 'findings' >/dev/null 2>&1 ) \
+( cd "$relative_repo/reviews" && "$BASH" "$branch_validator" \
+  'fix-P3/liveness_not-in-this-directory' 'findings' >/dev/null 2>&1 ) \
   || relative_miss_rc=$?
 if [[ "$relative_miss_rc" != 1 ]]; then
   echo "a relative listing must still refuse a name it does not hold; got $relative_miss_rc" >&2
@@ -2713,8 +2684,8 @@ fi
 long_way_repo="$fixture_dir/repo-long-way-round"
 new_repo "$long_way_repo"
 commit_finding "$long_way_repo" 'P3_liveness_202609100014_spelled-the-long-way.md' 'a real finding'
-if ! ( cd "$long_way_repo/reviews" && PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P3/liveness_spelled-the-long-way' \
+if ! ( cd "$long_way_repo/reviews" && "$BASH" "$branch_validator" \
+  'fix-P3/liveness_spelled-the-long-way' \
   '../../repo-long-way-round/reviews/findings' >/dev/null 2>&1 ); then
   echo 'a path that passes the work tree root on the way down must still resolve' >&2
   exit 1
@@ -2729,8 +2700,7 @@ fi
 untracked_listing="$untracked_repo/scratch/listing.txt"
 mkdir -p "$untracked_repo/scratch"
 printf 'P3_liveness_202609100003_written-into-the-checkout.md\n' > "$untracked_listing"
-if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'fix-P3/liveness_written-into-the-checkout' \
+if ! "$BASH" "$branch_validator" 'fix-P3/liveness_written-into-the-checkout' \
   "$untracked_listing" >/dev/null 2>&1; then
   echo 'an untracked file listing inside a work tree must still be read as a listing' >&2
   exit 1
@@ -2852,8 +2822,7 @@ for equivalence_entry in "${equivalence_repos[@]}"; do
   for eq_branch in "${equivalence_branches[@]}"; do
     eq_tree="$(verdict "$eq_repo" "$eq_base" "$eq_head" "$eq_branch")"
     eq_dir=0
-    PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-      "$BASH" "$branch_validator" "$eq_branch" "$eq_repo/reviews/findings" \
+    "$BASH" "$branch_validator" "$eq_branch" "$eq_repo/reviews/findings" \
       >/dev/null 2>&1 || eq_dir=$?
     if [[ "$eq_tree" != "$eq_dir" ]]; then
       echo "the two APIs disagree: ${eq_repo##*/} / $eq_branch -> trees $eq_tree, directory $eq_dir" >&2
@@ -3163,36 +3132,17 @@ if (( shape_region_lines > 250 )); then
   exit 1
 fi
 
-# ---- the gate must not recommend a destructive migration ------------------------------------
+# ---- the retired migration list stays retired ----------------------------------------------
 #
-# Renaming a head branch CLOSES its pull request, measured on throwaway #264,
-# and the gate told every exempted pull request to do exactly that. The body and
-# MAINTAINING.md were corrected and the gate's own output was not, so the
-# instruction a maintainer actually reads is the one under test here.
-exempt_out="$(PR_NUMBER=222 LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
-  "$BASH" "$branch_validator" 'codex/findings-p3-1a57a2730a12' 2>&1)"
-if grep -Eqi '^[[:space:]]*rename[[:space:]]' <<< "$exempt_out"; then
-  echo 'the exemption message still tells the author to rename the branch' >&2
+# The list and the exemption it fed are gone, and a gate that simply stopped
+# mentioning them would not notice either coming back. Both names are checked
+# by text because both are what a reintroduction would have to spell.
+if [[ -e "$root/.github/legacy-branches.txt" ]]; then
+  echo 'the retired migration list is back in .github/' >&2
   exit 1
 fi
-if ! grep -q 'DO NOT RENAME THE HEAD BRANCH' <<< "$exempt_out"; then
-  echo 'the exemption message must say renaming the head branch closes the pull request' >&2
-  exit 1
-fi
-if ! grep -q 'replacement pull request' <<< "$exempt_out"; then
-  echo 'the exemption message must name the route that is not destructive' >&2
-  exit 1
-fi
-
-# And the file the message points at says the same thing, because that is the
-# other place the instruction is read.
-legacy_shipped="$root/.github/legacy-branches.txt"
-if ! grep -q 'DO NOT RENAME A LISTED HEAD BRANCH' "$legacy_shipped"; then
-  echo 'legacy-branches.txt must warn that renaming a listed head branch closes it' >&2
-  exit 1
-fi
-if grep -q 'renamed as they come up for merge' "$legacy_shipped"; then
-  echo 'legacy-branches.txt still carries the rename-on-merge instruction' >&2
+if grep -q 'LEGACY_BRANCHES\|legacy-branches' "$branch_validator"; then
+  echo 'validate-pr-branch.sh reads a migration list again' >&2
   exit 1
 fi
 
