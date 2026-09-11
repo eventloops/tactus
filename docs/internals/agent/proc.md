@@ -1192,10 +1192,39 @@ Returns `Some(true)` only after the guard sent SIGSTOP and this
 process subsequently resumed. `Some(false)` means a concurrent
 continue/termination cancelled the stop before it was issued.
 
+## `mod termination` › `const NO_HELPER_IDENTITY: libc::c_int = -1;`
+
+The answer where nothing but a number can name a helper.
+
+This is not a failure path. A kernel without `pidfd_open`, a policy
+that refuses one of the calls an identity is used through, and every
+non-Linux Unix all answer it, and the signal and the wait below are
+then the `kill` and the `waitpid` they have always been. Row
+`HELPER-END-BY-PID-WHERE-THERE-IS-NO-IDENTITY` is what remains there,
+and DESIGN §15 states it as best effort rather than leaving it implied.
+
+## `mod termination` › `const HELPER_IDENTITY_ENDED: libc::c_int = -2;`
+
+The answer for a helper that has already ended and been collected by
+someone other than this teardown.
+
+It is neither a descriptor nor `NO_HELPER_IDENTITY`, and the distinction
+is the whole of row
+`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`. A helper an
+embedding host's wildcard wait has collected has left its number free
+for the kernel to re-issue, so that number is the one thing the teardown
+must not use — while `NO_HELPER_IDENTITY` means precisely "use the
+number". Answering `-1` for a helper known to have ended aims the
+teardown at whoever holds the number next, which is the sequence this
+module exists to close. `signal_helper` and `collect_helper` answer for
+the ended helper instead: `ESRCH` and `ECHILD`, the answers the kernel
+itself gives through a descriptor that still names it.
+
 ## `mod termination` › `fn open_helper_identity(pid: libc::pid_t) -> libc::c_int {`
 
 A name for a helper this process has just forked that a reused number
-cannot impersonate, or `-1`.
+cannot impersonate, `HELPER_IDENTITY_ENDED` if the helper has already
+ended, or `NO_HELPER_IDENTITY`.
 
 Called as the next parent statement after `fork` returns, at both
 helper fork sites, because the window this leaves is the window it
@@ -1208,25 +1237,62 @@ carries that decision. What this does narrow is the window that
 mattered: a helper's entire startup, up to `HELPER_READY_BUDGET`, and
 then however long its teardown takes.
 
-`-1` is not a failure path. A kernel without `pidfd_open`, a policy
-that refuses it, and every non-Linux Unix all answer `-1`, and the
-signal and the wait below are then the `kill` and the `waitpid` they
-have always been. Row
-`HELPER-END-BY-PID-WHERE-THERE-IS-NO-IDENTITY` is what remains there,
-and DESIGN §15 states it as best effort rather than leaving it implied.
+**Only a refusal of the operation itself answers `NO_HELPER_IDENTITY`.**
+Every call here has two ways to fail, and they are opposites. `ESRCH`
+from `pidfd_open`, and `ECHILD` from the collection probe, are the
+kernel answering *about this helper*: it has ended and been collected,
+which is proof the call works and proof the number is free. `ENOSYS`,
+`EINVAL` and a policy's `EPERM` are the kernel or the host refusing the
+call, which is the only thing the number is a fallback for. Reading the
+first as the second — which the first form of this function did, closing
+the descriptor on any probe failure — hands the teardown back the number
+of a helper it has just established is gone.
 
-## `mod termination` › `fn identity_can_collect(identity: libc::c_int) -> bool {`
+A descriptor is kept when both probes answered, whichever way they
+answered: a descriptor naming an ended helper is not a degraded
+identity but the exact thing the teardown needs, because the signal and
+the wait through it answer `ESRCH` and `ECHILD` rather than reaching the
+stranger holding the number. A descriptor is closed when either probe
+was refused, and what is answered then is `HELPER_IDENTITY_ENDED` if the
+other probe reported the helper gone and `NO_HELPER_IDENTITY` otherwise.
 
-Whether this kernel will collect through the descriptor as well as
-signal through it.
+## `mod termination` › `enum IdentityProbe {`
+
+What one capability probe on a fresh descriptor established.
+
+Three answers and not two, for the reason above: `Available` and
+`HelperEnded` both establish that the call works, and only `Refused`
+says the number is all there is.
+
+## `mod termination` › `fn identity_can_collect(identity: libc::c_int) -> IdentityProbe {`
+
+Whether this kernel will collect through the descriptor, and whether
+the helper is still there to collect.
 
 `pidfd_open` arrived in Linux 5.3 and `waitid`'s `P_PIDFD` in 5.4, so a
 kernel between the two answers a descriptor that can carry a signal and
-cannot carry the wait. An identity is both or neither: a half one would
-leave the collect on the number while the signal was safe, which is the
-harder of the two to reason about and the one that can block a launch
-on a stranger. The probe passes `WNOHANG | WNOWAIT`, so it collects
-nothing and leaves the helper in whatever state it is in.
+cannot carry the wait. An identity is all three or none: a partial one
+would leave one of the two calls on the number while the other was safe,
+and the collect on a number is the one that can block a launch on a
+stranger. The probe passes `WNOHANG | WNOWAIT`, so it collects nothing
+and leaves the helper in whatever state it is in. `ECHILD` is the
+kernel's answer for a helper collected elsewhere, so it reports
+`HelperEnded` and not `Refused`.
+
+## `mod termination` › `fn identity_can_signal(identity: libc::c_int) -> IdentityProbe {`
+
+Whether this kernel will signal through the descriptor.
+
+Acquisition and collection succeeding does not establish it.
+`pidfd_send_signal` is a separate system call, and a seccomp policy can
+allow `pidfd_open`, `waitid` and `kill` while refusing this one —
+measured on the build box: `pidfd_open=3`, the collection probe `0`,
+`pidfd_send_signal` `-1 EPERM`. Without this probe such a host takes the
+identity, the teardown's `SIGKILL` answers `EPERM`, nothing is
+delivered, and the blocking collection call that follows waits on a
+helper that is still running. The probe sends signal `0`, which is the
+kernel's permission check and delivers nothing; `ESRCH` from it is an
+answer about the helper, not a refusal, so it reports `HelperEnded`.
 
 ## `mod termination` › `fn signal_helper(pid: libc::pid_t, identity: libc::c_int, signal: libc::c_int) -> libc::c_int {`
 
@@ -1238,6 +1304,12 @@ process the descriptor does not name: `pidfd_send_signal` answers
 where a `kill` on the same number would have answered `0` and killed
 whoever holds it now.
 
+Where the helper ended before any descriptor could name it, the answer
+is that same `ESRCH`, written into `errno` by `set_errno` and reported
+`-1`, without a call: there is nothing left to signal, and the number is
+not the helper's any more. `describe_helper_end` then says "nothing of
+that number was there", which is what happened.
+
 ## `mod termination` › `fn collect_helper(`
 
 Collect the helper, blocking, answering what `waitpid(pid, status, 0)`
@@ -1248,6 +1320,12 @@ not only the signal's: a `waitpid` on a re-issued number collects
 another of the host's children, takes its exit status away from the
 code that was waiting for it, and blocks this launch for as long as
 that stranger runs.
+
+Where the helper ended before any descriptor could name it, the answer
+is `-1` with `ECHILD`, as `waitid` on a descriptor naming it would have
+answered. Every caller here loops until the wait is not interrupted and
+then reads `errno`, so the answer has to be in `errno` and not only in
+the return value.
 
 ## `mod termination` › `fn collect_through_identity(identity: libc::id_t, status: &mut libc::c_int) -> libc::pid_t {`
 
@@ -1591,6 +1669,17 @@ syscall-only per-descriptor fallback.
 `first == kept` is an empty range. Saturating `kept - 1`
 would turn the fd-zero case into 0..=0 and close the descriptor
 we were explicitly asked to preserve.
+
+## `mod termination` › `fn set_errno(errno: libc::c_int) {`
+
+Write this thread's `errno`, through the slot `last_errno` reads.
+
+`signal_helper` and `collect_helper` answer for a helper that ended
+before any descriptor could name it without making a call, and every
+caller of theirs reads the outcome out of `errno` — `abandon` for its
+`kill_errno`, the collection loops for `EINTR` and for the errno they
+report. An answer left in the return value alone would be read against
+whatever the previous call happened to leave there.
 
 ## `fn verify_group_scanner() -> Result<(), String>` › `let deadline = std::time::Instant::now() + Duration::from_secs(2);`
 

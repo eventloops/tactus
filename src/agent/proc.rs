@@ -2728,6 +2728,11 @@ mod termination {
         }
     }
 
+    const NO_HELPER_IDENTITY: libc::c_int = -1;
+
+    #[cfg(target_os = "linux")]
+    const HELPER_IDENTITY_ENDED: libc::c_int = -2;
+
     fn open_helper_identity(pid: libc::pid_t) -> libc::c_int {
         #[cfg(target_os = "linux")]
         {
@@ -2738,28 +2743,48 @@ mod termination {
             // or a negative number, and touches nothing this process owns.
             let opened = unsafe { libc::syscall(libc::SYS_pidfd_open, target, flags) };
             let Ok(identity) = libc::c_int::try_from(opened) else {
-                return -1;
+                return NO_HELPER_IDENTITY;
             };
             if identity < 0 {
-                return -1;
+                return if last_errno() == libc::ESRCH {
+                    HELPER_IDENTITY_ENDED
+                } else {
+                    NO_HELPER_IDENTITY
+                };
             }
-            if !identity_can_collect(identity) {
+            let probes = [
+                identity_can_collect(identity),
+                identity_can_signal(identity),
+            ];
+            if probes.contains(&IdentityProbe::Refused) {
                 close_fd(identity);
-                return -1;
+                return if probes.contains(&IdentityProbe::HelperEnded) {
+                    HELPER_IDENTITY_ENDED
+                } else {
+                    NO_HELPER_IDENTITY
+                };
             }
             identity
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = pid;
-            -1
+            NO_HELPER_IDENTITY
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn identity_can_collect(identity: libc::c_int) -> bool {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum IdentityProbe {
+        Available,
+        HelperEnded,
+        Refused,
+    }
+
+    #[cfg(target_os = "linux")]
+    fn identity_can_collect(identity: libc::c_int) -> IdentityProbe {
         let Ok(id) = libc::id_t::try_from(identity) else {
-            return false;
+            return IdentityProbe::Refused;
         };
         // SAFETY: `siginfo_t` is a plain C aggregate whose all-zero bit pattern
         // is the one `waitid` is documented to be handed.
@@ -2775,10 +2800,46 @@ mod termination {
                 libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
             )
         };
-        answered == 0
+        if answered == 0 {
+            IdentityProbe::Available
+        } else if last_errno() == libc::ECHILD {
+            IdentityProbe::HelperEnded
+        } else {
+            IdentityProbe::Refused
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn identity_can_signal(identity: libc::c_int) -> IdentityProbe {
+        let target = libc::c_long::from(identity);
+        let number: libc::c_long = 0;
+        let flags: libc::c_long = 0;
+        // SAFETY: as in `signal_helper`, whose call this is with signal `0`:
+        // the kernel runs the permission check and delivers nothing.
+        let sent = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                target,
+                number,
+                std::ptr::null_mut::<libc::siginfo_t>(),
+                flags,
+            )
+        };
+        if sent == 0 {
+            IdentityProbe::Available
+        } else if last_errno() == libc::ESRCH {
+            IdentityProbe::HelperEnded
+        } else {
+            IdentityProbe::Refused
+        }
     }
 
     fn signal_helper(pid: libc::pid_t, identity: libc::c_int, signal: libc::c_int) -> libc::c_int {
+        #[cfg(target_os = "linux")]
+        if identity == HELPER_IDENTITY_ENDED {
+            set_errno(libc::ESRCH);
+            return -1;
+        }
         #[cfg(target_os = "linux")]
         if identity >= 0 {
             let target = libc::c_long::from(identity);
@@ -2811,6 +2872,11 @@ mod termination {
         identity: libc::c_int,
         status: &mut libc::c_int,
     ) -> libc::pid_t {
+        #[cfg(target_os = "linux")]
+        if identity == HELPER_IDENTITY_ENDED {
+            set_errno(libc::ECHILD);
+            return -1;
+        }
         #[cfg(target_os = "linux")]
         if identity >= 0 {
             if let Ok(id) = libc::id_t::try_from(identity) {
@@ -3663,6 +3729,14 @@ mod termination {
 
     fn last_errno_is_interrupted() -> bool {
         last_errno() == libc::EINTR
+    }
+
+    #[cfg(target_os = "linux")]
+    fn set_errno(errno: libc::c_int) {
+        // SAFETY: `__errno_location` answers a pointer to this thread's own
+        // `errno`, which is live for the whole thread and is the slot
+        // `last_errno` reads back.
+        unsafe { *libc::__errno_location() = errno };
     }
 
     fn last_errno() -> libc::c_int {
