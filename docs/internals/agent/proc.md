@@ -1351,21 +1351,39 @@ Where the collecting call did not collect, the target is still the
 probe's own uncollected child and is collected by number. That wait
 cannot reach a stranger for the reason `collect_unnamed_helper` gives.
 
-## `mod termination` › `fn blocked_byte(errno: libc::c_int) -> u8 {`
+## `mod termination` › `fn blocked_by(errno: libc::c_int) -> u8 {`
 
-The errno of a probe step that could not be performed, and zero for
-every other failure.
+A step of the probe that could not be performed at all — no child to run
+the calls against, no way to take an inherited `SIGCHLD` disposition off
+this one.
 
-The distinction is the same one `open_helper_identity` draws between a
-resource this process ran out of and a call this host does not offer:
-`EMFILE`, `ENFILE`, `ENOMEM` and `EAGAIN` from `pidfd_open` say nothing
-about the facility, and `EINVAL` from the disposition reset says nothing
-about it either. `ENOSYS`, `ENODEV`, `EPERM`, `EACCES` and an `ESRCH` a
-policy wrote are answers, and answers leave the bit clear rather than
-failing the launch.
+That is a state of this process and never an answer about the host, so
+it is always reported, whatever errno it left. An errno wider than a
+byte, and a step that left none, are reported as a blocked probe rather
+than recorded as a fact — which fails the launch, and never turns the
+identity path off for the life of the process on the strength of a
+failure nobody looked at.
 
-An errno wider than a byte is reported as a blocked probe all the same,
-which fails the launch rather than recording a fact about the host.
+## `mod termination` › `fn blocked_by_shortage(errno: libc::c_int) -> u8 {`
+
+A `pidfd_open` that failed, told apart the way `open_helper_identity`
+tells its own apart.
+
+`EMFILE`, `ENFILE`, `ENOMEM` and `EAGAIN` are this process being short
+and say nothing about the facility, so they block the probe. Every other
+errno is an answer: `ENOSYS`, `ENODEV`, `EINVAL`, `EPERM` and `EACCES`
+say this host does not offer the call, and an `ESRCH` for a process the
+probe knows is there says a policy wrote it. An answer leaves the bit
+clear rather than failing the launch.
+
+The two readings are separate functions because folding them together
+was a defect, found in this round and fixed inside it: with `EINVAL`
+counted as a shortage, a kernel that does not know `pidfd_open`'s flag
+word — the case `open_helper_identity` has always answered
+`NO_HELPER_IDENTITY` for — would have failed every launch with
+`Err(EINVAL)` instead of taking the number.
+`a_call_this_host_does_not_offer_is_not_a_shortage_of_this_process` is
+the guard.
 
 ## `mod termination` › `const NO_HELPER_IDENTITY: libc::c_int = -1;`
 
@@ -2848,6 +2866,22 @@ remembered.
 `SECCOMP_RET_KILL_PROCESS` for `pidfd_open` and nothing else — the
 disposition a disallowed call draws by default under systemd's
 `SystemCallFilter=`, and the one a returning-errno filter cannot model.
+
+## `mod tests` › `fn answer_pidfd_open_with(action: u32) {`
+
+The same program with the action named, because the two cases the probe
+has to tell apart differ only there: a policy that ends the caller, and
+a policy that answers the errno a kernel without the call answers.
+
+## `mod tests` › `fn unknown_pidfd_open_identity_helper() {`
+
+That an `EINVAL` from `pidfd_open` is still read as this host not
+offering the call, so the launch **succeeds** on the number.
+
+The other four policy tests all assert a fallback, so none of them could
+see a probe that failed the launch instead. This is the case that
+separates "this host does not offer the call" from "this process is
+short of something", which `blocked_by_shortage` exists to keep apart.
 
 ## `mod tests` › `fn abandoned_child() -> libc::pid_t {`
 
