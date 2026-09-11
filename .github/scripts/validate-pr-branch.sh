@@ -145,6 +145,24 @@
 # only for an entry git does not track, where there is no recorded mode and a
 # symlink is skipped by -L.
 #
+# A REPOSITORY GIT CANNOT READ IS A REFUSAL AND NOT A REPOSITORY THAT IS NOT
+# THERE. Reading the recorded mode means asking git two questions, and the
+# second -- "is this inside a work tree?" -- has three answers and not two: yes,
+# no, and "I could not tell you". Collapsing the third into the second is how
+# the filesystem fallback came back: `.git/config` unreadable, discovery exiting
+# 128, the status thrown away, and the materialised symlink two paragraphs above
+# conforming at exit 0 again with nothing said. Only "there is no repository
+# here" falls back to the filesystem.
+#
+# A NAME THAT CANNOT BE HELD ON A LINE IS NOT A FINDING. A newline is legal in a
+# filename and is the separator every listing here is built from, so the one
+# separator that cannot occur in a name -- NUL -- is what git is asked for and
+# what is read back; nothing converts one into the other. A name carrying a
+# newline is then dropped, with a note, rather than split into two: it can match
+# no P<n>_<category>_<timestamp>_<description>.md, so it is no finding and can
+# make no other name ambiguous, and `git ls-tree` C-quotes it into a name that
+# matches nothing in the tree listings either.
+#
 # With no listing at all only the grammar is checked, which is how the fixtures
 # exercise it without a repository. With one listing, that listing alone is the
 # set: a caller that has only the merge base gets the stricter rule and says so
@@ -177,6 +195,16 @@
 
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
+
+# The entries of a DIRECTORY listing are read with a GLOB, because a newline is
+# legal in a filename and `ls` writes one name per line. These two settings are
+# what keep that glob honest, and it is the only one in this file: a pattern
+# that matches nothing has to be an empty list rather than the pattern itself --
+# `dir/*` standing for itself is a name that is not there -- and GLOBIGNORE
+# arrives from the ENVIRONMENT and would drop names from a listing in silence,
+# which is the narrowing every rule below refuses.
+shopt -s nullglob
+unset GLOBIGNORE
 
 # `dirname` and not "${BASH_SOURCE[0]%/*}": that expansion strips nothing when
 # the script is invoked by bare name from inside its own directory, which is the
@@ -309,15 +337,63 @@ check_listing "$range_findings"
 # A failure INSIDE a work tree is propagated: an index this cannot read is the
 # same refusal as a listing it cannot read, and for the same reason.
 #
-# `-z` so a name is never quoted or escaped. An entry below a subdirectory comes
-# out as `sub/name` and matches no name `ls -1` reports, which is the right
-# answer twice over: the subdirectory is not a finding whatever it holds, and
-# what it holds is not in this listing.
+# AND SO IS A FAILURE OF DISCOVERY ITSELF. "There is no repository here" and
+# "git could not tell me" are different answers, and only the first may fall
+# back to the filesystem. Suppressing git's status made them one answer and the
+# answer was the fallback: with `.git/config` unreadable, discovery exits 128,
+# that read as "no repository", and a committed symlink materialised as a
+# regular file -- the exact case the recorded mode was added to catch --
+# conformed at exit 0 with no diagnostic at all, on the commit the tree listings
+# refuse at exit 1. AN UNREADABLE REPOSITORY IS NOT PERMISSION TO DISREGARD ITS
+# RECORDED MODES. Where git's own discovery cannot separate the two it says "not
+# a git repository" -- an unreadable `.git` DIRECTORY reads that way to git
+# itself -- and this script has nothing available to it that git has not.
+#
+# `-z` so a name is never quoted or escaped, and the records are READ as
+# NUL-delimited records rather than CONVERTED to lines. A newline is legal in a
+# filename and NUL is the one byte that is not, so turning the separator into a
+# newline is what let `noise<LF>P2_<category>_<ts>_<desc>.md` arrive as two
+# records: the second carried no mode and no tab, the real finding of that name
+# landed among the NON-regular entries, and the name it should have made
+# ambiguous conformed at exit 0 while the tree listings refused it at exit 1.
+#
+# A NAME HOLDING A NEWLINE IS DROPPED HERE rather than split, and nothing is
+# lost by it: no such name can match P<n>_<category>_<timestamp>_<description>.md
+# whatever the set is built from, so it is not a finding and cannot make another
+# name ambiguous. The entry loop in read_listing reports it once for the listing
+# as a whole. `git ls-tree` C-QUOTES the same name in the tree listings, where
+# the quoted form matches no finding either, so the two APIs drop it alike.
+#
+# An entry below a subdirectory comes out as `sub/name` and matches no name in
+# the listing, which is the right answer twice over: the subdirectory is not a
+# finding whatever it holds, and what it holds is not in this listing.
 git_index_entries() {
-  local dir="$1"
+  local dir="$1" probe status=0 record
   command -v git >/dev/null 2>&1 || return 0
-  [[ "$(git -C "$dir" rev-parse --is-inside-work-tree 2>/dev/null || true)" == true ]] || return 0
-  git -C "$dir" ls-files -sz -- . | tr '\000' '\n'
+  # Taken with stderr, so git's own words reach the refusal below, and in the C
+  # locale so the sentence git uses for "no repository here" is the one this
+  # reads. On success the answer is the LAST line: a warning about some other
+  # file it could not read may precede it.
+  probe="$(LC_ALL=C git -C "$dir" rev-parse --is-inside-work-tree 2>&1)" || status=$?
+  if [[ "$status" -ne 0 ]]; then
+    case "$probe" in
+      *'not a git repository'*) return 0 ;;
+    esac
+    echo "branch-name-policy: git could not say what it records for '$dir':" >&2
+    sed 's/^/  /' <<< "$probe" >&2
+    echo "  A listing inside a repository this cannot read is refused rather than" >&2
+    echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
+    return 1
+  fi
+  [[ "${probe##*$'\n'}" == true ]] || return 0
+  # `pipefail` is what carries a failed `ls-files` out of this pipeline, so the
+  # loop costs nothing by running in its subshell: it only prints.
+  git -C "$dir" ls-files -sz -- . | while IFS= read -r -d '' record; do
+    case "${record#*$'\t'}" in
+      *$'\n'*) continue ;;
+    esac
+    printf '%s\n' "$record"
+  done
 }
 
 # read_listing <listing>: the finding filenames in one listing, one per line,
@@ -327,16 +403,24 @@ git_index_entries() {
 # and a directory can be readable and still not listable.
 #
 # A DIRECTORY IS LISTED DOWN TO ITS REGULAR FILES, AND A SYMLINK IS NOT ONE.
-# `ls -1` names a subdirectory, and a symlink, exactly as it names a file, so
-# reviews/findings/P2_correctness_<ts>_<desc>.md/ -- a directory, holding no
-# finding -- and a symlink of the same name each resolved
-# fix-P2/correctness_<desc>. The `ls` still runs, so an unlistable directory
-# still fails rather than reading as empty; `ls` says WHICH NAMES ARE IN THE
-# LISTING and what each name IS is decided below.
+# A directory listing names a subdirectory, and a symlink, exactly as it names a
+# file, so reviews/findings/P2_correctness_<ts>_<desc>.md/ -- a directory,
+# holding no finding -- and a symlink of the same name each resolved
+# fix-P2/correctness_<desc>. WHICH NAMES ARE IN THE LISTING is one question and
+# WHAT EACH NAME IS is another; the second is decided below, and the first is
+# asked twice on purpose. `ls` is run for its STATUS, because an unlistable
+# directory must fail rather than read as empty and a glob that matched nothing
+# cannot say which of those happened. The NAMES come from the glob, because `ls`
+# writes one name per line and A NEWLINE IS LEGAL IN A FILENAME: from `ls`,
+# `noise<LF>P2_<category>_<ts>_<desc>.md` arrives as two names, and the second is
+# either a name that is not in the directory at all -- a refusal where the tree
+# listings conform -- or one that is, which is a name that is no finding
+# answering for one. Both skip a name beginning with a dot, and both are right
+# to: a finding's name begins with `P`.
 read_listing() {
-  local listing="$1" out entry recorded record mode name recorded_regular recorded_other
+  local listing="$1" out entry path recorded record mode name recorded_regular recorded_other
   if [[ -d "$listing" ]]; then
-    out="$(ls -1 -- "$listing")" || return 1
+    ls -1 -- "$listing" >/dev/null || return 1
     # WHAT GIT RECORDS DECIDES A TRACKED ENTRY, NOT WHAT THE CHECKOUT
     # MATERIALISED, because only that answers the same question the workflow's
     # mode filter answers. Under core.symlinks=false a committed symlink is
@@ -349,7 +433,15 @@ read_listing() {
     }
     # Two sets rather than a lookup per name: bash 3.2 has no associative array
     # and this file runs wherever the suite is run by hand. A name is wrapped in
-    # newlines on both sides, so a membership test is exact and not a prefix. A
+    # newlines on both sides, so a membership test is exact and not a prefix --
+    # WHICH HOLDS ONLY BECAUSE NO NAME IN EITHER SET CARRIES A NEWLINE, and
+    # git_index_entries drops the ones that do. A recorded symlink named
+    # `noise<LF>P2_<category>_<ts>_<desc>.md` would otherwise put that wrapped
+    # newline inside a set member, and the real finding of the second name would
+    # test as a member of the NON-regular set and be dropped: one twin gone, an
+    # ambiguous name conforming at exit 0, and the tree listings refusing the
+    # same commit at exit 1. Reading the records whole is not enough on its own;
+    # the sets are lines too. A
     # CONFLICTED entry is recorded at SEVERAL stages: an ordinary content
     # conflict is a regular blob at every stage and stays a finding, while a
     # regular file conflicting with a symlink is recorded at both kinds, lands
@@ -365,8 +457,25 @@ read_listing() {
         *) recorded_other+="$name"$'\n' ;;
       esac
     done <<< "$recorded"
-    while IFS= read -r entry; do
-      [[ -n "$entry" ]] || continue
+    for path in "$listing"/*; do
+      entry="${path##*/}"
+      # A NAME THAT CANNOT BE HELD ON A LINE IS NOT A FINDING, AND IS SAID SO
+      # RATHER THAN SPLIT. The set this resolves against is a set of lines, and
+      # a finding's name is P<n>_<category>_<timestamp>_<description>.md, which
+      # no newline fits any part of. So such a name matches nothing and can make
+      # no other name ambiguous, whichever API asks: the tree listings meet it
+      # C-quoted by `git ls-tree` and it matches nothing there either. A
+      # CARRIAGE RETURN is different and is left alone -- a directory entry has
+      # no line endings, so a carriage return there is part of the name, and it
+      # keeps the name off every match without costing it its boundary.
+      case "$entry" in
+        *$'\n'*)
+          echo "branch-name-policy: a name in '$listing' holds a newline, so it is" >&2
+          echo "  no finding's name and is not in the candidate set:" >&2
+          printf '  %q\n' "$entry" >&2
+          continue
+          ;;
+      esac
       # A 120000 blob, a 040000 tree or a 160000 submodule is not a finding,
       # whatever the checkout put there.
       if [[ "$recorded_other" == *$'\n'"$entry"$'\n'* ]]; then
@@ -387,19 +496,19 @@ read_listing() {
       # link a non-finding rather than a read failure, which is what git says
       # about it too -- a 120000 blob is a 120000 blob whether or not anything
       # is at the other end.
-      if [[ -L "$listing/$entry" ]]; then
+      if [[ -L "$path" ]]; then
         continue
       fi
-      # An entry `ls` named and this cannot stat is a READ FAILURE and not a
-      # non-finding: a directory can be readable and still not searchable, and
-      # every name in it would otherwise be dropped in silence.
-      if [[ ! -e "$listing/$entry" ]]; then
-        echo "branch-name-policy: '$listing/$entry' is listed and cannot be examined" >&2
+      # An entry the listing named and this cannot stat is a READ FAILURE and
+      # not a non-finding: a directory can be readable and still not searchable,
+      # and every name in it would otherwise be dropped in silence.
+      if [[ ! -e "$path" ]]; then
+        echo "branch-name-policy: '$path' is listed and cannot be examined" >&2
         return 1
       fi
-      [[ -f "$listing/$entry" ]] || continue
+      [[ -f "$path" ]] || continue
       printf '%s\n' "$entry"
-    done <<< "$out"
+    done
     return 0
   elif [[ -f "$listing" ]]; then
     out="$(cat -- "$listing")" || return 1

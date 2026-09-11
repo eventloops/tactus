@@ -478,6 +478,35 @@ verdict() {
   echo "$rc"
 }
 
+# both_apis <label> <repo> <target> <head> <branch> <expected>: THE TWO
+# DOCUMENTED WAYS IN, ASKED ABOUT ONE COMMIT. The workflow builds three listings
+# with findings-in-range.sh; a maintainer running the validator by hand gives it
+# that working tree's reviews/findings/ as a directory. One commit gets one
+# answer whichever way it is asked -- that equivalence is what this pull request
+# claims, and three P1s have been two APIs disagreeing -- so the two answers are
+# compared WITH EACH OTHER first and against the expectation second. The
+# expectation is there to stop them agreeing on the wrong answer.
+#
+# The directory is ONE listing where the trees are three, so this holds only for
+# a repository where those hold the same set: no finding at the merge base, and
+# none deleted between there and the head. A fixture that files and repairs a
+# finding inside its own range is not one of those and has to be asserted the
+# long way, as repo-filed-and-repaired is above.
+both_apis() {
+  local label="$1" repo="$2" target="$3" head="$4" branch="$5" want="$6" tree_rc dir_rc=0
+  tree_rc="$(verdict "$repo" "$target" "$head" "$branch")"
+  PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+    "$BASH" "$branch_validator" "$branch" "$repo/reviews/findings" >/dev/null 2>&1 || dir_rc=$?
+  if [[ "$tree_rc" != "$dir_rc" ]]; then
+    echo "$label ($branch): the tree listings answered $tree_rc, the directory $dir_rc" >&2
+    exit 1
+  fi
+  if [[ "$tree_rc" != "$want" ]]; then
+    echo "$label ($branch): both APIs answered $tree_rc, and $want was expected" >&2
+    exit 1
+  fi
+}
+
 # A completed repair: commit A files the finding, commit B repairs it and
 # DELETES the file as reviews/findings/README.md requires, and the whole thing
 # is merged into the pull request's branch after an unrelated commit. The
@@ -991,9 +1020,136 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
       echo 'the regular file beside the materialised symlink must still resolve' >&2
       exit 1
     fi
+
+    # AND "GIT COULD NOT ANSWER" IS NOT "THERE IS NO REPOSITORY HERE". The
+    # recorded mode is only read where git says the directory is inside a work
+    # tree, and suppressing the status of THAT question turned a failure into
+    # the filesystem fallback it was added to replace: with `.git/config`
+    # unreadable, discovery exits 128 and this very commit -- the one the two
+    # assertions above have just refused -- conformed at exit 0 with no
+    # diagnostic at all. An unreadable repository is not permission to disregard
+    # its recorded modes. Root can read anything, so this only means something
+    # as an ordinary user.
+    if [[ "$(id -u)" -ne 0 ]] && chmod 000 "$repo_k/.git/config" 2>/dev/null \
+      && ! git -C "$repo_k/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      unreadable_rc=0
+      unreadable_out="$(PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+        "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
+        "$repo_k/reviews/findings" 2>&1)" || unreadable_rc=$?
+      # The other API cannot be built at all where git cannot read the
+      # repository, which is `verdict`'s 99. Neither may report conformance.
+      unreadable_tree="$(verdict "$repo_k" "$k_base" "$k_head" 'fix-P2/correctness_not-a-finding')"
+      chmod 600 "$repo_k/.git/config"
+      if [[ "$unreadable_rc" == 0 || "$unreadable_tree" == 0 ]]; then
+        echo "a repository git could not read conformed: directory $unreadable_rc, trees $unreadable_tree" >&2
+        exit 1
+      fi
+      if ! grep -q 'git could not say what it records' <<< "$unreadable_out"; then
+        echo 'a repository git could not read must refuse SAYING SO, not silently' >&2
+        exit 1
+      fi
+      # A repository git CAN read is still not a refusal, so the case above is
+      # about the unreadable config and not about the directory being in a
+      # repository at all.
+      if ! PR_NUMBER= LEGACY_BRANCHES="$fixture_dir/legacy.txt" \
+        "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
+        "$repo_k/reviews/findings" >/dev/null 2>&1; then
+        echo 'restoring the config must restore the verdict' >&2
+        exit 1
+      fi
+    else
+      chmod 600 "$repo_k/.git/config" 2>/dev/null || true
+      echo 'note: skipping the unreadable-repository case (running as root, or chmod had no effect)' >&2
+    fi
   fi
 else
   echo 'note: skipping the symlink cases (this filesystem will not create one)' >&2
+fi
+
+# ---- a filename is not a line ----------------------------------------------------------------
+#
+# A NEWLINE IS LEGAL IN A FILENAME AND NUL IS NOT, which is the whole reason git
+# is asked for `-z` records. Converting those NULs into newlines to read them
+# threw away the one boundary that cannot be forged:
+# `noise<LF>P2_<category>_<ts>_<desc>.md` arrived as two records, the second
+# carrying neither a mode nor a tab, and the REAL finding wearing that second
+# name was filed among the non-regular entries and dropped. One twin was left
+# and the ambiguous name conformed at exit 0 -- while the tree listings, where
+# `git ls-tree` C-QUOTES such a name into something that matches no finding at
+# all, refused the same commit at exit 1.
+#
+# READING THE RECORDS WHOLE IS NOT ENOUGH ON ITS OWN, which is why both shapes
+# are here. TWO HALF REPAIRS WERE MEASURED. One read git's records whole and
+# carried the names through the newline-delimited recorded-mode sets: the
+# symlink case below conformed at exit 0, because a name holding a newline
+# corrupts a membership test wherever it is put, and the real finding of that
+# name tested as a member of the non-regular set and was dropped exactly as
+# before. The other dropped nothing at all and printed such a name into the
+# candidate set: the `named-by-no-file` case conformed at exit 0, a finding
+# nothing has filed invented out of the tail of a name, where the trees refuse
+# at exit 1. So the names are read whole AND the ones that cannot be carried are
+# dropped where they are read.
+#
+# Every case here is taken through BOTH APIs, because agreeing is the property.
+newline_probe="$fixture_dir/$(printf 'newline\nprobe')"
+if : > "$newline_probe" 2>/dev/null && [[ -f "$newline_probe" ]]; then
+  nl_twin=$'noise\nP2_correctness_202609100002_shared-name.md'
+  nl_ghost=$'zzz\nP2_correctness_202609100003_named-by-no-file.md'
+  repo_l="$fixture_dir/repo-newline-in-a-name"
+  new_repo "$repo_l"
+  echo seed > "$repo_l/seed.txt"
+  git -C "$repo_l" add -A && git -C "$repo_l" commit -q -m base
+  l_base="$(git -C "$repo_l" rev-parse HEAD)"
+  mkdir -p "$repo_l/reviews/findings"
+  echo one > "$repo_l/reviews/findings/P2_correctness_202609100001_shared-name.md"
+  echo two > "$repo_l/reviews/findings/P2_correctness_202609100002_shared-name.md"
+  echo noise > "$repo_l/reviews/findings/noise"
+  # The tail of this name is the second twin's name exactly, so a split hands
+  # the set a name that IS a finding and takes the finding itself away.
+  echo split > "$repo_l/reviews/findings/$nl_twin"
+  # And the tail of this one is a finding NOTHING has filed, so a split invents
+  # a finding, or refuses for a name that is not in the directory at all.
+  echo invented > "$repo_l/reviews/findings/$nl_ghost"
+  echo real > "$repo_l/reviews/findings/P3_liveness_202609101300_a-real-finding.md"
+  git -C "$repo_l" add -A && git -C "$repo_l" commit -q -m 'a name with a newline in it'
+  l_head="$(git -C "$repo_l" rev-parse HEAD)"
+  if [[ ! -f "$repo_l/reviews/findings/$nl_twin" ]] \
+    || [[ -n "$(git -C "$repo_l" status --porcelain)" ]]; then
+    echo 'the fixture was meant to COMMIT a filename holding a newline' >&2
+    exit 1
+  fi
+  both_apis 'a name holding a newline hides neither twin' \
+    "$repo_l" "$l_base" "$l_head" 'fix-P2/correctness_shared-name' 1
+  both_apis 'and a fragment of one resolves nothing' \
+    "$repo_l" "$l_base" "$l_head" 'fix-P2/correctness_named-by-no-file' 1
+  # Dropping a name that cannot be a finding must not become a way to refuse a
+  # listing that holds one, or the two APIs part company the other way round.
+  both_apis 'and the finding beside them still resolves' \
+    "$repo_l" "$l_base" "$l_head" 'fix-P3/liveness_a-real-finding' 0
+
+  # The same name RECORDED AS A SYMLINK, which is the half of this that survives
+  # reading the records whole.
+  if [[ -L "$symlink_probe" ]]; then
+    repo_m="$fixture_dir/repo-newline-in-a-symlink-name"
+    new_repo "$repo_m"
+    echo seed > "$repo_m/seed.txt"
+    git -C "$repo_m" add -A && git -C "$repo_m" commit -q -m base
+    m_base="$(git -C "$repo_m" rev-parse HEAD)"
+    mkdir -p "$repo_m/reviews/findings"
+    echo one > "$repo_m/reviews/findings/P2_correctness_202609100001_shared-name.md"
+    echo two > "$repo_m/reviews/findings/P2_correctness_202609100002_shared-name.md"
+    ln -s ../../seed.txt "$repo_m/reviews/findings/$nl_twin"
+    git -C "$repo_m" add -A && git -C "$repo_m" commit -q -m 'a symlink whose name holds a newline'
+    m_head="$(git -C "$repo_m" rev-parse HEAD)"
+    if ! git -C "$repo_m" ls-tree "$m_head" reviews/findings/ | grep -q '^120000 blob '; then
+      echo 'the fixture was meant to commit a SYMLINK whose name holds a newline' >&2
+      exit 1
+    fi
+    both_apis 'a newline in a non-regular entry name hides no finding' \
+      "$repo_m" "$m_base" "$m_head" 'fix-P2/correctness_shared-name' 1
+  fi
+else
+  echo 'note: skipping the newline-in-a-name cases (this filesystem will not create one)' >&2
 fi
 
 # ---- the gate must not recommend a destructive migration ------------------------------------
