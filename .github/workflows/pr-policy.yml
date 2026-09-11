@@ -60,6 +60,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BRANCH: ${{ github.event.pull_request.head.ref }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
         run: |
           if [[ "$EVENT_NAME" == "merge_group" ]]; then
@@ -69,6 +70,7 @@ jobs:
             gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq .title > "$RUNNER_TEMP/pr-title"
             gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/pr-body"
             gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefOid --jq .headRefOid > "$RUNNER_TEMP/pr-head"
+            gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json headRefName --jq .headRefName > "$RUNNER_TEMP/pr-branch"
             # The entry is a merge commit whose second parent is the pull
             # request's head; the API's head must be that commit, or the body
             # being judged belongs to a head the entry does not carry.
@@ -80,8 +82,15 @@ jobs:
             printf '%s' "$PR_TITLE" > "$RUNNER_TEMP/pr-title"
             printf '%s' "$PR_BODY" > "$RUNNER_TEMP/pr-body"
             printf '%s' "$PR_HEAD" > "$RUNNER_TEMP/pr-head"
+            printf '%s' "$PR_BRANCH" > "$RUNNER_TEMP/pr-branch"
           fi
+          # The number is the identity a legacy exemption is bound to, so it
+          # is carried to the branch step like the head and the branch name.
+          # On merge_group it is the one parsed out of the queue ref above.
+          printf '%s' "$PR_NUMBER" > "$RUNNER_TEMP/pr-number"
           [[ -s "$RUNNER_TEMP/pr-head" ]] || { echo "no head SHA for pull request $PR_NUMBER" >&2; exit 1; }
+          [[ -s "$RUNNER_TEMP/pr-branch" ]] || { echo "no head branch for pull request $PR_NUMBER" >&2; exit 1; }
+          [[ -s "$RUNNER_TEMP/pr-number" ]] || { echo "no number for the pull request under review" >&2; exit 1; }
 
       - name: Validate title, evidence sections, and finding ledger
         shell: bash
@@ -90,3 +99,73 @@ jobs:
           head="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-body.sh "$title"
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-ledger-evidence.sh "$head"
+
+      # The branch vocabulary. A fix-P*/ name resolves against reviews/findings/
+      # anywhere in the PULL REQUEST, not at its two ends. Repairing a finding
+      # deletes its file, so a pull request that has done its job carries none
+      # at the branch point; a pull request that files the finding it repairs
+      # carries none at the branch point either; and one that files it in one
+      # commit and repairs it in the next carries none at EITHER end, which is
+      # the single-pull-request path the retirement of fix/ depends on. The
+      # three listings below are one set: the MERGE-BASE tree, the head tree,
+      # and every commit between them.
+      #
+      # The first listing is the merge base and NOT TARGET_SHA. The event's base
+      # SHA is the target branch's head at the moment of the event, and it moves
+      # for reasons outside this pull request: rooted there, an ambiguous name
+      # refused at exit 1 CONFORMED at exit 0 once master had advanced, on the
+      # same head. findings-in-range.sh takes the target SHA and resolves the
+      # merge base itself.
+      #
+      # That is the right DEFAULT and not a guarantee about the head. The merge
+      # base moves too, as soon as master absorbs a commit this branch also
+      # contains, and the verdict can change with no push to the branch. It is
+      # correct that it can: the name is resolved against reviews/findings/ AS
+      # IT STANDS WHEN THIS STEP RUNS, and whether a description names one
+      # finding or two is a property of the ledger that other pull requests
+      # legitimately change. This step runs again on every synchronize and on
+      # the queue entry -- and the listings it builds there are still the PULL
+      # REQUEST'S. The head is the pull request's head, read from the API above,
+      # and the boundary is its merge base; the queue commit's own tree is never
+      # listed. So a finding the target filed after the branch point is in none
+      # of the three on the entry either: replayed on a queue merge whose target
+      # had added two same-description findings, this step conformed at exit 0
+      # while the queue commit's own reviews/findings/ named 2 findings at exit
+      # 1. THE VERDICT IS NOT A VERDICT ON THE LEDGER THE MERGE LANDS ON, and no
+      # re-run makes it one. What it says is the narrow thing: the name resolved
+      # to exactly one filed finding in the three listings this step built, at
+      # the moment it ran. findings-in-range.sh argues it.
+      - name: Validate the head branch name
+        shell: bash
+        env:
+          TARGET_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          # The target and head commits, not remote-tracking refs:
+          # `actions/checkout` only promises the fetched history, and the event
+          # carries both SHAs on both triggers. findings-in-range.sh fails closed
+          # on an end that will not resolve, and on a pair with no merge base,
+          # rather than dropping either.
+          head_sha="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-head")"
+          # The three listings, built by .github/scripts/findings-in-range.sh
+          # so that .github/scripts/test-pr-policy.sh can build real repositories
+          # and check them. It was four lines here, and the fixtures could not
+          # reach it: three wrong ways of building the candidate set each
+          # survived a frontier review because the suite only ever tested what
+          # the validator does with a listing, never whether the listing was
+          # right.
+          #
+          # They are built in RUNNER_TEMP, outside the checkout, and that is a
+          # convention rather than a requirement: a file handed in as a listing
+          # is a list of names the caller wrote and is read wherever it lives,
+          # tracked or not. It is the DIRECTORY form -- a working tree's
+          # reviews/findings/, which this workflow never passes -- that is
+          # answered out of git's records instead of out of the checkout.
+          bash .github/scripts/findings-in-range.sh \
+            "$TARGET_SHA" "$head_sha" "$RUNNER_TEMP/findings"
+          export PR_NUMBER
+          PR_NUMBER="$(tr -d '[:space:]' < "$RUNNER_TEMP/pr-number")"
+          bash .github/scripts/validate-pr-branch.sh \
+            "$(cat "$RUNNER_TEMP/pr-branch")" \
+            "$RUNNER_TEMP/findings/merge-base-findings" \
+            "$RUNNER_TEMP/findings/head-findings" \
+            "$RUNNER_TEMP/findings/range-findings"

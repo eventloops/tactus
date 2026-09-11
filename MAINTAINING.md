@@ -206,6 +206,113 @@ receives neither and, if they are required there, waits on checks that never arr
 `test-docs-consistency.sh` pins the two workflows against its own copy of that list; it does not
 read this file, so changing the contract is a change to this file and to the gate together.
 
+Every head branch is in the vocabulary `.github/scripts/validate-pr-branch.sh` enforces, checked by
+`upstroke-pr-policy` on each pull request and each queue entry. `feature/`, `refactor/`, `docs/`,
+`standards/`, `ci/`, `gate/` and `findings/` take a lower-case name whose words are joined by single
+hyphens; `findings/` is for a pull request that touches `reviews/findings/` and nothing else.
+`fix-P<n>/` takes `<category>_<description>` and must name exactly one finding filed under
+`reviews/findings/`, for `n` in 0–3. `bulk-fix-P<n>/` takes a hyphenated name and carries a batch of
+them, for `n` in 2–3; P0 and P1 are never batched. The two are separate prefixes so that each one's
+rule is exact: a single-finding branch resolves to its file and a batch names none. The finding is
+looked for **anywhere in the pull request** and not at its two ends: the **merge-base** tree, the
+head tree, and every commit between them, and only a regular file is a finding. Repairing a finding
+deletes its file, so a pull request that has done its job carries none at the head; one that files
+the finding it repairs carries none at the branch point; and one that files it in one commit and
+repairs it in the next carries none at either end, which is the single-pull-request path the absence
+of `fix/` depends on. The boundary is the merge base and **not the target branch's current head**,
+which keeps `master` merely advancing out of the verdict — but **it does not make the verdict a
+function of the head**, and nothing does. The merge base moves as soon as `master` absorbs a commit
+the branch also carries, and a name that was ambiguous can resolve with no push to the branch. That
+is the right answer rather than a hole: whether a description picks out one finding or two is a
+property of **the ledger**, which other pull requests legitimately change, and what the check
+answers is whether the name resolves to exactly one filed finding in the listings it is handed.
+
+**A check that cannot see its input refuses; it never decides that it saw nothing.** The listings
+the check is handed are the merge-base tree, the head tree and the pull request's own commits, and a
+maintainer running it by hand may hand it a working tree's `reviews/findings/` directory instead.
+Whichever form, an input that cannot be read — an unreadable file, a stream that fails part-way, a
+directory that cannot be listed, an index or a repository git cannot read — is a **refusal** and
+never an empty set, because a candidate set that silently narrows turns an ambiguous name into an
+accepted one. Only "there is no repository here" falls back to the filesystem: metadata that is
+missing is not metadata that cannot be examined, and a `.git` file that names a gitdir git will not
+resolve — or holds a NUL where a `gitdir:` line should be — is the second of those. Every external
+probe, every file read and every directory listing in `validate-pr-branch.sh` goes through three
+audited helpers, and all three now obtain their bytes from **one capture primitive**: it opens its
+own destination and takes the open's status, runs the producer and keeps the producer's status, reads
+both private copies back as far as the sentinel byte it wrote, and hands nothing over unless all of
+that held. Each of those four was a round's P1 on its own — a helper that checked three of them
+reused the previous capture's bytes when its destination would not open, and one that took its names
+from a glob after a separate command's exit 0 read an unreadable directory as an empty one. Owning a
+file establishes nothing about reading it, and a successful producer establishes nothing about a
+successful read. `test-pr-policy.sh`
+holds the rest of the file to an **allowlist** — below the audited region a command may only be a
+shell builtin from a short list or a function the file defines, and nothing may redirect from a path
+— because five rounds of closing unsafe calls one at a time produced more of them each round, and
+the ban list that replaced those cases was itself walked past by an assignment prefix, a `command
+--`, and a reader it did not name. That check is a text scan over one file: it bounds what is
+written in the validator, not what bash can be made to do, and what it buys is that **the reviewed
+surface is the audited region**, which the gate caps at 250 lines. It is a helper and not a
+guarantee: a command word written entirely inside quotes leaves nothing on the line for a text scan
+to read, and a command reached through an `eval` of a string it cannot see is outside any such scan.
+
+**A directory handed in as a listing is answered out of git's records, not out of the checkout.**
+The directory form locates the repository and the path within it and then reads `git ls-files -s`
+alone: which names are there, and what each one is. Nothing about the working tree is consulted for a
+path git records anything at, under or above — not `-d`, not `-e`, not `-L`, not a glob, and never
+the bytes of a file the checkout materialised. That is what makes the two ways in one code path from
+the index down, so the equivalence below holds by construction: a committed symlink named like a
+finding is a `120000 blob` to both; a sparse checkout's excluded finding is an index entry and a tree
+entry; a `reviews` the checkout renamed and replaced with a link is still the directory the index
+records; and a link materialised under `core.symlinks=false` — git's own setting, and what it uses
+wherever a link cannot be made — is never read as a listing, which is how one was made to invent a
+finding nobody had filed. A listing path is reduced to its components before it is judged, so
+`reviews/findings`, `reviews/findings/`, `reviews/findings/.`, `reviews//findings` and
+`reviews/./findings` are one listing and answer alike, and the path the index is asked about is built
+from **those** components and never from where the filesystem takes them; a `..` after a named
+component is refused rather than guessed at. The work tree's root is matched against those components
+by inode, so a link above the repository costs nothing — but the path **through** that root is
+matched by recorded mode, because an inode comparison cannot see one: `reviews` committed as a link
+to the work tree's own root is `-ef` that root, and taking it as one named the listing `findings` and
+answered it out of the root's own directory, past the `120000` the index records. The filesystem is the whole of the evidence in one
+place only: a listing with no repository over it, which is how the validator is run against a scratch
+directory, and a path inside a work tree that git records nothing at, under **or above** — an
+ordinary untracked scratch directory, and the temporary files a caller builds the three listings in.
+
+**The property is that the two ways in agree**: for one commit, the three tree listings and the
+working tree's `reviews/findings/` give the same answer, and the fixture suite checks that as a
+property over repositories and branch names rather than case by case. It costs one thing and gains
+another, both deliberate. An **untracked** finding file inside a tracked `reviews/findings/` no
+longer counts for the directory form — the ledger is what is committed, a merge gate decides about
+commits and never about a work tree, and the answer for a finding an author has written and not yet
+added is `git add`. And where git records a **directory** at the listing path and the checkout holds
+a link or a file in its place, the directory form now **resolves** the name from the index instead of
+refusing: that is a loosening, and it is the point, because the trees resolve it too.
+
+There is no `fix/` prefix. A bug worth a branch is worth a finding, so a repair names the finding it
+closes, and a bug that is not filed yet is filed by the same pull request that repairs it — which is
+what reading the whole range is for, since the repair deletes the file again in the same range.
+`findings/` is not a substitute: it carries no repair.
+
+An unrecognised prefix fails rather than defaulting, which is the point of the check: until it
+existed, every prefix outside two `codex/` shapes fell into the audit's catch-all and was silently
+given the most expensive review and the loosest fix set. `test`, `chore`, `perf`, `security` and
+`build` are valid title types with no branch prefix; needing one is a gap to raise here, not a name
+to work around. The rule binds new branches, so `.github/legacy-branches.txt` lists the pull
+requests that predate it as `<number> <head branch>`: a listed pull request is accepted with a
+warning, entries are only ever removed, and the file reaching zero is the signal the migration
+finished. **An entry is the pull request and not the name** — both fields must match, because a bare
+branch name exempts anyone who later types it, and a list whose contents no longer decide who is
+exempt has stopped being a migration list. Renaming a head branch is not a migration either: GitHub
+closes the pull request, so a branch that must leave the list leaves it by way of a replacement pull
+request carrying the same head.
+
+The lane the audit derives from a prefix is a **separate** mapping, and it is unchanged: it still
+reads `codex/findings-p3-*`, `codex/findings-*` and everything else. A `findings/`, `fix-P<n>/` or
+`bulk-fix-P<n>/` branch is therefore audited as feature work, which is looser than any of the three
+is meant to be. That was tolerable while `fix-P<n>/` was reserved and unused; with no `fix/` prefix
+every repair is on it, so widening the lane table is the next change this rule owes. It is its own
+change because it touches `scripts/pr-ready-audit.sh`.
+
 Readiness to enqueue is the lane rule of 2026-09-06, audited by `scripts/pr-ready-audit.sh`,
 which decides a pull request's lane from its branch prefix alone (`codex/findings-p3-*`,
 `codex/findings-*`, everything else), counts only the owner's review comments, keeps the `lane:*`
