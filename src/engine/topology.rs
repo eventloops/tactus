@@ -5,6 +5,7 @@
 pub mod attempt;
 pub mod candidate;
 pub mod closure;
+pub mod coverage;
 pub mod create;
 pub mod dispatch;
 pub mod emit;

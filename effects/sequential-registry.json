@@ -1,0 +1,616 @@
+{
+  "note": "decisions.fault_injection_registry, ST-07 for the sequential run-end range: one entry per site x hook phase x parent-side point x injection mode, built through FaultRegistry::insert, each naming the committed test the suite's observation export shows executing it. Every point in the range is platform-independent, so one document serves both hosts. No site in the range registers a residue class; the frozen sampling N a recovery-proven entry cites is effects/residue-classes.json's (SWEEP-BIJECTION-005).",
+  "range": [
+    "Event.Append",
+    "Worktree.Remove",
+    "Worktree.RemoveIntent",
+    "Snapshot.Remove",
+    "Snapshot.RemoveIntent",
+    "Worktree.RemoveStaging",
+    "Worktree.RemoveStagingIntent",
+    "Ref.DeletePreparedPin",
+    "Ref.DeleteCandidatePin",
+    "Ref.DeleteCandidatesRef",
+    "Worktree.RemoveExecutionRoot",
+    "RunDir.WriteReport"
+  ],
+  "hosts": [
+    "windows",
+    "unix"
+  ],
+  "entries": [
+    {
+      "site": "Event.Append",
+      "phase": "before",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_run_finished_before_report",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": "after",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_run_finished_before_report",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "written",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "bytes written, possibly partially, and not synced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::closure_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "written",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "bytes written, possibly partially, and not synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::append_error_inside_closure_ends_command_and_resume_completes_closure",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "written_full",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "a complete newline-terminated line written and not synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::emit::tests::append_error_with_failed_prefix_sync_reports_undetermined_without_effects",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "synced",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the appended line is synced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::settle::tests::settlement_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "synced",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the appended line is synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::emit::tests::a_refusal_before_the_append_was_entered_does_not_run_the_protocol",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Remove",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Remove",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveIntent",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveIntent",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.Remove",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r24"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.Remove",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.RemoveIntent",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r24"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.RemoveIntent",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveStaging",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r10"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveStaging",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveStagingIntent",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r10"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveStagingIntent",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeletePreparedPin",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r12"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeletePreparedPin",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeleteCandidatePin",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_cand_ref",
+      "expected_residue": {
+        "rows": [
+          "r23"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeleteCandidatePin",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_cand_ref",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeleteCandidatesRef",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r11"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeleteCandidatesRef",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveExecutionRoot",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r18"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveExecutionRoot",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.WriteReport",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.WriteReport",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    }
+  ]
+}

@@ -3941,7 +3941,7 @@ fn kill_during_recovery_repeats_recovery() {
                 "--test-threads".to_owned(),
                 "1".to_owned(),
             ],
-            env: vec![
+            env: [
                 (
                     "UPSTROKE_TEST_KILL_REPO".to_owned(),
                     fixture.repo_root.display().to_string(),
@@ -3950,7 +3950,10 @@ fn kill_during_recovery_repeats_recovery() {
                     "UPSTROKE_TEST_KILL_GITDIR".to_owned(),
                     fixture.git_dir.display().to_string(),
                 ),
-            ],
+            ]
+            .into_iter()
+            .chain(observation_export_env())
+            .collect(),
             stdin: Vec::new(),
         },
         workspace: fixture.repo_root.clone(),
@@ -14200,7 +14203,7 @@ fn kill_inside_closure_recovers() {
                     "--test-threads".to_owned(),
                     "1".to_owned(),
                 ],
-                env: vec![
+                env: [
                     (
                         "UPSTROKE_TEST_KILL_REPO".to_owned(),
                         fixture.repo_root.display().to_string(),
@@ -14210,7 +14213,10 @@ fn kill_inside_closure_recovers() {
                         fixture.git_dir.display().to_string(),
                     ),
                     ("UPSTROKE_TEST_KILL_SHAPE".to_owned(), shape.to_owned()),
-                ],
+                ]
+                .into_iter()
+                .chain(observation_export_env())
+                .collect(),
                 stdin: Vec::new(),
             },
             workspace: fixture.repo_root.clone(),
@@ -16368,4 +16374,20 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
     assert_eq!(fact_of(&after, Row::R1), Fact::Zero);
     assert_eq!(fact_of(&after, Row::R9), Fact::Absent);
     assert_eq!(fact_of(&after, Row::R11), Fact::Absent);
+}
+
+/// The ST-07 observation export directory, handed on to a spawned kill
+/// child: the host runner composes the child's environment from scratch, so
+/// a variable the parent test was started with does not reach the child
+/// unless the request carries it.
+fn observation_export_env() -> Vec<(String, String)> {
+    std::env::var(crate::engine::topology::coverage::OBSERVATIONS_ENV)
+        .ok()
+        .map(|dir| {
+            vec![(
+                crate::engine::topology::coverage::OBSERVATIONS_ENV.to_owned(),
+                dir,
+            )]
+        })
+        .unwrap_or_default()
 }
