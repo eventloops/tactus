@@ -4727,7 +4727,8 @@ enum OracleRows {
     SiteRow,
     /// R27 and nothing else.
     R27,
-    /// R28 and nothing else — a surviving Unix reaper's cleanup hold.
+    /// R28 and nothing else — a surviving Unix reaper's cleanup hold (or a
+    /// surviving engine `git update-ref` child's, which holds the same lease).
     R28,
     /// No row at all.
     NoRow,

@@ -3469,7 +3469,9 @@ fn a_surviving_reaper_hold_refuses_the_next_coordinator_until_released() {
         .expect_err("a coordinator must not overlap a live reaper");
     let waited = started.elapsed();
     assert!(
-        error.to_string().contains("still cleaning agent processes"),
+        error
+            .to_string()
+            .contains("still has a process of its own alive"),
         "{error}"
     );
     assert!(
@@ -3503,6 +3505,112 @@ fn a_surviving_reaper_hold_refuses_the_next_coordinator_until_released() {
     drop(lease);
     let run = RunLock::acquire(&husk).expect("and so is the run lock");
     drop(run);
+}
+
+// =======================================================================
+// R28, held by a ref write's Git child
+// =======================================================================
+
+/// The child a ref write spawns, standing in for `git update-ref`: it does
+/// nothing but hold the inherited lease until its stdin closes.
+#[cfg(unix)]
+#[test]
+#[ignore = "spawned as a subprocess by a_ref_writers_child_holds_the_cleanup_lease_until_it_exits"]
+fn inherited_hold_child() {
+    let mut sink = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut sink);
+}
+
+/// `hold_cleanup_lease_for_child`: the lease is the child's, not this
+/// process's. Held before the spawn by the descriptor this process keeps,
+/// held by the child alone once that descriptor is closed, and released by
+/// the kernel at the child's exit with nobody resetting anything -- the fact
+/// `WorkspaceManager::reclaim_own_ref_lock` rests on for "no writer of this
+/// run is alive".
+#[cfg(unix)]
+#[test]
+fn a_ref_writers_child_holds_the_cleanup_lease_until_it_exits() {
+    let root = scratch("childlease");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000000");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    assert!(
+        !observe_cleanup_hold(&public, &mut NoHooks),
+        "nothing holds a lease that does not exist yet"
+    );
+
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    command
+        .args([
+            "--exact",
+            "rundir::tests::inherited_hold_child",
+            "--ignored",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let hold = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect("take the shared hold")
+        .expect("Unix hands the child a hold");
+    assert!(
+        observe_cleanup_hold(&public, &mut NoHooks),
+        "held by this process's descriptor before the spawn"
+    );
+
+    let mut child = command.spawn().expect("spawn the child");
+    // This process's copy is gone; the child's inherited descriptor is the
+    // only reference left to the open file description the lock lives on.
+    drop(hold);
+    assert!(
+        observe_cleanup_hold(&public, &mut NoHooks),
+        "the child alone keeps the lease"
+    );
+
+    // EOF on the child's stdin ends it.
+    drop(child.stdin.take());
+    let status = child.wait().expect("reap the child");
+    assert!(status.success(), "the child exited cleanly: {status:?}");
+    assert!(
+        !observe_cleanup_hold(&public, &mut NoHooks),
+        "released by the kernel at the child's exit"
+    );
+}
+
+/// The pre-spawn half without a spawn: the descriptor returned is a live
+/// shared hold, and dropping it releases the lease. A caller whose spawn
+/// fails therefore leaves nothing held.
+#[cfg(unix)]
+#[test]
+fn a_hold_whose_command_never_spawns_is_released_with_the_descriptor() {
+    let root = scratch("childlease-unspawned");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000001");
+    fs::create_dir_all(&public).expect("the run's public directory");
+    let mut command = std::process::Command::new("git");
+    let hold = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect("take the shared hold")
+        .expect("Unix hands the child a hold");
+    assert!(observe_cleanup_hold(&public, &mut NoHooks), "held");
+    drop(hold);
+    assert!(
+        !observe_cleanup_hold(&public, &mut NoHooks),
+        "released with the descriptor"
+    );
+}
+
+/// A run directory that does not exist is an error, not a silent write with
+/// no lease: every ref write a coordinator makes happens inside a run whose
+/// directory `RunLock::acquire` already created the lease file in.
+#[cfg(unix)]
+#[test]
+fn a_hold_over_an_absent_run_directory_is_an_io_error_naming_the_lease() {
+    let root = scratch("childlease-absent");
+    let public = public_dir(&root.join("repo"), "01CHILDLEASE000000000000002");
+    let mut command = std::process::Command::new("git");
+    let error = hold_cleanup_lease_for_child(&mut command, &public)
+        .expect_err("no directory, no lease, no silent success");
+    assert!(
+        matches!(&error, UpstrokeError::Io { path, .. } if *path == cleanup_lock_file(&public)),
+        "{error}"
+    );
 }
 
 // =======================================================================

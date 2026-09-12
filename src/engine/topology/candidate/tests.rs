@@ -69,6 +69,10 @@ impl Fixture {
         let private = root.join("private");
         make_dir(&private);
         let (head, _previous) = git_fixtures::repository(&base);
+        // The run's public directory, where every ref write's Git child holds
+        // the run's cleanup lease (`rundir::hold_cleanup_lease_for_child`);
+        // a coordinator would have created it before its first ref write.
+        make_dir(&crate::rundir::public_dir(&base, RUN_ID));
 
         let manager = WorkspaceManager::derive(&base, &private, RUN_ID, INCARNATION)
             .expect("derive the manager");

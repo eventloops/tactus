@@ -3359,10 +3359,16 @@ Objects written and never published: a blob and a commit no ref names.
 The workspace manager's classifier reads it as the site's Internal class
 and names what was planted.
 
-## `fn remove_git_ref_lock_residue(git_dir: &Path) -> Vec<PathBuf> {`
+## `fn remove_packed_refs_lock_residue(git_dir: &Path) -> Option<PathBuf> {`
 
-Git's own ref-lock residue in the repository's common git dir:
-`packed-refs.lock` and any `*.lock` under `refs/`. Not the run's
+Git's one ref-lock residue recovery may not touch: `packed-refs.lock` in
+the repository's common git dir. It is the repository's rather than the
+run's, any Git process can be holding it, and a wrong removal would let a
+concurrent `pack-refs` publish an empty packed file over every packed
+ref, so the engine never reclaims it and the operator does. A lock on one
+of the run's own refs is no longer removed here: the Ref funnel reclaims
+it when the repository proves it stale
+(`WorkspaceManager::reclaim_own_ref_lock`). Not the run's
 `upstroke-worktree.lock`, which is the coordinator's lock file (R25), and
 not a linked worktree's git dir, which recovery reclaims itself.
 
@@ -3579,28 +3585,71 @@ the timing evidence the finding said it lacked.
 
 The real child, killed at an uncontrolled point of the ladder.
 
-## `const SAMPLING_N: u32 = 8;` › `let _ = remove_git_ref_lock_residue(&fixture.git_dir);`
+## `const SAMPLING_N: u32 = 8;` › `let _ = remove_packed_refs_lock_residue(&fixture.git_dir);`
 
-A killed git child can also leave a lock file in the repository's
-common git dir — `packed-refs.lock`, observed on the macOS runner's
-git — which no residue class of the site names and no recovery step
-may remove (PR8-CRASH-002). It is removed here as the operator would,
-so the sampler measures the staging residue the site registers.
+A killed git child can also leave `packed-refs.lock` in the repository's
+common git dir — observed on the macOS runner's git — which no residue
+class of the site names and no recovery step may remove
+(`PR8-CRASH-002-PACKED-REFS-LOCK`). It is removed here as the operator
+would, so the sampler measures the staging residue the site registers.
 
 ## `const SAMPLING_N: u32 = 8;` › `let (_, handle) = resume_with_real_refs(&fixture, &harness())`
 
 Whatever the sample left, the resume reclaims it and the candidate
 integrates under a fresh pick.
 
-## `fn a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed() {` › `let fixture = Fixture::healthy("cas-lock");`
+## `fn plant_integration_lock(fixture: &Fixture, content: &[u8]) -> PathBuf {`
 
-PR8-CRASH-002 (deferred): a coordinator killed inside `git update-ref`
-leaves `<ref>.lock`, and the frozen effect inventory registers no
-residue class for any Ref site, so no recovery step may reclaim it.
-What holds today, pinned here: the authorized publication is retried,
-Git refuses on the lock, the refusal is resumable — the ref unchanged,
-merge_prepared durable, nothing appended — and once an operator removes
-the lock the next resume completes the publication.
+The lock file a killed `git update-ref` leaves on the integration ref,
+with the content Git leaves at the point of the kill. Measured on git
+2.43 under `strace`: the file is empty from Git's `open` to its content
+write — the longer part of the window, where the object lookup sits —
+and holds the new object id and its newline from that write to the
+publishing rename.
+
+## `fn an_empty_ref_lock_left_by_a_killed_compare_and_swap_is_reclaimed_and_the_publication_completes()`
+
+PR8-CRASH-002, closed: a coordinator killed inside `git update-ref` left
+`<ref>.lock` and every later resume refused on it until an operator
+removed the file. The Ref funnel now reclaims the lock before the retry
+when the repository proves it the engine's own and stale
+(`WorkspaceManager::reclaim_own_ref_lock`), and the publication the log
+authorized completes on the first resume. Witnessed against the
+unrepaired tree: the resume refused with Git's own "integration.lock …
+File exists".
+
+## `fn a_ref_lock_naming_the_authorized_proposal_is_reclaimed_with_or_without_its_newline() {`
+
+The other shape a kill leaves: the lock already names the proposal,
+with its newline after Git's second write and without it between the
+two. Both are the engine's own write of this transition and both are
+reclaimed.
+
+## `fn a_ref_lock_naming_another_object_is_left_and_refuses_resumably_until_removed() {`
+
+The negative control, and what still holds of the old behaviour: a lock
+naming a value the swap would not write belongs to another write, so it
+is left where it is. The refusal says why, the ref is unchanged,
+`merge_prepared` stays durable, nothing is appended, and once an
+operator removes the lock the next resume completes the publication.
+
+## `fn a_ref_lock_on_a_packed_integration_ref_is_left_and_refuses_resumably_until_removed() {`
+
+With the ref in `packed-refs`, a `git pack-refs --prune` may be holding
+its lock at this instant and nothing the repository records says
+otherwise, so the lock is left and the resume refuses
+(`PR8-CRASH-002-PACKED-RUN-REF`). Once the operator has removed it the
+swap writes the loose ref over the packed copy, as any swap of a packed
+ref does.
+
+## `fn a_surviving_ref_writer_of_the_dead_coordinator_refuses_the_resume_until_it_exits() {`
+
+The liveness fact the reclaim rests on, end to end: a process holding
+the run's cleanup lease the way an engine `git update-ref` child does
+(`rundir::hold_cleanup_lease_for_child`) makes the resume refuse at its
+worktree lease, with the lock untouched and nothing appended; once it
+exits the kernel releases the lease, the lock is stale, and the next
+resume reclaims it and completes the publication.
 
 ## `struct BlockNthSnapshotAdd {`
 

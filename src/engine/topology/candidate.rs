@@ -19,7 +19,7 @@ use crate::workspace_manager::{
     ResidueTarget, Slot, WorkspaceManager, classify_object_residue, is_object_id,
 };
 
-pub const RUN_REF_ROOT: &str = "refs/upstroke/runs";
+pub use crate::workspace_manager::RUN_REF_ROOT;
 
 #[must_use]
 pub fn run_namespace(run_id: &str) -> String {

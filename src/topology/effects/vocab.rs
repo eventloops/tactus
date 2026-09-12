@@ -159,7 +159,9 @@ pub enum ResourceRow {
     R26,
     /// Engine-created Git objects no engine ref, pin, or worktree references.
     R27,
-    /// A surviving Unix reaper's shared `cleanup.lock` hold.
+    /// A surviving Unix reaper's shared `cleanup.lock` hold -- and, since
+    /// `PR8-CRASH-002` closed, the same hold by an engine `git update-ref`
+    /// child for as long as it lives.
     R28,
 }
 

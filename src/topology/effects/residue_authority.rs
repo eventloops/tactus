@@ -1088,8 +1088,10 @@ impl SubEffectPoint {
     ///   handle, and there is none.
     /// * the Unix containment points — "a coordinator kill after any of these
     ///   leaves a group the reaper settles **while holding R28**". R28 is
-    ///   "a surviving Unix reaper's shared `cleanup.lock` hold"; R22 is not
-    ///   left holding a handle the dying coordinator owned.
+    ///   "a surviving Unix reaper's shared `cleanup.lock` hold" (held the same
+    ///   way by a surviving engine `git update-ref` child since
+    ///   `PR8-CRASH-002` closed); R22 is not left holding a handle the dying
+    ///   coordinator owned.
     ///
     /// The platform is not a new axis of the authority: it is already a
     /// function of the point ([`Self::platform`]), and this match is over the

@@ -12276,3 +12276,468 @@ fn a_listing_that_fails_part_way_through_is_an_inspection_error_not_the_end_of_i
         "a name found before the failure is an answer, and the listing stops there"
     );
 }
+
+// =======================================================================
+// A Git lock file a killed engine ref write left (PR8-CRASH-002)
+// =======================================================================
+
+/// A ref under this run's namespace, `refs/upstroke/runs/<run-id>/<name>`.
+fn run_ref(name: &str) -> String {
+    format!("{RUN_REF_ROOT}/{}/{name}", super::fixture::RUN_ID)
+}
+
+/// Where Git's files backend keeps the lock of `refname`, as
+/// `WorkspaceManager::ref_lock_path` spells it.
+fn lock_of(fixture: &Fixture, refname: &str) -> PathBuf {
+    fixture
+        .manager
+        .common_git_dir
+        .join(format!("{refname}.lock"))
+}
+
+/// The three primitives each reclaim the lock a killed write of their own
+/// left: empty, as a kill between Git's `open` and its content write leaves
+/// it, for a create; naming the value being written, as a kill between that
+/// write and the publishing rename leaves it, for a swap; and empty for a
+/// delete, whose lock Git never writes into.
+#[test]
+fn a_stale_lock_of_the_engines_own_write_is_reclaimed_by_the_write_that_retries() {
+    let fixture = Fixture::created("ref-lock-reclaim");
+    let name = run_ref("candidates/kalpha/1");
+    let lock = lock_of(&fixture, &name);
+
+    write_file(&lock, b"");
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateCandidates,
+            &name,
+            &fixture.head,
+        )
+        .expect("the create reclaims the empty lock its killed predecessor left");
+    assert!(!lock.exists(), "the reclaimed lock is gone");
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.head.clone())
+    );
+
+    write_file(&lock, format!("{}\n", fixture.seed).as_bytes());
+    fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect("the swap reclaims the lock naming the value it writes");
+    assert!(!lock.exists());
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.seed.clone())
+    );
+
+    write_file(&lock, b"");
+    fixture
+        .manager
+        .delete_ref_expected_old(
+            &mut NoHooks,
+            RefSite::DeleteCandidatesRef,
+            &name,
+            &fixture.seed,
+        )
+        .expect("the delete reclaims the empty lock");
+    assert!(!lock.exists());
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        None
+    );
+}
+
+/// A lock naming anything but the value this write writes belongs to another
+/// write: it is left where it is and the write refuses, saying so. For a
+/// delete that is any content at all, since a deletion's lock is never
+/// written into -- the ref's own current value included.
+#[test]
+fn a_lock_naming_another_value_is_left_and_the_write_refuses() {
+    let fixture = Fixture::created("ref-lock-foreign");
+    let name = run_ref("candidates/kalpha/1");
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateCandidates,
+            &name,
+            &fixture.head,
+        )
+        .expect("create");
+    let lock = lock_of(&fixture, &name);
+
+    write_file(&lock, format!("{}\n", fixture.side).as_bytes());
+    let error = fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect_err("a lock naming a third value is not this write's");
+    assert!(
+        error
+            .to_string()
+            .contains("names a value this write would not produce"),
+        "{error}"
+    );
+    assert!(lock.exists(), "left in place");
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.head.clone()),
+        "the ref is untouched"
+    );
+
+    write_file(&lock, format!("{}\n", fixture.head).as_bytes());
+    let error = fixture
+        .manager
+        .delete_ref_expected_old(
+            &mut NoHooks,
+            RefSite::DeleteCandidatesRef,
+            &name,
+            &fixture.head,
+        )
+        .expect_err(
+            "a deletion writes nothing into its lock, so a lock with content is not a deletion's",
+        );
+    assert!(
+        error
+            .to_string()
+            .contains("names a value this write would not produce"),
+        "{error}"
+    );
+    assert!(lock.exists());
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.head.clone())
+    );
+
+    // A lock longer than any object id and its newline is read only as far as
+    // the bound and is then, whatever follows, not this write's.
+    write_file(&lock, &vec![b'a'; 4096]);
+    let error = fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect_err("a long lock is not this write's");
+    assert!(
+        error
+            .to_string()
+            .contains("names a value this write would not produce"),
+        "{error}"
+    );
+    assert!(lock.exists());
+}
+
+/// A lock on a ref outside the run's namespace, offered to a namespace site,
+/// is nothing this manager reasons about: it is left exactly as before, and
+/// Git refuses the write on it as Git always did.
+#[test]
+fn a_lock_outside_the_run_namespace_is_left_for_git_to_refuse() {
+    let fixture = Fixture::created("ref-lock-elsewhere");
+    for name in [
+        "refs/upstroke/runs/01KZSOMEOTHERRUN0000000000/candidates/kalpha/1",
+        "refs/heads/elsewhere",
+    ] {
+        let lock = lock_of(&fixture, name);
+        write_file(&lock, b"");
+        let error = fixture
+            .manager
+            .create_ref_zero_old(&mut NoHooks, RefSite::CreateCandidates, name, &fixture.head)
+            .expect_err("Git refuses on the lock, as before");
+        assert!(
+            matches!(&error, UpstrokeError::Git { message } if message.contains(".lock")),
+            "{name}: Git's own refusal, naming the lock: {error}"
+        );
+        assert!(lock.exists(), "{name}: the lock was not touched");
+        assert_eq!(
+            fixture.manager.direct_ref_target(name).expect("read"),
+            None,
+            "{name}: nothing was created"
+        );
+    }
+}
+
+/// The two integration sites write the ref `run_started` recorded, wherever
+/// it lives -- the scaffold's is `refs/heads/upstroke/run-<id>` -- so a stale
+/// lock on it is reclaimed by its name being the run's integration ref rather
+/// than by the namespace.
+#[test]
+fn the_integration_sites_reclaim_a_stale_lock_on_the_recorded_integration_ref() {
+    let fixture = Fixture::created("ref-lock-integration");
+    let name = format!("refs/heads/upstroke/run-{}", super::fixture::RUN_ID);
+    let lock = lock_of(&fixture, &name);
+
+    write_file(&lock, b"");
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateIntegration,
+            &name,
+            &fixture.head,
+        )
+        .expect("the integration ref's create reclaims its stale lock");
+    assert!(!lock.exists());
+
+    write_file(&lock, fixture.seed.as_bytes());
+    fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect("the integration ref's swap reclaims a lock naming the value it writes");
+    assert!(!lock.exists());
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.seed.clone())
+    );
+
+    // The same name offered to a namespace site is outside that site's
+    // namespace, and is left for Git.
+    write_file(&lock, b"");
+    let error = fixture
+        .manager
+        .delete_ref_expected_old(
+            &mut NoHooks,
+            RefSite::DeleteCandidatesRef,
+            &name,
+            &fixture.seed,
+        )
+        .expect_err("a namespace site does not reclaim outside the namespace");
+    assert!(
+        matches!(&error, UpstrokeError::Git { .. }),
+        "Git's own refusal: {error}"
+    );
+    assert!(lock.exists());
+}
+
+/// With the ref in `packed-refs`, a `git pack-refs --prune` may be holding
+/// the lock at this instant and nothing the repository records says
+/// otherwise, so the lock is left and the write refuses -- and once an
+/// operator has removed it, the swap writes the loose ref over the packed
+/// copy as any swap of a packed ref does.
+#[test]
+fn a_stale_lock_on_a_packed_ref_is_left_and_the_write_refuses() {
+    let fixture = Fixture::created("ref-lock-packed");
+    let name = run_ref("candidates/kalpha/1");
+    fixture
+        .manager
+        .create_ref_zero_old(
+            &mut NoHooks,
+            RefSite::CreateCandidates,
+            &name,
+            &fixture.head,
+        )
+        .expect("create");
+    git(&fixture.base, &["pack-refs", "--all"]);
+    assert!(
+        !fixture.manager.common_git_dir.join(&name).exists(),
+        "pack-refs packed the ref and pruned its loose file"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .packed_ref_value(&name)
+            .expect("read packed-refs"),
+        Some(fixture.head.clone()),
+        "and the packed file names it"
+    );
+
+    let lock = lock_of(&fixture, &name);
+    write_file(&lock, b"");
+    let error = fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect_err("a lock on a packed ref may be a prune's");
+    assert!(
+        error.to_string().contains("the ref is in packed-refs"),
+        "{error}"
+    );
+    assert!(lock.exists(), "left in place");
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.head.clone()),
+        "the ref is untouched"
+    );
+
+    super::fixture::remove_file(&lock);
+    fixture
+        .manager
+        .compare_and_swap_ref(
+            &mut NoHooks,
+            RefSite::CompareAndSwapIntegration,
+            &name,
+            &fixture.head,
+            &fixture.seed,
+        )
+        .expect("with the lock gone the swap writes the loose ref");
+    assert_eq!(
+        fixture.manager.direct_ref_target(&name).expect("read"),
+        Some(fixture.seed.clone())
+    );
+}
+
+/// `packed-refs` is read as Git writes it: the `# pack-refs with:` header and
+/// the `^<peeled>` lines are skipped, every other line is `<id> <refname>`,
+/// an absent file and an absent name both read as nothing.
+#[test]
+fn packed_refs_is_read_as_git_writes_it() {
+    let fixture = Fixture::created("packed-refs-read");
+    let packed = fixture.manager.common_git_dir.join("packed-refs");
+    let name = run_ref("candidates/kalpha/1");
+    assert_eq!(
+        fixture.manager.packed_ref_value(&name).expect("no file"),
+        None
+    );
+    write_file(
+        &packed,
+        format!(
+            "# pack-refs with: peeled fully-peeled sorted \n{} refs/heads/main\n{} refs/tags/v1\n^{}\n{} {name}\n",
+            fixture.head, fixture.side, fixture.seed, fixture.seed
+        )
+        .as_bytes(),
+    );
+    assert_eq!(
+        fixture.manager.packed_ref_value(&name).expect("read"),
+        Some(fixture.seed.clone())
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .packed_ref_value("refs/heads/main")
+            .expect("read"),
+        Some(fixture.head.clone())
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .packed_ref_value(&run_ref("candidates/kalpha/2"))
+            .expect("read"),
+        None,
+        "a name the file does not list"
+    );
+    assert_eq!(
+        fixture
+            .manager
+            .packed_ref_value(&fixture.seed)
+            .expect("read"),
+        None,
+        "a peeled line is not a ref"
+    );
+}
+
+/// The check a swap runs after it reclaimed a lock: `packed-refs` now holding
+/// the ref at anything but the value just written means a `pack-refs` ran
+/// during the reclaim, and its prune may remove the loose ref, so the swap is
+/// refused rather than recorded. The same file holding the new value, or
+/// nothing, is no such sign.
+#[test]
+fn a_swap_that_reclaimed_a_lock_refuses_when_packed_refs_then_holds_the_ref_elsewhere() {
+    let fixture = Fixture::created("packed-refs-post-check");
+    let packed = fixture.manager.common_git_dir.join("packed-refs");
+    let name = run_ref("candidates/kalpha/1");
+
+    fixture
+        .manager
+        .refuse_if_repacked_elsewhere(&name, &fixture.seed)
+        .expect("no packed file, nothing to refuse");
+
+    write_file(
+        &packed,
+        format!(
+            "# pack-refs with: peeled fully-peeled sorted \n{} {name}\n",
+            fixture.seed
+        )
+        .as_bytes(),
+    );
+    fixture
+        .manager
+        .refuse_if_repacked_elsewhere(&name, &fixture.seed)
+        .expect("packed at the value just written: a pack-refs that ran after the swap");
+
+    write_file(
+        &packed,
+        format!(
+            "# pack-refs with: peeled fully-peeled sorted \n{} {name}\n",
+            fixture.head
+        )
+        .as_bytes(),
+    );
+    let error = fixture
+        .manager
+        .refuse_if_repacked_elsewhere(&name, &fixture.seed)
+        .expect_err("packed at the old value: a pack-refs that ran during the reclaim");
+    let text = error.to_string();
+    assert!(text.contains("packed-refs now holds it"), "{text}");
+    assert!(
+        text.contains(&fixture.head),
+        "names the packed value: {text}"
+    );
+    assert!(text.contains(&fixture.seed), "and the one written: {text}");
+}
+
+/// Every `git update-ref` this module runs hands its child the run's cleanup
+/// lease, and it is the one place the module spells that command: the
+/// liveness fact `reclaim_own_ref_lock` rests on is made by the same
+/// function that makes the write.
+#[test]
+fn the_one_update_ref_spawn_gives_its_child_the_cleanup_lease() {
+    let source =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workspace_manager.rs"))
+            .expect("this module's source")
+            // Normalised, so a checkout with Windows line endings reads the same
+            // source as one without: the body search below ends on a newline.
+            .replace("\r\n", "\n");
+    let code = crate::effects::production_code(&source);
+    assert_eq!(
+        code.matches("hold_cleanup_lease_for_child(").count(),
+        1,
+        "the lease is handed to exactly one child"
+    );
+    let start = source
+        .find("    fn update_ref(&self, args: &[&str])")
+        .expect("the update-ref runner");
+    let body = &source[start..];
+    let end = body.find("\n    }\n").expect("the end of its body");
+    let body = &body[..end];
+    assert!(
+        body.contains("hold_cleanup_lease_for_child("),
+        "and that child is the update-ref"
+    );
+    assert!(
+        body.contains("OsString::from(\"update-ref\")"),
+        "which this function spells"
+    );
+    assert_eq!(
+        source.matches("OsString::from(\"update-ref\")").count(),
+        1,
+        "and nothing else in the module does"
+    );
+}

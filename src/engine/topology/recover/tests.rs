@@ -2308,7 +2308,7 @@ fn resume_refused_while_reaper_hold_observed_then_succeeds() {
         let (result, _) = resume(&fixture, &harness, &given);
         let text = message(&result.expect_err("a surviving reaper hold refuses"));
         assert!(
-            text.contains("still cleaning agent processes"),
+            text.contains("still has a process of its own alive"),
             "the refusal names the hold it observed: {text}"
         );
         assert!(
@@ -10098,32 +10098,12 @@ fn synthetic_cherry_pick_residue_unreferenced_objects_and_cherry_pick_head_then_
     );
 }
 
-fn remove_git_ref_lock_residue(git_dir: &Path) -> Vec<PathBuf> {
-    let mut removed = Vec::new();
+fn remove_packed_refs_lock_residue(git_dir: &Path) -> Option<PathBuf> {
     let packed = git_dir.join("packed-refs.lock");
-    if packed.exists() {
+    packed.exists().then(|| {
         crate::workspace_manager::fixture::remove_file(&packed);
-        removed.push(packed);
-    }
-    let mut stack = vec![git_dir.join("refs")];
-    while let Some(dir) = stack.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path
-                .extension()
-                .is_some_and(|extension| extension == "lock")
-            {
-                crate::workspace_manager::fixture::remove_file(&path);
-                removed.push(path);
-            }
-        }
-    }
-    removed
+        packed
+    })
 }
 
 #[test]
@@ -10235,7 +10215,7 @@ fn sampled_cherry_pick_child_kills_every_residue_classified_and_recovered() {
                 ),
             }
         ));
-        let _ = remove_git_ref_lock_residue(&fixture.git_dir);
+        let _ = remove_packed_refs_lock_residue(&fixture.git_dir);
 
         let target = crate::workspace_manager::ResidueTarget::new(&fixture.repo_root)
             .at(&staging)
@@ -10318,25 +10298,88 @@ fn child_outran_the_kill(status: &std::process::ExitStatus) -> bool {
     status.success()
 }
 
-#[test]
-fn a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed() {
-    let fixture = Fixture::healthy("cas-lock");
-    let planted = plant_prepared_fast(&fixture);
+fn plant_integration_lock(fixture: &Fixture, content: &[u8]) -> PathBuf {
     let lock = fixture
         .git_dir
-        .join(fixture.started.integration_ref.as_str())
-        .with_extension("lock");
-    crate::workspace_manager::fixture::write_file(&lock, b"");
+        .join(format!("{}.lock", fixture.started.integration_ref.as_str()));
+    crate::workspace_manager::fixture::write_file(&lock, content);
+    lock
+}
+
+fn assert_publication_completed(fixture: &Fixture, planted: &PlantedTransaction, lock: &Path) {
+    assert!(
+        !lock.exists(),
+        "the reclaimed lock is gone: {}",
+        lock.display()
+    );
+    assert_eq!(
+        ref_target(fixture, fixture.started.integration_ref.as_str()).as_deref(),
+        Some(planted.commit.as_str()),
+        "the compare-and-swap moved the integration ref to the proposal"
+    );
+    assert_eq!(
+        merged_sequences(fixture),
+        vec![0],
+        "and task_merged was appended once"
+    );
+}
+
+#[test]
+fn an_empty_ref_lock_left_by_a_killed_compare_and_swap_is_reclaimed_and_the_publication_completes()
+{
+    let fixture = Fixture::healthy("cas-lock-empty");
+    let planted = plant_prepared_fast(&fixture);
+    let lock = plant_integration_lock(&fixture, b"");
+
+    let harness = harness();
+    resume_with_real_refs(&fixture, &harness).expect(
+        "the resume reclaims the lock its own killed write left and completes the publication",
+    );
+    assert_eq!(
+        cas_integration_entries(&harness),
+        1,
+        "one compare-and-swap, at its site"
+    );
+    assert_publication_completed(&fixture, &planted, &lock);
+}
+
+#[test]
+fn a_ref_lock_naming_the_authorized_proposal_is_reclaimed_with_or_without_its_newline() {
+    for (tag, newline) in [("cas-lock-named", "\n"), ("cas-lock-named-cut", "")] {
+        let fixture = Fixture::healthy(tag);
+        let planted = plant_prepared_fast(&fixture);
+        let lock = plant_integration_lock(
+            &fixture,
+            format!("{}{newline}", planted.commit.as_str()).as_bytes(),
+        );
+        resume_with_real_refs(&fixture, &harness())
+            .unwrap_or_else(|error| panic!("{tag}: the resume did not complete: {error}"));
+        assert_publication_completed(&fixture, &planted, &lock);
+    }
+}
+
+#[test]
+fn a_ref_lock_naming_another_object_is_left_and_refuses_resumably_until_removed() {
+    let fixture = Fixture::healthy("cas-lock-foreign");
+    let planted = plant_prepared_fast(&fixture);
+    let lock = plant_integration_lock(
+        &fixture,
+        format!("{}\n", fixture.base_sha.as_str()).as_bytes(),
+    );
     let before = fixture.log_bytes();
 
     let locked = harness();
     let text = message(
         &resume_with_real_refs(&fixture, &locked)
-            .expect_err("Git refuses the swap while the lock file exists"),
+            .expect_err("a lock naming a value this swap would not write is not the engine's"),
+    );
+    assert!(
+        text.contains("names a value this write would not produce"),
+        "the refusal says why the lock was left: {text}"
     );
     assert!(
         text.contains("integration.lock"),
-        "the refusal names the lock Git could not take: {text}"
+        "and names the lock: {text}"
     );
     assert_eq!(
         cas_integration_entries(&locked),
@@ -10353,19 +10396,92 @@ fn a_ref_lock_left_by_a_killed_compare_and_swap_refuses_resumably_until_removed(
         before,
         "nothing was appended: resumable"
     );
-    assert!(
-        lock.exists(),
-        "recovery deleted a lock file no residue class authorizes it to"
-    );
+    assert!(lock.exists(), "the lock was left in place for an operator");
 
     crate::workspace_manager::fixture::remove_file(&lock);
     resume_with_real_refs(&fixture, &harness())
         .expect("with the lock gone the authorized publication completes");
-    assert_eq!(merged_sequences(&fixture), vec![0]);
+    assert_publication_completed(&fixture, &planted, &lock);
+}
+
+#[test]
+fn a_ref_lock_on_a_packed_integration_ref_is_left_and_refuses_resumably_until_removed() {
+    let fixture = Fixture::healthy("cas-lock-packed");
+    let planted = plant_prepared_fast(&fixture);
+    crate::workspace_manager::fixture::git(&fixture.repo_root, &["pack-refs", "--all"]);
+    assert!(
+        !fixture
+            .git_dir
+            .join(fixture.started.integration_ref.as_str())
+            .exists(),
+        "pack-refs packed the integration ref and pruned its loose file"
+    );
+    let lock = plant_integration_lock(&fixture, b"");
+    let before = fixture.log_bytes();
+
+    let text = message(
+        &resume_with_real_refs(&fixture, &harness())
+            .expect_err("a lock on a packed ref may be a prune's, and the repository cannot say"),
+    );
+    assert!(
+        text.contains("the ref is in packed-refs"),
+        "the refusal says why the lock was left: {text}"
+    );
     assert_eq!(
         ref_target(&fixture, fixture.started.integration_ref.as_str()).as_deref(),
-        Some(planted.commit.as_str())
+        Some(fixture.base_sha.as_str()),
+        "the ref is unchanged, read from the packed file"
     );
+    assert_eq!(
+        fixture.log_bytes(),
+        before,
+        "nothing was appended: resumable"
+    );
+    assert!(lock.exists(), "the lock was left in place");
+
+    crate::workspace_manager::fixture::remove_file(&lock);
+    resume_with_real_refs(&fixture, &harness())
+        .expect("with the lock gone the swap writes the loose ref over the packed copy");
+    assert_publication_completed(&fixture, &planted, &lock);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_surviving_ref_writer_of_the_dead_coordinator_refuses_the_resume_until_it_exits() {
+    let fixture = Fixture::healthy("cas-lock-live-writer");
+    let planted = plant_prepared_fast(&fixture);
+    let lock = plant_integration_lock(&fixture, b"");
+    let mut writer = crate::workspace_manager::fixture::spawn_ready_helper(
+        "rundir::tests::cleanup_hold_child",
+        &[("UPSTROKE_TEST_CLEANUP_DIR", fixture.public().as_os_str())],
+    );
+    writer
+        .await_line("held", Duration::from_secs(30))
+        .or_fail("the writer never took its hold");
+    let before = fixture.log_bytes();
+
+    let text = message(
+        &resume_with_real_refs(&fixture, &harness())
+            .expect_err("the resume is refused while a writer of the run is alive"),
+    );
+    assert!(
+        text.contains("still has a process of its own alive"),
+        "the refusal is the worktree lease's observation of the run's cleanup lease: {text}"
+    );
+    assert!(
+        lock.exists(),
+        "nothing reclaimed a lock its writer may still be about to rename"
+    );
+    assert_eq!(
+        fixture.log_bytes(),
+        before,
+        "nothing was appended: resumable"
+    );
+
+    drop(writer);
+    resume_with_real_refs(&fixture, &harness())
+        .expect("once the writer is gone the lock is stale and the publication completes");
+    assert_publication_completed(&fixture, &planted, &lock);
 }
 
 #[test]

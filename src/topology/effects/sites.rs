@@ -1155,8 +1155,9 @@ pub enum LockSite {
     /// Creating the `upstroke-worktree.lock` file itself (R25), which spans runs
     /// and is never removed by one.
     CreateWorktreeLockFile,
-    /// Observing a surviving reaper's shared cleanup hold (R28). Never owned,
-    /// never reset; read-only.
+    /// Observing a surviving reaper's shared cleanup hold (R28), or a
+    /// surviving engine `git update-ref` child's, which holds the same lease
+    /// the same way. Never owned, never reset; read-only.
     ObserveCleanupHold,
 }
 
