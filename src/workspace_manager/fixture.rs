@@ -236,6 +236,13 @@ impl Fixture {
         let side = git(&base, &["rev-parse", "HEAD"]);
         git(&base, &["checkout", "-q", "main"]);
 
+        // The run's public directory, where `RunLock::acquire` would have
+        // created the cleanup lease a coordinator's ref writes hold
+        // (`rundir::hold_cleanup_lease_for_child`). No run lock is taken over
+        // this fixture, so the directory is made here for the lease file to
+        // land in, exactly where the engine's own run directory puts it.
+        fs::create_dir_all(crate::rundir::public_dir(&base, RUN_ID))
+            .expect("the run's public directory");
         let manager =
             WorkspaceManager::derive(&base, &private, RUN_ID, "inc-1").expect("derive the manager");
         Self {
@@ -418,6 +425,33 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
         command.env(key, value);
     }
     command.status().expect("spawn the kill child")
+}
+
+/// Run this test binary again, `--exact --ignored --nocapture`, with `env` set
+/// and its stdout piped, adopted by a [`readiness::Producer`]: the caller waits
+/// for the line the helper prints once it is ready, and the child is
+/// terminated, reaped and its reader joined when the producer drops, however
+/// the caller's scope ends.
+///
+/// For the suites under `src/engine/topology/**`, where `clippy.toml` denies
+/// `std::process::Command` to tests as well as production and which therefore
+/// cannot spawn a helper of their own.
+pub(crate) fn spawn_ready_helper(
+    test: &str,
+    env: &[(&str, &OsStr)],
+) -> crate::agent::proc::test_support::readiness::Producer {
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
+        .args(["--exact", test, "--ignored", "--nocapture"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    crate::agent::proc::test_support::readiness::Producer::adopt(
+        command.spawn().expect("spawn the ready helper"),
+    )
 }
 
 // -----------------------------------------------------------------------

@@ -454,7 +454,14 @@ funnel = [
     "write_question_payload",
     "write_report",
 ]
-effectful = []
+effectful = [
+    # Opens the run's cleanup lease, takes a shared `flock` on it and arranges
+    # for the next child the `Command` spawns to inherit that hold (R28). Takes
+    # no site of its own: it is called inside the Ref funnel's site-taking
+    # primitives in src/workspace_manager.rs, for the lifetime of each
+    # `git update-ref` child, and denied to every other caller in clippy.toml.
+    "hold_cleanup_lease_for_child",
+]
 effectful_unnameable = [
     "is_held",
     "take",
@@ -1544,6 +1551,7 @@ not_an_effect = [
     "F_GETFL",
     "F_GETLK",
     "F_SETFL",
+    "F_SETFD",
     "F_SETLK",
     "F_SETPIPE_SZ",
     "F_UNLCK",

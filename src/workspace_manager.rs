@@ -109,6 +109,15 @@ use crate::util::{DurabilityLedger, DurableStep};
 /// restating it.
 pub const NO_REPLACEMENT_OBJECTS: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1");
 
+/// The root of every run's ref namespace: a run's refs live under
+/// `refs/upstroke/runs/<run-id>/`, and the engine writes nothing else there.
+///
+/// Spelled once, here, because two readers depend on it being one spelling:
+/// the engine's ref naming (`engine::topology::candidate` re-exports it) and
+/// [`WorkspaceManager::reclaim_own_ref_lock`], which reclaims a Git lock file
+/// only under the run's own namespace.
+pub const RUN_REF_ROOT: &str = "refs/upstroke/runs";
+
 // ---------------------------------------------------------------------------
 // Hooks
 // ---------------------------------------------------------------------------
@@ -329,6 +338,64 @@ pub enum Refusal {
         role: &'static str,
         /// The value as it was offered.
         value: String,
+    },
+
+    /// A `<ref>.lock` under the run's own namespace whose content names an
+    /// object this write would not produce. Git writes the new object id into
+    /// the lock before the rename that publishes it, so the interrupted writer
+    /// was writing something else, and whoever it was the lock is not this
+    /// engine's to reclaim ([`WorkspaceManager::reclaim_own_ref_lock`]).
+    #[error(
+        "refusing to write `{refname}`: Git's lock file {} exists and names a value this write \
+         would not produce, so it is not the residue of an engine write of this ref; it is left in \
+         place for an operator, and the write is resumable once it is gone",
+        .lock.display()
+    )]
+    RefLockNamesAnotherWrite {
+        /// The ref whose write was refused.
+        refname: String,
+        /// The lock file, left as it was found.
+        lock: PathBuf,
+    },
+
+    /// A `<ref>.lock` on a ref that `packed-refs` also holds. `git pack-refs
+    /// --prune` takes exactly this lock, after committing the packed copy, for
+    /// the instant in which it deletes the loose ref; with the ref packed,
+    /// nothing the repository records separates a prune holding the lock now
+    /// from an engine writer that died holding it, so it is left
+    /// ([`WorkspaceManager::reclaim_own_ref_lock`]).
+    #[error(
+        "refusing to write `{refname}`: Git's lock file {} exists and the ref is in packed-refs, \
+         so a `git pack-refs --prune` may hold the lock at this instant and nothing the repository \
+         records says otherwise; it is left in place for an operator, and the write is resumable \
+         once it is gone",
+        .lock.display()
+    )]
+    RefLockOnPackedRef {
+        /// The ref whose write was refused.
+        refname: String,
+        /// The lock file, left as it was found.
+        lock: PathBuf,
+    },
+
+    /// After a reclaimed lock, the compare-and-swap completed and
+    /// `packed-refs` now carries the ref at another value: a `pack-refs`
+    /// committed between the reclaim's read and the swap, and its prune may
+    /// remove the loose ref the swap wrote. The swap is therefore not
+    /// recorded; the next resume reads the ref as it then stands
+    /// ([`WorkspaceManager::compare_and_swap_ref`]).
+    #[error(
+        "`{refname}` was swapped to {new} after its lock file was reclaimed, and packed-refs now \
+         holds it at {packed}: a `git pack-refs` ran during the reclaim and its prune may remove \
+         the loose ref, so the publication is not recorded; the next resume reads the ref again"
+    )]
+    RefRepackedDuringReclaim {
+        /// The ref that was swapped.
+        refname: String,
+        /// The value the swap wrote.
+        new: String,
+        /// The value packed-refs holds.
+        packed: String,
     },
 
     /// A value offered as an [`ObjectId`] that is not one: not a full
@@ -2728,18 +2795,30 @@ impl WorkspaceManager {
         refuse_new(refname, new)?;
         funnel(hooks, EffectSiteId::Ref(site), || {
             self.revalidate_acted_through(Primitive::CreateRef, None, None)?;
+            self.reclaim_own_ref_lock(site, refname, Some(new))?;
             self.update_ref(&["--no-deref", refname, new, ""])
         })
     }
 
     /// `Ref.CompareAndSwapIntegration`: expected-old, `--no-deref`.
     ///
+    /// A lock file a killed engine write of this ref left is reclaimed first
+    /// ([`Self::reclaim_own_ref_lock`]), and a swap that followed such a
+    /// reclaim is held to `packed-refs` afterwards: if the file now carries the
+    /// ref at anything but `new`, a `pack-refs` committed during the reclaim
+    /// and its prune may remove the loose ref the swap wrote, so the swap is
+    /// refused rather than recorded and the next resume reads the ref again.
+    /// A swap that reclaimed nothing held Git's lock throughout and needs no
+    /// such check.
+    ///
     /// # Errors
     ///
     /// [`Refusal::SymbolicRef`] or [`Refusal::CheckedOutRef`];
     /// [`Refusal::MalformedObjectId`] or [`Refusal::NullNew`] for `new`;
     /// [`Refusal::MalformedObjectId`] or [`Refusal::NullExpectedOld`] for
-    /// `old`; or a Git error when the old value does not match.
+    /// `old`; [`Refusal::RefLockNamesAnotherWrite`],
+    /// [`Refusal::RefLockOnPackedRef`] or [`Refusal::RefRepackedDuringReclaim`]
+    /// around a lock file; or a Git error when the old value does not match.
     pub fn compare_and_swap_ref(
         &self,
         hooks: &mut dyn EffectHooks,
@@ -2753,7 +2832,12 @@ impl WorkspaceManager {
         refuse_expected_old(refname, old)?;
         funnel(hooks, EffectSiteId::Ref(site), || {
             self.revalidate_acted_through(Primitive::CompareAndSwapRef, None, None)?;
-            self.update_ref(&["--no-deref", refname, new, old])
+            let reclaimed = self.reclaim_own_ref_lock(site, refname, Some(new))?;
+            self.update_ref(&["--no-deref", refname, new, old])?;
+            if reclaimed.is_some() {
+                self.refuse_if_repacked_elsewhere(refname, new)?;
+            }
+            Ok(())
         })
     }
 
@@ -2774,6 +2858,7 @@ impl WorkspaceManager {
         refuse_expected_old(refname, old)?;
         funnel(hooks, EffectSiteId::Ref(site), || {
             self.revalidate_acted_through(Primitive::DeleteRef, None, None)?;
+            self.reclaim_own_ref_lock(site, refname, None)?;
             self.update_ref(&["--no-deref", "-d", refname, old])
         })
     }
@@ -2905,11 +2990,182 @@ impl WorkspaceManager {
         Ok(())
     }
 
+    /// `git update-ref <args>` in the base, with the child holding the run's
+    /// cleanup lease (R28) for as long as it lives.
+    ///
+    /// The lease is what makes a lock file this child leaves reclaimable
+    /// ([`Self::reclaim_own_ref_lock`], fact 1): a resume is refused at its
+    /// run-lock acquisition while any holder of the lease is alive, so by the
+    /// time a resume writes a ref, no writer of the run it resumes can still
+    /// be inside `git update-ref`. The hold is the child's: taken before the
+    /// spawn, inherited across it, and the copy this process keeps is dropped
+    /// once the child has exited, so it says "a ref write of this run is in
+    /// flight" and nothing about this coordinator.
     fn update_ref(&self, args: &[&str]) -> Result<(), UpstrokeError> {
         let mut argv = vec![OsString::from("update-ref")];
         argv.extend(args.iter().map(OsString::from));
-        self.git_ok(&self.base, &argv)?;
-        Ok(())
+        self.revalidate_hooks_path()?;
+        let mut command = self.command(&self.base, &argv);
+        let _lease = crate::rundir::hold_cleanup_lease_for_child(
+            &mut command,
+            &crate::rundir::public_dir(&self.base, &self.run_id),
+        )?;
+        let output = command.output().map_err(|error| UpstrokeError::Git {
+            message: format!("failed to run git: {error}"),
+        })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(git_failure(&self.base, &argv, &output))
+        }
+    }
+
+    /// `RUN_REF_ROOT/<run-id>/`: the prefix every ref of this run lives under.
+    fn run_ref_namespace(&self) -> String {
+        format!("{RUN_REF_ROOT}/{}/", self.run_id)
+    }
+
+    /// Where Git's files backend keeps the lock of a loose ref under the
+    /// common dir: `<common git dir>/<refname>.lock`. The name is spelt out
+    /// rather than built with `with_extension`, which would replace a dot in
+    /// the ref's last component.
+    fn ref_lock_path(&self, refname: &str) -> PathBuf {
+        self.common_git_dir.join(format!("{refname}.lock"))
+    }
+
+    /// Reclaim the `<refname>.lock` a killed engine write left, when the
+    /// repository proves it is this engine's and stale; `Some(path)` names what
+    /// was removed, `None` that there was nothing to reclaim.
+    ///
+    /// Git takes `<ref>.lock` for the whole of a ref write and removes it by
+    /// the rename that publishes the ref, so a writer killed inside that window
+    /// leaves the file, and every later write of the ref refuses on it until
+    /// the file is gone (`PR8-CRASH-002`). The lock file records nothing about
+    /// who created it, so the proof is assembled from facts this process holds
+    /// or the repository records -- never from a clock, and never from a
+    /// process table:
+    ///
+    /// 1. **No writer of this run is alive.** Every `update-ref` this manager
+    ///    runs holds the run's cleanup lease for its lifetime
+    ///    ([`Self::update_ref`]); a resume is refused at run-lock acquisition
+    ///    while that lease is held, and this coordinator's own writes are
+    ///    waited on. On Windows the coordinator's ambient kill-on-close job
+    ///    ends its children with it (INV-18).
+    /// 2. **The ref is the run's own.** The two integration sites write the
+    ///    ref `run_started` recorded as the run's integration ref, which
+    ///    `DESIGN.md` §26 treats as the run's: a head the log did not put
+    ///    there is foreign integration state and is refused, never adopted.
+    ///    Every other Ref site writes under the run's namespace,
+    ///    `RUN_REF_ROOT/<run-id>/`, which nothing but this engine writes
+    ///    (`refuse_unexpected_refs`), and a name offered to one of those sites
+    ///    from outside it is left exactly as it was before this function
+    ///    existed, Git refusing on it as before.
+    /// 3. **The ref is not in `packed-refs`.** `git pack-refs --prune` is the
+    ///    one Git command that takes another ref's lock: it packs, commits the
+    ///    packed file, and only then locks each loose ref it deletes. A ref
+    ///    absent from the packed file read *after* the lock was seen has no
+    ///    prune over it; one present there may, and is refused
+    ///    ([`Refusal::RefLockOnPackedRef`]).
+    /// 4. **The lock names nothing, or exactly what this write writes.** Git
+    ///    writes the new object id into the lock before the rename and nothing
+    ///    into a deletion's lock; a lock naming anything else belongs to
+    ///    another write and is refused ([`Refusal::RefLockNamesAnotherWrite`]).
+    ///
+    /// The reads are in the order written -- the lock, then the packed file --
+    /// because a prune's lock can exist only after its packed entry does, so a
+    /// packed file without the ref, read after the lock, rules the prune out.
+    /// `packed-refs.lock` is never touched: it is the repository's, every Git
+    /// process can hold it, and a wrong removal would let a concurrent
+    /// pack-refs publish an empty packed file over every packed ref.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::RefLockNamesAnotherWrite`] or [`Refusal::RefLockOnPackedRef`],
+    /// or an I/O error naming the file that could not be read or removed.
+    fn reclaim_own_ref_lock(
+        &self,
+        site: RefSite,
+        refname: &str,
+        new: Option<&str>,
+    ) -> Result<Option<PathBuf>, UpstrokeError> {
+        let lock = self.ref_lock_path(refname);
+        let content = match read_prefix(&lock, REF_LOCK_READ_BOUND) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(UpstrokeError::Io { path: lock, source }),
+        };
+        let integration = matches!(
+            site,
+            RefSite::CreateIntegration | RefSite::CompareAndSwapIntegration
+        );
+        if !integration && !refname.starts_with(&self.run_ref_namespace()) {
+            return Ok(None);
+        }
+        let named = content.strip_suffix(b"\n").unwrap_or(&content);
+        let ours = named.is_empty() || new.is_some_and(|new| new.as_bytes() == named);
+        if !ours {
+            return Err(Refusal::RefLockNamesAnotherWrite {
+                refname: refname.to_owned(),
+                lock,
+            }
+            .into());
+        }
+        if self.packed_ref_value(refname)?.is_some() {
+            return Err(Refusal::RefLockOnPackedRef {
+                refname: refname.to_owned(),
+                lock,
+            }
+            .into());
+        }
+        match fs::remove_file(&lock) {
+            Ok(()) => Ok(Some(lock)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(UpstrokeError::Io { path: lock, source }),
+        }
+    }
+
+    /// The value `packed-refs` holds for `refname`, or `None` when the file is
+    /// absent or does not list it. Read as Git reads it: the header and peeled
+    /// lines (`#`, `^`) are skipped and every other line is
+    /// `<object id> <refname>`.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error naming the packed file.
+    fn packed_ref_value(&self, refname: &str) -> Result<Option<String>, UpstrokeError> {
+        let path = self.common_git_dir.join("packed-refs");
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(UpstrokeError::Io { path, source }),
+        };
+        Ok(bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| {
+                line.first()
+                    .is_some_and(|first| *first != b'#' && *first != b'^')
+            })
+            .find_map(|line| {
+                let mut fields = line.splitn(2, |byte| *byte == b' ');
+                let oid = fields.next()?;
+                (fields.next()? == refname.as_bytes())
+                    .then(|| String::from_utf8_lossy(oid).into_owned())
+            }))
+    }
+
+    /// After a swap that followed a reclaimed lock: refuse if `packed-refs`
+    /// now carries `refname` at anything but `new`
+    /// ([`Refusal::RefRepackedDuringReclaim`]).
+    fn refuse_if_repacked_elsewhere(&self, refname: &str, new: &str) -> Result<(), UpstrokeError> {
+        match self.packed_ref_value(refname)? {
+            Some(packed) if packed != new => Err(Refusal::RefRepackedDuringReclaim {
+                refname: refname.to_owned(),
+                new: new.to_owned(),
+                packed,
+            }
+            .into()),
+            _ => Ok(()),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4211,17 +4467,7 @@ impl WorkspaceManager {
     fn git_ok(&self, cwd: &Path, args: &[OsString]) -> Result<Vec<u8>, UpstrokeError> {
         let output = self.git(cwd, args)?;
         if !output.status.success() {
-            return Err(UpstrokeError::Git {
-                message: format!(
-                    "git {} failed in {}: {}",
-                    args.iter()
-                        .map(|arg| arg.to_string_lossy().into_owned())
-                        .collect::<Vec<_>>()
-                        .join(" "),
-                    cwd.display(),
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ),
-            });
+            return Err(git_failure(cwd, args, &output));
         }
         Ok(output.stdout)
     }
@@ -5015,6 +5261,37 @@ fn directory_is_empty(path: &Path) -> Result<bool, UpstrokeError> {
             source,
         }),
     }
+}
+
+/// A failed Git command as the error every caller of [`WorkspaceManager::git_ok`]
+/// and [`WorkspaceManager::update_ref`] reports: the argv, the directory, and
+/// what Git said.
+fn git_failure(cwd: &Path, args: &[OsString], output: &Output) -> UpstrokeError {
+    UpstrokeError::Git {
+        message: format!(
+            "git {} failed in {}: {}",
+            args.iter()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(" "),
+            cwd.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+    }
+}
+
+/// The most of a ref lock file [`WorkspaceManager::reclaim_own_ref_lock`]
+/// reads. An object id of either hash length and its newline fit in 65 bytes,
+/// so a prefix this long that is neither empty nor the new value is already
+/// not a lock an engine write left, whatever follows it.
+const REF_LOCK_READ_BOUND: u64 = 256;
+
+/// At most `bound` bytes from the start of `path`.
+fn read_prefix(path: &Path, bound: u64) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(bound).read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// The repository's canonical common git dir.

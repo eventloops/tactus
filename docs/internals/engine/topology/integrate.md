@@ -418,6 +418,14 @@ is INV-09's "CAS before `task_merged`". The pin and the staging worktree
 of a stale publication go afterwards, because both keep the proposal
 reachable until the integration ref does.
 
+A `<ref>.lock` that a killed `update-ref` left on the integration ref is
+the Ref funnel's business, not this function's: `compare_and_swap_ref`
+reclaims it before the swap when the repository proves it is the
+engine's own and stale, and refuses resumably otherwise
+(`WorkspaceManager::reclaim_own_ref_lock`, and `PR8-CRASH-002` for the
+wedge it closes). Seen from here the retry simply completes, or refuses
+with the lock still in place and nothing appended.
+
 ### Errors
 
 A symbolic or checked-out ref, [`Refusal::IntegrationRefAbsent`],

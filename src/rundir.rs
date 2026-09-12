@@ -1181,8 +1181,10 @@ impl WorktreeLock {
             Ok(file) => {
                 // A killed conductor releases the primary worktree lease, but
                 // its Unix cleanup reaper deliberately retains the old run's
-                // cleanup lease until every agent process is gone. Check only
-                // after taking the primary lease, closing the race where the
+                // cleanup lease until every agent process is gone, and so does
+                // a `git update-ref` it spawned, for as long as that child
+                // lives (`hold_cleanup_lease_for_child`). Check only after
+                // taking the primary lease, closing the race where the
                 // conductor dies between a scan and this acquisition.
                 //
                 // `run_dir_names`, not `list_runs`: the reader returns
@@ -1198,7 +1200,7 @@ impl WorktreeLock {
                     release_claim_after_file(Some(file), &claim, || {});
                     return Err(UpstrokeError::Refused {
                         message: format!(
-                            "run `{}` is still cleaning agent processes in worktree {}; refusing overlapping engine ownership",
+                            "run `{}` still has a process of its own alive in worktree {} -- an agent-cleanup reaper, or a Git child writing one of its refs -- and that process holds the run's cleanup lease; refusing overlapping engine ownership",
                             cleaning.file_name().unwrap_or_default().to_string_lossy(),
                             repo_root.display()
                         ),
@@ -1380,6 +1382,93 @@ pub fn observe_cleanup_hold(public: &Path, hooks: &mut dyn RunDirHooks) -> bool 
         // `is_running` treats a lock the OS will not report on.
         true,
     )
+}
+
+/// Make the child a `Command` will spawn hold the run's cleanup lease (R28) for
+/// as long as it lives, and return the descriptor this process keeps until the
+/// child has been spawned.
+///
+/// The lease is the shared `flock` every surviving Unix cleanup reaper holds,
+/// and `RunLock::acquire` probes its exclusive side and refuses the run while
+/// anyone holds it. A Git child that writes a ref holds it the same way, so a
+/// coordinator killed mid-write leaves a child whose liveness the next resume
+/// sees as a kernel fact -- not a guess from a clock or a process table -- and
+/// a lock file that child leaves is reclaimable only once the kernel has
+/// released the lease: `WorkspaceManager::reclaim_own_ref_lock`, fact 1.
+///
+/// **Shared, and blocking.** Shared because several holders may be alive at
+/// once, reapers and this child, and a shared take never conflicts with
+/// another shared hold. Blocking because the only exclusive takers are the two
+/// momentary probes of this module, `cleanup::take` and `cleanup::is_held`,
+/// each of which unlocks in the statement after it locks: a non-blocking take
+/// racing one of them would refuse a ref write over a hold that is already
+/// gone. `EINTR` is retried.
+///
+/// **Inherited by this child only.** `File::open` sets `CLOEXEC`; the
+/// `pre_exec` clears it in the child between `fork` and `exec`, so no other
+/// process this coordinator spawns receives the descriptor. A `fork` without
+/// `exec` in this process -- the Unix reaper -- would inherit it, and the
+/// reaper's own hold on the same file is shared already, so nothing changes.
+///
+/// # Errors
+///
+/// An I/O error naming the lease file. `RunLock::acquire` created it, in a run
+/// directory that exists for every run a coordinator holds.
+#[cfg(unix)]
+pub(crate) fn hold_cleanup_lease_for_child(
+    command: &mut std::process::Command,
+    public: &Path,
+) -> Result<Option<File>, UpstrokeError> {
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::process::CommandExt as _;
+
+    let path = cleanup_lock_file(public);
+    let file = File::options()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|source| UpstrokeError::Io {
+            path: path.clone(),
+            source,
+        })?;
+    loop {
+        // SAFETY: `file` owns a live descriptor, and `flock` takes an integer
+        // and a flag and reads nothing through a pointer.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH) } == 0 {
+            break;
+        }
+        let source = io::Error::last_os_error();
+        if source.kind() != io::ErrorKind::Interrupted {
+            return Err(UpstrokeError::Io { path, source });
+        }
+    }
+    let fd = file.as_raw_fd();
+    // SAFETY: the closure runs in the child between `fork` and `exec` and calls
+    // only `fcntl`, which is async-signal-safe, on the descriptor the child
+    // inherited from this process's open `file`; it allocates nothing and
+    // touches no state of this process.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(Some(file))
+}
+
+/// On Windows the coordinator's ambient kill-on-close Job Object ends every
+/// child with the coordinator (INV-18), so a child cannot outlive the process
+/// whose death a resume follows, and no lease is needed to say so.
+#[cfg(not(unix))]
+pub(crate) fn hold_cleanup_lease_for_child(
+    _command: &mut std::process::Command,
+    _public: &Path,
+) -> Result<Option<File>, UpstrokeError> {
+    Ok(None)
 }
 
 /// Release a process-scoped POSIX lock before another thread can observe the

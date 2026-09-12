@@ -162,6 +162,7 @@ disallowed-methods = [
     { path = "upstroke::util::fsync_file", reason = "UPSTROKE-WRAPPER R21/R18: the file half of the durability barrier; the ledger entry beside it belongs to a site-taking funnel" },
     { path = "upstroke::util::fsync_dir", reason = "UPSTROKE-WRAPPER R21/R18: the directory half of the durability barrier; the ledger entry beside it belongs to a site-taking funnel" },
     { path = "upstroke::util::write_text", reason = "UPSTROKE-WRAPPER: wraps std::fs::write; a topology write goes through a site-taking funnel" },
+    { path = "upstroke::rundir::hold_cleanup_lease_for_child", reason = "UPSTROKE-WRAPPER R28: opens the run's cleanup lease and hands the next child a shared hold on it; only the Ref funnel's site-taking primitives in workspace_manager.rs give a child that hold" },
     { path = "upstroke::util::write_json", reason = "UPSTROKE-WRAPPER: the mechanism sentence's own example; wraps std::fs::write" },
     { path = "upstroke::interaction::write_question", reason = "UPSTROKE-WRAPPER: delegates to rundir::write_question_payload; call the funnel and pass the site" },
     { path = "upstroke::interaction::write_answer", reason = "UPSTROKE-WRAPPER: delegates to the Answer.StageWrite/PublishRename funnels" },
