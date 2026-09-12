@@ -1106,6 +1106,34 @@ queued but ineligible.
 
 `merge_verification_unavailable`.
 
+## `pub struct MergeVerificationUnavailable` › `pub reviews: Vec<ReviewRecord>,`
+
+The review passes this verification paid for before it ended. DESIGN §26
+has all four terminal shapes carrying their usage and cost, and this is the
+one that had nowhere to put it: a park or an infrastructure deferral can
+follow a review that returned a verdict and a bill, and the live account
+charges it as each pass completes. Without the record on the wire a replay
+restored a total without it, and the incarnation after a restart admitted
+integration a ceiling had already refused — the direction is overspending,
+and it compounds once per restart (`PR8-R2-SPEND-REPLAY`).
+
+Only review passes are here, because only review passes cost money: gates
+run locally and their verdicts are evidence rather than spend, and
+`merge_verification_interrupted` stays the unknown-spend terminal §26's
+crash table makes it. The list is what the verification charged, not what it
+judged — a pass that returned unavailable and billed for the tokens it spent
+is in it, and a judgement that never came back does not empty it, because
+`IntegrationCx::verify` carries out what its account was charged rather than
+what a `Judgement` survived to report.
+
+The field is required on the wire, like every other schema-4 payload field
+(`every_required_payload_field_is_refused_when_it_is_absent`). Schema 4 is
+pre-release — no `0.2.0` exists and a run reaches this vocabulary only by
+choosing it — so there is no schema-4 log under a compatibility promise for
+a default to protect. A log written before the field is refused at parse
+rather than folded to a total it cannot account for, which is the safe
+direction for a ceiling.
+
 ## `pub enum UnavailableDefect {`
 
 How an unavailability record disagrees with itself.

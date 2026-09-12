@@ -592,3 +592,38 @@ sequence. An entry the format refuses is reported with the format's own error va
 that value carries what the entry wrote in the field the format refused — a residue detail, a
 resume action, a site or phase name as text — so a hand-edited document's own text can reach a
 reader through that one variant, quoted, never interpreted.
+
+#### The unavailable terminal's spend
+
+Added 2026-09-12 under §13's same-change rule; not part of the verbatim record above. It records
+which of the two readings of "the four terminal shapes carry the complete gate/review records,
+usage/cost" the unavailable terminal implements, now that it can implement either.
+
+`merge_verification_unavailable` carries the review passes its verification charged, in the
+`Vec<ReviewRecord>` shape the prepared and rejected terminals carry inside their verification
+record, and replay charges them by the same addition. This is the requirement above read
+literally, and the alternative — amending the record to say the unavailable terminal carries no
+spend — was rejected: the failure it would make permanent is that a restart forgets what the
+parked and deferred verifications of the incarnation it replaces cost, so every incarnation admits
+integration a ceiling had already refused and the overspend compounds once per restart.
+
+The terminal carries review records and no gate verdicts. A gate is a local process with no
+reported cost, so the sentence's "usage/cost" half is satisfied by the reviews alone; the
+gate-record half of it remains unimplemented for this one terminal and is a reporting gap, not a
+budget one. `merge_verification_interrupted` is unchanged and stays the unknown-spend terminal the
+crash table above makes it: a coordinator that died holding a verification recorded no cost for
+anything it was running.
+
+The spend a terminal records is what its verification *charged*, which is not always what a
+judgement reports. Review passes are charged as each returns; a later pass's snapshot or ledger
+step can fail and take the whole judgement with it, and on an integration that failure settles the
+sequence unavailable rather than ending the command. So the records come from the account that
+charged them rather than from a judgement that may not survive, and the unavailable terminal of a
+verification whose judgement never returned still carries the passes that did.
+
+The field is required, as every schema-4 payload field is. Schema 4 has never shipped in a
+release and a run reaches this vocabulary only by choosing it, so no schema-4 log is under a
+compatibility promise that a defaulted field would be protecting; one written before the field is
+refused at parse rather than folded to a total it cannot account for, which is the safe direction
+for a ceiling. This remains a Class C wire change under the `src/topology/**` freeze and it is the
+whole subject of the pull request that makes it, which is what the classification asks for.

@@ -468,8 +468,9 @@ ceiling is done whatever the branch would have been — and what the
 verification then spends on its reviews is charged, to the
 candidate's task and to the run, before its terminal is appended
 ([`Spend::record_reviews`]; `Spend::replay` reads it back off
-`merge_prepared` and `merge_rejected`), so the run ceiling that admits
-the *next* integration counts every review the last one ran.
+`merge_prepared`, `merge_rejected` and `merge_verification_unavailable`),
+so the run ceiling that admits the *next* integration counts every review
+the last one ran — in this incarnation and in the one that replaces it.
 
 ## `pub fn checkpoint(step: Step) -> Result<Admitted, UpstrokeError> {`
 
@@ -650,9 +651,39 @@ run and to the task.
 ## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `TopologyEventBody::MergePrepared { data } => {`
 
 The integration verifications whose terminal carries the
-review record. An unavailable terminal carries none, so a
-verification that ended in a park or an outage is charged
-live and not here (`pr8-plan.md` R22).
+review record: a publication and a code rejection both embed the
+verification that judged them, and its passes are charged from
+there.
+
+## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `TopologyEventBody::MergeVerificationStarted { data } => {`
+
+The third terminal's task, which the terminal itself does not
+carry. `merge_verification_unavailable` records `sequence` and no
+key ([`TopologyEventBody::key`] answers `None` for it, as it does
+for `merge_verification_interrupted` and `task_merged`), and the
+key its reviews belong to is the candidate the *start* of that
+sequence named. Only one verification is open at a time — the fold
+holds a single transaction and refuses a terminal whose sequence is
+not the open one — so the start immediately preceding the terminal
+is its own, and matching the sequence makes a mispairing
+unrepresentable rather than merely unlikely.
+
+## `pub fn replay(events: &[TopologyEvent]) -> Self {` › `None => spend.record_unattributed_reviews(&data.reviews),`
+
+A terminal this slice gives no start for. The fold cannot produce
+one — it refuses an unavailable record with no open transaction of
+that sequence — so no log that reached a resume arrives here. This
+function is `pub` over an arbitrary slice, though, and the two ways
+of being wrong are not symmetric: attributing the cost to the wrong
+task overstates one ceiling, while dropping it understates the run's,
+which is the overspend this whole path exists to prevent. So the run
+is charged and no task is.
+
+## `impl Spend {` › `fn record_unattributed_reviews(&mut self, reviews: &[crate::events::ReviewRecord]) {`
+
+The run half of a charge with no task to bill. See the `None` arm of
+[`Spend::replay`] for the only caller and why it charges rather than
+skips.
 
 ## `impl Spend {` › `pub fn record_review_cost(&mut self, key: TaskKey, cost_usd: Option<f64>) {`
 

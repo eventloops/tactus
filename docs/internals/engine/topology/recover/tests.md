@@ -3277,6 +3277,33 @@ proposed tree before any reviewer runs.
 The ceiling is checked against `Spend`, so a review an integration ran
 must be charged there, live and on replay of the terminal's record.
 
+## `fn a_paid_review_that_parks_is_charged_live_and_its_cost_replays() {`
+
+`PR8-R2-SPEND-REPLAY` from both ends, inside one incarnation: a 2.50
+review returns needs_human under a 2.20 ceiling, the park is charged
+live, the answered candidate's next integration is refused in the same
+incarnation, the terminal carries the pass, and a replay of the log
+reaches the total the run held rather than the one it started from.
+
+This was the test that pinned the gap. Its last assertion required the
+replayed total to equal the *opening* one and said in its message that
+the day the terminal gained its record the assertion would fail and the
+ledger row would close. It did, and it now asserts the closing total.
+
+## `fn the_cost_of_a_parked_verification_still_refuses_the_next_integration_after_a_restart() {`
+
+The same finding's harm, which is not a number but a decision, across the
+restart that is the whole of it. One incarnation parks the paid
+verification and answers it; a second resumes the log it wrote and must
+refuse the integration the first one refused. Withdraw the replay of the
+terminal's reviews and the second incarnation reports `Integrated`
+instead — the spend assertion sits last precisely so the failure names
+the decision and not the arithmetic behind it.
+
+Two incarnations because one cannot witness this: the live account holds
+the cost inside an incarnation whatever the log says, so any assertion
+made without crossing a resume passes with the terminal empty.
+
 ## `fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {`
 
 R13: the loop ingests an answer to a verification-park question —
@@ -3594,9 +3621,15 @@ the loop's next admission — in this same incarnation, with no restart — has 
 be made against a total that holds it. Charging only on a successful judgement
 return discarded the whole vector with `?` and let another sequence in.
 
-Distinct from `PR8-R2-SPEND-REPLAY`, which is a restart losing costs the frozen
-terminal cannot carry: this one involves no restart, and the cost is known and
-in memory when it is thrown away.
+That was the whole of this test. `PR8-R2-SPEND-REPLAY` was the restart half of
+the same money — the frozen terminal could carry no record, so a resumed run
+replayed a total without it — and closing it reached this arm too, which is the
+one with no judgement to record from. The terminal now carries the pass that
+returned, taken from what the account charged rather than from a judgement that
+did not survive, and the last two assertions hold the terminal's `reviews` and
+the replayed total to it. Withdraw `charged` from the Git-error arm of
+`IntegrationCx::verify` and the terminal comes back `reviews: []` while the live
+total still reads 3.80.
 
 ## `fn a_reviewer_whose_process_never_started_is_a_runner_spawn_failure() {`
 
