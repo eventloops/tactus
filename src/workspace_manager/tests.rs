@@ -32,9 +32,11 @@ use std::collections::BTreeSet;
 // this module's: `src/engine/topology/**` needs them too and cannot reach
 // an effect primitive of its own. See that module for why they moved.
 use super::fixture::{
-    Fixture, assert_replacement_controls_pinned, assert_replacement_refs_are_live, create_dir,
-    died_by_abort, died_by_kill, fan_out_directory, git, git_out, run_kill_child, scratch,
-    without_ambient_replacement_controls, write_file,
+    Fixture, REPLACEMENT_DISABLED_EXIT, REPLACEMENT_WITNESS, ReplacementLiveness,
+    ambient_replacement_controls, assert_replacement_controls_pinned, create_dir, died_by_abort,
+    died_by_kill, environment_without_ambient_replacement_controls, fan_out_directory, git,
+    git_out, replacement_liveness, run_kill_child, run_replacement_witness_child, scratch,
+    without_ambient_replacement_controls, write_file, write_include_path,
 };
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
@@ -78,7 +80,7 @@ use crate::topology::paths::GitPath;
 // their own: what is being asserted is that `HostEnvironment::compose` puts the
 // pair in the vector `HostRunner::run` installs after `env_clear`.
 use crate::agent::ProcessOutput;
-use crate::runner::host::{HostEnvironment, HostRunner, KeyCase};
+use crate::runner::host::{HostEnvironment, HostRunner, KeyCase, ObjectGraph};
 use crate::runner::invocation::{AttemptRole, InvocationId};
 use crate::runner::{CommandSpec, Runner};
 use crate::topology::events::{AttemptNumber, GenerationId};
@@ -5759,8 +5761,38 @@ fn a_full_id_of_the_repositorys_own_format_is_accepted_and_the_head_is_what_git_
 /// raw tree, since the head is unchanged under a tree replacement and a test
 /// that read only the head could not see this. Witnessed failing with the
 /// environment variable removed from `command`: the checkout holds `B`.
+///
+/// **The work is in a neutralised child** (PR #271, round 4), for the reason
+/// [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`] is: the
+/// manager's own `git` children inherit this process's environment, so an
+/// operator's `GIT_NO_REPLACE_OBJECTS=1` -- which is what this pull request
+/// makes upstroke's own gates supply -- would hand this witness the very
+/// protection it exists to prove the manager installs, and the checkout would
+/// hold `A` with the repair removed. The child is where
+/// [`assert_replacement_controls_pinned`] can be stated, and it is stated there
+/// before anything is measured.
 #[test]
 fn a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree() {
+    let status =
+        run_replacement_witness_child("workspace_manager::tests::snapshot_replacement_helper");
+    assert!(
+        status.success(),
+        "the child witnesses an exact snapshot over a replaced tree with every \
+         ambient control over `refs/replace/*` taken away from it, and ended \
+         {status:?}"
+    );
+}
+
+/// Spawned by
+/// [`a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree`].
+#[test]
+#[ignore = "subprocess helper"]
+fn snapshot_replacement_helper() {
+    if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    assert_replacement_controls_pinned("snapshot");
+
     let fixture = Fixture::created("replace-objects");
     let file = fixture.base.join("replaced.txt");
 
@@ -5833,19 +5865,94 @@ fn a_snapshot_ignores_a_replacement_object_and_materialises_the_judged_tree() {
         .expect("Snapshot.Remove + Snapshot.RemoveIntent");
 }
 
-/// A base that does not carry [`NO_REPLACEMENT_OBJECTS`], so a role process
-/// composed from it cannot pass by inheriting the operator's own value.
+/// A base that does not carry [`NO_REPLACEMENT_OBJECTS`] **and carries no other
+/// ambient control over `refs/replace/*` either**, so a role process composed
+/// from it cannot pass by inheriting one.
 ///
 /// `HostEnvironment::from_process` is the production base and `HostRunner::run`
 /// clears the ambient environment before installing what `compose` returned; a
 /// suite that took the process environment unfiltered would be asserting about
 /// whatever the machine running it happened to export.
+///
+/// **Removing one name was not enough, and that is round 3's blocking finding**
+/// (PR #271). Until now this filtered `GIT_NO_REPLACE_OBJECTS` out of
+/// `std::env::vars_os()` and passed everything else through, so mutating
+/// `HostRunner::run` to discard the pair from the composed environment exited
+/// `101` normally and **`0`** under `GIT_CONFIG_COUNT=1
+/// GIT_CONFIG_KEY_0=core.useReplaceRefs GIT_CONFIG_VALUE_0=false` -- measured,
+/// all seven non-ignored `replacement` tests green against unrepaired code. The
+/// base is now [`environment_without_ambient_replacement_controls`] with that
+/// one pair taken out of it, which is the enumeration; the measurement that
+/// does not depend on the enumeration is
+/// [`assert_a_role_process_sees_replacements`].
 fn base_without_replacement_isolation() -> HostEnvironment {
     let case = KeyCase::current();
-    let base: Vec<(OsString, OsString)> = std::env::vars_os()
+    let base: Vec<(OsString, OsString)> = environment_without_ambient_replacement_controls()
+        .into_iter()
         .filter(|(key, _)| !case.same_key(key, std::ffi::OsStr::new(NO_REPLACEMENT_OBJECTS.0)))
         .collect();
     HostEnvironment::with_base(base, case)
+}
+
+/// Refuse to measure the role-process path through a runner whose own role
+/// processes cannot see a replacement in the first place.
+///
+/// [`assert_replacement_controls_pinned`] answers for *this* process, and this
+/// process is not where the claim lives: `HostRunner::run` calls `env_clear`
+/// and installs what `compose` returned, so the only environment a role process
+/// has is the composed one. This probe is that exact runner --
+/// [`base_without_replacement_isolation`], read as [`ObjectGraph::AsReplaced`],
+/// which is the one setting that makes `compose` leave the pair off -- run over
+/// a throwaway repository carrying a replacement. It must read the
+/// **replacing** object. If it reads the recorded one, replacements are dead in
+/// the composed environment and the witness below would read the judged tree
+/// whatever production did.
+///
+/// This is the half that depends on no list of names: an eighteenth mechanism
+/// costs this panic rather than a silent pass.
+fn assert_a_role_process_sees_replacements(tag: &str) {
+    let root = scratch(&format!("role-replacement-live-{tag}"));
+    let repo = root.join("repo");
+    create_dir(&repo);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["config", "user.email", "tests@upstroke.local"]);
+    git(&repo, &["config", "user.name", "upstroke tests"]);
+    git(&repo, &["config", "core.autocrlf", "false"]);
+    git(&repo, &["config", "core.eol", "lf"]);
+
+    write_file(&repo.join("probe.txt"), b"recorded\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "recorded"]);
+    let recorded = git(&repo, &["rev-parse", "HEAD"]);
+
+    write_file(&repo.join("probe.txt"), b"replacing\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "replacing"]);
+    git(&repo, &["replace", &recorded, "HEAD"]);
+    assert_eq!(
+        git(
+            &repo,
+            &["for-each-ref", "--format=%(refname)", "refs/replace/"]
+        ),
+        format!("refs/replace/{recorded}"),
+        "`{tag}`: `git replace` did not write under `refs/replace/`, so this \
+         probe would answer a question it was not asked"
+    );
+
+    let runner = HostRunner::new()
+        .with_environment(base_without_replacement_isolation().reading(ObjectGraph::AsReplaced));
+    let shown = gate_in(&runner, &repo, &["show", &format!("{recorded}:probe.txt")]);
+    assert_eq!(
+        shown.stdout,
+        "replacing\n",
+        "`{tag}`: a role process composed from this base does not honour \
+         `refs/replace/*` at all, so the witness below would read the judged \
+         tree whatever production installed. The enumerated controls this \
+         process carries are {:?}; if none of them explains this, the \
+         enumeration is missing a mechanism and closing it is the fix",
+        ambient_replacement_controls()
+    );
+    let _ = fs::remove_dir_all(&root);
 }
 
 /// One `git` gate, run through the production runner in `workspace`.
@@ -5900,8 +6007,40 @@ fn gate_in(runner: &HostRunner, workspace: &Path, args: &[&str]) -> ProcessOutpu
 /// Witnessed failing with the pair removed from `HostEnvironment::compose`:
 /// `git show` printed `B`, and `git status --porcelain` printed `M
 /// replaced.txt`.
+///
+/// **The work is in a neutralised child, and it states two preconditions**
+/// (PR #271, round 4). Round 3's blocking finding was that this witness -- *the
+/// role-process path, which is the core of the finding* -- was the one the
+/// round-3 neutraliser was never given: mutating `HostRunner::run` to discard
+/// the pair from the composed environment exited `101` normally and **`0`**
+/// under `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.useReplaceRefs
+/// GIT_CONFIG_VALUE_0=false`. The child closes the enumerated mechanisms and
+/// [`assert_replacement_controls_pinned`] states that by name and by
+/// measurement; [`assert_a_role_process_sees_replacements`] then measures the
+/// one thing a list of names cannot reach, through this witness's own runner.
 #[test]
 fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
+    let status =
+        run_replacement_witness_child("workspace_manager::tests::role_process_replacement_helper");
+    assert!(
+        status.success(),
+        "the child witnesses a role process reading the judged tree with every \
+         ambient control over `refs/replace/*` taken away from it, and ended \
+         {status:?}"
+    );
+}
+
+/// Spawned by
+/// [`a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement`].
+#[test]
+#[ignore = "subprocess helper"]
+fn role_process_replacement_helper() {
+    if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+        return;
+    }
+    assert_replacement_controls_pinned("role-process");
+    assert_a_role_process_sees_replacements("role-process");
+
     let fixture = Fixture::created("replace-role-process");
     let file = fixture.base.join("replaced.txt");
 
@@ -5923,10 +6062,15 @@ fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
         &["checkout", "--detach", "--quiet", &judged_commit],
     );
     git(&fixture.base, &["replace", &judged_tree, &other_tree]);
+    // `git replace -l` lists under `GIT_REPLACE_REF_BASE`, so it would answer
+    // `yes` about a namespace nothing reads; name `refs/replace/` itself.
     assert_eq!(
-        git(&fixture.base, &["replace", "-l"]),
-        judged_tree,
-        "the replacement is in place"
+        git(
+            &fixture.base,
+            &["for-each-ref", "--format=%(refname)", "refs/replace/"]
+        ),
+        format!("refs/replace/{judged_tree}"),
+        "the replacement is in place, under the namespace a reader looks in"
     );
 
     let snapshot = fixture
@@ -5972,14 +6116,14 @@ fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
 
 /// Where [`the_neutraliser_defeats_every_ambient_control_it_enumerates`] tells
 /// its probe to do the work, and which of the two questions to answer;
-/// `#[ignore]`-guarded for the reason [`QUIESCENCE_REPLACEMENT`] is.
+/// `#[ignore]`-guarded for the reason [`REPLACEMENT_WITNESS`] is.
 ///
 /// `pinned` is the neutralised leg: the names and then the measurement. `live`
-/// is the raw leg, and it asks **only** the measurement -- a raw leg that also
-/// checked the pinned names would fail for want of the pins whatever the
-/// hostile value did, which would make it no evidence that the row is a
-/// control at all, and so no evidence that the neutralised leg above it means
-/// anything.
+/// is the controlled leg, and it asks **only** the measurement -- a controlled
+/// leg that also checked the pinned names would fail for want of the pins
+/// whatever the hostile value did, which would make it no evidence that the row
+/// is a control at all, and so no evidence that the neutralised leg above it
+/// means anything.
 const REPLACEMENT_CONTROL_PROBE: &str = "UPSTROKE_PR271_REPLACEMENT_CONTROL_PROBE";
 
 /// Whether a row of [`hostile_replacement_environments`] has to be a control on
@@ -5988,14 +6132,39 @@ const REPLACEMENT_CONTROL_PROBE: &str = "UPSTROKE_PR271_REPLACEMENT_CONTROL_PROB
 /// [`Reach::SomeGits`] is not a loophole: the row's neutralised leg is asserted
 /// either way, and a row that is inert on this Git cannot be a masking vector
 /// on this Git. What it admits is that Git changed. The one row that needs it
-/// is the uncounted indexed configuration pair -- a control on git 2.43.0 and
-/// **not** on git 2.55.0, measured on all three CI platforms, which is the
-/// difference that turned this grid red on its first CI run while the box it
-/// was written on stayed green.
+/// is the uncounted indexed configuration pair, and the reason is now measured
+/// rather than assumed -- see that row.
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Reach {
     EveryGit,
     SomeGits,
+}
+
+/// Which of a row's three legs to run.
+///
+/// The two that matter are [`Leg::Controlled`] and [`Leg::Treated`], and they
+/// differ **only** by the row's treatment: both start from the neutralised
+/// environment, both lift exactly the pins that would mask the row, and the
+/// first must be replacement-live. That is what makes the second's failure
+/// attributable to the row (PR #271, round 4). Until now the treated leg took
+/// this process's environment raw, so `GIT_CONFIG_NOSYSTEM=1` exported into the
+/// suite made the `GIT_CONFIG_SYSTEM` row inert and the grid exited `101`
+/// blaming the row; and in the masking direction, an inert treatment
+/// substituted for a real one exited `101` cleanly but **`0`** under an
+/// exported `GIT_NO_REPLACE_OBJECTS=1`, because the grid credited the
+/// environment's own suppression to the row.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Leg {
+    /// Neutralised, the row's masking pins lifted, the row's controlled values
+    /// applied, and **no treatment**. Must be replacement-live.
+    Controlled,
+    /// [`Leg::Controlled`] plus the row's treatment. This is where the row is
+    /// measured to be a control at all.
+    Treated,
+    /// The row's controlled values and treatment applied as an operator's
+    /// environment would have them, and *then* the neutralisation. Must be
+    /// replacement-live: this is the claim the whole grid exists for.
+    Neutralised,
 }
 
 /// One hostile environment per mechanism the enumeration claims to close,
@@ -6006,16 +6175,40 @@ enum Reach {
 /// The last row sets all of them at once, because a neutraliser that closes
 /// each in isolation and leaves one open in combination is the shape this
 /// pull request has already shipped twice.
-type HostileEnvironment = (&'static str, Reach, Vec<(String, OsString)>);
+struct HostileEnvironment {
+    name: &'static str,
+    reach: Reach,
+    /// Pins [`without_ambient_replacement_controls`] installs that would mask
+    /// this row, lifted from the controlled and treated legs alike so the row
+    /// can act at all -- and never from the neutralised leg, which is the one
+    /// asserting those pins win.
+    ///
+    /// Measured, git 2.43.0: `GIT_CONFIG_SYSTEM` is ignored outright while
+    /// `GIT_CONFIG_NOSYSTEM` is set, and `HOME`/`XDG_CONFIG_HOME` are not read
+    /// at all while `GIT_CONFIG_GLOBAL` is. A row whose pin is not lifted is
+    /// not a weaker row, it is no row.
+    lifted: &'static [&'static str],
+    /// What puts the *dimension* this row acts in into a known,
+    /// replacement-live state once its pins are lifted. Applied to the
+    /// controlled leg and to the treated leg.
+    controlled: Vec<(String, OsString)>,
+    /// What makes the row hostile: the only difference between the controlled
+    /// leg and the treated one.
+    treatment: Vec<(String, OsString)>,
+}
 
 fn hostile_replacement_environments(root: &Path) -> Vec<HostileEnvironment> {
     let disables = root.join("disables.cfg");
     write_file(&disables, b"[core]\n\tuseReplaceRefs = false\n");
+    // Written by Git's own configuration writer rather than by `format!`
+    // (PR #271, round 4). A path is not a config value: measured on git
+    // 2.43.0, an unquoted `.display()` of a directory containing `#` is
+    // truncated at the comment character and the row silently stops being a
+    // control, and one containing a backslash is read as an escape -- `git
+    // config --list` over it exits `128`, `bad config line 2`. `git config
+    // --file` quotes the first and doubles the second, and both then resolve.
     let including = root.join("including.cfg");
-    write_file(
-        &including,
-        format!("[include]\n\tpath = {}\n", disables.display()).as_bytes(),
-    );
+    write_include_path(&including, &disables);
     let home = root.join("home");
     write_file(
         &home.join(".gitconfig"),
@@ -6028,72 +6221,143 @@ fn hostile_replacement_environments(root: &Path) -> Vec<HostileEnvironment> {
     );
     let empty_home = root.join("empty-home");
     create_dir(&empty_home);
+    let empty_xdg = root.join("empty-xdg");
+    create_dir(&empty_xdg);
+    // A template directory is the seventeenth mechanism, and it acts at
+    // repository *creation*: `git init` copies this `config` into the new
+    // repository's own, above everything `git init` writes there (measured,
+    // git 2.43.0). Nothing an environment does afterwards can undo it, which
+    // is why the probe's own `git init` runs in the environment under test.
+    let template = root.join("template");
+    write_file(
+        &template.join("config"),
+        b"[core]\n\tuseReplaceRefs = false\n",
+    );
 
     let set = |key: &str, value: &OsStr| (key.to_owned(), value.to_owned());
+    let row = |name: &'static str,
+               reach: Reach,
+               lifted: &'static [&'static str],
+               controlled: Vec<(String, OsString)>,
+               treatment: Vec<(String, OsString)>| HostileEnvironment {
+        name,
+        reach,
+        lifted,
+        controlled,
+        treatment,
+    };
+    // Both file-backed rows below read a `HOME`/`XDG_CONFIG_HOME` pair, and
+    // both legs of each get the same pair: only the one variable under test
+    // differs between them.
+    let neutral_dirs = || {
+        vec![
+            set("HOME", empty_home.as_os_str()),
+            set("XDG_CONFIG_HOME", empty_xdg.as_os_str()),
+        ]
+    };
     let rows: Vec<HostileEnvironment> = vec![
-        (
+        row(
             "GIT_NO_REPLACE_OBJECTS",
             Reach::EveryGit,
+            &[],
+            Vec::new(),
             vec![set("GIT_NO_REPLACE_OBJECTS", OsStr::new("1"))],
         ),
-        (
+        row(
             "an indexed config pair, counted",
             Reach::EveryGit,
+            &[],
+            Vec::new(),
             vec![
                 set("GIT_CONFIG_COUNT", OsStr::new("1")),
                 set("GIT_CONFIG_KEY_0", OsStr::new("core.useReplaceRefs")),
                 set("GIT_CONFIG_VALUE_0", OsStr::new("false")),
             ],
         ),
-        (
+        // `Reach::SomeGits`, and the measurement behind it is corrected here
+        // (PR #271, round 4). The claim this row used to carry -- that a lone
+        // `GIT_CONFIG_KEY_0` takes effect on git 2.43.0 with no count -- was an
+        // artefact of the environment it was measured in: this box's build
+        // wrapper exports `GIT_CONFIG_COUNT=1` with an indexed pair of its own
+        // into every `cargo test`, so the "uncounted" pair was counted. With
+        // the count genuinely lifted, `git config --get core.useReplaceRefs`
+        // exits `1` and prints nothing on git 2.43.0, and exits `0` printing
+        // `false` with the count at `1`. The row is inert on this Git, kept as
+        // `SomeGits` because the pair is real wherever a count reaches it and
+        // the neutralised leg is asserted either way.
+        row(
             "an indexed config pair, uncounted",
             Reach::SomeGits,
+            &["GIT_CONFIG_COUNT"],
+            Vec::new(),
             vec![
                 set("GIT_CONFIG_KEY_0", OsStr::new("core.useReplaceRefs")),
                 set("GIT_CONFIG_VALUE_0", OsStr::new("false")),
             ],
         ),
-        (
+        row(
             "GIT_CONFIG_PARAMETERS",
             Reach::EveryGit,
+            &[],
+            Vec::new(),
             vec![set(
                 "GIT_CONFIG_PARAMETERS",
                 OsStr::new("'core.usereplacerefs'='false'"),
             )],
         ),
-        (
+        row(
             "GIT_CONFIG_GLOBAL",
             Reach::EveryGit,
+            &[],
+            Vec::new(),
             vec![set("GIT_CONFIG_GLOBAL", disables.as_os_str())],
         ),
-        (
+        row(
             "GIT_CONFIG_SYSTEM",
             Reach::EveryGit,
+            &["GIT_CONFIG_NOSYSTEM"],
+            Vec::new(),
             vec![set("GIT_CONFIG_SYSTEM", disables.as_os_str())],
         ),
-        (
+        row(
             "GIT_CONFIG_GLOBAL through include.path",
             Reach::EveryGit,
+            &[],
+            Vec::new(),
             vec![set("GIT_CONFIG_GLOBAL", including.as_os_str())],
         ),
-        ("HOME", Reach::EveryGit, vec![set("HOME", home.as_os_str())]),
-        (
+        row(
+            "HOME",
+            Reach::EveryGit,
+            &["GIT_CONFIG_GLOBAL"],
+            neutral_dirs(),
+            vec![set("HOME", home.as_os_str())],
+        ),
+        row(
             "XDG_CONFIG_HOME",
             Reach::EveryGit,
-            vec![
-                set("HOME", empty_home.as_os_str()),
-                set("XDG_CONFIG_HOME", xdg.as_os_str()),
-            ],
+            &["GIT_CONFIG_GLOBAL"],
+            neutral_dirs(),
+            vec![set("XDG_CONFIG_HOME", xdg.as_os_str())],
         ),
-        (
+        row(
             "GIT_REPLACE_REF_BASE",
             Reach::EveryGit,
+            &[],
+            Vec::new(),
             vec![set("GIT_REPLACE_REF_BASE", OsStr::new("refs/elsewhere/"))],
+        ),
+        row(
+            "GIT_TEMPLATE_DIR",
+            Reach::EveryGit,
+            &[],
+            Vec::new(),
+            vec![set("GIT_TEMPLATE_DIR", template.as_os_str())],
         ),
     ];
     let mut everything: Vec<(String, OsString)> = rows
         .iter()
-        .flat_map(|(_, _, pairs)| pairs.iter().cloned())
+        .flat_map(|row| row.treatment.iter().cloned())
         .collect();
     // `GIT_CONFIG` is enumerated and neutralised but is not a row of its own,
     // because it is not a control over what a Git child *reads*: measured, a
@@ -6105,16 +6369,24 @@ fn hostile_replacement_environments(root: &Path) -> Vec<HostileEnvironment> {
     // survive it beside everything else.
     everything.push(set("GIT_CONFIG", disables.as_os_str()));
     let mut rows = rows;
-    rows.push(("all of them at once", Reach::EveryGit, everything));
+    rows.push(row(
+        "all of them at once",
+        Reach::EveryGit,
+        // Every pin any row lifts, because the combination is every row.
+        &[
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_NOSYSTEM",
+            "GIT_CONFIG_GLOBAL",
+        ],
+        neutral_dirs(),
+        everything,
+    ));
     rows
 }
 
-/// Run [`replacement_control_probe_helper`] under `hostile`, neutralised or
-/// not, and return its exit status.
-fn run_replacement_control_probe(
-    hostile: &[(String, OsString)],
-    neutralised: bool,
-) -> std::process::ExitStatus {
+/// Run [`replacement_control_probe_helper`] as one leg of `row`, and return its
+/// exit status.
+fn run_replacement_control_probe(row: &HostileEnvironment, leg: Leg) -> std::process::ExitStatus {
     let mut command = Command::new(std::env::current_exe().expect("this test binary"));
     command
         .args([
@@ -6125,68 +6397,135 @@ fn run_replacement_control_probe(
         ])
         .env(
             REPLACEMENT_CONTROL_PROBE,
-            if neutralised { "pinned" } else { "live" },
+            if leg == Leg::Neutralised {
+                "pinned"
+            } else {
+                "live"
+            },
         )
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    for (key, value) in hostile {
-        command.env(key, value);
-    }
-    if neutralised {
+    if leg == Leg::Neutralised {
+        // The operator's environment first, the neutralisation second: the
+        // neutralisation is what this leg asserts wins.
+        for (key, value) in row.controlled.iter().chain(&row.treatment) {
+            command.env(key, value);
+        }
         without_ambient_replacement_controls(&mut command);
+    } else {
+        // The controlled base first -- which is where this leg's baseline comes
+        // from -- then the pins this row would otherwise be masked by, then the
+        // row's own values.
+        without_ambient_replacement_controls(&mut command);
+        for key in row.lifted {
+            command.env_remove(key);
+        }
+        for (key, value) in &row.controlled {
+            command.env(key, value);
+        }
+        if leg == Leg::Treated {
+            for (key, value) in &row.treatment {
+                command.env(key, value);
+            }
+        }
     }
     command.status().expect("spawn the control probe")
 }
 
+/// A probe leg's exit status, said in a sentence a CI log's reader can use.
+fn probe_outcome(status: std::process::ExitStatus) -> String {
+    match status.code() {
+        Some(0) => "replacements live".to_owned(),
+        Some(code) if code == REPLACEMENT_DISABLED_EXIT => {
+            "a Git child did not honour `refs/replace/*`".to_owned()
+        }
+        Some(code) => format!("the probe itself failed, exit {code}"),
+        None => format!("the probe was killed by a signal ({status:?})"),
+    }
+}
+
 /// Every name in the enumeration earns its place, and the measurement catches
-/// what no name list reaches (PR #271, round 3).
+/// what no name list reaches (PR #271, rounds 3 and 4).
 ///
 /// The neutralisation is only *exercised* when the control it removes is
 /// actually set, and CI sets none of them -- so without this grid a name could
 /// be dropped from [`without_ambient_replacement_controls`] and nothing would
 /// go red until a reviewer exported it, which is exactly how rounds 1 and 2
-/// were found. Each row is run twice: neutralised, where the probe must still
-/// see `refs/replace/*` honoured, and raw, where -- unless the row is
-/// [`Reach::SomeGits`] -- it must not. The raw leg asks the measurement alone
-/// -- see [`REPLACEMENT_CONTROL_PROBE`] -- so what it establishes is that the
-/// row really is a control on the Git running this suite, which is what keeps
-/// the neutralised leg from being vacuous. Every row is reported rather than
-/// the first failing one, because a grid that stops at row 3 tells a CI run's
-/// reader nothing about rows 4 to 11.
+/// were found.
 ///
-/// `HOME` and `XDG_CONFIG_HOME` are in the grid and in **neither** name list:
-/// they are closed by pinning `GIT_CONFIG_GLOBAL`, and their raw legs fail in
-/// [`assert_replacement_refs_are_live`] rather than in the name check. That is
-/// the half of the closure that does not depend on the enumeration being
-/// complete, and this is where it is witnessed doing the work.
+/// **Each row is run three times, and the first run is why the other two mean
+/// anything** (round 4). [`Leg::Controlled`] establishes that the row's own
+/// dimension is replacement-live before the treatment goes in;
+/// [`Leg::Treated`] adds the treatment and nothing else, so a failure there is
+/// the row's; [`Leg::Neutralised`] sets the hostile values as an operator would
+/// and requires the neutralisation to win. A treated leg that ends in anything
+/// but `0` or [`REPLACEMENT_DISABLED_EXIT`] is a **setup failure** and is
+/// reported as one rather than counted as suppression -- a malformed
+/// configuration file makes `git` exit `128`, and a grid that reads that as
+/// evidence is a grid that passes for the wrong reason.
+///
+/// Every row is reported rather than the first failing one, because a grid that
+/// stops at row 3 tells a CI run's reader nothing about rows 4 to 12.
+///
+/// `HOME`, `XDG_CONFIG_HOME` and `GIT_TEMPLATE_DIR` are in the grid and in
+/// **neither** name list: the first two are closed by pinning
+/// `GIT_CONFIG_GLOBAL`, the third by a name of its own in
+/// `REPLACEMENT_CONTROLS_REMOVED`, and their treated legs fail in the
+/// measurement rather than in the name check. That is the half of the closure
+/// that does not depend on the enumeration being complete, and this is where it
+/// is witnessed doing the work.
 #[test]
 fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
     let root = scratch("replacement-controls");
     let rows = hostile_replacement_environments(&root);
     assert_eq!(
         rows.len(),
-        11,
+        12,
         "one row per mechanism, plus the combination"
     );
 
     let mut wrong: Vec<String> = Vec::new();
     let mut inert: Vec<&str> = Vec::new();
-    for (name, reach, hostile) in &rows {
-        if !run_replacement_control_probe(hostile, true).success() {
+    for row in &rows {
+        let name = row.name;
+        let controlled = run_replacement_control_probe(row, Leg::Controlled);
+        let attributable = controlled.code() == Some(0);
+        if !attributable {
             wrong.push(format!(
-                "`{name}` survived the neutralisation: a Git child of the probe \
-                 did not honour `refs/replace/*`"
+                "`{name}`: the controlled baseline for this row is not \
+                 replacement-live -- {} -- so nothing the treatment does below \
+                 is attributable to the treatment",
+                probe_outcome(controlled)
             ));
         }
-        if run_replacement_control_probe(hostile, false).success() {
-            if *reach == Reach::EveryGit {
-                wrong.push(format!(
-                    "`{name}` is not a control at all on this Git: the probe \
-                     passed with it set and nothing taken away, so the \
-                     neutralised leg above it proves nothing"
-                ));
+
+        let treated = run_replacement_control_probe(row, Leg::Treated);
+        match treated.code() {
+            Some(0) => {
+                if row.reach == Reach::EveryGit && attributable {
+                    wrong.push(format!(
+                        "`{name}` is not a control at all on this Git: the probe \
+                         passed with it set over a controlled baseline, so the \
+                         neutralised leg above it proves nothing"
+                    ));
+                }
+                inert.push(name);
             }
-            inert.push(name);
+            Some(code) if code == REPLACEMENT_DISABLED_EXIT => {}
+            _ => wrong.push(format!(
+                "`{name}`: the treated leg neither observed a live read nor a \
+                 suppressed one -- {} -- and a setup that never ran is not \
+                 evidence that this row suppresses anything",
+                probe_outcome(treated)
+            )),
+        }
+
+        let neutralised = run_replacement_control_probe(row, Leg::Neutralised);
+        if !neutralised.success() {
+            wrong.push(format!(
+                "`{name}` survived the neutralisation: {}",
+                probe_outcome(neutralised)
+            ));
         }
     }
     assert!(
@@ -6218,7 +6557,15 @@ fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
     let root = scratch("git-config-redirect");
     let repo = root.join("repo");
     create_dir(&repo);
-    git(&repo, &["init", "-q", "-b", "main"]);
+    // Neutralised, because `GIT_TEMPLATE_DIR` writes into a repository at
+    // creation and this one's local file is the whole measurement below.
+    let mut init = Command::new("git");
+    init.arg("-C").arg(&repo).args(["init", "-q", "-b", "main"]);
+    without_ambient_replacement_controls(&mut init);
+    assert!(
+        init.status().expect("run git").success(),
+        "the repository this test measures in was never created"
+    );
     let elsewhere = root.join("elsewhere.cfg");
     write_file(&elsewhere, b"");
 
@@ -6236,9 +6583,30 @@ fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
             command.status().expect("run git").success(),
             "the pin itself failed, so neither leg below measures where it landed"
         );
-        let read = git_out(
-            &repo,
-            &["config", "--local", "--get", "core.useReplaceRefs"],
+        // **The read-back is neutralised too, and its exit status is asserted**
+        // (PR #271, round 4). It was not, and that was the same read-back bug
+        // this pull request had already fixed in `gates.rs`: with an ambient
+        // `GIT_CONFIG` pointing anywhere, `git config --local --get` exits
+        // `129` on `only one config file at a time`, prints nothing, and an
+        // observer that reads empty stdout as "the key is absent" reports a pin
+        // that succeeded as a pin that never landed. Measured: this test exited
+        // `101` under `GIT_CONFIG` at an empty file and `0` with it unset. A
+        // silent observer is not a weaker observer, it is a wrong one, and the
+        // rule is every observer's rather than the one a reviewer named.
+        let mut read_back = Command::new("git");
+        read_back
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "--local", "--get", "core.useReplaceRefs"]);
+        without_ambient_replacement_controls(&mut read_back);
+        let read = read_back.output().expect("run git");
+        // `--get` exits `1` when the key is absent, which is an answer about
+        // the repository; anything else means the read never happened.
+        assert!(
+            matches!(read.status.code(), Some(0 | 1)),
+            "the read-back did not answer about the repository: {:?}, {}",
+            read.status.code(),
+            String::from_utf8_lossy(&read.stderr)
         );
         (
             String::from_utf8_lossy(&read.stdout).trim().to_owned(),
@@ -6272,45 +6640,30 @@ fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
 }
 
 /// Spawned by [`the_neutraliser_defeats_every_ambient_control_it_enumerates`].
+///
+/// The `live` arm exits [`REPLACEMENT_DISABLED_EXIT`] rather than panicking,
+/// because *observing* that a treatment disabled replacements is the answer
+/// that leg exists to collect, and a panic would spell it `101` -- the same
+/// code a `git` that never ran gives. Keeping the two apart is half of the
+/// round-4 repair to this grid: a backslash in `TMPDIR` used to make the raw
+/// leg fail at `git config`'s parser, and the grid credited that as evidence
+/// that the row suppressed replacement.
 #[test]
 #[ignore = "subprocess helper"]
 fn replacement_control_probe_helper() {
     match std::env::var_os(REPLACEMENT_CONTROL_PROBE) {
         None => (),
         Some(mode) if mode == *"pinned" => assert_replacement_controls_pinned("control-probe"),
-        Some(_) => assert_replacement_refs_are_live("control-probe"),
+        Some(_) => {
+            // Bound rather than tested inline so the verdict is one value: a
+            // `RefsElsewhere` and a `NotHonoured` are the same answer to the
+            // grid and a different answer to a reader.
+            let verdict = replacement_liveness("control-probe");
+            if verdict != ReplacementLiveness::Live {
+                std::process::exit(REPLACEMENT_DISABLED_EXIT);
+            }
+        }
     }
-}
-
-/// Where [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`]
-/// tells its helper to do the work.
-///
-/// Guarded by a variable for the reason [`abort_probe_helper`] is: the item is
-/// `#[ignore]`, and a run with `--include-ignored` would otherwise execute the
-/// body in a process that still carries `GIT_NO_REPLACE_OBJECTS`, which is the
-/// one environment this witness must never be measured in.
-const QUIESCENCE_REPLACEMENT: &str = "UPSTROKE_PR271_QUIESCENCE_REPLACEMENT";
-
-/// Run this test binary again at `test`, `--exact --ignored`, with **every**
-/// ambient control over `refs/replace/*` taken away from the child, and return
-/// its exit status.
-///
-/// [`run_kill_child`] sets variables; this one takes away the ones that would
-/// make its witness pass for the wrong reason. `Command` inherits the parent's
-/// environment, so a suite run under an exported `GIT_NO_REPLACE_OBJECTS=1` --
-/// which is what this pull request makes upstroke's own gates supply -- would
-/// hand the child the protection the child exists to prove the code installs.
-/// Round 2 removed that one variable and the reviewer reached the same silent
-/// pass through `core.useReplaceRefs=false` instead, so what is removed here is
-/// the enumeration [`without_ambient_replacement_controls`] carries, and the
-/// child measures what is left before it trusts it.
-fn run_child_without_replacement_isolation(test: &str) -> std::process::ExitStatus {
-    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
-    command
-        .args(["--exact", test, "--ignored", "--nocapture"])
-        .env(QUIESCENCE_REPLACEMENT, "1");
-    without_ambient_replacement_controls(&mut command);
-    command.status().expect("spawn the witness child")
 }
 
 /// Quiescence answers about the tree the worktree holds, not about whatever
@@ -6348,9 +6701,8 @@ fn run_child_without_replacement_isolation(test: &str) -> std::process::ExitStat
 /// exit `0` against the repaired code.
 #[test]
 fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
-    let status = run_child_without_replacement_isolation(
-        "workspace_manager::tests::quiescence_replacement_helper",
-    );
+    let status =
+        run_replacement_witness_child("workspace_manager::tests::quiescence_replacement_helper");
     assert!(
         status.success(),
         "the child witnesses quiescence over a replaced tree with every ambient \
@@ -6369,7 +6721,7 @@ fn quiescence_holds_when_the_recorded_tree_carries_a_replacement() {
 #[test]
 #[ignore = "subprocess helper"]
 fn quiescence_replacement_helper() {
-    if std::env::var_os(QUIESCENCE_REPLACEMENT).is_none() {
+    if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
         return;
     }
     assert_replacement_controls_pinned("quiescence");

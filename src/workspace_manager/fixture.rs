@@ -434,30 +434,45 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
 /// `core.useReplaceRefs` exactly as `-c` does; `GIT_CONFIG` redirects
 /// `git config`'s **writes**, so a fixture that pins a key with it set would
 /// pin it in the operator's file and not in its own repository.
+///
+/// `GIT_TEMPLATE_DIR` is the seventeenth mechanism, and the one that says why
+/// the enumeration is no longer what correctness rests on: it was found by a
+/// reviewer within the hour of the previous sixteen being written down.
+/// Measured on git 2.43.0, `git init` copies a template's `config` **into the
+/// new repository**, above everything `git init` itself writes there, so a
+/// template naming `[core] useReplaceRefs = false` decides the question for a
+/// repository the fixture created and never asked -- and it does it at
+/// creation, which no later environment neutralisation can undo. The same
+/// value arrives through `init.templateDir` in a global or system file
+/// (measured), and that half is closed by the two pins below.
 pub(crate) const REPLACEMENT_CONTROLS_REMOVED: &[&str] = &[
     "GIT_NO_REPLACE_OBJECTS",
     "GIT_REPLACE_REF_BASE",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG",
+    "GIT_TEMPLATE_DIR",
 ];
 
 /// Removed by prefix: the indexed configuration pairs, every index of them.
 ///
-/// **Version-dependent, and measured both ways.** On git 2.43.0, with
-/// `GIT_CONFIG_COUNT` *absent*, a lone `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
-/// still takes effect -- which is not what `git-config(1)` describes, and it
-/// says nothing about an absent count. On git 2.55.0 it does not, measured on
-/// all three CI platforms; that difference turned
-/// `the_neutraliser_defeats_every_ambient_control_it_enumerates` red on its
-/// first CI run while the box it was written on stayed green, and it is why
-/// that row is `Reach::SomeGits`.
+/// **The claim this carried until round 4 was an artefact of the environment it
+/// was measured in, and is corrected rather than left standing.** It said that
+/// on git 2.43.0 a lone `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0` takes effect
+/// with `GIT_CONFIG_COUNT` absent. It does not: measured 2026-09-12 with the
+/// count genuinely unset, `git config --get core.useReplaceRefs` exits `1` and
+/// prints nothing, and exits `0` printing `false` with the count at `1`. What
+/// made the earlier reading come out the other way is that this box's build
+/// wrapper exports `GIT_CONFIG_COUNT=1` and an indexed pair of its own into
+/// every `cargo test` it runs, so the "uncounted" pair was counted by an
+/// inherited count nobody had taken away. `git-config(1)` describes the
+/// documented behaviour and git 2.43.0 has it.
 ///
-/// What closes the vector on the Gits that have it is the `GIT_CONFIG_COUNT=0`
-/// pin below, and these removals are a second, independent way: measured on
-/// git 2.43.0, emptying this list leaves that grid green, so it is defence in
-/// depth and not the load-bearing half. They also close the case the pin
-/// cannot -- a pair set on the `Command` itself rather than inherited, which
-/// the sweep over this process's environment would not see.
+/// What closes the vector is the `GIT_CONFIG_COUNT=0` pin below, and these
+/// removals are a second, independent way: measured on git 2.43.0, emptying
+/// this list leaves the grid green, so it is defence in depth and not the
+/// load-bearing half. They also close the case the pin cannot -- a pair set on
+/// the `Command` itself rather than inherited, which the sweep over this
+/// process's environment would not see.
 pub(crate) const REPLACEMENT_CONTROL_PREFIXES: &[&str] = &["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
 
 /// Pinned to a fixed value rather than removed, because an absent value is
@@ -586,13 +601,39 @@ pub(crate) fn environment_without_ambient_replacement_controls() -> Vec<(OsStrin
 
 /// Every enumerated control this process still carries, with its value, for
 /// a diagnostic that says what the environment actually was.
+///
+/// **Two of them carry their value redacted, and that is not caution.** This
+/// box's build wrapper derives `GIT_CONFIG_COUNT=1`,
+/// `GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader` and a
+/// `GIT_CONFIG_VALUE_0` holding a GitHub personal access token, and exports all
+/// three into every `cargo test` it runs (measured 2026-09-12). A diagnostic
+/// that prints an enumerated control's value therefore prints that token into a
+/// failing test's output, and into CI's log, the first time one of these
+/// assertions fires. `GIT_CONFIG_PARAMETERS` is redacted for the same reason:
+/// it is how Git propagates `-c` to its own subprocesses, so it carries the
+/// same pairs. The length is kept, because "set and empty" and "set to
+/// something" are different diagnoses.
 pub(crate) fn ambient_replacement_controls() -> Vec<String> {
     let mut seen: Vec<String> = std::env::vars_os()
         .filter(|(key, _)| is_ambient_replacement_control(key))
-        .map(|(key, value)| format!("{}={}", key.to_string_lossy(), value.to_string_lossy()))
+        .map(|(key, value)| {
+            let name = key.to_string_lossy().into_owned();
+            if carries_a_credential(&key) {
+                format!("{name}=<redacted, {} bytes>", value.len())
+            } else {
+                format!("{name}={}", value.to_string_lossy())
+            }
+        })
         .collect();
     seen.sort();
     seen
+}
+
+/// Whether `key`'s **value** may be a credential, and so must never reach a
+/// panic message. See [`ambient_replacement_controls`] for the measurement.
+fn carries_a_credential(key: &OsStr) -> bool {
+    let name = key.to_string_lossy().to_ascii_uppercase();
+    name.starts_with("GIT_CONFIG_VALUE_") || name == "GIT_CONFIG_PARAMETERS"
 }
 
 /// Refuse to measure replacement behaviour in a process that still carries an
@@ -654,20 +695,58 @@ pub(crate) fn assert_replacement_controls_pinned(tag: &str) {
     assert_replacement_refs_are_live(tag);
 }
 
+/// What a probe found when it asked whether `refs/replace/*` is honoured.
+///
+/// A verdict rather than a panic because two of its answers are *evidence* --
+/// the grid's controlled leg wants to be told that a treatment really did
+/// disable replacements -- and because the third thing that can happen, a
+/// `git` command failing outright, must never be counted as either. See
+/// [`replacement_liveness`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReplacementLiveness {
+    /// `git replace` wrote under `refs/replace/` and a child read through it.
+    Live,
+    /// `git replace` wrote somewhere else, so this process is not speaking
+    /// about the namespace the design and the finding name.
+    RefsElsewhere { found: String },
+    /// The refs are where they belong and a child ignored them.
+    NotHonoured { read: String },
+}
+
+/// The exit status the grid's probe helper uses for
+/// [`ReplacementLiveness::RefsElsewhere`] and
+/// [`ReplacementLiveness::NotHonoured`].
+///
+/// Distinct from `0` (live) and from the `101` a panicking `git` helper gives,
+/// so a caller can tell *the treatment disabled replacements* from *the setup
+/// never ran*. A grid that cannot tell them apart credits a malformed
+/// configuration file as evidence of replacement suppression, which is what the
+/// include-path row did with a backslash in `TMPDIR` (PR #271, round 3).
+pub(crate) const REPLACEMENT_DISABLED_EXIT: i32 = 3;
+
 /// Measure -- in **this process's** environment, over a throwaway repository
-/// -- that a Git child still honours `refs/replace/*`.
+/// -- whether a Git child still honours `refs/replace/*`.
 ///
 /// The enumeration above is a list of names, and a list of names is exactly
-/// what cost this pull request two rounds: a witness sensitive to one vector
+/// what cost this pull request three rounds: a witness sensitive to one vector
 /// and blind to the next passes silently. This is the closure that does not
-/// depend on the list being complete. A witness whose failure mode is a
-/// *silent pass* calls it before it measures anything, so a control nobody
-/// enumerated turns that silent pass into this panic.
+/// depend on the list being complete, and every replacement witness in the
+/// crate runs it before it measures anything, so a control nobody enumerated
+/// costs a loud failure rather than a false green.
 ///
 /// The child is `read_only_git`'s and `HostEnvironment::from_process`'s own
-/// child: both inherit this process's environment, which is why measuring
-/// this process is measuring theirs.
-pub(crate) fn assert_replacement_refs_are_live(tag: &str) {
+/// child: both inherit this process's environment, which is why measuring this
+/// process is measuring theirs.
+///
+/// **Every `git` here runs in this process's environment, `git init`
+/// included.** That is deliberate, and it is what closes `GIT_TEMPLATE_DIR`
+/// honestly rather than by exclusion: a template writes its `config` into the
+/// repository at creation, so a probe whose own `init` were neutralised would
+/// build a clean instrument, report `Live`, and say nothing about the
+/// repositories the witness then builds. The probe pins no repository-local
+/// `core.useReplaceRefs` for the same reason -- a local pin would outrank the
+/// operator's `~/.gitconfig` and hide a control this exists to find.
+pub(crate) fn replacement_liveness(tag: &str) -> ReplacementLiveness {
     let root = scratch(&format!("replacement-live-{tag}"));
     let repo = root.join("repo");
     create_dir(&repo);
@@ -689,30 +768,49 @@ pub(crate) fn assert_replacement_refs_are_live(tag: &str) {
     assert_ne!(recorded, replacing, "two distinct commits");
 
     git(&repo, &["replace", &recorded, &replacing]);
-    let controls = ambient_replacement_controls();
-    assert_eq!(
-        git(
-            &repo,
-            &["for-each-ref", "--format=%(refname)", "refs/replace/"]
-        ),
-        format!("refs/replace/{recorded}"),
-        "`{tag}`: `git replace` did not write under `refs/replace/`, so this \
-         process is not speaking about the namespace the design and the finding \
-         name. `GIT_REPLACE_REF_BASE` moves it, and a probe that writes and \
-         reads through the same moved base would answer yes to a question it \
-         was not asked. The enumerated controls this process carries are \
-         {controls:?}"
+    let found = git(
+        &repo,
+        &["for-each-ref", "--format=%(refname)", "refs/replace/"],
     );
-    let read = git(&repo, &["show", &format!("{recorded}:probe.txt")]);
-    assert_eq!(
-        read, "replacing",
-        "`{tag}`: this process cannot witness replacement isolation, because a \
-         Git child of it does not honour `refs/replace/*` in the first place. \
-         The enumerated controls it carries are {controls:?}; if none of them \
-         explains this, the enumeration in `REPLACEMENT_CONTROLS_REMOVED` and \
-         `REPLACEMENT_CONTROLS_PINNED` is missing a mechanism"
-    );
+    let verdict = if found == format!("refs/replace/{recorded}") {
+        let read = git(&repo, &["show", &format!("{recorded}:probe.txt")]);
+        if read == "replacing" {
+            ReplacementLiveness::Live
+        } else {
+            ReplacementLiveness::NotHonoured { read }
+        }
+    } else {
+        ReplacementLiveness::RefsElsewhere { found }
+    };
     let _ = fs::remove_dir_all(&root);
+    verdict
+}
+
+/// [`replacement_liveness`], as the precondition a witness states before it
+/// trusts anything it measures.
+pub(crate) fn assert_replacement_refs_are_live(tag: &str) {
+    let controls = ambient_replacement_controls();
+    match replacement_liveness(tag) {
+        ReplacementLiveness::Live => {}
+        ReplacementLiveness::RefsElsewhere { found } => panic!(
+            "`{tag}`: `git replace` wrote `{found}` rather than under \
+             `refs/replace/`, so this process is not speaking about the \
+             namespace the design and the finding name. `GIT_REPLACE_REF_BASE` \
+             moves it, and a probe that writes and reads through the same moved \
+             base would answer yes to a question it was not asked. The \
+             enumerated controls this process carries are {controls:?}"
+        ),
+        ReplacementLiveness::NotHonoured { read } => panic!(
+            "`{tag}`: this process cannot witness replacement isolation, \
+             because a Git child of it does not honour `refs/replace/*` in the \
+             first place -- it read `{read}` where the replacing object says \
+             `replacing`. The enumerated controls it carries are {controls:?}; \
+             if none of them explains this, the enumeration in \
+             `REPLACEMENT_CONTROLS_REMOVED` and `REPLACEMENT_CONTROLS_PINNED` \
+             is missing a mechanism, and closing it is the fix -- never \
+             weakening this check"
+        ),
+    }
 }
 
 /// The repository configuration a fixture that measures replacement
@@ -744,6 +842,73 @@ pub(crate) fn pin_replacement_refs_in(repo: &Path) {
         repo.display(),
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// Write `include.path = <included>` into the Git configuration file `file`,
+/// **using Git's own configuration writer**.
+///
+/// A path is not a configuration value, and spelling one with `format!` was a
+/// measured defect (PR #271, round 3): on git 2.43.0 an unquoted path
+/// containing `#` is truncated at the comment character, so the include
+/// silently stops including anything, and one containing a backslash is read as
+/// an escape -- `git config --list` over the result exits `128` with `bad
+/// config line 2`. `git config --file` quotes the first and doubles the second,
+/// and both then resolve. It creates the file if it is not there.
+///
+/// The write goes through [`without_ambient_replacement_controls`] for the
+/// reason [`pin_replacement_refs_in`]'s does: `GIT_CONFIG` redirects `git
+/// config`'s writes.
+pub(crate) fn write_include_path(file: &Path, included: &Path) {
+    let mut command = Command::new("git");
+    command
+        .args(["config", "--file"])
+        .arg(file)
+        .arg("include.path")
+        .arg(included);
+    without_ambient_replacement_controls(&mut command);
+    let out = command.output().expect("run git");
+    assert!(
+        out.status.success(),
+        "writing `include.path` into {}: {}",
+        file.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Where a replacement witness tells its helper to do the work.
+///
+/// Guarded by a variable because each helper is `#[ignore]`, and a run with
+/// `--include-ignored` would otherwise execute its body in a process that still
+/// carries whatever the machine exported -- which is the one environment a
+/// replacement witness must never be measured in.
+pub(crate) const REPLACEMENT_WITNESS: &str = "UPSTROKE_PR271_REPLACEMENT_WITNESS";
+
+/// Run this test binary again at `test`, `--exact --ignored`, with **every**
+/// ambient control over `refs/replace/*` taken away from the child, and return
+/// its exit status.
+///
+/// [`run_kill_child`] sets variables; this one takes away the ones that would
+/// make a witness pass for the wrong reason. `Command` inherits the parent's
+/// environment, so a suite run under an exported `GIT_NO_REPLACE_OBJECTS=1` --
+/// which is what this pull request makes upstroke's own gates supply -- would
+/// hand the child the protection the child exists to prove the code installs.
+/// Round 2 removed that one variable and the reviewer reached the same silent
+/// pass through `core.useReplaceRefs=false` instead, so what is removed here is
+/// the enumeration [`without_ambient_replacement_controls`] carries, and the
+/// child measures what is left before it trusts it.
+///
+/// **Every replacement witness in the crate goes through here** (PR #271,
+/// round 4), in `src/workspace_manager/tests.rs`, `src/gates.rs` and
+/// `src/engine/tests.rs` alike. Rounds 1, 2 and 3 each shipped one witness that
+/// could pass without its fix, and each repair reached only the witness a
+/// reviewer had named; there is now one door and no witness beside it.
+pub(crate) fn run_replacement_witness_child(test: &str) -> std::process::ExitStatus {
+    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
+    command
+        .args(["--exact", test, "--ignored", "--nocapture"])
+        .env(REPLACEMENT_WITNESS, "1");
+    without_ambient_replacement_controls(&mut command);
+    command.status().expect("spawn the witness child")
 }
 
 /// A `git` child a test can kill at a chosen moment.

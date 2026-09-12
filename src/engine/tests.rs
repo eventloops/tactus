@@ -4947,19 +4947,8 @@ fn crash_child_dies_inside_an_attempt() {
     std::process::exit(0);
 }
 
-const V1_OBJECT_GRAPH: &str = "UPSTROKE_PR271_V1_OBJECT_GRAPH";
-
 const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\
      cmd = 'git diff --exit-code probe-recorded probe-replacing'\n";
-
-fn v1_object_graph_child(test: &str) -> std::process::ExitStatus {
-    let mut command = Command::new(std::env::current_exe().expect("this test binary"));
-    command
-        .args(["--exact", test, "--ignored", "--nocapture"])
-        .env(V1_OBJECT_GRAPH, "1");
-    crate::workspace_manager::fixture::without_ambient_replacement_controls(&mut command);
-    command.status().expect("spawn the witness child")
-}
 
 fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {
     let repo = temp_engine_repo(tag);
@@ -4997,7 +4986,9 @@ fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {
 
 #[test]
 fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote() {
-    let status = v1_object_graph_child("engine::tests::v1_object_graph_helper");
+    let status = crate::workspace_manager::fixture::run_replacement_witness_child(
+        "engine::tests::v1_object_graph_helper",
+    );
     assert!(
         status.success(),
         "the child drives `engine::run_harness` and `engine::resume_harness` over a \
@@ -5008,7 +4999,7 @@ fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote() {
 #[test]
 #[ignore = "subprocess helper"]
 fn v1_object_graph_helper() {
-    if std::env::var_os(V1_OBJECT_GRAPH).is_none() {
+    if std::env::var_os(crate::workspace_manager::fixture::REPLACEMENT_WITNESS).is_none() {
         return;
     }
     crate::workspace_manager::fixture::assert_replacement_controls_pinned("v1-object-graph");

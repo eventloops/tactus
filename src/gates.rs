@@ -491,8 +491,9 @@ mod test_support {
 mod tests {
     use super::*;
     use crate::workspace_manager::fixture::{
+        REPLACEMENT_WITNESS, assert_replacement_controls_pinned,
         environment_without_ambient_replacement_controls, pin_replacement_refs_in,
-        without_ambient_replacement_controls,
+        run_replacement_witness_child, without_ambient_replacement_controls,
     };
     use std::env;
     use std::process::Command as StdCommand;
@@ -574,9 +575,38 @@ mod tests {
         )
     }
 
+    /// The v0.1 exemption is measured in a **neutralised child**, and the child
+    /// states the precondition before it measures anything (PR #271, round 4).
+    ///
+    /// Every `git` below already runs with the ambient controls taken away, so
+    /// nothing here could be decided by the operator's environment -- but
+    /// "nothing could be" was the claim rounds 1, 2 and 3 each made about a
+    /// witness that then could be. [`assert_replacement_controls_pinned`] is
+    /// that claim executed: the enumerated names are gone, and a Git child of
+    /// this process honours `refs/replace/*` at all. It cannot be stated in the
+    /// parent, because the parent is whatever environment the suite was started
+    /// in; the child is the one this witness's own commands run in.
     #[test]
     fn a_v1_gate_judges_the_tree_its_own_workspace_materialised() {
+        let status = run_replacement_witness_child("gates::tests::v1_gate_replacement_helper");
+        assert!(
+            status.success(),
+            "the child witnesses the v0.1 gate exemption over a replaced tree \
+             with every ambient control over `refs/replace/*` taken away from \
+             it, and ended {status:?}"
+        );
+    }
+
+    /// Spawned by [`a_v1_gate_judges_the_tree_its_own_workspace_materialised`].
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn v1_gate_replacement_helper() {
         use crate::runner::host::ObjectGraph;
+
+        if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("v1-gate");
 
         let repo = temp_repo("legacy-replacement");
         pin_replacement_refs_in(&repo);
@@ -893,6 +923,18 @@ mod tests {
             .args(["config", "--local", "test.quoted"]);
         without_ambient_replacement_controls(&mut read_back);
         let get = read_back.output().expect("read back");
+        // The exit status, not just the bytes: `git config --get` prints
+        // nothing on every failure it has, so an observer that reads stdout
+        // alone reports "the key is absent" for a read that never ran. That is
+        // the rule `a_redirected_git_config_cannot_capture_a_fixtures_own_pin`
+        // states, and it belongs to every observer rather than to the one a
+        // reviewer named (PR #271, round 4).
+        assert_eq!(
+            get.status.code(),
+            Some(0),
+            "the read-back did not answer about the repository: {}",
+            String::from_utf8_lossy(&get.stderr)
+        );
         assert_eq!(
             String::from_utf8_lossy(&get.stdout).trim(),
             "two words",
