@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 5
 reviewed_sha:
-location: src/workspace_manager.rs:3144
+location: src/workspace_manager.rs:3173
 provenance: undetermined
 first_bad:
 guard: PR6/PR7 implementer

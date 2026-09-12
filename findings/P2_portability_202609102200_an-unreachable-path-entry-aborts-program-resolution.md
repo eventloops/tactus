@@ -5,7 +5,7 @@ disposition: deferred
 category: portability
 pr: 262
 reviewed_sha: 5df9f7c0defd464cae495ba91b82d8ed5ca1f17c
-location: src/runner/host/naming.rs:220, src/runner/host/tests.rs:5550
+location: src/runner/host/naming.rs:220, src/runner/host/tests.rs:5627
 provenance: pre_existing
 first_bad:
 guard: project owner — the slice that next opens the host runner's program resolution

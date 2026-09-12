@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 107
 reviewed_sha:
-location: src/workspace_manager/tests.rs:9058
+location: src/workspace_manager/tests.rs:10009
 provenance: pre_existing
 first_bad:
 guard: project owner / the slice that next opens the workspace residue sampler

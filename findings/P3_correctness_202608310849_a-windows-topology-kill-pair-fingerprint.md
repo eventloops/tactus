@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 43
 reviewed_sha:
-location: src/engine/topology/attempt/tests.rs:1252, src/engine/topology/attempt/tests.rs:1308
+location: src/engine/topology/attempt/tests.rs:1377, src/engine/topology/attempt/tests.rs:1433
 provenance: undetermined
 first_bad:
 guard: project owner / the slice that next opens the Windows topology kill harness
