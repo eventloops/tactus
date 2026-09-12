@@ -2948,4 +2948,625 @@ mod tests {
             );
         }
     }
+
+    // -----------------------------------------------------------------------
+    // PR10: the resume classifier over every explored state, the fault rows,
+    // the runner identity in both directions, and the summary (ST-14).
+    // -----------------------------------------------------------------------
+
+    use crate::engine::topology::reachability::{
+        self, ResumeAction, classify, matches_row, rows_reached,
+    };
+    use crate::topology::effects::FaultRow;
+
+    struct CensusIds;
+
+    impl crate::engine::topology::seams::IdSource for CensusIds {
+        fn run_id(&self) -> String {
+            RUN_ID.to_owned()
+        }
+
+        fn incarnation(&self) -> IncarnationId {
+            IncarnationId("01J8ZQKB2M7NC5PQR0TVWXYZ88".to_owned())
+        }
+
+        fn pid(&self) -> u32 {
+            4242
+        }
+
+        fn question_id(&self) -> QuestionId {
+            QuestionId::from("q-census-repair")
+        }
+    }
+
+    /// "the explorer … classifies every reachable state with a resume action
+    /// by running the recovery classifier over it (Complete and Halted
+    /// classify as finalize-then-terminal)", and "the classification computed
+    /// during live emission equals the classification recomputed from the
+    /// durable prefix alone": the incremental fold each state was reached
+    /// with, against a replay of its trace.
+    #[test]
+    fn every_explored_state_classifies_and_the_classification_is_the_same_live_and_on_replay() {
+        let census = census();
+        let (mut finalize, mut reopen, mut recover) = (0, 0, 0);
+        for state in census.states() {
+            let live = classify(&state.fold);
+            let from_prefix = classify(&replayed(&state.trace));
+            assert_eq!(
+                live, from_prefix,
+                "state {}: the live fold and the durable prefix classify differently",
+                state.id
+            );
+            match (&live, state.fold.finished()) {
+                (ResumeAction::FinalizeThenRefuse { outcome }, Some(finished)) => {
+                    assert!(
+                        matches!(finished, RunOutcome::Complete | RunOutcome::Halted),
+                        "state {}",
+                        state.id
+                    );
+                    assert_eq!(outcome, finished, "state {}", state.id);
+                    finalize += 1;
+                }
+                (ResumeAction::Recover(plan), Some(finished)) => {
+                    assert!(
+                        matches!(finished, RunOutcome::Parked | RunOutcome::BudgetExceeded),
+                        "state {}: a Complete or Halted run is finalized, never recovered",
+                        state.id
+                    );
+                    assert_eq!(plan.reopens.as_ref(), Some(finished), "state {}", state.id);
+                    reopen += 1;
+                }
+                (ResumeAction::Recover(plan), None) => {
+                    assert!(plan.reopens.is_none(), "state {}", state.id);
+                    assert_eq!(
+                        plan.derived,
+                        reachability::derived_label(&state.outcome),
+                        "state {}",
+                        state.id
+                    );
+                    recover += 1;
+                }
+                (ResumeAction::NotStarted, _) => {
+                    panic!("state {}: every census state has a run", state.id)
+                }
+                (ResumeAction::FinalizeThenRefuse { .. }, None) => {
+                    panic!(
+                        "state {}: finalization needs a durable run_finished",
+                        state.id
+                    )
+                }
+            }
+        }
+        assert!(
+            finalize > 0 && reopen > 0 && recover > 0,
+            "finalize {finalize}, reopen {reopen}, recover {recover}: each kind is explored"
+        );
+    }
+
+    /// "every fault row's durable prefix is a reachable census state and its
+    /// fold-derived classification matches the row's resume action". The
+    /// two-original fixture reaches fifteen of the twenty-one rows; the two
+    /// repair rows are reached from a rejection in
+    /// `a_rejection_and_its_repairs_dispatch_are_reachable_prefixes_classified_as_tabled`,
+    /// the retained and retry rows from a retained session in
+    /// `a_retained_generation_and_its_retry_are_reachable_prefixes_classified_as_tabled`,
+    /// and the two rows outside the fold (a container, an append) have no
+    /// fold state to classify and say so in the summary.
+    #[test]
+    fn every_fault_rows_durable_prefix_is_a_reachable_state_classified_as_its_resume_action() {
+        let census = census();
+        let mut reached: BTreeMap<FaultRow, usize> = BTreeMap::new();
+        for state in census.states() {
+            let action = classify(&state.fold);
+            for row in rows_reached(&state.fold, &action) {
+                assert!(
+                    matches_row(row, &action),
+                    "state {}: a {} prefix classified as {}",
+                    state.id,
+                    reachability::row_name(row),
+                    reachability::action_label(&action)
+                );
+                *reached.entry(row).or_insert(0) += 1;
+            }
+        }
+        for row in [
+            FaultRow::TRunstart,
+            FaultRow::TDispatch,
+            FaultRow::TAttempt,
+            FaultRow::TCandObj,
+            FaultRow::TCandRef,
+            FaultRow::TScrub,
+            FaultRow::TFailed,
+            FaultRow::TFast,
+            FaultRow::TProposal,
+            FaultRow::TVerify,
+            FaultRow::TPrepared,
+            FaultRow::TAnswer,
+            FaultRow::TFinish,
+            FaultRow::TFinalize,
+            FaultRow::TResume,
+        ] {
+            assert!(
+                reached.get(&row).copied().unwrap_or(0) > 0,
+                "{}: no explored state is this row's durable prefix",
+                reachability::row_name(row)
+            );
+        }
+        for row in [
+            FaultRow::TReject,
+            FaultRow::TRepairDispatch,
+            FaultRow::TRetained,
+            FaultRow::TRetry,
+        ] {
+            assert_eq!(
+                reached.get(&row).copied().unwrap_or(0),
+                0,
+                "{}: the two-original fixture offers no repair spawn and retains no session; \
+                 the seeded explorations reach these rows",
+                reachability::row_name(row)
+            );
+        }
+        for row in [FaultRow::TContainer, FaultRow::TAppend] {
+            assert!(reachability::outside_the_fold(row));
+            assert_eq!(reached.get(&row).copied().unwrap_or(0), 0);
+        }
+        assert_eq!(FaultRow::ALL.len(), 21);
+    }
+
+    fn conflict_rejection(fold: &TopologyFold) -> TopologyEvent {
+        let rejected = crate::engine::topology::repair::merge_rejected(
+            fold,
+            &CensusIds,
+            &candidate_of(ALEPH, 0),
+            sha("base"),
+            SequenceId(0),
+            crate::topology::events::RejectionDisposition::Conflict {
+                paths: region(ALEPH),
+            },
+            region(ALEPH),
+        )
+        .expect("a conflict rejection registers a repair of aleph");
+        ev(TopologyEventBody::MergeRejected {
+            data: Box::new(rejected),
+        })
+    }
+
+    /// The repair rows: a conflict rejection registers a repair of aleph
+    /// inside a new lineage (T-REJECT), and the repair's dispatch inherits the
+    /// lineage and names its source candidate (T-REPAIR-DISPATCH). Both
+    /// prefixes are explored as census states from that seed and classify as
+    /// tabled: nothing to settle for the rejection, an open repair generation
+    /// to recreate at its base for the dispatch.
+    #[test]
+    fn a_rejection_and_its_repairs_dispatch_are_reachable_prefixes_classified_as_tabled() {
+        let mut trace = queued_candidate_trace(region(ALEPH));
+        let fold = replayed(&trace);
+        let rejection = conflict_rejection(&fold);
+        trace.push(rejection.clone());
+        let rejected = replayed(&trace);
+        let repair = TaskKey(2);
+        assert_eq!(rejected.task_state(ALEPH), Some(TaskState::AwaitingRepair));
+        assert_eq!(rejected.task_state(repair), Some(TaskState::Pending));
+        assert!(
+            rejected
+                .leases()
+                .expect("started")
+                .lineages()
+                .iter()
+                .any(|lineage| lineage.root == ALEPH),
+            "the rejection creates the lineage lease"
+        );
+        let action = classify(&rejected);
+        assert!(
+            rows_reached(&rejected, &action).contains(&FaultRow::TReject),
+            "{}",
+            reachability::action_label(&action)
+        );
+        assert!(matches_row(FaultRow::TReject, &action));
+        assert_eq!(action, classify(&replayed(&trace)), "live equals replay");
+
+        let TopologyEventBody::MergeRejected { data } = &rejection.body else {
+            unreachable!("built above");
+        };
+        let dispatch = ev(TopologyEventBody::TaskDispatched {
+            data: TaskDispatched {
+                key: repair,
+                generation: GenerationId(0),
+                base_sha: sha("base"),
+                worktree_path: "/tmp/census/repair".to_owned(),
+                lease: LeaseGrant::InheritedLineage { root: ALEPH },
+                source_candidate: Some(data.candidate.clone()),
+            },
+        });
+        trace.push(dispatch);
+        let dispatched = replayed(&trace);
+        let action = classify(&dispatched);
+        assert!(rows_reached(&dispatched, &action).contains(&FaultRow::TRepairDispatch));
+        assert!(matches_row(FaultRow::TRepairDispatch, &action));
+        assert!(
+            !matches_row(FaultRow::TDispatch, &action),
+            "a repair's open generation is not an ordinary dispatch's"
+        );
+        let ResumeAction::Recover(plan) = &action else {
+            panic!("{action:?}");
+        };
+        assert_eq!(
+            plan.recreate_open
+                .iter()
+                .map(|open| (open.key, open.generation, open.lineage))
+                .collect::<Vec<_>>(),
+            vec![(repair.0, 0, true)]
+        );
+
+        // Both prefixes are census states when explored from the seed.
+        let seeded = Census::explore(
+            rejected.clone(),
+            trace[..trace.len() - 1].to_vec(),
+            CensusBounds {
+                max_trace: trace.len() + 1,
+                max_states: 500,
+                ..CensusBounds::default()
+            },
+            |fold| {
+                let mut out = classes(fold);
+                out.retain(|candidate| !candidate.label.starts_with("task_dispatched/"));
+                out.push(Candidate::new(
+                    "task_dispatched/repair/g0",
+                    ev(TopologyEventBody::TaskDispatched {
+                        data: TaskDispatched {
+                            key: repair,
+                            generation: GenerationId(0),
+                            base_sha: sha("base"),
+                            worktree_path: "/tmp/census/repair".to_owned(),
+                            lease: LeaseGrant::InheritedLineage { root: ALEPH },
+                            source_candidate: Some(candidate_of(ALEPH, 0)),
+                        },
+                    }),
+                ));
+                out
+            },
+        );
+        assert!(!seeded.truncated());
+        let mut reject = 0;
+        let mut repair_dispatch = 0;
+        for state in seeded.states() {
+            let action = classify(&state.fold);
+            assert_eq!(
+                action,
+                classify(&replayed(&state.trace)),
+                "state {}",
+                state.id
+            );
+            let rows = rows_reached(&state.fold, &action);
+            for row in &rows {
+                assert!(matches_row(*row, &action), "state {}: {row:?}", state.id);
+            }
+            reject += usize::from(rows.contains(&FaultRow::TReject));
+            repair_dispatch += usize::from(rows.contains(&FaultRow::TRepairDispatch));
+        }
+        assert!(
+            reject > 0 && repair_dispatch > 0,
+            "{reject}/{repair_dispatch}"
+        );
+        assert!(
+            seeded
+                .accepted_labels()
+                .contains("task_dispatched/repair/g0"),
+            "the repair dispatches in the exploration"
+        );
+    }
+
+    const RETAINED_SESSION: &str = "census-retained-session";
+
+    fn retained_settlement(key: TaskKey, generation: u32, attempt: u32) -> TopologyEvent {
+        ev(TopologyEventBody::AttemptFinished {
+            data: Box::new(AttemptFinished4 {
+                key,
+                generation: GenerationId(generation),
+                attempt: AttemptNumber(attempt),
+                record: Box::new({
+                    let mut record = attempt_record(attempt);
+                    record.session_id = Some(RETAINED_SESSION.to_owned());
+                    record.failure = Some(crate::events::FailureRecord {
+                        kind: crate::ladder::FailureKind::GateFailed,
+                        origin: crate::ladder::FailureOrigin::Worker,
+                        reason: "the fixture's retained failure".to_owned(),
+                        detail: None,
+                    });
+                    record
+                }),
+                settlement: AttemptSettlement::Retained {
+                    retained_session: crate::topology::events::SessionId(
+                        RETAINED_SESSION.to_owned(),
+                    ),
+                    retained_incarnation: crate::topology::events::Epoch(0),
+                },
+            }),
+        })
+    }
+
+    fn resumed_attempt(
+        fold: &TopologyFold,
+        key: TaskKey,
+        generation: u32,
+        attempt: u32,
+    ) -> TopologyEvent {
+        let TopologyEventBody::AttemptStarted { mut data } =
+            attempt_started(fold, key, generation, attempt).body
+        else {
+            unreachable!("attempt_started builds an attempt_started");
+        };
+        data.resume_session = Some(crate::topology::events::SessionId(
+            RETAINED_SESSION.to_owned(),
+        ));
+        ev(TopologyEventBody::AttemptStarted { data })
+    }
+
+    /// The retained rows: a retained settlement leaves the generation idle
+    /// with its session (T-RETAINED: a fresh process closes it), and the
+    /// same-session retry the retaining incarnation starts is in flight at
+    /// attempt two (T-RETRY: a fresh process settles it interrupted). Both
+    /// prefixes are explored as census states from that seed.
+    #[test]
+    fn a_retained_generation_and_its_retry_are_reachable_prefixes_classified_as_tabled() {
+        let started_fold = started();
+        let mut trace = vec![
+            run_started_event(),
+            dispatch(ALEPH, 0),
+            attempt_started(&started_fold, ALEPH, 0, 1),
+            retained_settlement(ALEPH, 0, 1),
+        ];
+        let retained = replayed(&trace);
+        assert!(
+            retained.ready_retry(ALEPH),
+            "the retaining incarnation may retry"
+        );
+        let action = classify(&retained);
+        assert!(rows_reached(&retained, &action).contains(&FaultRow::TRetained));
+        assert!(matches_row(FaultRow::TRetained, &action));
+        let ResumeAction::Recover(plan) = &action else {
+            panic!("{action:?}");
+        };
+        assert_eq!(
+            plan.close_retained
+                .iter()
+                .map(|closed| (closed.key, closed.generation))
+                .collect::<Vec<_>>(),
+            vec![(ALEPH.0, 0)]
+        );
+
+        trace.push(resumed_attempt(&retained, ALEPH, 0, 2));
+        let retrying = replayed(&trace);
+        let action = classify(&retrying);
+        assert!(rows_reached(&retrying, &action).contains(&FaultRow::TRetry));
+        assert!(matches_row(FaultRow::TRetry, &action));
+        assert_eq!(action, classify(&replayed(&trace)), "live equals replay");
+
+        let seeded = Census::explore(
+            retained.clone(),
+            trace[..trace.len() - 1].to_vec(),
+            CensusBounds {
+                max_trace: trace.len() + 1,
+                max_states: 500,
+                ..CensusBounds::default()
+            },
+            |fold| {
+                let mut out = classes(fold);
+                out.push(Candidate::new(
+                    "attempt_started/resumed/aleph/g0/a2",
+                    resumed_attempt(fold, ALEPH, 0, 2),
+                ));
+                out
+            },
+        );
+        assert!(!seeded.truncated());
+        let (mut retained_states, mut retry_states) = (0, 0);
+        for state in seeded.states() {
+            let action = classify(&state.fold);
+            assert_eq!(
+                action,
+                classify(&replayed(&state.trace)),
+                "state {}",
+                state.id
+            );
+            let rows = rows_reached(&state.fold, &action);
+            for row in &rows {
+                assert!(matches_row(*row, &action), "state {}: {row:?}", state.id);
+            }
+            retained_states += usize::from(rows.contains(&FaultRow::TRetained));
+            retry_states += usize::from(rows.contains(&FaultRow::TRetry));
+        }
+        assert!(
+            retained_states > 0 && retry_states > 0,
+            "{retained_states}/{retry_states}"
+        );
+        assert!(
+            seeded
+                .accepted_labels()
+                .contains("attempt_started/resumed/aleph/g0/a2"),
+            "the same-session retry is accepted in the exploration"
+        );
+        assert!(
+            seeded
+                .refused_labels()
+                .contains("attempt_started/aleph/g0/a2"),
+            "and a retry that resumes no session is refused on a retained generation"
+        );
+    }
+
+    fn resumed_with(runner: RunnerPolicy) -> TopologyEvent {
+        ev(TopologyEventBody::RunResumed {
+            data: Box::new(crate::topology::events::RunResumed4 {
+                incarnation: IncarnationId("01J8ZQKB2M7NC5PQR0TVWXYZ99".to_owned()),
+                runner,
+                probed_agents: probed_agents(),
+                upstroke_version: "0.2.0-census-resume".to_owned(),
+            }),
+        })
+    }
+
+    fn runner_variants() -> Vec<(&'static str, RunnerPolicy)> {
+        let recorded = run_started().runner;
+        let image = || {
+            recorded
+                .image
+                .clone()
+                .expect("the fixture records an image")
+        };
+        let mut variants = Vec::new();
+        variants.push(("kind", {
+            let mut other = recorded.clone();
+            other.kind = RunnerKind::Host;
+            other
+        }));
+        variants.push(("policy", {
+            let mut other = recorded.clone();
+            other.policy = RunnerContract::HostV1;
+            other
+        }));
+        variants.push(("reference", {
+            let mut other = recorded.clone();
+            let mut moved = image();
+            moved.reference = "ghcr.io/example/census-runner:3.5".to_owned();
+            other.image = Some(moved);
+            other
+        }));
+        variants.push(("id", {
+            let mut other = recorded.clone();
+            let mut moved = image();
+            moved.id = format!("sha256:{}", "9".repeat(64));
+            other.image = Some(moved);
+            other
+        }));
+        variants.push(("digest", {
+            let mut other = recorded.clone();
+            let mut moved = image();
+            moved.digest = None;
+            other.image = Some(moved);
+            other
+        }));
+        variants.push(("volumes", {
+            let mut other = recorded.clone();
+            other.credential_volumes = Some(BTreeMap::new());
+            other
+        }));
+        variants.push(("image presence", {
+            let mut other = recorded.clone();
+            other.image = None;
+            other
+        }));
+        variants
+    }
+
+    /// "every run_resumed with an identical runner identity is accepted and
+    /// every run_resumed with any different field (kind, policy, reference,
+    /// id, digest, volumes) is refused" — offered at every explored state.
+    /// A Complete or Halted state refuses the identical one too, because the
+    /// run is over; every other state accepts it, and the state it reaches
+    /// has the next epoch, no budget stop, no deferral and no end.
+    #[test]
+    fn run_resumed_is_accepted_with_an_identical_runner_and_refused_with_any_different_field() {
+        let census = census();
+        let identical = resumed_with(run_started().runner);
+        let variants = runner_variants();
+        assert_eq!(variants.len(), 7);
+        let (mut accepted, mut over, mut refused) = (0, 0, 0);
+        for state in census.states() {
+            let over_already = matches!(
+                state.fold.finished(),
+                Some(RunOutcome::Complete | RunOutcome::Halted)
+            );
+            match state.fold.plan_transition(&identical) {
+                Ok(delta) => {
+                    assert!(!over_already, "state {}: a finished run resumed", state.id);
+                    let mut next = state.fold.clone();
+                    next.apply_delta(delta);
+                    assert_eq!(
+                        next.epoch().map(|epoch| epoch.0),
+                        state.fold.epoch().map(|epoch| epoch.0 + 1),
+                        "state {}",
+                        state.id
+                    );
+                    assert!(next.budget_stop().is_none(), "state {}", state.id);
+                    assert!(next.finished().is_none(), "state {}", state.id);
+                    assert!(
+                        [ALEPH, BET]
+                            .iter()
+                            .all(|key| next.task_state(*key) != Some(TaskState::Deferred)),
+                        "state {}: the resume wakes every deferred task",
+                        state.id
+                    );
+                    assert_eq!(
+                        classify(&next),
+                        classify(&{
+                            let mut trace = state.trace.clone();
+                            trace.push(identical.clone());
+                            replayed(&trace)
+                        }),
+                        "state {}: the resumed state classifies alike live and on replay",
+                        state.id
+                    );
+                    accepted += 1;
+                }
+                Err(error) => {
+                    assert!(over_already, "state {}: {error}", state.id);
+                    over += 1;
+                }
+            }
+            for (field, runner) in &variants {
+                let error = state
+                    .fold
+                    .plan_transition(&resumed_with(runner.clone()))
+                    .expect_err("a different runner is refused");
+                if !over_already {
+                    let text = error.to_string();
+                    assert!(
+                        text.contains("runner")
+                            || text.contains("image")
+                            || text.contains("volume"),
+                        "state {}: the {field} refusal names the identity: {text}",
+                        state.id
+                    );
+                }
+                refused += 1;
+            }
+        }
+        assert!(accepted > 0 && over > 0, "{accepted}/{over}");
+        assert_eq!(refused, census.states().len() * variants.len());
+    }
+
+    /// The summary the G5 gate dumps: every fault row, the two outside the
+    /// fold marked, every action and outcome counted, the bounds it ran
+    /// under. Written to `UPSTROKE_CENSUS_SUMMARY` when that names a file.
+    #[test]
+    fn the_census_summary_names_every_fault_row_and_serializes() {
+        let census = census();
+        let summary = reachability::summarize(census, true);
+        assert_eq!(summary.states, census.states().len());
+        assert_eq!(summary.transitions, census.transitions().len());
+        assert_eq!(summary.accepted + summary.refused, summary.transitions);
+        assert!(!summary.truncated);
+        assert_eq!(summary.fault_rows.len(), 21);
+        for row in FaultRow::ALL {
+            let name = reachability::row_name(*row);
+            let entry = summary
+                .fault_rows
+                .get(&name)
+                .unwrap_or_else(|| panic!("{name} is missing from the summary"));
+            assert!(entry.every_reachable_state_classifies_as_tabled, "{name}");
+            assert_eq!(entry.outside_the_fold, reachability::outside_the_fold(*row));
+            if entry.outside_the_fold {
+                assert_eq!(entry.reachable_states, 0, "{name}");
+            }
+        }
+        assert!(summary.fault_rows["T-FINALIZE"].reachable_states > 0);
+        assert_eq!(summary.outcomes.len(), 5, "{:?}", summary.outcomes.keys());
+        assert!(summary.actions.len() >= 4, "{:?}", summary.actions.keys());
+        assert_eq!(summary.bounds["max_trace"], 12);
+        let json = serde_json::to_string_pretty(&summary).expect("serializes");
+        assert!(json.contains("\"T-RESUME\"") && json.contains("finalize then refuse"));
+        if let Ok(path) = std::env::var("UPSTROKE_CENSUS_SUMMARY") {
+            std::fs::write(&path, format!("{json}\n")).expect("the summary is written");
+        }
+    }
 }

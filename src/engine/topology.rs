@@ -12,6 +12,7 @@ pub mod finalize;
 pub mod identity;
 pub mod integrate;
 pub mod prelock;
+pub mod reachability;
 pub mod repair;
 pub mod report;
 pub mod seams;
