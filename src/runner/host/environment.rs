@@ -10,6 +10,7 @@ use std::ffi::{OsStr, OsString};
 
 use crate::error::UpstrokeError;
 use crate::runner::{AgentId, ExecutionRole};
+use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 use super::{RESERVED_ALWAYS, credential_location, reserved_keys, supplies_credentials};
 
@@ -42,10 +43,18 @@ impl KeyCase {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObjectGraph {
+    #[default]
+    Recorded,
+    AsReplaced,
+}
+
 #[derive(Debug)]
 pub struct HostEnvironment {
     base: Vec<(OsString, OsString)>,
     case: KeyCase,
+    objects: ObjectGraph,
 }
 
 impl HostEnvironment {
@@ -54,12 +63,28 @@ impl HostEnvironment {
         Self {
             base: std::env::vars_os().collect(),
             case: KeyCase::current(),
+            objects: ObjectGraph::Recorded,
         }
     }
 
     #[must_use]
     pub fn with_base(base: Vec<(OsString, OsString)>, case: KeyCase) -> Self {
-        Self { base, case }
+        Self {
+            base,
+            case,
+            objects: ObjectGraph::Recorded,
+        }
+    }
+
+    #[must_use]
+    pub const fn reading(mut self, objects: ObjectGraph) -> Self {
+        self.objects = objects;
+        self
+    }
+
+    #[must_use]
+    pub const fn objects(&self) -> ObjectGraph {
+        self.objects
     }
 
     #[must_use]
@@ -109,6 +134,15 @@ impl HostEnvironment {
             upsert(&mut composed, self.case, OsString::from(key), value);
         }
         for (key, value) in overlay {
+            upsert(
+                &mut composed,
+                self.case,
+                OsString::from(key),
+                OsString::from(value),
+            );
+        }
+        if self.objects == ObjectGraph::Recorded {
+            let (key, value) = NO_REPLACEMENT_OBJECTS;
             upsert(
                 &mut composed,
                 self.case,

@@ -68,6 +68,19 @@ deliberate.
 Re-exported so `engine::AdapterSource` still resolves for callers that
 reasonably think of it as the engine's seam.
 
+## `run_harness_on(opts, harness, &HostRunner::for_legacy_workspace())`
+
+The v0.1 conductor's runner, and the same call in `resume_harness` below.
+
+`HostRunner::for_legacy_workspace` differs from `HostRunner::new` in one
+field: its children read the object graph `refs/replace/*` describes, which is
+the graph `src/workspace.rs` writes the workspace and its gate snapshots from.
+This function drives the *schema-1..3* coordinator and nothing else, so it is
+the one place that choice belongs. See
+[`ObjectGraph`](../runner/host/environment.md) for why a consumer has to read
+its own producer's graph, and `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` for
+the deferred finding about that graph being the replaced one.
+
 ## `fn run_harness_on(`
 
 The same run, on an explicit [`Runner`].

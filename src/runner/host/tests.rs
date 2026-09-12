@@ -20,6 +20,7 @@ use crate::runner::{HarnessHooks, ProbeTarget, SPAWN_SITE};
 use crate::topology::effects::{HookHarness, Injection, InjectionMode, Platform, SubEffectPoint};
 use crate::topology::events::{AttemptNumber, GenerationId};
 use crate::topology::registry::TaskKey;
+use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 fn os(value: &str) -> OsString {
     OsString::from(value)
@@ -258,6 +259,72 @@ fn environment_composition_fixtures() {
             }
         }
     }
+}
+
+#[test]
+fn every_composed_environment_disables_replacement_objects() {
+    let mut rows = 0_usize;
+    for case in KeyCase::ALL {
+        let mut base = synthetic_base();
+        base.push((
+            os(NO_REPLACEMENT_OBJECTS.0),
+            os("whatever-the-operator-exported"),
+        ));
+        let environment = HostEnvironment::with_base(base, *case);
+        for role in ExecutionRole::all() {
+            for overlay in [
+                Vec::new(),
+                vec![(NO_REPLACEMENT_OBJECTS.0.to_owned(), "0".to_owned())],
+            ] {
+                let composed = environment
+                    .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &overlay)
+                    .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+                assert_eq!(
+                    value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
+                    Some(OsStr::new(NO_REPLACEMENT_OBJECTS.1)),
+                    "{role} ({case:?}, overlay {overlay:?}): the child would read \
+                     whatever `git replace` points at the judged objects"
+                );
+                rows += 1;
+            }
+        }
+    }
+    assert_eq!(
+        rows,
+        5 * 2 * KeyCase::ALL.len(),
+        "every role, both overlays"
+    );
+}
+
+#[test]
+fn the_v1_conductors_environment_composes_no_replacement_isolation() {
+    let mut rows = 0_usize;
+    for case in KeyCase::ALL {
+        let mut base = synthetic_base();
+        base.push((
+            os(NO_REPLACEMENT_OBJECTS.0),
+            os("whatever-the-operator-exported"),
+        ));
+        let environment = HostEnvironment::with_base(base, *case).reading(ObjectGraph::AsReplaced);
+        for role in ExecutionRole::all() {
+            let composed = environment
+                .compose(&role, Some(&AgentId::new(claude::ADAPTER_ID)), &[])
+                .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+            assert_eq!(
+                value(&composed, NO_REPLACEMENT_OBJECTS.0, *case),
+                Some(OsStr::new("whatever-the-operator-exported")),
+                "{role} ({case:?}): the v0.1 conductor's own base is what its \
+                 children read, and this boundary must add nothing to it"
+            );
+            rows += 1;
+        }
+    }
+    assert_eq!(rows, 5 * KeyCase::ALL.len(), "every role, both key cases");
+    assert_eq!(
+        HostRunner::for_legacy_workspace().environment().objects(),
+        ObjectGraph::AsReplaced,
+        "and that is the environment `engine::run` and `engine::resume` install"
+    );
 }
 
 #[test]
@@ -5369,30 +5436,38 @@ fn production_reaches_a_spawn_through_one_host_runner_per_run() {
         "the census and its expectation cover different files"
     );
 
+    const CONSTRUCTORS: [&str; 2] = ["HostRunner::new(", "HostRunner::for_legacy_workspace("];
+
     const CONTROL: &str = r##"
 // STRIP-CONTROL: HostRunner::new();
-/* HostRunner::new(); /* HostRunner::new(); */ */
+/* HostRunner::for_legacy_workspace(); /* HostRunner::new(); */ */
 const TEXT: &str = "HostRunner::new();";
-const RAW: &str = r#"HostRunner::new();"#;
+const RAW: &str = r#"HostRunner::for_legacy_workspace();"#;
 const BYTES: &[u8] = b"HostRunner::new();";
-const RAW_BYTES: &[u8] = br#"HostRunner::new();"#;
+const RAW_BYTES: &[u8] = br#"HostRunner::for_legacy_workspace();"#;
 const QUOTE: char = '"';
 #[cfg(test)]
 pub(super) fn excluded_control() -> Result<((), ()), ()> {
     let runner = HostRunner::new();
+    let legacy = HostRunner::for_legacy_workspace();
     Ok(((), ()))
 }
-fn production_control() { let runner = HostRunner::new(); }
+fn production_control() {
+    let runner = HostRunner::new();
+    let legacy = HostRunner::for_legacy_workspace();
+}
 "##;
     let count_constructions = |source: &str| {
-        crate::effects::production_code(source)
-            .matches("HostRunner::new(")
-            .count()
+        let production = crate::effects::production_code(source);
+        CONSTRUCTORS
+            .iter()
+            .map(|spelling| production.matches(spelling).count())
+            .sum::<usize>()
     };
     assert_eq!(
         count_constructions(CONTROL),
-        1,
-        "the control must count only the production construction"
+        CONSTRUCTORS.len(),
+        "the control must count every constructor's production construction and nothing else"
     );
     let mut counted: Vec<(&str, usize)> = Vec::new();
     for (name, source) in sources {
@@ -5400,7 +5475,7 @@ fn production_control() { let runner = HostRunner::new(); }
         let with_control = format!("{source}\n{CONTROL}");
         assert_eq!(
             count_constructions(&with_control),
-            count + 1,
+            count + CONSTRUCTORS.len(),
             "{name}: the census must ignore prose and test items and count an appended production construction"
         );
         counted.push((name, count));
@@ -5420,7 +5495,9 @@ fn production_control() { let runner = HostRunner::new(); }
             .map(|(_, rest)| rest.lines().take(8).collect::<Vec<_>>().join("\n"))
             .unwrap_or_default();
         assert!(
-            after.contains("HostRunner::new()"),
+            CONSTRUCTORS
+                .iter()
+                .any(|spelling| after.contains(spelling.trim_end_matches('('))),
             "`{facade}` is not one of the two construction sites this census counted"
         );
     }

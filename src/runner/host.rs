@@ -30,7 +30,7 @@ mod probe;
 pub use self::probe::{SHELL_PROBE_COMMAND, SHELL_PROBE_TIMEOUT, run_shell_probe};
 
 mod environment;
-pub use self::environment::{HostEnvironment, KeyCase};
+pub use self::environment::{HostEnvironment, KeyCase, ObjectGraph};
 
 pub const RESERVED_ALWAYS: &[&str] = &["PATH", "HOME", "USERPROFILE"];
 
@@ -114,6 +114,12 @@ impl HostRunner {
             hooks: Mutex::new(Box::new(NoHooks)),
             resolved: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    #[must_use]
+    pub fn for_legacy_workspace() -> Self {
+        Self::new()
+            .with_environment(HostEnvironment::from_process().reading(ObjectGraph::AsReplaced))
     }
 
     #[must_use]

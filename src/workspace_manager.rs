@@ -81,6 +81,35 @@ use crate::topology::paths::PathSet;
 use crate::util::{DurabilityLedger, DurableStep};
 
 // ---------------------------------------------------------------------------
+// The Git environment every upstroke process runs under
+// ---------------------------------------------------------------------------
+
+/// The environment pair that makes Git read the objects the repository holds.
+///
+/// `git replace A B` installs `refs/replace/A`, and from then on Git reads `B`
+/// wherever `A` is named while `rev-parse` still prints `A`. An exact snapshot
+/// is defined against the objects the repository holds and never against that
+/// rewriting (`design/15_design_event_log_resume_run_layout.md`, "What an exact
+/// snapshot is exact against"), so this pair is set on every child that runs
+/// Git over one: the manager's own commands ([`WorkspaceManager::command`]),
+/// the manager's read-only reads ([`read_only_git`], which [`read_only_git_ok`]
+/// is the only other way to reach), and every role process either runner spawns
+/// (`HostEnvironment::compose`, `ContainerEnvironment::compose`), which clear
+/// the ambient environment and so would otherwise drop it.
+///
+/// **Not the v0.1 path**, which has no exact snapshot: `src/workspace.rs` reads
+/// the replaced graph at both ends and is frozen (`effects/allowlist.toml`'s
+/// `[[legacy]]` row, `invariants_preserved[1]`), so its conductor's runner
+/// reads that graph too rather than judging a tree its own producer never
+/// wrote -- `crate::runner::host::ObjectGraph`, and
+/// `LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS` for the deferred defect.
+///
+/// It is one constant rather than four literals so that the key and the value
+/// cannot be separated and a new spawn site names the fact rather than
+/// restating it.
+pub const NO_REPLACEMENT_OBJECTS: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1");
+
+// ---------------------------------------------------------------------------
 // Hooks
 // ---------------------------------------------------------------------------
 
@@ -4128,21 +4157,22 @@ impl WorkspaceManager {
     /// list`, `for-each-ref`, `show-ref`, `diff`) is about the objects the
     /// repository actually holds.
     ///
-    /// **What it does not cover, stated precisely.** Only children this
-    /// builder spawns. A gate or a reviewer running inside a snapshot gets the
-    /// environment the host runner composes, which clears the ambient one and
-    /// does not include this; the free functions `read_only_git` and
-    /// `read_only_git_ok`, which `quiescence` uses, are outside this builder
-    /// as they are outside the hooks-path walk. Measured on git 2.43: a role
-    /// process running `git show HEAD:f` in a snapshot of a tree with a
-    /// replacement installed reads the replacement. So the snapshot's
-    /// filesystem is the judged tree while a process inspecting it through Git
-    /// may not see that tree, and this doc claims only the first. Closing the
-    /// second is product-wide behaviour needing a `design/` sentence about
-    /// what an exact snapshot is defined against, and is a deferred finding in
-    /// `reviews/findings/`
-    /// (`id: PR130-REVIEW3-REPLACEMENT-ISOLATION-STOPS-AT-THE-MANAGER`)
-    /// awaiting the owner's design ruling.
+    /// **What this builder covers, and who covers the rest.** Only children
+    /// this builder spawns, which is not every process that reads the snapshot:
+    /// measured on git 2.43, a role process running `git show HEAD:f` in a
+    /// snapshot of a tree with a replacement installed reads the replacement,
+    /// and `git status --porcelain` calls an untouched snapshot modified. A
+    /// gate or a reviewer gets the environment its runner composes, which
+    /// clears the ambient one; the free functions [`read_only_git`] and
+    /// [`read_only_git_ok`], which `quiescence` uses, are outside this builder
+    /// as they are outside the hooks-path walk. Each of those now sets the same
+    /// pair from the same [`NO_REPLACEMENT_OBJECTS`] constant, so the snapshot's
+    /// filesystem and every process inspecting it through Git see one tree --
+    /// the judged one. `design/15_design_event_log_resume_run_layout.md`, "What
+    /// an exact snapshot is exact against", is the product sentence that says
+    /// so, and its second paragraph is why the v0.1 conductor, which takes no
+    /// snapshot from this manager, is the one runner that reads the other
+    /// graph.
     fn command(&self, cwd: &Path, args: &[OsString]) -> Command {
         let mut hooks_config = OsString::from("core.hooksPath=");
         hooks_config.push(self.hooks_dir());
@@ -4154,7 +4184,7 @@ impl WorkspaceManager {
             .arg(hooks_config)
             .args(["-c", "core.fsmonitor=false"])
             .args(["-c", "protocol.file.allow=never"])
-            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1)
             .args(args)
             .stdin(Stdio::null());
         command
@@ -4442,12 +4472,23 @@ fn git_dir_of(worktree: &Path) -> Result<Option<PathBuf>, UpstrokeError> {
 /// ([`WorkspaceManager::index_differs_from`]); it belongs here, where a read
 /// added later inherits it, because a read that writes the index writes it
 /// outside every effect hook.
+///
+/// **[`NO_REPLACEMENT_OBJECTS`] on every one of them too**, for the same reason
+/// [`WorkspaceManager::command`] sets it: these reads answer *what does this
+/// worktree hold*, and `git replace` would have `diff-index`, `cat-file`,
+/// `status` and `fsck` answer about the replacing object instead. Quiescence is
+/// where that bites -- `index_differs_from` compares the index against the
+/// recorded tree, and a replacement of that tree turns an untouched worktree
+/// into a `TreeMismatch` -- so this is not a second copy of a manager
+/// precaution but the same one, at the reads the manager makes outside its
+/// builder.
 fn read_only_git(cwd: &Path, args: &[&str]) -> Result<Output, UpstrokeError> {
     Command::new("git")
         .arg("-C")
         .arg(cwd)
         .args(["--no-optional-locks", "-c", "core.fsmonitor=false"])
         .args(args)
+        .env(NO_REPLACEMENT_OBJECTS.0, NO_REPLACEMENT_OBJECTS.1)
         .stdin(Stdio::null())
         .output()
         .map_err(|error| UpstrokeError::Git {

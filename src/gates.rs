@@ -490,6 +490,11 @@ mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workspace_manager::fixture::{
+        REPLACEMENT_WITNESS, assert_replacement_controls_pinned,
+        environment_without_ambient_replacement_controls, pin_replacement_refs_in,
+        run_replacement_witness_child, without_ambient_replacement_controls,
+    };
     use std::env;
     use std::process::Command as StdCommand;
 
@@ -502,18 +507,20 @@ mod tests {
 
     fn temp_repo(tag: &str) -> PathBuf {
         let dir = temp_dir(tag);
-        let out = StdCommand::new("git")
-            .arg("-C")
-            .arg(&dir)
-            .args(["init", "-q"])
-            .output()
-            .expect("git");
+        let mut command = StdCommand::new("git");
+        command.arg("-C").arg(&dir).args(["init", "-q"]);
+        without_ambient_replacement_controls(&mut command);
+        let out = command.output().expect("git");
         assert!(out.status.success());
         dir
     }
 
     fn host() -> crate::runner::host::HostRunner {
-        crate::runner::host::HostRunner::new()
+        use crate::runner::host::{HostEnvironment, HostRunner, KeyCase};
+        HostRunner::new().with_environment(HostEnvironment::with_base(
+            environment_without_ambient_replacement_controls(),
+            KeyCase::current(),
+        ))
     }
 
     fn gate_id(n: u32) -> InvocationId {
@@ -530,6 +537,124 @@ mod tests {
             timeout: Duration::from_secs(secs),
             shell: ShellKind::native(),
         }
+    }
+
+    fn git_as_the_legacy_workspace_does(dir: &Path, args: &[&str]) -> String {
+        let mut command = StdCommand::new("git");
+        command
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "-c",
+                "user.name=upstroke",
+                "-c",
+                "user.email=u@example.invalid",
+            ])
+            .args(["-c", "core.autocrlf=false", "-c", "core.eol=lf"])
+            .args(args);
+        without_ambient_replacement_controls(&mut command);
+        let out = command.output().expect("git");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    fn runner_reading(
+        objects: crate::runner::host::ObjectGraph,
+    ) -> crate::runner::host::HostRunner {
+        use crate::runner::host::{HostEnvironment, HostRunner, KeyCase};
+        HostRunner::new().with_environment(
+            HostEnvironment::with_base(
+                environment_without_ambient_replacement_controls(),
+                KeyCase::current(),
+            )
+            .reading(objects),
+        )
+    }
+
+    /// The v0.1 exemption is measured in a **neutralised child**, and the child
+    /// states the precondition before it measures anything (PR #271, round 4).
+    ///
+    /// Every `git` below already runs with the ambient controls taken away, so
+    /// nothing here could be decided by the operator's environment -- but
+    /// "nothing could be" was the claim rounds 1, 2 and 3 each made about a
+    /// witness that then could be. [`assert_replacement_controls_pinned`] is
+    /// that claim executed: the enumerated names are gone, and a Git child of
+    /// this process honours `refs/replace/*` at all. It cannot be stated in the
+    /// parent, because the parent is whatever environment the suite was started
+    /// in; the child is the one this witness's own commands run in.
+    #[test]
+    fn a_v1_gate_judges_the_tree_its_own_workspace_materialised() {
+        let status = run_replacement_witness_child("gates::tests::v1_gate_replacement_helper");
+        assert!(
+            status.success(),
+            "the child witnesses the v0.1 gate exemption over a replaced tree \
+             with every ambient control over `refs/replace/*` taken away from \
+             it, and ended {status:?}"
+        );
+    }
+
+    /// Spawned by [`a_v1_gate_judges_the_tree_its_own_workspace_materialised`].
+    #[test]
+    #[ignore = "subprocess helper"]
+    fn v1_gate_replacement_helper() {
+        use crate::runner::host::ObjectGraph;
+
+        if std::env::var_os(REPLACEMENT_WITNESS).is_none() {
+            return;
+        }
+        assert_replacement_controls_pinned("v1-gate");
+
+        let repo = temp_repo("legacy-replacement");
+        pin_replacement_refs_in(&repo);
+        fs::write(repo.join("f.txt"), "A\n").expect("the recorded content");
+        git_as_the_legacy_workspace_does(&repo, &["add", "f.txt"]);
+        git_as_the_legacy_workspace_does(&repo, &["commit", "-q", "-m", "recorded"]);
+        let recorded_commit = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD"]);
+        let recorded_tree = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD^{tree}"]);
+
+        fs::write(repo.join("f.txt"), "B\n").expect("the replacing content");
+        git_as_the_legacy_workspace_does(&repo, &["add", "f.txt"]);
+        git_as_the_legacy_workspace_does(&repo, &["commit", "-q", "-m", "replacing"]);
+        let replacing_tree = git_as_the_legacy_workspace_does(&repo, &["rev-parse", "HEAD^{tree}"]);
+        assert_ne!(recorded_tree, replacing_tree, "two distinct trees");
+
+        git_as_the_legacy_workspace_does(&repo, &["replace", &recorded_tree, &replacing_tree]);
+        git_as_the_legacy_workspace_does(
+            &repo,
+            &["checkout", "--detach", "--quiet", &recorded_commit],
+        );
+
+        assert_eq!(
+            fs::read_to_string(repo.join("f.txt")).expect("the checkout"),
+            "B\n",
+            "the v0.1 producer honours `refs/replace/*`; without that this test \
+             measures nothing"
+        );
+
+        let ws = Workspace::open(&repo).expect("open");
+        let judge = gate("git diff --exit-code HEAD -- f.txt", 60);
+
+        let legacy = judge
+            .check(&runner_reading(ObjectGraph::AsReplaced), gate_id(0), &ws)
+            .expect("the gate ran");
+        assert!(
+            matches!(legacy, GateResult::Pass { .. }),
+            "a v0.1 gate over an untouched v0.1 checkout must pass: {legacy:?}"
+        );
+
+        let recorded = judge
+            .check(&runner_reading(ObjectGraph::Recorded), gate_id(1), &ws)
+            .expect("the gate ran");
+        assert!(
+            matches!(recorded, GateResult::Fail { .. }),
+            "and the disagreement this exemption exists to avoid is real: reading \
+             the recorded graph over a checkout the replacing graph wrote must \
+             fail, or the two legs are not measuring the pair: {recorded:?}"
+        );
     }
 
     #[test]
@@ -791,12 +916,25 @@ mod tests {
             set.check(&host(), gate_id(0), &ws),
             Ok(GateResult::Pass { .. })
         ));
-        let get = StdCommand::new("git")
+        let mut read_back = StdCommand::new("git");
+        read_back
             .arg("-C")
             .arg(&repo)
-            .args(["config", "--local", "test.quoted"])
-            .output()
-            .expect("read back");
+            .args(["config", "--local", "test.quoted"]);
+        without_ambient_replacement_controls(&mut read_back);
+        let get = read_back.output().expect("read back");
+        // The exit status, not just the bytes: `git config --get` prints
+        // nothing on every failure it has, so an observer that reads stdout
+        // alone reports "the key is absent" for a read that never ran. That is
+        // the rule `a_redirected_git_config_cannot_capture_a_fixtures_own_pin`
+        // states, and it belongs to every observer rather than to the one a
+        // reviewer named (PR #271, round 4).
+        assert_eq!(
+            get.status.code(),
+            Some(0),
+            "the read-back did not answer about the repository: {}",
+            String::from_utf8_lossy(&get.stderr)
+        );
         assert_eq!(
             String::from_utf8_lossy(&get.stdout).trim(),
             "two words",

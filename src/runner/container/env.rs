@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use crate::error::UpstrokeError;
 use crate::runner::host::{KeyCase, credential_location, reserved_keys};
 use crate::runner::{AgentId, ExecutionRole, ProbeTarget};
+use crate::workspace_manager::NO_REPLACEMENT_OBJECTS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundaryLayout {
@@ -228,6 +229,8 @@ impl ContainerEnvironment {
         for (key, value) in overlay {
             upsert(&mut composed, self.case, key.clone(), value.clone());
         }
+        let (key, value) = NO_REPLACEMENT_OBJECTS;
+        upsert(&mut composed, self.case, key.to_owned(), value.to_owned());
         self.certify_path(&composed)?;
         Ok(composed)
     }
@@ -428,6 +431,45 @@ mod tests {
         assert_eq!(refused, 5 * 6, "five roles crossed with six reserved keys");
         assert_eq!(allowed, 5);
         assert_eq!(ExecutionRole::all().len(), 5);
+    }
+
+    #[test]
+    fn every_composed_environment_disables_replacement_objects() {
+        let volumes = volumes();
+        let layout = BoundaryLayout::new();
+        let mut rows = 0_usize;
+        for case in KeyCase::ALL {
+            let mut base = image_base();
+            base.push((NO_REPLACEMENT_OBJECTS.0.to_ascii_lowercase(), String::new()));
+            let environment = ContainerEnvironment::with_base(base, *case);
+            for role in ExecutionRole::all() {
+                let agent = binding(&role);
+                let scope = scope(&role, agent.as_ref(), &volumes, &layout);
+                for overlay in [
+                    Vec::new(),
+                    vec![(NO_REPLACEMENT_OBJECTS.0.to_owned(), "0".to_owned())],
+                ] {
+                    let composed = environment
+                        .compose(&scope, &overlay)
+                        .unwrap_or_else(|error| panic!("{role} ({case:?}) was refused: {error}"));
+                    let named: Vec<&str> = composed
+                        .iter()
+                        .filter(|(name, _)| {
+                            case.same_key(name.as_ref(), NO_REPLACEMENT_OBJECTS.0.as_ref())
+                        })
+                        .map(|(_, value)| value.as_str())
+                        .collect();
+                    assert_eq!(
+                        named,
+                        vec![NO_REPLACEMENT_OBJECTS.1],
+                        "{role} ({case:?}, overlay {overlay:?}): the container would read \
+                         whatever `git replace` points at the judged objects"
+                    );
+                    rows += 1;
+                }
+            }
+        }
+        assert_eq!(rows, ExecutionRole::all().len() * 2 * KeyCase::ALL.len());
     }
 
     #[test]

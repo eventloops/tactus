@@ -221,6 +221,114 @@ One legacy-scoped gate identity. `TaskKey(0)`, attempt 1, gate `n` —
 the packet's first form with the legacy engine's generation
 (`InvocationId::legacy_attempt`).
 
+## `mod tests` › `fn temp_repo(tag: &str) -> PathBuf {`
+
+`git init` through
+[`without_ambient_replacement_controls`](../../src/workspace_manager/fixture.rs),
+because the repository this suite measures must not be one the machine
+configured. A global `init.templateDir` copies the template's `config`
+**into the new repository's own** `.git/config`, below every later `git
+config` and above every file layer a later pin could reach (measured on
+git 2.43.0: a template carrying `[core] useReplaceRefs = false` lands in
+the fresh repository and decides it). Pinning the two configuration-file
+variables for the `init` itself is what closes that.
+
+## `mod tests` › `fn host() -> crate::runner::host::HostRunner {`
+
+The default host runner, over a base with the ambient Git controls taken
+out — see `runner_reading` below for why, and
+`without_ambient_replacement_controls` for what.
+
+`HostRunner::new()` composes from `HostEnvironment::from_process()`, so a
+gate this suite runs inherits whatever the machine exported. One of those
+variables breaks a gate that has nothing to do with replacement objects:
+under `GIT_CONFIG=<file>`, `git config --local` refuses with `only one
+config file at a time` and exits 129, so
+`quoted_arguments_survive_the_windows_shell` failed at base `5aebbbf`
+under a setting an operator is entitled to have. The base here is the same
+one `runner_reading` takes.
+
+## `mod tests` › `fn git_as_the_legacy_workspace_does(dir: &Path, args: &[&str]) -> String {`
+
+A `git` of the shape `src/workspace.rs` runs — no
+[`NO_REPLACEMENT_OBJECTS`](../../src/workspace_manager.rs) — over an
+environment that decides nothing else about `refs/replace/*` either.
+
+The removal is the point. The v0.1 workspace sets no such pair on its
+twenty Git children, so its checkout materialises whatever `refs/replace/*`
+points the recorded tree at; a suite started under an exported
+`GIT_NO_REPLACE_OBJECTS=1` would set the fixture up the *other* way and
+measure nothing.
+
+That variable is not the only way, which is round 2's finding and the whole
+of round 3's instruction. `core.useReplaceRefs=false` does it too, and the
+reviewer reached it through `GIT_CONFIG_COUNT` — measured at head
+`aa2728d`, the test below failed at exit `101` with actual `"A\n"` where the
+fixture requires `"B\n"`, under a configuration an operator is entitled to
+set. So the whole enumeration is taken away here rather than the one name:
+`without_ambient_replacement_controls` states what it is and how it was
+measured, and `pin_replacement_refs_in` states the repository-local half.
+
+## `mod tests` › `fn runner_reading(objects: crate::runner::host::ObjectGraph) -> crate::runner::host::HostRunner {`
+
+A host runner whose base carries none of the ambient controls over
+`refs/replace/*`, reading `objects`.
+
+`HostRunner::run` clears the ambient environment and installs what
+`compose` returned, and `compose`'s base is this process's environment:
+under an exported `GIT_NO_REPLACE_OBJECTS=1` the base would carry the pair
+and both legs of the witness below would read the same object graph, and
+under an exported `core.useReplaceRefs=false` both would read the recorded
+one. Taking the enumeration out of the base is what makes them differ by
+the one thing under test.
+
+## `mod tests` › `fn a_v1_gate_judges_the_tree_its_own_workspace_materialised() {`
+
+A v0.1 gate judges the tree its own workspace materialised (PR #271,
+round 1's regression finding).
+
+**The work is in `v1_gate_replacement_helper`, a neutralised child** (round
+4). Every `git` below already runs with the ambient controls taken away, so
+nothing here could be decided by the operator's environment — but "nothing
+could be" was the claim rounds 1, 2 and 3 each made about a witness that
+then could be, and what this process does not carry cannot be asserted from
+inside a process that carries it. `fixture::run_replacement_witness_child`
+is the shared door; `assert_replacement_controls_pinned` is the first
+statement on the other side of it, and it refuses on the enumerated names
+and then on a measurement of whether a Git child honours `refs/replace/*` at
+all. An eighteenth mechanism nobody has listed fails there, loudly, instead
+of letting these two legs agree for the wrong reason.
+
+The schema-1..3 path shares `HostRunner` with the schema-4 one, and its
+producer is frozen: `src/workspace.rs`'s Git children set no
+`NO_REPLACEMENT_OBJECTS`, so with `refs/replace/<tree A> -> <tree B>`
+installed its checkout of a commit whose recorded tree is `A` puts `B` on
+disk. Composing the pair for that gate's process puts producer and consumer
+on different object graphs, and `git diff --exit-code HEAD` over a checkout
+nothing has touched exits 1 — a `Fail` on a workspace the engine itself
+wrote. Measured on git 2.43 with the pair composed unconditionally: `Fail`,
+exactly as the `Recorded` leg still records.
+
+So the v0.1 conductor's runner reads the graph its own producer wrote
+(`HostRunner::for_legacy_workspace`, installed at `engine::run` and
+`engine::resume`), and the exact-snapshot rule of `design/15` binds the
+schema-4 path, whose producer removes replacements at both ends. That the
+v0.1 path reads replacements at all is
+`LEGACY-WORKSPACE-READS-REPLACEMENT-OBJECTS`, deferred behind the module's
+freeze; this test pins only that this pull request did not change its
+answer.
+
+Both legs run the production `ShellGate::check` over a production
+`Workspace` with a legacy invocation, so what differs between them is one
+field of one environment.
+
+The `assert_eq!` before them is the premise, and the half this pull request
+must not have changed: the workspace's own checkout of the recorded tree
+put the replacing blob on disk. It is also this test's own probe that the
+enumeration held — if an ambient control had reached the fixture's `git`
+after all, that assertion fails loudly rather than letting the two legs
+agree for the wrong reason.
+
 ## `mod tests` › `fn every_shell_spells_its_invocation_the_way_the_record_says() {`
 
 How each shell is asked to run a command line, written from the
@@ -334,6 +442,14 @@ them both would still be caught by the count below.
 
 `git config` with a quoted value round-trips only if the shell
 preserved the quote grouping.
+
+The read-back that follows is neutralised **and its exit status is
+asserted** (round 4). `git config --get` prints nothing on every failure it
+has, so an observer that reads stdout alone reports "the key is absent" for
+a read that never ran, and would have reported this test's own `129` under
+`GIT_CONFIG` as a lost value rather than as a broken observer. That is every
+observer's rule, not the one a reviewer named — the same assertion is in
+`a_redirected_git_config_cannot_capture_a_fixtures_own_pin`.
 
 ## `fn resolution_enforces_simple_commands_and_skips_shelly_ones() {` › `for complex in [`
 
