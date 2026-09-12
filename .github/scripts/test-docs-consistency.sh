@@ -36,7 +36,10 @@
 #       the directory, holding findings no gate, lane rule or ledger reads.
 #       The prefix is matched case-sensitively and with its trailing slash, so
 #       reviews/FINDINGS.md, the closed ledger that differs from the moved
-#       directory only in case, never matches.
+#       directory only in case, never matches. AND THE LISTING MUST SUCCEED:
+#       where `git ls-files` cannot answer, this check reports a failure and
+#       never a pass, because an index that was not read is an UNCHECKED prefix
+#       and not an empty one.
 #
 # WITHDRAWN, DELIBERATELY (round 5 of this file's review): this gate makes NO
 # claim about which cargo commands CI runs, whether CI executes them, or which
@@ -66,7 +69,9 @@
 #   round 3: MUT-MASTER-TRIGGERS-REMOVED (integration branch present, master
 #            not required), MUT-FORWARD-PATH-REUSED-AS-CURRENT (one qualified
 #            occurrence marked the path for all of them);
-#   round 4: MUT-CONTRIBUTING-DELETED (a required document treated as optional).
+#   round 4: MUT-CONTRIBUTING-DELETED (a required document treated as optional);
+#   round 6: MUT-C5-PRODUCER-FAILS-OPEN (a guard whose own listing command
+#            could fail unnoticed, so the check it never ran read as a pass).
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 
@@ -261,15 +266,72 @@ fi
 # the closed ledger, which differs from the moved directory only in case -- is
 # never matched. The message says what to do, because whoever reads it is in
 # the middle of a rebase.
+#
+# THE LISTING'S STATUS IS CHECKED BEFORE ITS OUTPUT IS BELIEVED.
+# MUT-C5-PRODUCER-FAILS-OPEN: this loop read `done < <(git ls-files -z)`, and
+# BASH DISCARDS A PROCESS SUBSTITUTION'S EXIT STATUS -- what the loop reports is
+# the loop's own status and the producer's belongs to nobody. `git ls-files -z`
+# exits 128 on an index it cannot read and on no repository at all; either way
+# the loop body then ran ZERO times, old_ledger_paths stayed empty, the `if`
+# below was skipped, and this gate printed `documentation consistency fixtures:
+# PASS` and exited 0. Two review lenses reproduced that independently on one
+# head, one with `chmod 000` on the index and one with a corrupt GIT_INDEX_FILE.
+# A guard that passes when its own producer fails is worse than no guard,
+# because it reports a protection that was never applied. So the listing is
+# written to a FILE, where the status belongs to the command that wrote it, and
+# a producer failure is an `error` and not a pass -- the rule
+# .github/scripts/changed-in-range.sh states at its own added-findings loop for
+# the same reason. The regression test is at the foot of this file.
 old_ledger_paths=''
-while IFS= read -r -d '' path; do
-  [[ "$path" == reviews/findings/* ]] || continue
-  old_ledger_paths+="  $path"$'\n'
-done < <(git ls-files -z)
+tracked_paths="$(mktemp)"
+trap 'rm -f -- "$tracked_paths"' EXIT
+ls_files_status=0
+git ls-files -z > "$tracked_paths" || ls_files_status=$?
+if (( ls_files_status != 0 )); then
+  error "C5 could not read this head's tracked paths: git ls-files -z exited $ls_files_status, so the old finding-ledger prefix is UNCHECKED; that is a failure and not a pass"
+else
+  while IFS= read -r -d '' path; do
+    [[ "$path" == reviews/findings/* ]] || continue
+    old_ledger_paths+="  $path"$'\n'
+  done < "$tracked_paths"
+fi
 if [[ -n "$old_ledger_paths" ]]; then
   error "reviews/findings/ was moved to findings/ in pull request #276 (2026-09-12) and must not come back. This head tracks these paths under the old prefix:"
   error "${old_ledger_paths%$'\n'}"
   error "Rebase onto master and move them under findings/ with git mv: nothing reads reviews/findings/ any more, so a finding left there is filed nowhere."
+fi
+
+# --- C5's regression test: a failing producer must go RED, never green -------
+# MUT-C5-PRODUCER-FAILS-OPEN is killed here rather than by hand, because that
+# mutation was invisible to every fixture this repository had: the gate passed.
+# The whole gate is re-run with GIT_DIR pointing at a path that cannot be a
+# directory, so `git ls-files` exits 128 without anything touching the index
+# this run is reading. C5 is the only check here that speaks to git, so the
+# child's output is three lines and nothing else -- git's own `fatal:`, C5's
+# refusal naming the status, and the FAIL line -- and that exactness is the part
+# that pins "only C5 reads git" for whoever adds the next check. git's
+# diagnostic is deliberately not silenced: C5's message carries the status and
+# git's carries the reason, and the reader of a red gate wants both.
+#
+# THE CHILD IS TOLD NOT TO RECURSE BY ARGUMENT AND NOT BY ENVIRONMENT: a
+# variable that suppresses a test is a variable a stale export suppresses it
+# with, and nothing invokes this gate with arguments.
+#
+# Measured both ways on this file. With `done < <(git ls-files -z)` restored the
+# child prints `documentation consistency fixtures: PASS`, exits 0, and these
+# three checks all speak; with the status checked it exits 1 naming the producer.
+if [[ "${1:-}" != --child-of-c5-selftest ]]; then
+  selftest_status=0
+  selftest_out="$(GIT_DIR=/dev/null/not-a-git-repository \
+    "$BASH" "$script_dir/${BASH_SOURCE[0]##*/}" --child-of-c5-selftest 2>&1)" \
+    || selftest_status=$?
+  selftest_said="${selftest_out//$'\n'/ | }"
+  (( selftest_status != 0 )) \
+    || error "C5 passed with a failing git ls-files: the child run exited 0 and said: $selftest_said"
+  [[ "$selftest_out" == *'git ls-files -z exited 128'* ]] \
+    || error "C5 must name the producer that failed; the child run said: $selftest_said"
+  [[ "$(grep -c . <<< "$selftest_out")" == 3 ]] \
+    || error "a child run with no repository must say exactly three things -- git's fatal, C5's refusal, the FAIL line -- and fail no other check; it said: $selftest_said"
 fi
 
 if (( failed )); then
