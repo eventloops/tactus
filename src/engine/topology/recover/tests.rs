@@ -686,6 +686,9 @@ struct RecordingRunner {
     failing: Mutex<Option<String>>,
     filters: Mutex<bool>,
     edits: Mutex<bool>,
+    /// Name the edited file by the attempt's task, so two tasks' workers leave
+    /// two different edits and a dependent task's diff is not empty.
+    per_task: Mutex<bool>,
 }
 
 impl RecordingRunner {
@@ -701,6 +704,15 @@ impl RecordingRunner {
     fn editing() -> Self {
         let runner = Self::default();
         *runner.edits.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        runner
+    }
+
+    fn editing_per_task() -> Self {
+        let runner = Self::editing();
+        *runner
+            .per_task
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = true;
         runner
     }
 
@@ -741,8 +753,15 @@ impl Runner for RecordingRunner {
             && request.role == crate::runner::ExecutionRole::Implement
             && *self.edits.lock().unwrap_or_else(PoisonError::into_inner)
         {
+            let per_task = *self.per_task.lock().unwrap_or_else(PoisonError::into_inner);
+            let name = match (&request.invocation, per_task) {
+                (crate::runner::InvocationId::Attempt { key, .. }, true) => {
+                    format!("worker-k{}.txt", key.0)
+                }
+                _ => "worker.txt".to_owned(),
+            };
             crate::workspace_manager::fixture::write_file(
-                &request.workspace.join("worker.txt"),
+                &request.workspace.join(name),
                 b"the worker's edit\n",
             );
             if *self.filters.lock().unwrap_or_else(PoisonError::into_inner) {
@@ -15063,4 +15082,395 @@ fn finalized_report_names_runner_identity() {
     assert_eq!(status.runner, report.runner);
     assert_eq!(status.outcome, Some(RunOutcome::Halted));
     assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+// ---------------------------------------------------------------------------
+// PR10: projection equivalence and the acceptance subset at max_parallel = 1.
+// ---------------------------------------------------------------------------
+
+/// The live incremental fold of a stepped run against a fresh replay of the
+/// bytes on disk, and the report each derives: Q1's comparison, made against
+/// the live state and not between two replays. The G4 gate ran this as an
+/// uncommitted measurement (`live_vs_replay`) and asked for it committed.
+struct LiveVsReplay {
+    state_equal: bool,
+    live_digest: String,
+    replay_digest: String,
+    replay_twice_equal: bool,
+}
+
+fn live_vs_replay(
+    fixture: &Fixture,
+    run: &crate::engine::topology::run::TopologyRun,
+) -> LiveVsReplay {
+    use crate::engine::topology::report::TopologyReport;
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("the log parses");
+    let replayed = TopologyFold::replay(fixture.inputs(), &events).expect("the log replays");
+    let again = TopologyFold::replay(fixture.inputs(), &events).expect("the log replays again");
+    let live_report =
+        TopologyReport::derive(RUN_ID, run.fold(), run.events()).expect("the live report derives");
+    let replay_report =
+        TopologyReport::derive(RUN_ID, &replayed, &events).expect("the replayed report derives");
+    LiveVsReplay {
+        state_equal: run.fold().state() == replayed.state(),
+        live_digest: live_report.digest,
+        replay_digest: replay_report.digest,
+        replay_twice_equal: replayed.state() == again.state(),
+    }
+}
+
+#[track_caller]
+fn assert_live_equals_replay(
+    fixture: &Fixture,
+    run: &crate::engine::topology::run::TopologyRun,
+    step: usize,
+) {
+    let compared = live_vs_replay(fixture, run);
+    assert!(
+        compared.state_equal,
+        "after step {step}: the live fold and a replay of the bytes on disk disagree"
+    );
+    assert_eq!(
+        compared.live_digest, compared.replay_digest,
+        "after step {step}: the report derived live and the report derived from replay differ"
+    );
+    assert!(
+        compared.replay_twice_equal,
+        "after step {step}: replay twice equal"
+    );
+}
+
+/// What a user sees of their repository: `HEAD`, every tracked file's bytes,
+/// and whether anything tracked is modified.
+fn user_checkout(repo_root: &Path) -> (String, BTreeMap<String, Vec<u8>>, String) {
+    use crate::workspace_manager::fixture::git;
+    let head = git(repo_root, &["rev-parse", "HEAD"]);
+    let tracked = git(repo_root, &["ls-files"])
+        .lines()
+        .map(|name| {
+            (
+                name.to_owned(),
+                std::fs::read(repo_root.join(name)).expect("a tracked file"),
+            )
+        })
+        .collect();
+    let status = git(
+        repo_root,
+        &["status", "--porcelain", "--untracked-files=no"],
+    );
+    (head, tracked, status)
+}
+
+/// `acceptance_subset[0]`: "max_parallel = 1 topology completes a multi-task
+/// plan with one linear engine commit per plan task, user checkout
+/// byte-for-byte unchanged" — a two-task chain driven to `run_finished
+/// (Complete)`, with the live fold and its report compared against a replay
+/// of the bytes on disk after every step (`projection equivalence`).
+#[test]
+fn max_parallel_one_completes_a_two_task_chain_with_one_linear_commit_per_task_and_the_checkout_unchanged()
+ {
+    use crate::engine::topology::select::Ceiling;
+    use crate::workspace_manager::fixture::git;
+
+    let fixture = Fixture::build(
+        "acceptance-chain",
+        Damage {
+            two_tasks: true,
+            beta_depends_on_alpha: true,
+            ..Damage::default()
+        },
+    );
+    git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            fixture.base_sha.as_str(),
+        ],
+    );
+    let checkout_before = user_checkout(&fixture.repo_root);
+    assert!(
+        checkout_before.2.is_empty(),
+        "the fixture's checkout is clean before the run: {}",
+        checkout_before.2
+    );
+    let harness = harness();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let manager = fixture.manager();
+
+    let progress = with_live_run_hooked_runner(
+        &fixture,
+        &harness,
+        Ceiling::unlimited(),
+        &adapters,
+        &RecordingRunner::editing_per_task(),
+        |run, seams, hooks| {
+            let mut progress = Vec::new();
+            for step in 1..=6 {
+                let outcome = run.step(seams, hooks);
+                if outcome.is_ok() {
+                    assert_live_equals_replay(&fixture, run, step);
+                }
+                progress.push(outcome);
+            }
+            progress
+        },
+    );
+    let shapes: Vec<String> = progress
+        .iter()
+        .map(|step| match step {
+            Ok(Progress::Settled { key, accepted, .. }) => {
+                format!("settled(k{}, {accepted})", key.0)
+            }
+            Ok(Progress::Integrated { key, sequence, .. }) => {
+                format!("integrated(k{}, s{})", key.0, sequence.0)
+            }
+            Ok(Progress::Finished {
+                outcome,
+                closed,
+                report_written,
+                execution_root_removed,
+            }) => format!(
+                "finished({outcome:?}, {closed}, {report_written}, {execution_root_removed})"
+            ),
+            Ok(other) => format!("{other:?}"),
+            Err(error) if error.to_string().contains("already finished as `complete`") => {
+                "refused(finished)".to_owned()
+            }
+            Err(error) => format!("error({error})"),
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "settled(k0, true)",
+            "integrated(k0, s0)",
+            "settled(k1, true)",
+            "integrated(k1, s1)",
+            "finished(Complete, 0, true, true)",
+            "refused(finished)",
+        ],
+        "alpha attempts and publishes, beta dispatches at alpha's head, attempts and publishes, \
+         the run ends Complete, and a further step is refused"
+    );
+
+    let log = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+    let merged: Vec<(u32, String, Vec<u32>)> = log
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::TaskMerged { data } => Some((
+                data.sequence.0,
+                data.merged_sha.0.clone(),
+                data.satisfies.iter().map(|key| key.0).collect(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(merged.len(), 2);
+    assert_eq!(merged[0].2, vec![0]);
+    assert_eq!(merged[1].2, vec![1]);
+    let dispositions: Vec<String> = log
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::MergePrepared { data } => Some(format!("{:?}", data.disposition)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        dispositions,
+        vec!["Fast", "Fast"],
+        "each candidate's base was the head when it integrated, so each publishes the exact \
+         commit its gates judged"
+    );
+
+    let head = ref_target(&fixture, fixture.started.integration_ref.as_str())
+        .expect("the integration ref");
+    assert_eq!(
+        head, merged[1].1,
+        "the integration ref is at beta's publication"
+    );
+    let lineage = git(
+        &fixture.repo_root,
+        &[
+            "rev-list",
+            "--parents",
+            &format!("{}..{}", fixture.base_sha.as_str(), head),
+        ],
+    );
+    let lineage: Vec<Vec<&str>> = lineage
+        .lines()
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert_eq!(
+        lineage,
+        vec![
+            vec![merged[1].1.as_str(), merged[0].1.as_str()],
+            vec![merged[0].1.as_str(), fixture.base_sha.as_str()],
+        ],
+        "one linear engine commit per plan task, beta's on alpha's on the base, no merge parents"
+    );
+    for (sequence, commit, _) in &merged {
+        let tree_files = git(&fixture.repo_root, &["ls-tree", "--name-only", commit]);
+        assert!(
+            tree_files
+                .lines()
+                .any(|name| name == format!("worker-k{sequence}.txt")),
+            "commit s{sequence} carries its task's edit: {tree_files}"
+        );
+    }
+
+    assert_eq!(
+        user_checkout(&fixture.repo_root),
+        checkout_before,
+        "the user's checkout — HEAD, every tracked file, the index — is byte-for-byte unchanged"
+    );
+
+    let report = report_of(&fixture);
+    assert_eq!(report.outcome, Some(RunOutcome::Complete));
+    assert_eq!(
+        report
+            .tasks
+            .iter()
+            .map(|task| task.state.as_str())
+            .collect::<Vec<_>>(),
+        vec!["merged", "merged"]
+    );
+    assert_eq!(
+        report
+            .integration_ledger
+            .iter()
+            .map(|row| (row.sequence, row.basis.as_str(), row.terminal.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(0, "fast", "task_merged"), (1, "fast", "task_merged")],
+        "the integration ledger section (INV-13)"
+    );
+    assert!(report.retained_candidates.is_empty());
+    let ends = finished_events(&log);
+    assert_eq!(ends.len(), 1);
+    assert_eq!((ends[0].merged, ends[0].parked), (2, 0));
+    assert!(
+        candidates_refs_of(&fixture).is_empty(),
+        "Complete pruned both candidates refs"
+    );
+    assert!(pins_of(&fixture).is_empty());
+    assert!(manager.intents().expect("intents").is_empty());
+    assert!(!manager.execution_root().exists());
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .iter()
+            .all(|object| fixture.manager().object_exists(object).unwrap_or(false)),
+        "every object the pruning released is still in Git's store (R27: left to Git, never \
+         deleted)"
+    );
+}
+
+/// [`with_live_run_hooked`] with the runner chosen by the caller.
+fn with_live_run_hooked_runner<R>(
+    fixture: &Fixture,
+    harness: &Arc<Mutex<HookHarness>>,
+    ceiling: crate::engine::topology::select::Ceiling,
+    adapters: &crate::engine::topology::scaffold::ScaffoldAdapters,
+    runner: &dyn Runner,
+    body: impl FnOnce(
+        &mut crate::engine::topology::run::TopologyRun,
+        &crate::engine::topology::run::RunSeams<'_>,
+        &mut dyn TopologyHooks,
+    ) -> R,
+) -> R {
+    use crate::engine::topology::run::{RunSeams, TopologyRun};
+
+    let mut hooks = HarnessTopologyHooks::new(Arc::clone(harness));
+    let (_recovered, handle) =
+        resume_with_real_refs_hooked(fixture, &mut hooks).expect("the planted state resumes");
+    let mut run = TopologyRun::resumed(handle, fixture.inputs(), ceiling);
+    let sleeper = RecordingSleeper::default();
+    let manager = fixture.manager();
+    let paths = crate::rundir::RunPaths::with_private_root(
+        &fixture.repo_root,
+        &fixture.started.run_id,
+        &fixture.private_root,
+    );
+    paths.create().expect("the run directories are creatable");
+    let plans = crate::engine::assembly::FrozenPlans {
+        adapters,
+        paths: &paths,
+        gates: &[],
+        pools: &[],
+        caps: &[],
+        worker_timeout: Duration::from_secs(300),
+        decisions: &[],
+    };
+    let seams = RunSeams {
+        manager: &manager,
+        clock: &Frozen,
+        sleeper: &sleeper,
+        runner,
+        adapters,
+        paths: &paths,
+        plans: &plans,
+        reviews: &crate::engine::attempt::LegacyReviewPasses,
+        input_policy: &crate::engine::attempt::LegacyReviewInputPolicy,
+        answers: &crate::interaction::UnattendedAnswers,
+        ids: &FixedIds,
+        halts_run: false,
+    };
+    body(&mut run, &seams, &mut hooks)
+}
+
+/// `projection equivalence` over a run that parks, defers, stops for budget
+/// and ends: the report derived from the live fold equals the report derived
+/// from a replay of the bytes on disk after every step, and every prefix of
+/// the final log derives a report twice alike.
+#[test]
+fn projections_are_equal_between_live_and_replay_at_every_prefix() {
+    use crate::engine::topology::report::TopologyReport;
+    use crate::engine::topology::select::Ceiling;
+
+    let fixture = Fixture::two_tasks("projection-equivalence");
+    let harness = harness();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::rate_limiting();
+    let steps = with_live_run(
+        &fixture,
+        &harness,
+        Ceiling {
+            run_usd: Some(0.2),
+            task_usd: None,
+        },
+        &adapters,
+        |run, seams, hooks| {
+            let mut steps = 0;
+            loop {
+                let outcome = run.step(seams, hooks);
+                steps += 1;
+                match outcome {
+                    Ok(_) => assert_live_equals_replay(&fixture, run, steps),
+                    Err(_) => break,
+                }
+                assert!(steps < 8, "the run did not end");
+            }
+            steps
+        },
+    );
+    assert!(
+        steps >= 4,
+        "the run deferred, stopped, closed and refused: {steps} steps"
+    );
+
+    let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+    assert_eq!(finished_events(&events).len(), 1);
+    for prefix in 1..=events.len() {
+        let once = TopologyFold::replay(fixture.inputs(), &events[..prefix]).expect("replays");
+        let twice = TopologyFold::replay(fixture.inputs(), &events[..prefix]).expect("replays");
+        let first = TopologyReport::derive(RUN_ID, &once, &events[..prefix]).expect("derives");
+        let second = TopologyReport::derive(RUN_ID, &twice, &events[..prefix]).expect("derives");
+        assert_eq!(
+            first, second,
+            "prefix {prefix}: the projection is a function of the prefix"
+        );
+        assert!(
+            first.is_fresh_against(serde_json::to_vec(&first).expect("serializes").as_slice()),
+            "prefix {prefix}: a report is fresh against its own bytes"
+        );
+    }
 }
