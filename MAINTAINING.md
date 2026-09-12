@@ -148,11 +148,14 @@ source, documentation, workflows, release machinery and this file.
    text that defines the delegate's own authority. They are different kinds of thing, and folding
    them together would make the list read as closed again, which is the failure two earlier rounds
    already produced. Nothing enforces this limb, and it is worse served than the first: no required
-   check reads this rule at all. The one required check that reads `MAINTAINING.md` is
-   `export::tests::review_finding_ledger_uses_canonical_category_tokens`, which `include_str!`s the
-   file to check that three backticked category tokens occur somewhere in it and that their
-   underscore spellings occur nowhere — a substring check on the whole file, not a pin on the
-   ledger's vocabulary — and never reaches the delegation rule.
+   check reads this rule at all. Required checks do read these documents, by name and without it:
+   `export::tests::review_finding_ledger_uses_canonical_category_tokens` `include_str!`s this file
+   and checks that three backticked category tokens occur somewhere in it and their underscore
+   spellings nowhere, a substring check on the whole file and not a pin on the ledger's vocabulary;
+   `validate-pr-ledger-evidence.sh` searches every tracked text file for each identifier a ledger
+   row cites, so an edit to any of the four can turn `upstroke-pr-policy` red though it names none.
+   A filename search cannot close the set of a file's readers, and none of them reads what this
+   rule means.
 
    Which side a pull request falls on is read off its diff, not off its branch prefix, and reading
    it is the delegate's duty: **no check enforces this**, which is filed as
