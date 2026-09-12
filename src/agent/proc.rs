@@ -7209,6 +7209,11 @@ mod termination {
                     "SIGKILL failed: Operation not permitted (os error 1), and the wait collected \
                      it, asking for no exit status"
                 }
+                "ESRCH" => {
+                    answer_call_with(libc::SYS_kill, seccomp_refuse_with(libc::ESRCH));
+                    "SIGKILL answered ESRCH, so nothing of that number was there, and the wait \
+                     collected it, asking for no exit status"
+                }
                 "wait-with-status-refused" => {
                     answer_a_wait_by_number_with_a_status_pointer_with(seccomp_refuse_with(
                         libc::EPERM,
@@ -7252,6 +7257,7 @@ mod termination {
             for (answer, extra) in [
                 ("delivered", None),
                 ("EPERM", None),
+                ("ESRCH", None),
                 ("wait-with-status-refused", None),
                 ("wait-with-status-killed", None),
                 ("identity", Some(IDENTITY_ON)),
