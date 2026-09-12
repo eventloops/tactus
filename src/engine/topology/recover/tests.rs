@@ -9276,20 +9276,20 @@ fn the_cost_of_a_parked_verification_still_refuses_the_next_integration_after_a_
         &mut HarnessTopologyHooks::new(harness()),
     );
     assert!(
-        (second.spend_before - first.spend_after).abs() < 1e-9,
-        "the restart replays the total the parked incarnation reached: {} vs {}",
-        second.spend_before,
-        first.spend_after
-    );
-    assert!(
         matches!(second.progress.first(), Some(Ok(Progress::BudgetExceeded))),
-        "and refuses the integration the incarnation before it refused: {:?}",
+        "the restarted incarnation refuses the integration the one before it refused: {:?}",
         second.progress
     );
     assert!(
         second.reviewer_models.is_empty(),
-        "no reviewer was invoked by the restarted incarnation: {:?}",
+        "so no reviewer was invoked by it: {:?}",
         second.reviewer_models
+    );
+    assert!(
+        (second.spend_before - first.spend_after).abs() < 1e-9,
+        "and its replayed total is the one the parked incarnation reached: {} vs {}",
+        second.spend_before,
+        first.spend_after
     );
 }
 
