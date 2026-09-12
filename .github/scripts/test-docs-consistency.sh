@@ -79,8 +79,11 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$script_dir/../.." && pwd)"
 cd "$root"
 
+# failed is a COUNT, not a flag: the FAIL line reports it, and C5's self-test
+# below reads that number to assert which checks failed without counting the
+# child's output lines -- see the fixture's own comment for why that matters.
 failed=0
-error() { echo "$*" >&2; failed=1; }
+error() { echo "$*" >&2; failed=$(( failed + 1 )); }
 
 # block <file> <key>: the lines nested under a two-space-indented YAML key --
 # an `on:` event such as `pull_request_target`, or a job such as `lint`. The
@@ -306,36 +309,55 @@ fi
 # mutation was invisible to every fixture this repository had: the gate passed.
 # The whole gate is re-run with GIT_DIR pointing at a path that cannot be a
 # directory, so `git ls-files` exits 128 without anything touching the index
-# this run is reading. C5 is the only check here that speaks to git, so the
-# child's output is three lines and nothing else -- git's own `fatal:`, C5's
-# refusal naming the status, and the FAIL line -- and that exactness is the part
-# that pins "only C5 reads git" for whoever adds the next check. git's
-# diagnostic is deliberately not silenced: C5's message carries the status and
-# git's carries the reason, and the reader of a red gate wants both.
+# this run is reading. With `done < <(git ls-files -z)` restored the child
+# prints `documentation consistency fixtures: PASS` and exits 0; with the status
+# checked it exits 1 naming the producer.
+#
+# WHAT IS ASSERTED IS OUTCOMES, NOT A COUNT OF THE CHILD'S OUTPUT LINES. The
+# first version of this fixture required the child to say exactly three things.
+# That pinned a property worth keeping -- C5 is the only check here that speaks
+# to git, so nothing else can fail when git does -- but it pinned it through
+# git's diagnostics as well as this gate's, and git has more to say when it is
+# asked to: under GIT_TRACE2=1 the child said NINE things rather than three
+# (measured on this box, git 2.43.0), so anyone who set that variable to
+# investigate a gate got a failure caused by their own tracing -- the gate
+# exited 1 under GIT_TRACE2=1 and 0 without it, on a tree where nothing else had
+# changed. The property now rides on the error count the FAIL line reports
+# instead -- exactly one error is C5 refusing and no other check failing --
+# which no amount of tracing, and no wording of git's own messages, can move.
+#
+# git's diagnostic is still required and still deliberately not silenced: C5's
+# message carries the status and git's carries the reason, and the reader of a
+# red gate wants both. What is matched is the GIT_DIR value inside git's
+# message, which no check here prints; the literal `fatal:` is NOT matched,
+# because git translates that prefix where message catalogues are installed and
+# the fixture would then fail on the reader's locale -- the same class of defect
+# as the line count.
 #
 # THE CHILD IS TOLD NOT TO RECURSE BY ARGUMENT AND NOT BY ENVIRONMENT: a
 # variable that suppresses a test is a variable a stale export suppresses it
 # with, and nothing invokes this gate with arguments.
-#
-# Measured both ways on this file. With `done < <(git ls-files -z)` restored the
-# child prints `documentation consistency fixtures: PASS`, exits 0, and these
-# three checks all speak; with the status checked it exits 1 naming the producer.
 if [[ "${1:-}" != --child-of-c5-selftest ]]; then
-  selftest_status=0
-  selftest_out="$(GIT_DIR=/dev/null/not-a-git-repository \
-    "$BASH" "$script_dir/${BASH_SOURCE[0]##*/}" --child-of-c5-selftest 2>&1)" \
-    || selftest_status=$?
-  selftest_said="${selftest_out//$'\n'/ | }"
-  (( selftest_status != 0 )) \
-    || error "C5 passed with a failing git ls-files: the child run exited 0 and said: $selftest_said"
-  [[ "$selftest_out" == *'git ls-files -z exited 128'* ]] \
-    || error "C5 must name the producer that failed; the child run said: $selftest_said"
-  [[ "$(grep -c . <<< "$selftest_out")" == 3 ]] \
-    || error "a child run with no repository must say exactly three things -- git's fatal, C5's refusal, the FAIL line -- and fail no other check; it said: $selftest_said"
+  self="$script_dir/${BASH_SOURCE[0]##*/}"
+  only_c5_failed='documentation consistency fixtures: FAIL (errors: 1)'
+
+  producer_status=0
+  producer_out="$(GIT_DIR=/dev/null/not-a-git-repository \
+    "$BASH" "$self" --child-of-c5-selftest 2>&1)" \
+    || producer_status=$?
+  producer_said="${producer_out//$'\n'/ | }"
+  (( producer_status != 0 )) \
+    || error "C5 passed with a failing git ls-files: the producer child exited 0 and said: $producer_said"
+  [[ "$producer_out" == *'git ls-files -z exited 128'* ]] \
+    || error "C5 must name the producer that failed; the producer child said: $producer_said"
+  [[ "$producer_out" == *'/dev/null/not-a-git-repository'* ]] \
+    || error "git's own diagnostic must reach the reader of a red gate, naming the repository it could not open; the producer child said: $producer_said"
+  [[ "$producer_out" == *"$only_c5_failed"* ]] \
+    || error "a child run with no repository must fail C5 and no other check, because C5 is the only check here that speaks to git; the producer child said: $producer_said"
 fi
 
 if (( failed )); then
-  echo "documentation consistency fixtures: FAIL" >&2
+  echo "documentation consistency fixtures: FAIL (errors: $failed)" >&2
   exit 1
 fi
 echo "documentation consistency fixtures: PASS"
