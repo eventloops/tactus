@@ -2263,7 +2263,7 @@ mod termination {
                 kill_errno,
                 waited,
                 wait_errno,
-                status,
+                status: (waited > 0).then_some(status),
                 through_identity: false,
             }
         }
@@ -2731,7 +2731,7 @@ mod termination {
                 kill_errno,
                 waited,
                 wait_errno,
-                status: if waited > 0 { status } else { 0 },
+                status: (waited > 0).then_some(status),
                 through_identity: false,
             }
         }
@@ -2766,7 +2766,7 @@ mod termination {
         kill_errno: libc::c_int,
         waited: libc::pid_t,
         wait_errno: libc::c_int,
-        status: libc::c_int,
+        status: Option<libc::c_int>,
         through_identity: bool,
     }
 
@@ -2790,18 +2790,17 @@ mod termination {
             ),
         };
         let reaped = if end.waited > 0 {
-            if libc::WIFSIGNALED(end.status) {
-                format!(
+            match end.status {
+                None => format!("and {wait} collected it, asking for no exit status"),
+                Some(status) if libc::WIFSIGNALED(status) => format!(
                     "and {wait} collected it, killed by signal {}",
-                    libc::WTERMSIG(end.status)
-                )
-            } else if libc::WIFEXITED(end.status) {
-                format!(
+                    libc::WTERMSIG(status)
+                ),
+                Some(status) if libc::WIFEXITED(status) => format!(
                     "and {wait} collected it, having already exited with status {}",
-                    libc::WEXITSTATUS(end.status)
-                )
-            } else {
-                format!("and {wait} collected it with raw status {}", end.status)
+                    libc::WEXITSTATUS(status)
+                ),
+                Some(status) => format!("and {wait} collected it with raw status {status}"),
             }
         } else if end.through_identity && end.wait_errno == 0 {
             "and nothing was waited for, because the signal was not delivered".to_owned()
@@ -2933,7 +2932,7 @@ mod termination {
             kill_errno,
             waited,
             wait_errno,
-            status,
+            status: (waited > 0).then_some(status),
             through_identity: true,
         }
     }
@@ -3416,7 +3415,11 @@ mod termination {
             for fd in [command[0], command[1], ack[0]] {
                 close_fd(fd);
             }
-            let end = describe_helper_end(end_unready_guard(pid, identity));
+            let end = describe_helper_end(end_unready_guard(
+                pid,
+                identity,
+                EndingWait::AskingForNoStatus,
+            ));
             return Err(format!(
                 "configuring Unix job-control guard descriptors; ending it: {end}"
             ));
@@ -3444,7 +3447,11 @@ mod termination {
             for fd in [command[0], command[1], ack[0]] {
                 close_fd(fd);
             }
-            let end = describe_helper_end(end_unready_guard(pid, identity));
+            let end = describe_helper_end(end_unready_guard(
+                pid,
+                identity,
+                EndingWait::CollectingStatus,
+            ));
             return Err(format!(
                 "Unix job-control guard did not initialize; waited {waited:?} of \
                  {HELPER_READY_BUDGET:?}; descriptor ceiling {open_max}; {how}; ending it: {end}"
@@ -3455,7 +3462,13 @@ mod termination {
         Ok(guard)
     }
 
-    fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int) -> HelperEnd {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum EndingWait {
+        CollectingStatus,
+        AskingForNoStatus,
+    }
+
+    fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int, wait: EndingWait) -> HelperEnd {
         #[cfg(target_os = "linux")]
         if identity >= 0 {
             return end_helper_through_identity(identity);
@@ -3468,14 +3481,25 @@ mod termination {
         // kept, for the message below.
         let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
         let kill_errno = if killed == 0 { 0 } else { last_errno() };
-        let mut status = 0;
-        // SAFETY: as above.
-        let waited_pid = unsafe { libc::waitpid(pid, &mut status, 0) };
+        let (waited_pid, status) = match wait {
+            EndingWait::CollectingStatus => {
+                let mut status = 0;
+                // SAFETY: as above, and `status` is writable for the call.
+                let waited_pid = unsafe { libc::waitpid(pid, &mut status, 0) };
+                (waited_pid, (waited_pid > 0).then_some(status))
+            }
+            EndingWait::AskingForNoStatus => {
+                // SAFETY: as above, and `waitpid` writes nothing through the
+                // null status pointer this arm passes.
+                let waited_pid = unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+                (waited_pid, None)
+            }
+        };
         HelperEnd {
             kill_errno,
             waited: waited_pid,
             wait_errno: if waited_pid < 0 { last_errno() } else { 0 },
-            status: if waited_pid > 0 { status } else { 0 },
+            status,
             through_identity: false,
         }
     }
@@ -5489,7 +5513,7 @@ mod termination {
                     kill_errno: 0,
                     waited: 4321,
                     wait_errno: 0,
-                    status: exited_one,
+                    status: Some(exited_one),
                     through_identity: false,
                 }),
                 "SIGKILL was delivered, and the wait collected it, having already exited with \
@@ -5501,17 +5525,28 @@ mod termination {
                     kill_errno: 0,
                     waited: 4321,
                     wait_errno: 0,
-                    status: killed_by_nine,
+                    status: Some(killed_by_nine),
                     through_identity: false,
                 }),
                 "SIGKILL was delivered, and the wait collected it, killed by signal 9",
                 "a helper that was still there when the parent gave up"
             );
+            assert_eq!(
+                describe_helper_end(HelperEnd {
+                    kill_errno: 0,
+                    waited: 4321,
+                    wait_errno: 0,
+                    status: None,
+                    through_identity: false,
+                }),
+                "SIGKILL was delivered, and the wait collected it, asking for no exit status",
+                "a helper collected by a wait that asked for no status"
+            );
             let gone = describe_helper_end(HelperEnd {
                 kill_errno: libc::ESRCH,
                 waited: -1,
                 wait_errno: libc::ECHILD,
-                status: 0,
+                status: None,
                 through_identity: false,
             });
             assert!(
@@ -5523,7 +5558,7 @@ mod termination {
                 kill_errno: libc::EPERM,
                 waited: -1,
                 wait_errno: libc::ECHILD,
-                status: 0,
+                status: None,
                 through_identity: false,
             });
             assert!(
@@ -7111,10 +7146,25 @@ mod termination {
             close_fd(command_write);
             refuse_fcntl_on(command_write);
             let words = match answer.as_str() {
-                "delivered" => "SIGKILL was delivered, and the wait collected it",
+                "delivered" => {
+                    "SIGKILL was delivered, and the wait collected it, asking for no exit status"
+                }
                 "EPERM" => {
                     answer_call_with(libc::SYS_kill, seccomp_refuse_with(libc::EPERM));
-                    "SIGKILL failed: Operation not permitted (os error 1), and the wait collected it"
+                    "SIGKILL failed: Operation not permitted (os error 1), and the wait collected \
+                     it, asking for no exit status"
+                }
+                "wait-with-status-refused" => {
+                    answer_a_wait_by_number_with_a_status_pointer_with(seccomp_refuse_with(
+                        libc::EPERM,
+                    ));
+                    "SIGKILL was delivered, and the wait collected it, asking for no exit status"
+                }
+                "wait-with-status-killed" => {
+                    answer_a_wait_by_number_with_a_status_pointer_with(
+                        libc::SECCOMP_RET_KILL_PROCESS,
+                    );
+                    "SIGKILL was delivered, and the wait collected it, asking for no exit status"
                 }
                 "identity" => {
                     assert!(
@@ -7136,7 +7186,9 @@ mod termination {
                 "the launch's failure ({answer}) does not carry the end its calls answered: \
                  {message}"
             );
-            assert_no_child_left(&format!("the descriptor-configuration failure ({answer})"));
+            assert_no_child_left_asking_for_no_status(&format!(
+                "the descriptor-configuration failure ({answer})"
+            ));
         }
 
         #[cfg(target_os = "linux")]
@@ -7145,6 +7197,8 @@ mod termination {
             for (answer, extra) in [
                 ("delivered", None),
                 ("EPERM", None),
+                ("wait-with-status-refused", None),
+                ("wait-with-status-killed", None),
                 ("identity", Some(IDENTITY_ON)),
             ] {
                 let mut vars = vec![("UPSTROKE_GUARD_DESCRIPTOR_FAILURE_END_HELPER", answer)];
@@ -7165,7 +7219,7 @@ mod termination {
                     kill_errno: 0,
                     waited: 4321,
                     wait_errno: 0,
-                    status: killed_by_nine,
+                    status: Some(killed_by_nine),
                     through_identity: true,
                 }),
                 "SIGKILL was delivered through the helper's identity, and the wait through it \
@@ -7177,7 +7231,7 @@ mod termination {
                     kill_errno: libc::ESRCH,
                     waited: -1,
                     wait_errno: 0,
-                    status: 0,
+                    status: None,
                     through_identity: true,
                 }),
                 "SIGKILL answered ESRCH through the helper's identity, so nothing it named was \
@@ -7189,7 +7243,7 @@ mod termination {
                     kill_errno: libc::EPERM,
                     waited: -1,
                     wait_errno: 0,
-                    status: 0,
+                    status: None,
                     through_identity: true,
                 }),
                 "SIGKILL through the helper's identity failed: Operation not permitted (os error \
@@ -7201,7 +7255,7 @@ mod termination {
                     kill_errno: 0,
                     waited: -1,
                     wait_errno: libc::EPERM,
-                    status: 0,
+                    status: None,
                     through_identity: true,
                 }),
                 "SIGKILL was delivered through the helper's identity, and the wait through it \
