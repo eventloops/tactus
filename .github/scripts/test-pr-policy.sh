@@ -795,6 +795,72 @@ if ( cd "$repo_d" && "$BASH" "$range_script" \
   exit 1
 fi
 
+# THE RANGE SPANS THE LEDGER MOVE. reviews/findings/ became findings/ on
+# 2026-09-12, so a branch cut before that has a merge base whose findings are
+# all under the OLD prefix, and every listing here is built from commits AS THEY
+# STAND rather than from the head's idea of where the ledger lives. Listing
+# findings/ alone read such a base as an empty ledger -- 0 names against a tree
+# holding 336, measured on the moving pull request's own range -- and an empty
+# base listing is a false GREEN, not a false red: the twin that makes a
+# fix-P<n>/ name ambiguous is exactly what lives at the base and nowhere else
+# once the branch has repaired it.
+#
+# The shape is that pull request: the base files two findings under the old
+# prefix; the branch repairs one and deletes it BEFORE the move, so no tree the
+# branch carries holds it; then it moves the ledger; then it files its own
+# finding sharing the deleted one's severity, category and description. The
+# merge-base listing is the only place the twin can be seen.
+repo_e="$fixture_dir/repo-ledger-move"
+new_repo "$repo_e"
+mkdir -p "$repo_e/reviews/findings"
+echo fixture > "$repo_e/reviews/findings/P2_correctness_202609010900_a-shared-description.md"
+echo fixture > "$repo_e/reviews/findings/P3_docs-contract_202609010901_filed-before-the-move.md"
+git -C "$repo_e" add -A
+git -C "$repo_e" commit -q -m 'the base files two findings under the old prefix'
+e_base="$(git -C "$repo_e" rev-parse HEAD)"
+git -C "$repo_e" rm -q 'reviews/findings/P2_correctness_202609010900_a-shared-description.md'
+git -C "$repo_e" commit -q -m 'the branch repairs one of them and deletes it'
+git -C "$repo_e" mv reviews/findings findings
+git -C "$repo_e" commit -q -m 'move the finding ledger from reviews/findings/ to findings/'
+commit_finding "$repo_e" 'P2_correctness_202609111500_a-shared-description.md' \
+  'the branch files its own, same description, under the new prefix'
+e_head="$(git -C "$repo_e" rev-parse HEAD)"
+
+( cd "$repo_e" && "$BASH" "$range_script" "$e_base" "$e_head" "$repo_e/out" >/dev/null 2>&1 ) \
+  || { echo 'findings-in-range.sh failed on the ledger-move repository' >&2; exit 1; }
+want=$'P2_correctness_202609010900_a-shared-description.md\nP3_docs-contract_202609010901_filed-before-the-move.md'
+got="$(cat "$repo_e/out/merge-base-findings")"
+if [[ "$got" != "$want" ]]; then
+  echo "the merge-base listing must name the findings a pre-move base filed under the old prefix; got [$got]" >&2
+  exit 1
+fi
+if "$BASH" "$branch_validator" 'fix-P2/correctness_a-shared-description' \
+  "$repo_e/out/merge-base-findings" "$repo_e/out/head-findings" "$repo_e/out/range-findings" \
+  >/dev/null 2>&1; then
+  echo 'a twin filed under the old prefix before the move made an ambiguous name conform' >&2
+  exit 1
+fi
+
+# ONE COMMIT CAN CARRY BOTH DIRECTORIES, and both are listed at it. A branch cut
+# before the move files under the old prefix and rebases after it; C5 of
+# test-docs-consistency.sh refuses that head and cannot refuse it in history, so
+# the finding is in the tree either way and a listing that cannot see it makes
+# an ambiguous name conform.
+git -C "$repo_e" checkout -q -b old-prefix-after-the-move
+mkdir -p "$repo_e/reviews/findings"
+echo fixture > "$repo_e/reviews/findings/P1_liveness_202609120900_filed-under-the-old-prefix.md"
+git -C "$repo_e" add -A
+git -C "$repo_e" commit -q -m 'a branch cut before the move files under the old prefix'
+e_both="$(git -C "$repo_e" rev-parse HEAD)"
+( cd "$repo_e" && "$BASH" "$range_script" "$e_base" "$e_both" "$repo_e/out-both" >/dev/null 2>&1 ) \
+  || { echo 'findings-in-range.sh failed on the both-prefixes head' >&2; exit 1; }
+want=$'P1_liveness_202609120900_filed-under-the-old-prefix.md\nP2_correctness_202609111500_a-shared-description.md\nP3_docs-contract_202609010901_filed-before-the-move.md'
+got="$(cat "$repo_e/out-both/head-findings")"
+if [[ "$got" != "$want" ]]; then
+  echo "a head carrying both ledger directories must list both; got [$got]" >&2
+  exit 1
+fi
+
 # ---- what advancing master may and may not do to a verdict ---------------------------------
 #
 # The listings were rooted at the EVENT'S BASE SHA, which is the target branch's
