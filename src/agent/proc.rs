@@ -7272,6 +7272,67 @@ mod termination {
             }
         }
 
+        /// The wall-clock deadline for a fixture whose every wait by number
+        /// is answered `EINTR`: a retry that lost its bound must FAIL here,
+        /// never hang CI.
+        ///
+        /// **Fixed, and deliberately not derived from
+        /// `INTERRUPTED_WAIT_ATTEMPTS`.** A deadline computed from the constant
+        /// it guards moves when that constant moves. Measured: a first version
+        /// of this took `60ms × INTERRUPTED_WAIT_ATTEMPTS`, and against a
+        /// mutation that set the bound to `u32::MAX` — round 4's shape — the
+        /// deadline grew to years while the exhausted wait ran for 301s, so
+        /// both drivers passed a tree whose retry was effectively unbounded.
+        /// Against this fixed one they fail inside a minute.
+        #[cfg(target_os = "linux")]
+        const INTERRUPTED_WAIT_DEADLINE: Duration = Duration::from_secs(60);
+
+        /// What exhausting the bound is allowed to cost, asserted inside the
+        /// fixture so a failure names the retry rather than the fixture's own
+        /// startup. `INTERRUPTED_WAIT_ATTEMPTS` refused waits cost single-digit
+        /// milliseconds; this is a fixed ceiling for the same reason the
+        /// deadline above is one.
+        #[cfg(target_os = "linux")]
+        const AN_EXHAUSTED_ENDING_RETURNS_WITHIN: Duration = Duration::from_secs(10);
+
+        /// The mirror of `assert_no_child_left_asking_for_no_status`, for the
+        /// one case where production leaves a child on purpose: a wait that is
+        /// answered `EINTR` every time collects nothing, whether it is made
+        /// once or `INTERRUPTED_WAIT_ATTEMPTS` times, so the killed guard is
+        /// still here. `waitid` is a different syscall from `wait4`, so a
+        /// policy answering every wait *by number* does not reach this look.
+        #[cfg(target_os = "linux")]
+        fn assert_a_child_is_left_behind(after: &str) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                // SAFETY: `siginfo_t` is a plain C aggregate whose all-zero bit
+                // pattern is the one `waitid` is documented to be handed.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // SAFETY: `info` is live for the call, which reaches none but
+                // this process's own children and, with `WNOHANG`, blocks on
+                // none.
+                let looked = unsafe {
+                    libc::waitid(libc::P_ALL, 0, &mut info, libc::WEXITED | libc::WNOHANG)
+                };
+                let errno = last_errno();
+                // SAFETY: `waitid` returning 0 has written the union arm this
+                // accessor reads, and `info` is the aggregate it wrote into.
+                let reported = unsafe { info.si_pid() };
+                if looked == 0 && reported > 0 {
+                    return;
+                }
+                assert!(
+                    !(looked < 0 && errno == libc::ECHILD),
+                    "{after} left no child behind: waitid(P_ALL) answered ECHILD, so something                      collected the guard the interrupted wait could not"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "{after}: the killed guard did not become collectable within the deadline;                      waitid(P_ALL) answered {looked} with errno {errno}"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
         /// Run a fixture that must *return*, and fail if it does not.
         /// `run_fixture` blocks until its child exits, so a fixture whose wait
         /// never returns would hang the suite instead of failing it. This one
@@ -7349,20 +7410,38 @@ mod termination {
             // Through the public entry point rather than `spawn_guard`: this is
             // the path a caller takes, and what the caller receives is what is
             // asserted below.
-            let Err(error) = crate::agent::proc::test_support::run_with_timeout(
+            let began = Instant::now();
+            let launched = crate::agent::proc::test_support::run_with_timeout(
                 Command::new("/bin/true"),
                 "",
                 Duration::from_secs(5),
-            ) else {
+            );
+            let took = began.elapsed();
+            let Err(error) = launched else {
                 panic!("a launch whose guard descriptors could not be configured was accepted")
             };
+            assert!(
+                took < AN_EXHAUSTED_ENDING_RETURNS_WITHIN,
+                "the launch took {took:?} to report an interrupted wait; this site makes one \
+                 wait, and even a site retrying to `INTERRUPTED_WAIT_ATTEMPTS` \
+                 ({INTERRUPTED_WAIT_ATTEMPTS}) returns in milliseconds"
+            );
             let reported = error.to_string();
             assert!(
                 reported.contains(
                     "configuring Unix job-control guard descriptors; ending it: SIGKILL was \
-                     delivered, and the wait collected nothing: Interrupted system call"
+                     delivered, and the wait collected nothing: Interrupted system call \
+                     (os error 4)"
                 ),
                 "the launch does not report what its interrupted wait answered: {reported}"
+            );
+            // And it cannot be read as a wait that collected the guard.
+            assert!(
+                !reported.contains("collected it"),
+                "an interrupted wait must not read as one that collected the guard: {reported}"
+            );
+            assert_a_child_is_left_behind(
+                "the descriptor-configuration failure's interrupted wait",
             );
         }
 
@@ -7375,7 +7454,7 @@ mod termination {
                     "UPSTROKE_GUARD_DESCRIPTOR_FAILURE_INTERRUPTED_WAIT_HELPER",
                     "1",
                 )],
-                Duration::from_secs(60),
+                INTERRUPTED_WAIT_DEADLINE,
             );
         }
 
@@ -7392,15 +7471,48 @@ mod termination {
             }
             let guard = spawn_guard(quiet_signal_policy()).expect("spawn private guard");
             // Installed after the launch, so the policy answers the teardown's
-            // own wait and nothing the launch made.
+            // own wait and nothing the launch made. Every wait by number is
+            // answered `EINTR`, so no attempt can ever succeed and the only way
+            // out of the loop is `INTERRUPTED_WAIT_ATTEMPTS`.
             answer_call_with(libc::SYS_wait4, seccomp_refuse_with(libc::EINTR));
-            let end = describe_helper_end(guard.abort_setup());
+            let began = Instant::now();
+            let end = guard.abort_setup();
+            let took = began.elapsed();
+            assert!(
+                took < AN_EXHAUSTED_ENDING_RETURNS_WITHIN,
+                "exhausting the retry took {took:?}; `INTERRUPTED_WAIT_ATTEMPTS` \
+                 ({INTERRUPTED_WAIT_ATTEMPTS}) refused waits cost milliseconds, so this is a \
+                 retry that is not stopping at its bound"
+            );
+            // What the caller receives when the bound runs out, field by field.
+            // `status` is `None` rather than a fabricated exit, which the
+            // description alone would not catch: with `waited` negative,
+            // `describe_helper_end` reads the same either way.
             assert_eq!(
                 end,
-                "SIGKILL was delivered, and the wait collected nothing: Interrupted system call \
-                 (os error 4)",
+                HelperEnd {
+                    kill_errno: 0,
+                    waited: -1,
+                    wait_errno: libc::EINTR,
+                    status: None,
+                    through_identity: false,
+                },
                 "the aborted guard's end is not what its exhausted retry answered"
             );
+            let described = describe_helper_end(end);
+            assert_eq!(
+                described,
+                "SIGKILL was delivered, and the wait collected nothing: Interrupted system call \
+                 (os error 4)",
+                "the exhausted retry is not described by what its calls answered"
+            );
+            // An exhausted retry must be distinguishable from a collection that
+            // succeeded, in the words and in the process table alike.
+            assert!(
+                !described.contains("collected it"),
+                "an exhausted retry must not read as a wait that collected the guard: {described}"
+            );
+            assert_a_child_is_left_behind("the aborted guard's exhausted retry");
         }
 
         #[cfg(target_os = "linux")]
@@ -7409,7 +7521,7 @@ mod termination {
             run_fixture_within(
                 "guard_abort_interrupted_wait_helper",
                 &[("UPSTROKE_GUARD_ABORT_INTERRUPTED_WAIT_HELPER", "1")],
-                Duration::from_secs(60),
+                INTERRUPTED_WAIT_DEADLINE,
             );
         }
 
