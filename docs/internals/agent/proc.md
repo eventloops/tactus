@@ -1249,6 +1249,25 @@ for the same reason: an ending computed and dropped is that row's
 defect, `unused_must_use` names it, and the Clippy leg's `-D warnings`
 refuses it.
 
+**The row's scope is the end of a helper, which is five sites and not
+every `kill` in the module.** Its sibling row
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` names them in its
+own words -- `Reaper::abandon` through `close_and_wait`, the `setpgid`
+failure in `spawn_reaper`, `Guard::abort_setup`, and the
+descriptor-configuration and READY failures in `spawn_guard` -- and
+cites this row for what they must report. All five are settled: three
+report through `HelperEnd`, and `spawn_reaper`'s parent-side
+`setpgid(pid, pid)` no longer exists to fail. The module's remaining
+discarded signals are group signals and test children, deliberately so:
+`cleanup_reaper_group` re-sends `SIGKILL` until
+`group_has_non_zombie_members` observes the group empty, `stop_groups`
+polls `groups_are_quiescent` after its `SIGSTOP`, and `monitor`'s
+`SIGKILL` is followed on the next statement by `SIG_DFL` and `raise`,
+so no caller is left with an action it could take. The two places where
+that reasoning does not hold are filed rather than left implied:
+`REFUSED-SIGCONT-LEAVES-A-MIRRORED-GROUP-STOPPED` and
+`REFUSED-KILL-UNBOUNDS-THE-BOUNDED-DOCKER-REAP`.
+
 **Nothing here is a claim about which process the number named.** A
 pid cannot be tied to the helper that was forked with it while an
 embedding host may reap this process's children, and no observation
