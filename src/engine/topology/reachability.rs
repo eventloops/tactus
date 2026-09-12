@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::Serialize;
 
 use crate::events::RunOutcome;
-use crate::topology::census::{Census, CensusState, TransitionOutcome};
+use crate::topology::census::{Census, TransitionOutcome};
 use crate::topology::effects::FaultRow;
 use crate::topology::events::{DerivedOutcome, PreparedDisposition, VerificationBasis};
 use crate::topology::fold::{GenerationClass, TaskState, TopologyFold, TransactionClass};
@@ -465,11 +465,6 @@ pub fn action_label(action: &ResumeAction) -> String {
             format!("recover: {}", parts.join(", "))
         }
     }
-}
-
-#[must_use]
-pub fn state_classification(state: &CensusState) -> ResumeAction {
-    classify(&state.fold)
 }
 
 fn keys(fold: &TopologyFold) -> impl Iterator<Item = TaskKey> + '_ {

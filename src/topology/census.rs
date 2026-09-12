@@ -3566,7 +3566,10 @@ mod tests {
         let json = serde_json::to_string_pretty(&summary).expect("serializes");
         assert!(json.contains("\"T-RESUME\"") && json.contains("finalize then refuse"));
         if let Ok(path) = std::env::var("UPSTROKE_CENSUS_SUMMARY") {
-            std::fs::write(&path, format!("{json}\n")).expect("the summary is written");
+            crate::workspace_manager::fixture::write_file(
+                std::path::Path::new(&path),
+                format!("{json}\n").as_bytes(),
+            );
         }
     }
 }

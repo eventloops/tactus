@@ -1499,6 +1499,10 @@ impl TopologyRun {
         }
         self.spend.record(site.key, &settled.event.record);
         self.brief.record(site.key, &settled.event.record);
+        let closed = matches!(
+            settled.event.settlement,
+            crate::topology::events::AttemptSettlement::Closed { .. }
+        );
         self.emit(
             TopologyEventBody::AttemptFinished {
                 data: Box::new(settled.event),
@@ -1506,6 +1510,9 @@ impl TopologyRun {
             seams,
             hooks,
         )?;
+        if closed {
+            super::dispatch::scrub(seams.manager, hooks, site.slot)?;
+        }
         Ok(settled.spent_attempt)
     }
 

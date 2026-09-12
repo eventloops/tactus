@@ -46,6 +46,9 @@ use crate::topology::schema::TOPOLOGY_SCHEMA;
 use crate::workspace_manager::Refusal;
 
 use crate::engine::topology::identity::{InvocationLedger, ReservationKind, Reservations};
+use crate::engine::topology::ledger::{
+    self, Fact, Ledger, Outcome as LedgerOutcome, PhysicalInventory, ProcessLocal, Row,
+};
 use crate::engine::topology::preflight::RunPreflight;
 use crate::engine::topology::run::Progress;
 use crate::engine::topology::seams::{HarnessTopologyHooks, TimeSource, TopologyHooks};
@@ -8253,6 +8256,35 @@ fn drive_handle(
     runner: &dyn Runner,
     hooks: &mut dyn TopologyHooks,
 ) -> Driven {
+    drive_handle_observing(fixture, handle, seams, steps, runner, hooks, &mut |_, _| {})
+}
+
+/// [`drive_with`] with an observer called after every step with the step
+/// number and the run, so a test can read the live fold and the
+/// process-local ledgers before the run is dropped.
+fn drive_observing(
+    fixture: &Fixture,
+    seams: &DriveSeams,
+    steps: usize,
+    runner: &dyn Runner,
+    observe: &mut dyn FnMut(usize, &crate::engine::topology::run::TopologyRun),
+) -> Driven {
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let (_, handle) = resume_as(fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("the resume settles the planted state");
+    drive_handle_observing(fixture, handle, seams, steps, runner, &mut hooks, observe)
+}
+
+/// The steps of [`drive_handle`], each followed by `observe`.
+fn drive_handle_observing(
+    fixture: &Fixture,
+    handle: RunHandle,
+    seams: &DriveSeams,
+    steps: usize,
+    runner: &dyn Runner,
+    hooks: &mut dyn TopologyHooks,
+    observe: &mut dyn FnMut(usize, &crate::engine::topology::run::TopologyRun),
+) -> Driven {
     use crate::engine::topology::run::{RunSeams, TopologyRun};
 
     let mut run = TopologyRun::resumed(
@@ -8329,9 +8361,11 @@ fn drive_handle(
         halts_run: seams.halts_run,
     };
     let spend_before = run.spend().run_total();
-    let progress = (0..steps)
-        .map(|_| run.step(&run_seams, &mut *hooks))
-        .collect();
+    let mut progress = Vec::with_capacity(steps);
+    for step in 1..=steps {
+        progress.push(run.step(&run_seams, &mut *hooks));
+        observe(step, &run);
+    }
     Driven {
         progress,
         implementers: plans.implementers.into_inner(),
@@ -13239,7 +13273,7 @@ fn a_live_worktree_missing_close_reclaims_the_generations_worktree_and_intent() 
                     .strip_prefix("gitdir: ")
                     .expect("the .git file names the worktree's git dir"),
             );
-            std::fs::write(git_dir.join("index.lock"), b"").expect("plant the lock");
+            crate::workspace_manager::fixture::write_file(&git_dir.join("index.lock"), b"");
 
             let second = run
                 .step(seams, hooks)
@@ -14773,6 +14807,24 @@ impl FinishedPlanting {
     }
 }
 
+/// Publish an answer the way `upstroke answer` does: `Answer.StageWrite`
+/// then `Answer.PublishRename`, the two funnels `interaction::write_answer`
+/// delegates to.
+fn publish_answer_file(answers: &Path, id: &crate::ir::QuestionId, text: &str) {
+    let component = crate::util::filename_component(id.as_str());
+    crate::rundir::stage_answer(
+        answers,
+        &component,
+        &crate::ir::Answer::Answered {
+            text: text.to_owned(),
+        },
+        &mut NoHooks,
+    )
+    .expect("the answer is staged");
+    crate::rundir::publish_answer(answers, &component, &mut NoHooks)
+        .expect("the answer is published");
+}
+
 /// `answer_files_untouched_by_finalization` (T-FINALIZE, R21): an answer
 /// published for the open question and a writer's `.partial` residue are
 /// left byte-identical by finalization, never ingested, and never pruned.
@@ -14786,19 +14838,15 @@ fn answer_files_untouched_by_finalization() {
     );
     let fixture = &planted.fixture;
     let answers = fixture.public().join("answers");
-    std::fs::create_dir_all(&answers).expect("answers dir");
+    mkdir(&answers);
     let id = crate::ir::QuestionId(PARKED_QUESTION.to_owned());
-    crate::interaction::write_answer(
-        &answers,
-        &id,
-        &crate::ir::Answer::Answered {
-            text: "go ahead".to_owned(),
-        },
-    )
-    .expect("the production writer publishes the answer");
+    publish_answer_file(&answers, &id, "go ahead");
     let published = crate::interaction::answer_path(&answers, &id);
     let partial = answers.join("q-another.json.partial");
-    std::fs::write(&partial, b"{\"answer\":\"answered\",\"text\":\"half").expect("partial");
+    crate::workspace_manager::fixture::write_file(
+        &partial,
+        b"{\"answer\":\"answered\",\"text\":\"half",
+    );
     let published_bytes = std::fs::read(&published).expect("published");
     let partial_bytes = std::fs::read(&partial).expect("partial");
     let before = fixture.log_bytes();
@@ -14834,8 +14882,12 @@ fn answer_files_untouched_by_finalization() {
 }
 
 /// `late_answer_after_finalization_is_inert_and_reported_not_live`
-/// (T-ANSWER): `upstroke answer` after finalization writes its file and
-/// reports the run not live; the file stays inert across every later resume.
+/// (T-ANSWER): `upstroke answer` after finalization writes its file — through
+/// the `Answer.StageWrite`/`PublishRename` funnels the command delegates to —
+/// and finds the run not live by the same `rundir::is_running` probe the
+/// command reports (`src/answer.rs`,
+/// `an_answer_lands_where_the_engine_will_find_it`); the file stays inert
+/// across every later resume.
 #[test]
 fn late_answer_after_finalization_is_inert_and_reported_not_live() {
     let planted = plant_finished_run_with(
@@ -14846,9 +14898,10 @@ fn late_answer_after_finalization_is_inert_and_reported_not_live() {
     );
     let fixture = &planted.fixture;
     let questions = fixture.public().join("questions");
-    std::fs::create_dir_all(&questions).expect("questions dir");
-    crate::interaction::write_question(
+    mkdir(&questions);
+    crate::rundir::write_question_payload(
         &questions,
+        &crate::util::filename_component(PARKED_QUESTION),
         &crate::interaction::QuestionRecord::open(crate::ir::Question {
             id: crate::ir::QuestionId(PARKED_QUESTION.to_owned()),
             kind: crate::ir::QuestionKind::Unblock,
@@ -14858,6 +14911,7 @@ fn late_answer_after_finalization_is_inert_and_reported_not_live() {
                 crate::ir::QuestionKind::Unblock,
             ),
         }),
+        &mut NoHooks,
     )
     .expect("the question payload the park published");
 
@@ -14869,20 +14923,15 @@ fn late_answer_after_finalization_is_inert_and_reported_not_live() {
     let before = fixture.log_bytes();
     let report_bytes = std::fs::read(fixture.public().join("report.json")).expect("report");
 
-    let answered = crate::answer::answer(
-        &fixture.repo_root,
-        PARKED_QUESTION,
-        crate::answer::Reply::Text("go ahead".to_owned()),
-    )
-    .expect("the answer command writes its file whatever the run's state");
+    let answers = fixture.public().join("answers");
+    mkdir(&answers);
+    let id = crate::ir::QuestionId(PARKED_QUESTION.to_owned());
+    publish_answer_file(&answers, &id, "go ahead");
     assert!(
-        !answered.run_is_live,
+        !crate::rundir::is_running(&fixture.public()),
         "the command reports the run not live: nothing holds its lock"
     );
-    let published = crate::interaction::answer_path(
-        &fixture.public().join("answers"),
-        &crate::ir::QuestionId(PARKED_QUESTION.to_owned()),
-    );
+    let published = crate::interaction::answer_path(&answers, &id);
     let bytes = std::fs::read(&published).expect("the late answer file");
 
     for round in 1..=2 {
@@ -14918,16 +14967,9 @@ fn late_answer_before_halting_settlement_is_inert_and_retained() {
         ],
     );
     let answers = fixture.public().join("answers");
-    std::fs::create_dir_all(&answers).expect("answers dir");
+    mkdir(&answers);
     let id = crate::ir::QuestionId(PARKED_QUESTION.to_owned());
-    crate::interaction::write_answer(
-        &answers,
-        &id,
-        &crate::ir::Answer::Answered {
-            text: "go ahead".to_owned(),
-        },
-    )
-    .expect("published before the settlement");
+    publish_answer_file(&answers, &id, "go ahead");
     let published = crate::interaction::answer_path(&answers, &id);
     let bytes = std::fs::read(&published).expect("published");
     append_events(
@@ -15473,4 +15515,857 @@ fn projections_are_equal_between_live_and_replay_at_every_prefix() {
             "prefix {prefix}: a report is fresh against its own bytes"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// PR10: the sequential ledger — R1–R28 observed at every outcome (ST-09, ST-10).
+// ---------------------------------------------------------------------------
+
+/// Every object the run's refs, pins and worktree HEADs reference: what a
+/// pruning releases to Git, and what R27 says is still in the store after.
+fn referenced_objects(fixture: &Fixture) -> Vec<String> {
+    use crate::workspace_manager::fixture::git;
+    let manager = fixture.manager();
+    let namespace = crate::engine::topology::candidate::run_namespace(RUN_ID);
+    let mut objects: Vec<String> = manager
+        .refs_under(&namespace)
+        .expect("refs")
+        .into_iter()
+        .map(|(_, oid)| oid)
+        .collect();
+    for slot in manager.intents().expect("intents") {
+        let worktree = manager.slot_path(&slot);
+        if worktree.join(".git").exists() {
+            objects.push(git(&worktree, &["rev-parse", "HEAD"]));
+        }
+    }
+    objects.sort();
+    objects.dedup();
+    objects
+}
+
+/// Intents and directories of one slot namespace, counted as one set: a
+/// worktree without its intent and an intent without its worktree are each
+/// still a held slot.
+fn slots_present(
+    manager: &crate::workspace_manager::WorkspaceManager,
+    namespace: &str,
+    is: fn(&crate::workspace_manager::Slot) -> bool,
+) -> u32 {
+    let mut seen: std::collections::BTreeSet<PathBuf> = manager
+        .intents()
+        .expect("intents")
+        .into_iter()
+        .filter(is)
+        .map(|slot| manager.slot_path(&slot))
+        .collect();
+    if let Ok(entries) = std::fs::read_dir(manager.execution_root().join(namespace)) {
+        seen.extend(entries.flatten().map(|entry| entry.path()));
+    }
+    u32::try_from(seen.len()).expect("a small count")
+}
+
+fn files_ending_with(dir: &Path, suffix: &str) -> u32 {
+    let count = std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(suffix))
+                .count()
+        })
+        .unwrap_or(0);
+    u32::try_from(count).expect("a small count")
+}
+
+/// The physical half of the ledger, measured from the repository, the
+/// execution root, the run directory and the private half. `released` names
+/// the objects the last pre-finalization observation saw referenced, so R27
+/// can ask whether each is still in Git's store.
+fn ledger_inventory(
+    fixture: &Fixture,
+    fold: &TopologyFold,
+    released: &[String],
+) -> PhysicalInventory {
+    let manager = fixture.manager();
+    let namespace = crate::engine::topology::candidate::run_namespace(RUN_ID);
+    let public = fixture.public();
+    let private_dir = fixture.private_root.join("runs").join(RUN_ID);
+    let refs = |prefix: &str| {
+        u32::try_from(
+            manager
+                .refs_under(&format!("{namespace}{prefix}"))
+                .expect("refs")
+                .len(),
+        )
+        .expect("a small count")
+    };
+    let missing = released
+        .iter()
+        .filter(|object| !manager.object_exists(object).unwrap_or(false))
+        .count();
+    // R20 is operator-owned by classification: no site in the inventory creates or removes a
+    // volume, and the volume map the run recorded at `run_started` is the one it ends with.
+    let no_volume_site = EffectSiteId::all()
+        .iter()
+        .all(|site| !site.variant().contains("Volume"));
+    let volumes_recorded = fold
+        .started()
+        .map(|started| started.runner.credential_volumes.clone());
+    PhysicalInventory {
+        task_slots: slots_present(&manager, "tasks", |slot| {
+            matches!(slot, crate::workspace_manager::Slot::Task { .. })
+        }),
+        staging_slots: slots_present(&manager, "merge", |slot| {
+            matches!(slot, crate::workspace_manager::Slot::Staging { .. })
+        }),
+        snapshot_slots: slots_present(&manager, "snapshots", |slot| {
+            matches!(slot, crate::workspace_manager::Slot::Snapshot { .. })
+        }),
+        candidates_refs: refs("candidates/"),
+        prepared_pins: refs("prepared/"),
+        candidate_pins: refs("candidate-prepared/"),
+        integration_ref_present: ref_target(fixture, fixture.started.integration_ref.as_str())
+            .is_some(),
+        execution_root_present: manager.execution_root().exists(),
+        event_log_present: fixture.log().exists(),
+        report_present: public.join("report.json").exists(),
+        answer_files: files_ending_with(&public.join("answers"), ".json"),
+        partial_files: files_ending_with(&public.join("answers"), ".partial"),
+        owner_record_present: private_dir.join(rundir::OWNER_RECORD).exists(),
+        commit_record_present: private_dir.join(rundir::COMMIT_RECORD).exists(),
+        run_lock_file_present: rundir::lock_file(&public).exists(),
+        worktree_lock_file_present: fixture.worktree_lock_file().exists(),
+        container_intents: files_ending_with(
+            &crate::runner::container::intent::containers_dir(&fixture.private_root),
+            ".intent",
+        ),
+        volumes_unchanged: no_volume_site
+            && volumes_recorded == Some(fixture.started.runner.credential_volumes.clone()),
+        unreachable_objects: u32::try_from(
+            crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+                .expect("fsck")
+                .len(),
+        )
+        .expect("a small count"),
+        released_objects_checked: u32::try_from(released.len()).expect("a small count"),
+        released_objects_missing: u32::try_from(missing).expect("a small count"),
+    }
+}
+
+/// R3, R4, R13, R17, R22 and R28 as the live process sees them.
+fn process_local_of(
+    run: &crate::engine::topology::run::TopologyRun,
+    public: &Path,
+) -> ProcessLocal {
+    ProcessLocal {
+        invocations_balanced: run.invocations_balance(),
+        entitlements_held: run.entitlements_held(),
+        run_lock_held: rundir::is_running(public),
+        cleanup_hold_observed: rundir::observe_cleanup_hold(public, &mut crate::rundir::NoHooks),
+    }
+}
+
+/// The same rows once the run has been dropped: the process-local ledgers
+/// as the run last reported them, the locks as the OS reports them.
+fn process_local_after(public: &Path, last: (bool, u32)) -> ProcessLocal {
+    ProcessLocal {
+        invocations_balanced: last.0,
+        entitlements_held: last.1,
+        run_lock_held: rundir::is_running(public),
+        cleanup_hold_observed: rundir::observe_cleanup_hold(public, &mut crate::rundir::NoHooks),
+    }
+}
+
+fn last_process_facts(run: &crate::engine::topology::run::TopologyRun) -> (bool, u32) {
+    (run.invocations_balance(), run.entitlements_held())
+}
+
+fn observe_live(
+    fixture: &Fixture,
+    run: &crate::engine::topology::run::TopologyRun,
+    released: &[String],
+) -> Ledger {
+    ledger::observe(
+        run.fold(),
+        &ledger_inventory(fixture, run.fold(), released),
+        &process_local_of(run, &fixture.public()),
+    )
+}
+
+fn observe_after_drop(fixture: &Fixture, released: &[String], last: (bool, u32)) -> Ledger {
+    let fold = replayed(fixture);
+    ledger::observe(
+        &fold,
+        &ledger_inventory(fixture, &fold, released),
+        &process_local_after(&fixture.public(), last),
+    )
+}
+
+#[track_caller]
+fn fact_of(observed: &Ledger, row: Row) -> Fact {
+    observed
+        .fact(row)
+        .unwrap_or_else(|| panic!("{row} is observed"))
+}
+
+/// The outcome equation, checked; the rendered ledger is written to
+/// `$UPSTROKE_LEDGER_EXPORT/<tag>.md` when the variable names a directory,
+/// which is how the record quotes it.
+#[track_caller]
+fn assert_ledger(before: &Ledger, after: &Ledger, outcome: LedgerOutcome, tag: &str) {
+    let record = ledger::record(before, after, outcome);
+    if let Ok(dir) = std::env::var("UPSTROKE_LEDGER_EXPORT") {
+        crate::workspace_manager::fixture::write_file(
+            &PathBuf::from(dir).join(format!("{tag}.md")),
+            record.render().as_bytes(),
+        );
+    }
+    let disagreements = ledger::check(before, after, outcome);
+    assert!(
+        disagreements.is_empty(),
+        "{tag}: the {outcome:?} outcome equation does not hold:\n{disagreements:#?}\n\n{}",
+        record.render()
+    );
+}
+
+/// Every path under `root`, relative, sorted: what an execution root still
+/// holds when a finalization reports it not removed.
+fn tree_of(root: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            out.push(
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string(),
+            );
+            if path.is_dir() && !path.join(".git").exists() {
+                walk(root, &path, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, root, &mut out);
+    out.sort();
+    out
+}
+
+fn progress_shape(step: &Result<Progress, UpstrokeError>) -> String {
+    match step {
+        Ok(Progress::Settled { key, accepted, .. }) => format!("settled(k{}, {accepted})", key.0),
+        Ok(Progress::Integrated { key, sequence, .. }) => {
+            format!("integrated(k{}, s{})", key.0, sequence.0)
+        }
+        Ok(Progress::Answered { key, declined, .. }) => {
+            format!("answered(k{}, declined {declined})", key.0)
+        }
+        Ok(Progress::Finished {
+            outcome,
+            closed,
+            report_written,
+            execution_root_removed,
+        }) => {
+            format!("finished({outcome:?}, {closed}, {report_written}, {execution_root_removed})")
+        }
+        Ok(other) => format!("{other:?}"),
+        Err(error) if error.to_string().contains("already finished as") => {
+            "refused(finished)".to_owned()
+        }
+        Err(error) => format!("error({error})"),
+    }
+}
+
+/// `resource_accounting.outcome_equations.Complete`: the acceptance chain,
+/// observed live before the ending step and again from the bytes on disk
+/// once the process has let go.
+#[test]
+fn the_ledger_balances_at_complete() {
+    use crate::engine::topology::select::Ceiling;
+    use crate::workspace_manager::fixture::git;
+
+    let fixture = Fixture::build(
+        "ledger-complete",
+        Damage {
+            two_tasks: true,
+            beta_depends_on_alpha: true,
+            ..Damage::default()
+        },
+    );
+    git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            fixture.base_sha.as_str(),
+        ],
+    );
+    let harness = harness();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let (shapes, before, released, last) = with_live_run_hooked_runner(
+        &fixture,
+        &harness,
+        Ceiling::unlimited(),
+        &adapters,
+        &RecordingRunner::editing_per_task(),
+        |run, seams, hooks| {
+            let mut shapes = Vec::new();
+            for _ in 0..4 {
+                shapes.push(progress_shape(&run.step(seams, hooks)));
+            }
+            let released = referenced_objects(&fixture);
+            let before = observe_live(&fixture, run, &released);
+            shapes.push(progress_shape(&run.step(seams, hooks)));
+            (shapes, before, released, last_process_facts(run))
+        },
+    );
+    assert_eq!(
+        shapes,
+        vec![
+            "settled(k0, true)",
+            "integrated(k0, s0)",
+            "settled(k1, true)",
+            "integrated(k1, s1)",
+            "finished(Complete, 0, true, true)",
+        ]
+    );
+    let after = observe_after_drop(&fixture, &released, last);
+    assert_ledger(&before, &after, LedgerOutcome::Complete, "ledger-complete");
+    assert_eq!(
+        fact_of(&before, Row::R11),
+        Fact::Present(2),
+        "both candidates refs stood until finalization"
+    );
+    assert_eq!(
+        fact_of(&after, Row::R11),
+        Fact::Absent,
+        "and Complete pruned them"
+    );
+    assert!(
+        released.len() >= 2,
+        "the pruned refs released their commits to Git: {released:?}"
+    );
+    assert_eq!(
+        fact_of(&after, Row::R27),
+        Fact::Balanced,
+        "and every one of them is still in the store"
+    );
+    assert_eq!(fact_of(&after, Row::R6), Fact::Zero);
+    assert_eq!(fact_of(&after, Row::R15), Fact::Zero);
+    assert_eq!(fact_of(&after, Row::R18), Fact::Absent);
+}
+
+/// `outcome_equations.Parked`: alpha's queued candidate publishes, beta's
+/// worker asks a question, the hard block finds nobody there and the closure
+/// ends the run Parked — the candidates ref retained, the question open.
+#[test]
+fn the_ledger_balances_at_parked() {
+    use crate::engine::topology::select::Ceiling;
+
+    let fixture = Fixture::two_tasks("ledger-parked");
+    let alpha = plant_queued_candidate(&fixture);
+    let harness = harness();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::asking();
+    let (shapes, before, released, last) = with_live_run(
+        &fixture,
+        &harness,
+        Ceiling::unlimited(),
+        &adapters,
+        |run, seams, hooks| {
+            let mut shapes = vec![
+                progress_shape(&run.step(seams, hooks)),
+                progress_shape(&run.step(seams, hooks)),
+            ];
+            let released = referenced_objects(&fixture);
+            let before = observe_live(&fixture, run, &released);
+            shapes.push(progress_shape(&run.step(seams, hooks)));
+            (shapes, before, released, last_process_facts(run))
+        },
+    );
+    assert_eq!(
+        shapes,
+        vec![
+            "integrated(k0, s0)",
+            "settled(k1, false)",
+            "finished(Parked, 0, true, true)",
+        ],
+        "execution root: {:?}",
+        tree_of(fixture.manager().execution_root())
+    );
+    let after = observe_after_drop(&fixture, &released, last);
+    assert_ledger(&before, &after, LedgerOutcome::Parked, "ledger-parked");
+    assert_eq!(
+        fact_of(&after, Row::R15),
+        Fact::Held(1),
+        "beta's question is open"
+    );
+    assert_eq!(
+        fact_of(&after, Row::R11),
+        Fact::Present(1),
+        "alpha's candidates ref is retained"
+    );
+    assert_eq!(
+        ref_target(&fixture, alpha.candidate.candidate_ref.as_str()),
+        Some(alpha.commit.as_str().to_owned())
+    );
+    assert_eq!(
+        fact_of(&after, Row::R6),
+        Fact::Zero,
+        "alpha's queue position was consumed by `task_merged`"
+    );
+    assert_eq!(fact_of(&after, Row::R9), Fact::Absent);
+    assert_eq!(fact_of(&after, Row::R18), Fact::Absent);
+}
+
+/// `outcome_equations.Halted`: a declined verification park with the halting
+/// policy; the ledger after the decline is ingested and after the closure
+/// ends the run Halted — the candidates ref kept for forensics, the queue
+/// position and the question consumed, the proposal pin and the staging
+/// worktree pruned.
+#[test]
+fn the_ledger_balances_at_halted() {
+    let options =
+        crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify);
+    let fixture = Fixture::two_tasks("ledger-halted");
+    let (candidate, _, pin) = plant_stale_verification(&fixture);
+    append_events(
+        &fixture,
+        &[TopologyEventBody::MergeVerificationUnavailable {
+            data: crate::topology::events::MergeVerificationUnavailable {
+                sequence: crate::topology::events::SequenceId(1),
+                cause: crate::topology::events::UnavailableCause::HumanRequired {
+                    verdict: "a person must decide this integration".to_owned(),
+                },
+                outcome: crate::topology::events::UnavailableOutcome::Parked {
+                    question: crate::topology::events::FrozenQuestion {
+                        id: crate::ir::QuestionId("q-ledger-halted".to_owned()),
+                        key: ALPHA,
+                        kind: crate::ir::QuestionKind::Clarify,
+                        context: "integration verification needs a person".to_owned(),
+                        options,
+                    },
+                },
+                reviews: Vec::new(),
+            },
+        }],
+    );
+    let mut before = None;
+    let mut released = Vec::new();
+    let mut last = (false, 0);
+    let driven = drive_observing(
+        &fixture,
+        &DriveSeams {
+            answer: Some(crate::ir::Answer::Declined),
+            answer_delivery: AnswerDelivery::Blocking,
+            halts_run: true,
+            ..DriveSeams::default()
+        },
+        2,
+        &RecordingRunner::editing(),
+        &mut |step, run| {
+            if step == 1 {
+                released = referenced_objects(&fixture);
+                before = Some(observe_live(&fixture, run, &released));
+            }
+            last = last_process_facts(run);
+        },
+    );
+    let shapes: Vec<String> = driven.progress.iter().map(progress_shape).collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "answered(k0, declined true)",
+            "finished(Halted, 0, true, true)"
+        ]
+    );
+    let before = before.expect("observed after the decline");
+    let after = observe_after_drop(&fixture, &released, last);
+    assert_ledger(&before, &after, LedgerOutcome::Halted, "ledger-halted");
+    assert_eq!(
+        fact_of(&after, Row::R11),
+        Fact::Present(2),
+        "Halted retains the candidates refs for forensics: the parked candidate's and the \
+         published beta's"
+    );
+    assert_eq!(
+        ref_target(&fixture, candidate.candidate_ref.as_str()).as_deref(),
+        Some(candidate.commit_sha.as_str())
+    );
+    assert_eq!(
+        fact_of(&after, Row::R6),
+        Fact::Zero,
+        "the declined park consumed the queue position"
+    );
+    assert_eq!(fact_of(&after, Row::R15), Fact::Zero, "and the question");
+    assert_eq!(
+        fact_of(&before, Row::R12),
+        Fact::Absent,
+        "the planted terminal's proposal pin was pruned by the resume, at the recorded \
+         proposal, before the loop ran (R12: pruned at the Parked terminal)"
+    );
+    assert_eq!(fact_of(&after, Row::R12), Fact::Absent);
+    assert!(ref_target(&fixture, pin.as_str()).is_none());
+    assert_eq!(
+        fact_of(&before, Row::R10),
+        Fact::Absent,
+        "and so was its staging worktree"
+    );
+    assert_eq!(fact_of(&after, Row::R10), Fact::Absent);
+}
+
+/// R9 at the live loop: a `Closed` settlement — here a deferral — closes the
+/// generation in the fold, and the loop prunes the generation's worktree and
+/// intent right after the `attempt_finished` append, as the retry path's
+/// `Close` arm and run-end closure do for the closes they make. Found by
+/// the ledger at Parked: before this, every closed settlement other than a
+/// promotion left its slot for the next resume to reclaim.
+#[test]
+fn a_closed_settlement_scrubs_the_generations_worktree_and_intent() {
+    use crate::engine::topology::select::Ceiling;
+
+    let fixture = Fixture::healthy("closed-settlement-scrub");
+    let harness = harness();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::rate_limiting();
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    with_live_run(
+        &fixture,
+        &harness,
+        Ceiling::unlimited(),
+        &adapters,
+        |run, seams, hooks| {
+            let first = run.step(seams, hooks).expect("the outage defers alpha");
+            assert!(
+                matches!(
+                    first,
+                    Progress::Settled {
+                        accepted: false,
+                        ..
+                    }
+                ),
+                "{first:?}"
+            );
+            assert_eq!(run.fold().task_state(ALPHA), Some(TaskState::Deferred));
+            assert!(
+                !worktree.exists(),
+                "the closed generation's worktree is pruned with the settlement"
+            );
+            assert!(
+                manager.intents().expect("intents").is_empty(),
+                "and its intent: {:?}",
+                manager.intents().expect("intents")
+            );
+            let kinds = durable_kinds(&fixture);
+            assert_eq!(
+                kinds.last().map(String::as_str),
+                Some("attempt_finished"),
+                "the scrub follows the durable close: {kinds:?}"
+            );
+        },
+    );
+}
+
+/// `outcome_equations.BudgetExceeded`: a spend already over the ceiling
+/// refuses beta's queued candidate its integration, `budget_exceeded` is
+/// appended, and the closure ends the run — the queue position, the
+/// candidate lease and the candidates ref resumably open, the pins pruned.
+#[test]
+fn the_ledger_balances_at_budget_exceeded() {
+    use crate::engine::topology::select::Ceiling;
+    use crate::workspace_manager::fixture::git;
+
+    let fixture = Fixture::build(
+        "ledger-budget",
+        Damage {
+            two_tasks: true,
+            extra: vec![
+                dispatched(),
+                attempt_started(1),
+                attempt_finished(
+                    1,
+                    AttemptSettlement::Closed {
+                        transition: SettlementTransition::Retry,
+                        lease: LeaseDisposition::PredictedReleased,
+                    },
+                ),
+            ],
+            ..Damage::default()
+        },
+    );
+    let beta = plant_queued_beta(&fixture);
+    git(
+        &fixture.repo_root,
+        &[
+            "update-ref",
+            fixture.started.integration_ref.as_str(),
+            fixture.base_sha.as_str(),
+        ],
+    );
+    let harness = harness();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let (shapes, before, released, last) = with_live_run(
+        &fixture,
+        &harness,
+        Ceiling {
+            run_usd: Some(0.000_001),
+            task_usd: None,
+        },
+        &adapters,
+        |run, seams, hooks| {
+            let mut shapes = vec![progress_shape(&run.step(seams, hooks))];
+            let released = referenced_objects(&fixture);
+            let before = observe_live(&fixture, run, &released);
+            shapes.push(progress_shape(&run.step(seams, hooks)));
+            (shapes, before, released, last_process_facts(run))
+        },
+    );
+    assert_eq!(shapes[0], "BudgetExceeded", "{shapes:?}");
+    assert!(
+        shapes[1].starts_with("finished(BudgetExceeded, "),
+        "{shapes:?}"
+    );
+    let after = observe_after_drop(&fixture, &released, last);
+    assert_ledger(
+        &before,
+        &after,
+        LedgerOutcome::BudgetExceeded,
+        "ledger-budget-exceeded",
+    );
+    assert_eq!(
+        fact_of(&after, Row::R6),
+        Fact::Held(1),
+        "beta's queue position is resumably open"
+    );
+    assert_eq!(
+        fact_of(&after, Row::R7),
+        Fact::Held(1),
+        "and its candidate lease"
+    );
+    assert_eq!(
+        fact_of(&after, Row::R11),
+        Fact::Present(1),
+        "and its candidates ref"
+    );
+    assert_eq!(
+        ref_target(&fixture, beta.candidate_ref.as_str()).as_deref(),
+        Some(beta.commit_sha.as_str())
+    );
+    assert_eq!(
+        fact_of(&after, Row::R23),
+        Fact::Absent,
+        "the candidate-prepared pin is pruned"
+    );
+    assert_eq!(fact_of(&after, Row::R5), Fact::Zero);
+    assert_eq!(fact_of(&after, Row::R18), Fact::Absent);
+}
+
+/// Hooks that return `Err` from the `Written` point of the nth transaction
+/// append counted from the moment `countdown` is set — the append-error
+/// protocol, aimed at one line of the test's choosing.
+struct ArmedAppendError {
+    events: ArmedAppendEvents,
+    rest: HarnessTopologyHooks,
+}
+
+struct ArmedAppendEvents {
+    inner: crate::events::log::HarnessEventHooks,
+    countdown: Arc<AtomicU32>,
+    fired: Arc<AtomicU32>,
+}
+
+impl ArmedAppendError {
+    fn new(
+        harness: &Arc<Mutex<HookHarness>>,
+        countdown: &Arc<AtomicU32>,
+        fired: &Arc<AtomicU32>,
+    ) -> Self {
+        Self {
+            events: ArmedAppendEvents {
+                inner: crate::events::log::HarnessEventHooks::new(Arc::clone(harness)),
+                countdown: Arc::clone(countdown),
+                fired: Arc::clone(fired),
+            },
+            rest: HarnessTopologyHooks::new(Arc::clone(harness)),
+        }
+    }
+}
+
+impl crate::events::log::EventHooks for ArmedAppendEvents {
+    fn phase(&mut self, site: EventSite, phase: HookPhase) {
+        self.inner.phase(site, phase);
+    }
+
+    fn point(&mut self, site: EventSite, point: SubEffectPoint, mode: InjectionMode) -> Injection {
+        if matches!(site, EventSite::Append)
+            && matches!(point, SubEffectPoint::Written)
+            && matches!(mode, InjectionMode::ErrorReturn)
+        {
+            let remaining = self.countdown.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.countdown.store(remaining - 1, Ordering::SeqCst);
+                if remaining == 1 {
+                    self.fired.fetch_add(1, Ordering::SeqCst);
+                    return Injection::Error;
+                }
+            }
+        }
+        self.inner.point(site, point, mode)
+    }
+
+    fn written_kill_shape(&mut self, site: EventSite) -> crate::events::log::WrittenShape {
+        self.inner.written_kill_shape(site)
+    }
+
+    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
+        self.inner.durability_ledger()
+    }
+
+    fn synced(&mut self, record: &crate::events::log::SyncRecord) {
+        self.inner.synced(record);
+    }
+}
+
+impl TopologyHooks for ArmedAppendError {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        self.rest.effects()
+    }
+
+    fn rundir(&mut self) -> &mut dyn crate::rundir::RunDirHooks {
+        self.rest.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        &mut self.events
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.rest.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.rest.spawn()
+    }
+}
+
+/// `outcome_equations.NoRunFinished`: "a command ended by the append-error
+/// protocol leaves exactly this shape with the surviving prefix as the fold".
+/// Alpha publishes; beta's first settlement append errors after
+/// `attempt_started` is durable, so the surviving prefix holds an in-flight
+/// generation, its worktree and intent, and the execution root — every row
+/// resumably open, the process-local rows empty. The next incarnation then
+/// settles what the fold holds and the run ends Complete, with the ledger
+/// balanced there too.
+#[test]
+fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resume() {
+    use crate::engine::topology::select::Ceiling;
+
+    let fixture = Fixture::two_tasks("ledger-no-run-finished");
+    plant_queued_candidate(&fixture);
+    let harness = harness();
+    let countdown = Arc::new(AtomicU32::new(0));
+    let fired = Arc::new(AtomicU32::new(0));
+    let mut hooks = ArmedAppendError::new(&harness, &countdown, &fired);
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let (first, error, last) = with_live_run_hooked(
+        &fixture,
+        &mut hooks,
+        Ceiling::unlimited(),
+        &adapters,
+        |run, seams, hooks| {
+            let first = progress_shape(&run.step(seams, hooks));
+            // Beta's dispatch appends `task_dispatched` and `attempt_started`; the third
+            // append is the first line after the worker ran, and it errors.
+            countdown.store(3, Ordering::SeqCst);
+            let error = run
+                .step(seams, hooks)
+                .expect_err("the append-error protocol ends the command");
+            assert!(run.fold().is_poisoned(), "the fold is poisoned");
+            (first, error.to_string(), last_process_facts(run))
+        },
+    );
+    assert_eq!(first, "integrated(k0, s0)");
+    assert_eq!(
+        fired.load(Ordering::SeqCst),
+        1,
+        "the armed append errored once"
+    );
+    assert!(error.contains("does not contain the line"), "{error}");
+    let kinds = durable_kinds(&fixture);
+    assert_eq!(
+        kinds.last().map(String::as_str),
+        Some("attempt_started"),
+        "the surviving prefix ends inside beta's attempt: {kinds:?}"
+    );
+    let released = referenced_objects(&fixture);
+    let observed = observe_after_drop(&fixture, &released, last);
+    assert_ledger(
+        &observed,
+        &observed,
+        LedgerOutcome::NoRunFinished,
+        "ledger-no-run-finished",
+    );
+    assert_eq!(
+        fact_of(&observed, Row::R1),
+        Fact::Held(1),
+        "beta's in-flight generation holds the pipeline"
+    );
+    assert_eq!(
+        fact_of(&observed, Row::R9),
+        Fact::Present(1),
+        "its worktree and intent stand"
+    );
+    assert_eq!(fact_of(&observed, Row::R18), Fact::Present(1));
+    assert_eq!(fact_of(&observed, Row::R11), Fact::Present(1));
+    assert_eq!(
+        fact_of(&observed, Row::R17),
+        Fact::Absent,
+        "the lock went with the process"
+    );
+    assert_eq!(
+        last,
+        (true, 0),
+        "the protocol settled every invocation and cancelled the reservation"
+    );
+
+    let mut before = observed.clone();
+    let mut released = released;
+    let mut last = last;
+    let driven = drive_observing(
+        &fixture,
+        &DriveSeams::default(),
+        4,
+        &RecordingRunner::editing_per_task(),
+        &mut |_, run| {
+            if run.fold().finished().is_none() {
+                released = referenced_objects(&fixture);
+                before = observe_live(&fixture, run, &released);
+            }
+            last = last_process_facts(run);
+        },
+    );
+    let shapes: Vec<String> = driven.progress.iter().map(progress_shape).collect();
+    assert_eq!(
+        shapes,
+        vec![
+            "settled(k1, true)",
+            "integrated(k1, s1)",
+            "finished(Complete, 0, true, true)",
+            "refused(finished)",
+        ],
+        "the resume settles the interrupted attempt and the run completes"
+    );
+    let after = observe_after_drop(&fixture, &released, last);
+    assert_ledger(
+        &before,
+        &after,
+        LedgerOutcome::Complete,
+        "ledger-no-run-finished-then-complete",
+    );
+    assert_eq!(fact_of(&after, Row::R1), Fact::Zero);
+    assert_eq!(fact_of(&after, Row::R9), Fact::Absent);
+    assert_eq!(fact_of(&after, Row::R11), Fact::Absent);
 }
