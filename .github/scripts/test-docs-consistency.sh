@@ -6,10 +6,13 @@
 #
 #   C1  CLAUDE.md and CONTRIBUTING.md exist. Every repository path either names
 #       in backticks exists at this head, or EACH occurrence is qualified within
-#       its own window (three lines before to four after) by one of the marker
-#       phrases below. Qualification is syntactic: the gate checks that a phrase
-#       is present near that occurrence, not what the phrase refers to. And
-#       CLAUDE.md does not carry a sentence matching
+#       its own window -- three lines before to four after, CLAMPED TO THE
+#       OCCURRENCE'S OWN PARAGRAPH -- by one of the marker phrases below.
+#       Qualification is syntactic within that paragraph: the gate checks that a
+#       phrase is present in it, not what the phrase refers to, so a qualifier
+#       still excuses every missing citation written beside it. What it can no
+#       longer do is reach across a blank line into prose about something else.
+#       And CLAUDE.md does not carry a sentence matching
 #       /CONTRIBUTING\.md.{0,40}(omits|is stale|does not (carry|include))/ while
 #       CONTRIBUTING.md carries `--all-features` -- the stale cross-document
 #       claim PR #20's review had to catch by hand.
@@ -75,7 +78,10 @@
 #            could fail unnoticed, so the check it never ran read as a pass);
 #   round 7: MUT-C5-CONSUMER-FAILS-OPEN (the producer's status checked and its
 #            output never proved read, so a listing the loop failed to read was
-#            indistinguishable from a clean one).
+#            indistinguishable from a clean one);
+#   round 8: MUT-C1-QUALIFIER-CROSSES-A-PARAGRAPH (a fixed line window reached
+#            past a blank line, so a qualifier excused a citation in a
+#            neighbouring paragraph -- this file's own repair silenced C1).
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 
@@ -132,7 +138,39 @@ types_line() {
 # the same missing path passed as a current pointer. Each occurrence is judged
 # on its own window now. A qualifier may say the path is coming, or that it
 # deliberately does not exist ("there is **no** rust-toolchain.toml").
+# MUT-C1-QUALIFIER-CROSSES-A-PARAGRAPH: the window was three lines before to
+# four after AND NOTHING ELSE, so it reached across a blank line into the
+# neighbouring prose and a qualifier there excused a citation it was never
+# written about. Measured on 38283eae: the trap paragraph this pull request added
+# to CLAUDE.md ends its first sentence in the words "must not exist", four lines
+# below the src/export.rs citation and separated from it by a blank line; with
+# that citation changed to a path that does not exist, the base gate exited 1
+# naming it and this head exited 0 printing PASS. A
+# qualifier BELONGS TO THE PARAGRAPH IT IS WRITTEN IN, so the window is clamped
+# to the citation's own paragraph -- blank line to blank line -- and can only
+# ever SHRINK, never reach further than the ±3/+4 it already had. What is still
+# syntactic: a qualifier excuses every missing citation in its OWN paragraph,
+# because nothing here reads which path a phrase refers to.
 marker='arrives with|arrive with|not yet|until that merges|until it merges|lands with|forward reference|\*\*no |there is \*\*?no|does not exist|must not exist'
+
+# excused <doc> <line_no>: is the occurrence on that line qualified? This is the
+# whole of C1's qualification decision, in one place, so the regression test at
+# the foot asserts what C1 asks and not a restatement of it.
+excused() {
+  local doc="$1" line_no="$2" from to para_from para_to
+  from=$(( line_no > 3 ? line_no - 3 : 1 ))
+  to=$(( line_no + 4 ))
+  # The paragraph the occurrence sits in: the line after the nearest blank line
+  # above it, to the line before the nearest blank line below it. A line of
+  # nothing but whitespace is blank -- `NF` is 0 for it -- which is what a reader
+  # sees too. A document with no blank line above or below is one paragraph.
+  para_from=$(awk -v n="$line_no" 'NR < n && !NF { last = NR } END { print last + 1 }' "$doc")
+  para_to=$(awk -v n="$line_no" 'NR > n && !NF { print NR - 1; found = 1; exit } END { if (!found) print NR }' "$doc")
+  if (( from < para_from )); then from=$para_from; fi
+  if (( to > para_to )); then to=$para_to; fi
+  sed -n "${from},${to}p" "$doc" | grep -qiE "$marker"
+}
+
 for doc in CLAUDE.md CONTRIBUTING.md; do
   [[ -f "$doc" ]] || { error "$doc is missing: this gate requires it"; continue; }
   rooted=$(grep -oE '`(src|infra|\.github|acceptance|decisions|proposals|reviews|findings|examples|fixtures|docs)/[A-Za-z0-9_./-]*`' "$doc" | tr -d '`' || true)
@@ -142,9 +180,8 @@ for doc in CLAUDE.md CONTRIBUTING.md; do
     [[ -e "$path" ]] && continue
     while IFS= read -r line_no; do
       [[ -z "$line_no" ]] && continue
-      from=$(( line_no > 3 ? line_no - 3 : 1 ))
-      sed -n "${from},$(( line_no + 4 ))p" "$doc" | grep -qiE "$marker" \
-        || error "$doc:$line_no names \`$path\`, which does not exist at this head; this occurrence is neither marked as a forward reference nor stated as deliberately absent"
+      excused "$doc" "$line_no" \
+        || error "$doc:$line_no names \`$path\`, which does not exist at this head; this occurrence is neither marked as a forward reference nor stated as deliberately absent within its own paragraph"
     done < <(grep -nF -- "\`$path\`" "$doc" | cut -d: -f1)
   done < <(printf '%s\n%s\n' "$rooted" "$bare" | grep -v '^$' | sort -u)
 done
@@ -352,6 +389,57 @@ if [[ -n "$old_ledger_paths" ]]; then
   error "reviews/findings/ was moved to findings/ in pull request #276 (2026-09-12) and must not come back. This head tracks these paths under the old prefix:"
   error "${old_ledger_paths%$'\n'}"
   error "Rebase onto master and move them under findings/ with git mv: nothing reads reviews/findings/ any more, so a finding left there is filed nowhere."
+fi
+
+# --- C1's regression test: a qualifier belongs to its own paragraph ----------
+# MUT-C1-QUALIFIER-CROSSES-A-PARAGRAPH is killed here rather than by hand. It
+# was invisible to every fixture this repository had, because the only documents
+# C1 reads are CLAUDE.md and CONTRIBUTING.md and both must keep passing: the
+# weakening shows only when a citation in one of them is made to dangle, which a
+# gate cannot do to its own repository. `excused` is the whole of the decision,
+# so a fixture document pins it.
+#
+# WHAT WOULD STILL PASS IF THE CLAMP WERE GONE: rows 1 and 2, and only those --
+# they are the rows that need a blank line to be honoured. Rows 3 and 4 hold
+# either way and are here so the clamp cannot be "fixed" by narrowing the window
+# to the citation's own line, which would refuse a qualification that merely
+# wrapped. Row 5 is the other bound: inside one paragraph the ±3/+4 window still
+# applies, so clamping widened nothing.
+if [[ "${1:-}" != --child-of-c5-selftest ]]; then
+  c1_doc="$(mktemp)"
+  cat > "$c1_doc" <<'C1FIXTURE'
+**`src/a-no-qualifier.rs` is cited here.** Nothing in this paragraph
+qualifies it.
+
+**`other/thing.md` must not exist.** A separate paragraph, whose qualifier
+belongs to the citation on this line and to no other.
+
+**`src/b-below-a-qualifier.rs` is cited here.** The marker three lines above
+belongs to the paragraph above and not to this one.
+
+**`src/c-wrapped.rs` is cited here.** The qualifier for it
+does not exist yet, and it is written on the next line of the same paragraph.
+
+**`src/d-same-line.rs` does not exist.** One line, one paragraph.
+
+A paragraph that does not exist as a qualifier for the citation below it.
+Line two.
+Line three.
+Line four.
+Line five cites `src/e-too-far.rs`.
+C1FIXTURE
+  c1_case() {  # c1_case <line> <yes|no> <what>
+    local got=no
+    excused "$c1_doc" "$1" && got=yes
+    [[ "$got" == "$2" ]] \
+      || error "C1 qualification, line $1 ($3): excused=$got, and excused=$2 was expected"
+  }
+  c1_case 1  no  'a marker in the paragraph BELOW must not excuse it'
+  c1_case 7  no  'a marker in the paragraph ABOVE must not excuse it'
+  c1_case 10 yes 'a marker on the next line of the same paragraph excuses it'
+  c1_case 13 yes 'a marker on the occurrence own line excuses it'
+  c1_case 19 no  'a marker four lines above, inside one paragraph, is still out of the window'
+  rm -f "$c1_doc"
 fi
 
 # --- C5's regression tests: a listing that fails must go RED, never green ----
