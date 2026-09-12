@@ -6,7 +6,7 @@ use crate::error::UpstrokeError;
 use crate::events::{AttemptRecord, BudgetKind};
 use crate::ir::QuestionId;
 use crate::topology::events::{
-    AttemptNumber, BudgetExceeded4, CandidateRef, DerivedOutcome, Epoch, GenerationId,
+    AttemptNumber, BudgetExceeded4, CandidateRef, DerivedOutcome, Epoch, GenerationId, SequenceId,
     TopologyEvent, TopologyEventBody,
 };
 use crate::topology::fold::{GenerationClass, TopologyFold};
@@ -46,14 +46,33 @@ impl Spend {
         *self.per_task.entry(key).or_insert(0.0) += cost;
     }
 
+    fn record_unattributed_reviews(&mut self, reviews: &[crate::events::ReviewRecord]) {
+        for review in reviews {
+            self.run += review.cost_usd.unwrap_or(0.0);
+        }
+    }
+
     #[must_use]
     pub fn replay(events: &[TopologyEvent]) -> Self {
         let mut spend = Self::new();
+        let mut verifying: Option<(SequenceId, TaskKey)> = None;
         for event in events {
             match &event.body {
                 TopologyEventBody::AttemptFinished { data } => spend.record(data.key, &data.record),
                 TopologyEventBody::CandidatePrepared { data } => {
                     spend.record(data.key, &data.attempt);
+                }
+                TopologyEventBody::MergeVerificationStarted { data } => {
+                    verifying = Some((data.sequence, data.candidate.key));
+                }
+                TopologyEventBody::MergeVerificationUnavailable { data } => {
+                    match verifying
+                        .take()
+                        .filter(|(sequence, _)| *sequence == data.sequence)
+                    {
+                        Some((_, key)) => spend.record_reviews(key, &data.reviews),
+                        None => spend.record_unattributed_reviews(&data.reviews),
+                    }
                 }
                 TopologyEventBody::MergePrepared { data } => {
                     if let Some(verification) = &data.verification {

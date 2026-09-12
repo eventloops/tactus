@@ -4970,6 +4970,7 @@ fn sequences_are_dense_and_one_transaction_runs_at_a_time() {
                     kind: InfrastructureKind::RateLimited,
                 },
                 outcome: UnavailableOutcome::Deferred { defers: 1 },
+                reviews: Vec::new(),
             },
         })
     };
@@ -5914,6 +5915,7 @@ fn unavailable_event(
             sequence: SequenceId(sequence),
             cause,
             outcome,
+            reviews: Vec::new(),
         },
     })
 }

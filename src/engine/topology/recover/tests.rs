@@ -9293,6 +9293,7 @@ fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {
                         options: options.clone(),
                     },
                 },
+                reviews: Vec::new(),
             },
         }],
     );

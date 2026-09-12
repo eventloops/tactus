@@ -2127,6 +2127,7 @@ mod tests {
                         options: vec!["retry".to_owned(), "abandon".to_owned()],
                     },
                 },
+                reviews: Vec::new(),
             },
         })
     }
@@ -2139,6 +2140,7 @@ mod tests {
                     kind: InfrastructureKind::RateLimited,
                 },
                 outcome: UnavailableOutcome::Deferred { defers },
+                reviews: Vec::new(),
             },
         })
     }

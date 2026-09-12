@@ -950,12 +950,14 @@ pub enum UnavailableOutcome {
     Parked { question: FrozenQuestion },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MergeVerificationUnavailable {
     pub sequence: SequenceId,
     pub cause: UnavailableCause,
     pub outcome: UnavailableOutcome,
+    #[serde(deserialize_with = "strict::list")]
+    pub reviews: Vec<ReviewRecord>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1802,6 +1804,20 @@ mod tests {
         }
     }
 
+    fn unavailable_reviews() -> Vec<ReviewRecord> {
+        vec![ReviewRecord {
+            pass: "integration".to_owned(),
+            agent: "codex".to_owned(),
+            model: "gpt-5.6-sol".to_owned(),
+            adapter: Some("codex".to_owned()),
+            preflight_cli_version: Some("1.7.2".to_owned()),
+            effort: Some(Effort::Max),
+            pool: Some("codex-plus".to_owned()),
+            cost_usd: Some(2.5),
+            outcome: ReviewPassOutcome::Unavailable,
+        }]
+    }
+
     fn merge_prepared_fast() -> MergePrepared {
         let candidate = candidate_ref();
         MergePrepared {
@@ -1957,6 +1973,7 @@ mod tests {
                         kind: InfrastructureKind::ReviewerTimeout,
                     },
                     outcome: UnavailableOutcome::Deferred { defers: 2 },
+                    reviews: unavailable_reviews(),
                 },
             },
             TopologyEventBody::MergeVerificationInterrupted {
@@ -2266,7 +2283,7 @@ mod tests {
             }
         }
         assert_eq!(
-            visited, 130,
+            visited, 131,
             "the corpus covers a different number of object boundaries than it did"
         );
         assert_eq!(
@@ -2385,7 +2402,7 @@ mod tests {
             }
         }
         assert_eq!(
-            deletions, 376,
+            deletions, 377,
             "the corpus requires a different number of fields than it did"
         );
     }
@@ -3339,6 +3356,7 @@ mod tests {
                     outcome: UnavailableOutcome::Parked {
                         question: frozen_question("q-verify-0001", task_key(2)),
                     },
+                    reviews: unavailable_reviews(),
                 },
             },
             TopologyEventBody::GenerationClosed {
@@ -3559,6 +3577,7 @@ mod tests {
                     sequence: SequenceId(6),
                     cause: cause.clone(),
                     outcome: outcome.clone(),
+                    reviews: unavailable_reviews(),
                 };
                 let human = matches!(cause, UnavailableCause::HumanRequired { .. });
                 let parked = matches!(outcome, UnavailableOutcome::Parked { .. });
@@ -4206,6 +4225,10 @@ mod tests {
                     "sequence": 6,
                     "cause": {"cause": "infrastructure", "kind": {"kind": "reviewer_timeout"}},
                     "outcome": {"outcome": "deferred", "defers": 2},
+                    "reviews": legacy(
+                        serde_json::to_value(unavailable_reviews())
+                            .expect("legacy review records"),
+                    ),
                 }),
             ),
             envelope(

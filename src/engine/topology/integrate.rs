@@ -711,6 +711,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
                 proposed,
                 UnavailableCause::Infrastructure { kind },
                 Some(detail),
+                Vec::new(),
             );
         }
     };
@@ -734,6 +735,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
                 },
             },
             Some(detail),
+            judgement.reviews.clone(),
         );
     }
 
@@ -754,6 +756,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
             proposed,
             infrastructure(&failure),
             Some(failure.reason.clone()),
+            judgement.reviews.clone(),
         ),
         Some(failure) if needs_human(&failure) => unavailable(
             journal,
@@ -766,6 +769,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
                 verdict: failure.reason.clone(),
             },
             None,
+            judgement.reviews.clone(),
         ),
         Some(failure) => {
             let record = code_record(&judgement, &failure);
@@ -848,6 +852,7 @@ fn unavailable<J: IntegrationJournal + Verification>(
     proposed: &CommitSha,
     cause: UnavailableCause,
     detail: Option<String>,
+    reviews: Vec<crate::events::ReviewRecord>,
 ) -> Result<Terminal, UpstrokeError> {
     let candidate = &request.candidate;
     let taken = candidate_defers(journal.fold(), candidate);
@@ -873,6 +878,7 @@ fn unavailable<J: IntegrationJournal + Verification>(
             sequence: request.sequence,
             cause,
             outcome,
+            reviews,
         },
     })?;
     reclaim_staging(
