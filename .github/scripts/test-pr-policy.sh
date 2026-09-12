@@ -629,10 +629,12 @@ verdict() {
   echo "$rc"
 }
 
-# both_apis <label> <repo> <target> <head> <branch> <expected>: THE TWO
-# DOCUMENTED WAYS IN, ASKED ABOUT ONE COMMIT. The workflow builds three listings
-# with findings-in-range.sh; a maintainer running the validator by hand gives it
-# that working tree's findings/ as a directory. One commit gets one
+# both_apis <label> <repo> <target> <head> <branch> <expected> [<directory>]: THE
+# TWO DOCUMENTED WAYS IN, ASKED ABOUT ONE COMMIT. The workflow builds three
+# listings with findings-in-range.sh; a maintainer running the validator by hand
+# gives it that working tree's findings/ as a directory -- or, for the shapes
+# whose subject is a path that is NOT the ledger's own, the directory the seventh
+# argument names. One commit gets one
 # answer whichever way it is asked -- that equivalence is what this pull request
 # claims, and three P1s have been two APIs disagreeing -- so the two answers are
 # compared WITH EACH OTHER first and against the expectation second. The
@@ -644,9 +646,10 @@ verdict() {
 # finding inside its own range is not one of those and has to be asserted the
 # long way, as repo-filed-and-repaired is above.
 both_apis() {
-  local label="$1" repo="$2" target="$3" head="$4" branch="$5" want="$6" tree_rc dir_rc=0
+  local label="$1" repo="$2" target="$3" head="$4" branch="$5" want="$6" dir="${7:-$2/findings}"
+  local tree_rc dir_rc=0
   tree_rc="$(verdict "$repo" "$target" "$head" "$branch")"
-  "$BASH" "$branch_validator" "$branch" "$repo/findings" >/dev/null 2>&1 || dir_rc=$?
+  "$BASH" "$branch_validator" "$branch" "$dir" >/dev/null 2>&1 || dir_rc=$?
   if [[ "$tree_rc" != "$dir_rc" ]]; then
     echo "$label ($branch): the tree listings answered $tree_rc, the directory $dir_rc" >&2
     exit 1
@@ -659,7 +662,7 @@ both_apis() {
 
 # ONE LISTING HAS MANY SPELLINGS AND THEY MUST ANSWER ALIKE. `findings`,
 # `findings/`, `findings/.`, `findings/./`,
-# `reviews//findings` and `reviews/./findings` name one directory, and they did
+# `<repo>//findings` and `<repo>/./findings` name one directory, and they did
 # not answer alike: the last component decides what the path IS, and with `/.`
 # appended the last component was `.`, so a COMMITTED SYMLINK at
 # `findings` that the plain spelling refused at exit 1 conformed at exit 0
@@ -1244,12 +1247,12 @@ if [[ -L "$symlink_probe" ]]; then
   echo seed > "$repo_p/seed.txt"
   git -C "$repo_p" add -A && git -C "$repo_p" commit -q -m base
   p_base="$(git -C "$repo_p" rev-parse HEAD)"
-  mkdir -p "$repo_p/elsewhere" "$repo_p/reviews"
+  mkdir -p "$repo_p/elsewhere"
   echo fixture > "$repo_p/elsewhere/P2_correctness_202609100001_no-ledger-entry.md"
-  ln -s ../elsewhere "$repo_p/findings"
+  ln -s elsewhere "$repo_p/findings"
   git -C "$repo_p" add -A && git -C "$repo_p" commit -q -m 'a findings directory that is a symlink'
   p_head="$(git -C "$repo_p" rev-parse HEAD)"
-  if ! git -C "$repo_p" ls-tree "$p_head" reviews/ | grep -q '^120000 blob .*findings$' \
+  if ! git -C "$repo_p" ls-tree "$p_head" | grep -q $'^120000 blob [0-9a-f]*\tfindings$' \
     || [[ -n "$(git -C "$repo_p" status --porcelain)" ]]; then
     echo 'the fixture was meant to COMMIT findings as a symlink, cleanly' >&2
     exit 1
@@ -1276,7 +1279,7 @@ if [[ -L "$symlink_probe" ]]; then
 
   # THE SAME COMMIT CHECKED OUT WHERE THE FILESYSTEM CARRIES NO SYMLINK. Under
   # core.symlinks=false the 120000 blob is materialised as a REGULAR FILE
-  # holding `../elsewhere`, which is not a directory at all: read as a file
+  # holding `elsewhere`, which is not a directory at all: read as a file
   # listing it names one absent finding, and the recorded mode is what catches
   # it, because it is the same 120000 either way.
   git -C "$repo_p" config core.symlinks false
@@ -1302,7 +1305,7 @@ if [[ -L "$symlink_probe" ]]; then
   mkdir -p "$repo_q/elsewhere"
   echo fixture > "$repo_q/elsewhere/P3_liveness_202609100009_not-in-the-ledger.md"
   rm -rf "$repo_q/findings"
-  ln -s ../elsewhere "$repo_q/findings"
+  ln -s elsewhere "$repo_q/findings"
   if [[ "$(git -C "$repo_q" ls-files -- findings/ | wc -l)" != 1 ]]; then
     echo 'the fixture was meant to leave the findings directory in the index' >&2
     exit 1
@@ -1879,7 +1882,6 @@ else
   invented_repo="$fixture_dir/repo-invented-by-a-read-failure"
   invented_name='P2_correctness_202609100001_invented-by-a-read-failure.md'
   new_repo "$invented_repo"
-  mkdir -p "$invented_repo/reviews"
   if [[ -L "$symlink_probe" ]] && ln -s "$invented_name" "$invented_repo/findings"; then
     git -C "$invented_repo" add -A \
       && git -C "$invented_repo" commit -q -m 'a findings directory that is a symlink naming a finding'
@@ -1905,7 +1907,7 @@ else
       # breaks discovery itself. Two statuses, one wrong answer, so both are here.
       for invented_victim in index config; do
         if ! chmod 000 "$invented_repo/.git/$invented_victim" 2>/dev/null \
-          || git -C "$invented_repo/reviews" ls-files -sz -- . >/dev/null 2>&1; then
+          || git -C "$invented_repo" ls-files -sz -- . >/dev/null 2>&1; then
           chmod 644 "$invented_repo/.git/$invented_victim" 2>/dev/null || true
           echo "note: skipping the unreadable-$invented_victim case (chmod had no effect on git)" >&2
           continue
@@ -1939,13 +1941,15 @@ fi
 # ---- a RECORDED ANCESTOR is followed too, and one listing has many spellings ------------------
 #
 # The entries were decided by the mode git records, and so was the listing path
-# itself -- and the path ABOVE it was not. Commit `reviews` as a SYMLINK to a
-# sibling directory holding a finding and git calls it a `120000 blob`, `git
-# status` stays empty, and no tree entry and no index entry is NAMED
-# `findings/...`: the tree listings hold no finding and refuse at exit 1.
-# Handing `findings` straight in asked the index from INSIDE the link --
-# `git -C reviews` chdirs to `elsewhere` -- and resolved the name out of files no
-# ledger holds at that path, at exit 0.
+# itself -- and the path ABOVE it was not. The ledger's own directory sits at the
+# work tree's root, so no ancestor of it inside the repository can be a link; a
+# directory handed in BY HAND is any path, and this is the rule for its
+# ancestors. Commit `ledger` as a SYMLINK to a sibling directory holding a finding
+# and git calls it a `120000 blob`, `git status` stays empty, and no tree entry
+# and no index entry is NAMED `ledger/findings/...`: the tree listings hold no
+# finding and refuse at exit 1. Handing `ledger/findings` straight in asked the
+# index from INSIDE the link -- `git -C ledger` chdirs to `elsewhere` -- and
+# resolved the name out of files no ledger holds at that path, at exit 0.
 #
 # AND THE SAME LISTING WRITTEN FIVE WAYS IS ONE LISTING. `findings/.`
 # moved the question from `findings` to `.`, so the committed symlink AT
@@ -1961,18 +1965,19 @@ if [[ -L "$symlink_probe" ]]; then
   r_base="$(git -C "$repo_r" rev-parse HEAD)"
   mkdir -p "$repo_r/elsewhere/findings"
   echo fixture > "$repo_r/elsewhere/findings/P2_correctness_202609100001_no-ledger-entry.md"
-  ln -s elsewhere "$repo_r/reviews"
-  git -C "$repo_r" add -A && git -C "$repo_r" commit -q -m 'reviews is a symlink'
+  ln -s elsewhere "$repo_r/ledger"
+  git -C "$repo_r" add -A && git -C "$repo_r" commit -q -m 'ledger is a symlink'
   r_head="$(git -C "$repo_r" rev-parse HEAD)"
-  if ! git -C "$repo_r" ls-tree "$r_head" | grep -q '^120000 blob .*reviews$' \
+  if ! git -C "$repo_r" ls-tree "$r_head" | grep -q $'^120000 blob [0-9a-f]*\tledger$' \
     || [[ -n "$(git -C "$repo_r" status --porcelain)" ]]; then
-    echo 'the fixture was meant to COMMIT reviews as a symlink, cleanly' >&2
+    echo 'the fixture was meant to COMMIT ledger as a symlink, cleanly' >&2
     exit 1
   fi
   both_apis 'a findings directory reached through a committed symlink holds none' \
-    "$repo_r" "$r_base" "$r_head" 'fix-P2/correctness_no-ledger-entry' 1
+    "$repo_r" "$r_base" "$r_head" 'fix-P2/correctness_no-ledger-entry' 1 \
+    "$repo_r/ledger/findings"
   spelling_case 'a symlinked ancestor, every spelling' \
-    'fix-P2/correctness_no-ledger-entry' 1 "$repo_r/findings"
+    'fix-P2/correctness_no-ledger-entry' 1 "$repo_r/ledger/findings"
 
   # The same name through the REAL directory the link points at resolves, so the
   # case above is a rule about the path and not a listing read as empty.
@@ -1983,26 +1988,27 @@ if [[ -L "$symlink_probe" ]]; then
   fi
 
   # THE SAME COMMIT CHECKED OUT WHERE THE FILESYSTEM CARRIES NO SYMLINK. Under
-  # core.symlinks=false the 120000 blob at `reviews` is materialised as a REGULAR
-  # FILE holding `elsewhere`, so `findings` is not there at all: both APIs
+  # core.symlinks=false the 120000 blob at `ledger` is materialised as a REGULAR
+  # FILE holding `elsewhere`, so `ledger/findings` is not there at all: both APIs
   # refuse, one for a name it cannot find in the trees and one for a listing that
   # is neither a file nor a directory. One answer, two ways of arriving at it.
   git -C "$repo_r" config core.symlinks false
-  rm "$repo_r/reviews"
-  git -C "$repo_r" checkout -- reviews
-  if [[ -L "$repo_r/reviews" ]] || [[ ! -f "$repo_r/reviews" ]]; then
+  rm "$repo_r/ledger"
+  git -C "$repo_r" checkout -- ledger
+  if [[ -L "$repo_r/ledger" ]] || [[ ! -f "$repo_r/ledger" ]]; then
     echo 'note: skipping the materialised-ancestor case (this git left the link a link)' >&2
   else
     both_apis 'a symlinked ancestor materialised as a file holds no finding either' \
-      "$repo_r" "$r_base" "$r_head" 'fix-P2/correctness_no-ledger-entry' 1
+      "$repo_r" "$r_base" "$r_head" 'fix-P2/correctness_no-ledger-entry' 1 \
+      "$repo_r/ledger/findings"
     spelling_case 'a materialised ancestor, every spelling' \
-      'fix-P2/correctness_no-ledger-entry' 1 "$repo_r/findings"
+      'fix-P2/correctness_no-ledger-entry' 1 "$repo_r/ledger/findings"
   fi
   # Put the link back, because the equivalence property below registers this
   # repository and the shape it registers is the committed symlink.
-  rm "$repo_r/reviews"
+  rm "$repo_r/ledger"
   git -C "$repo_r" config core.symlinks true
-  git -C "$repo_r" checkout -- reviews
+  git -C "$repo_r" checkout -- ledger
 
   # AND A LINK ABOVE THE WORK TREE IS NOT ONE OF THESE. `/tmp` and `/var` are
   # symlinks on macOS and `mktemp -d` hands back a path through them, so a
@@ -2027,12 +2033,12 @@ if [[ -L "$symlink_probe" ]]; then
   fi
 
   # A SYMLINK TO THE WORK TREE'S OWN ROOT IS THE SAME RULE AT THE INODE. `-ef`
-  # FOLLOWS a link, so with `reviews` committed as a link to `.` the prefix
-  # `<repo>/reviews` IS the work tree root by inode: taking the deepest such
-  # match named the listing `findings`, answered it out of the root's own
-  # `findings/`, and never consulted the 120000 the index records for `reviews`.
-  # The checkout is clean, the tree listings hold nothing under
-  # `findings` and refuse at exit 1, and the directory conformed at exit
+  # FOLLOWS a link, so with `loop` committed as a link to `.` the prefix
+  # `<repo>/loop` IS the work tree root by inode: handed `<repo>/loop/elsewhere`,
+  # taking the deepest such match named the listing `elsewhere`, answered it out
+  # of the root's own `elsewhere/`, and never consulted the 120000 the index
+  # records for `loop`. The checkout is clean, the tree listings hold nothing
+  # under `findings/` and refuse at exit 1, and the directory conformed at exit
   # 0 -- the last counter-example to the equivalence on a clean checkout. The
   # root is matched by inode; the path through it is matched by RECORDED MODE,
   # and this is the half that asserts the second.
@@ -2041,32 +2047,33 @@ if [[ -L "$symlink_probe" ]]; then
   echo seed > "$root_loop_repo/seed.txt"
   git -C "$root_loop_repo" add -A && git -C "$root_loop_repo" commit -q -m base
   root_loop_base="$(git -C "$root_loop_repo" rev-parse HEAD)"
-  mkdir -p "$root_loop_repo/findings"
-  echo fixture > "$root_loop_repo/findings/P2_correctness_202609110001_root-loop.md"
-  ln -s . "$root_loop_repo/reviews"
+  mkdir -p "$root_loop_repo/elsewhere"
+  echo fixture > "$root_loop_repo/elsewhere/P2_correctness_202609110001_root-loop.md"
+  ln -s . "$root_loop_repo/loop"
   git -C "$root_loop_repo" add -A \
-    && git -C "$root_loop_repo" commit -q -m 'reviews is a symlink to the work tree root'
+    && git -C "$root_loop_repo" commit -q -m 'loop is a symlink to the work tree root'
   root_loop_head="$(git -C "$root_loop_repo" rev-parse HEAD)"
-  if ! git -C "$root_loop_repo" ls-tree "$root_loop_head" | grep -q '^120000 blob .*reviews$' \
+  if ! git -C "$root_loop_repo" ls-tree "$root_loop_head" | grep -q $'^120000 blob [0-9a-f]*\tloop$' \
     || [[ -n "$(git -C "$root_loop_repo" status --porcelain)" ]]; then
-    echo 'the fixture was meant to COMMIT reviews as a link to the root, cleanly' >&2
+    echo 'the fixture was meant to COMMIT loop as a link to the root, cleanly' >&2
     exit 1
   fi
   both_apis 'a symlink to the work tree root names no findings directory' \
-    "$root_loop_repo" "$root_loop_base" "$root_loop_head" 'fix-P2/correctness_root-loop' 1
+    "$root_loop_repo" "$root_loop_base" "$root_loop_head" 'fix-P2/correctness_root-loop' 1 \
+    "$root_loop_repo/loop/elsewhere"
   spelling_case 'a symlink to the work tree root, every spelling' \
-    'fix-P2/correctness_root-loop' 1 "$root_loop_repo/findings"
+    'fix-P2/correctness_root-loop' 1 "$root_loop_repo/loop/elsewhere"
   # And the real directory the link comes back to still answers for its OWN
   # name, so the case above is a rule about the path and not a listing read as
   # empty.
   if ! "$BASH" "$branch_validator" 'fix-P2/correctness_root-loop' \
-    "$root_loop_repo/findings" >/dev/null 2>&1; then
+    "$root_loop_repo/elsewhere" >/dev/null 2>&1; then
     echo 'the directory the link comes back to must still resolve the finding it holds' >&2
     exit 1
   fi
 
-  # AND THE SAME THING AT THE LAST COMPONENT. `reviews` is a tracked directory
-  # and `findings` a committed link to `..`, so the LISTING PATH ITSELF
+  # AND THE SAME THING AT THE LAST COMPONENT. `findings` is a committed link to
+  # `.`, so the LISTING PATH ITSELF
   # is the work tree root by inode while the index records it as a 120000 blob.
   # Found by sweeping shapes for more counter-examples rather than by review, and
   # it was one: trees 1, directory 0 on the unrepaired file.
@@ -2075,10 +2082,8 @@ if [[ -L "$symlink_probe" ]]; then
   echo seed > "$last_loop_repo/seed.txt"
   git -C "$last_loop_repo" add -A && git -C "$last_loop_repo" commit -q -m base
   last_loop_base="$(git -C "$last_loop_repo" rev-parse HEAD)"
-  mkdir -p "$last_loop_repo/reviews"
   echo fixture > "$last_loop_repo/P2_correctness_202609110002_loops-to-the-root.md"
-  echo keep > "$last_loop_repo/reviews/keep.txt"
-  ln -s .. "$last_loop_repo/findings"
+  ln -s . "$last_loop_repo/findings"
   git -C "$last_loop_repo" add -A \
     && git -C "$last_loop_repo" commit -q -m 'findings is a link to the work tree root'
   last_loop_head="$(git -C "$last_loop_repo" rev-parse HEAD)"
@@ -2116,7 +2121,11 @@ if [[ "$dotdot_rc" != 1 ]] || ! grep -q "holds a '\.\.' after a named component"
   echo "a '..' after a named component must be refused, saying so; got $dotdot_rc" >&2
   exit 1
 fi
-if ! ( cd "$spelling_repo/reviews" && "$BASH" "$branch_validator" \
+# From a TRACKED subdirectory: the walk from the root passes only through components the
+# records call directories, and `src/` in the real tree is one.
+mkdir -p "$spelling_repo/src" && echo 'fn main() {}' > "$spelling_repo/src/main.rs"
+git -C "$spelling_repo" add -A && git -C "$spelling_repo" commit -q -m 'a tracked subdirectory'
+if ! ( cd "$spelling_repo/src" && "$BASH" "$branch_validator" \
   'fix-P3/liveness_written-five-ways' \
   '../findings' >/dev/null 2>&1 ); then
   echo 'a LEADING .. is a starting directory and must still resolve' >&2
@@ -2133,14 +2142,14 @@ fi
 # first.
 
 # A CHECKOUT DIRECTORY RENAMED AND REPLACED BY A LINK IS STILL THE INDEX'S
-# DIRECTORY. `mv reviews saved-reviews; ln -s saved-reviews reviews` leaves the
+# DIRECTORY. `mv findings saved-findings; ln -s saved-findings findings` leaves the
 # index recording `findings/<twin>.md` and leaves `git ls-tree` holding
-# it too -- and the ancestor rule that used to see the link returned the EMPTY
+# it too -- and the rule that used to see the link returned the EMPTY
 # SET before looking at what the index records, so the twin vanished and an
 # ambiguous name conformed at exit 0 where the parent refuses at exit 1. The
 # names come from the records now, so the rename changes nothing.
 if [[ -L "$symlink_probe" ]]; then
-  renamed_repo="$fixture_dir/repo-renamed-reviews"
+  renamed_repo="$fixture_dir/repo-renamed-findings"
   new_repo "$renamed_repo"
   echo seed > "$renamed_repo/seed.txt"
   git -C "$renamed_repo" add -A && git -C "$renamed_repo" commit -q -m base
@@ -2158,8 +2167,8 @@ if [[ -L "$symlink_probe" ]]; then
     echo "the control was meant to refuse an ambiguous name; got $renamed_control_rc" >&2
     exit 1
   fi
-  mv "$renamed_repo/reviews" "$renamed_repo/saved-reviews"
-  ln -s saved-reviews "$renamed_repo/reviews"
+  mv "$renamed_repo/findings" "$renamed_repo/saved-findings"
+  ln -s saved-findings "$renamed_repo/findings"
   # The point of the fixture is that the INDEX did not move.
   if [[ "$(git -C "$renamed_repo" ls-files -- findings/ | wc -l)" != 1 ]]; then
     echo 'the fixture was meant to leave the index recording the finding' >&2
@@ -2174,12 +2183,12 @@ if [[ -L "$symlink_probe" ]]; then
   fi
 
   # A MATERIALISED LINK BEHIND ANOTHER LINK INVENTED A FINDING ON A CLEAN
-  # CHECKOUT. `reviews -> elsewhere` and `elsewhere/findings -> <finding>.md`
+  # CHECKOUT. `ledger -> elsewhere` and `elsewhere/findings -> <finding>.md`
   # are both committed; under core.symlinks=false the second is materialised as
   # a REGULAR FILE holding that filename, `git status` stays empty, and
-  # `findings` was read as a FILE LISTING naming a finding nobody has
+  # `ledger/findings` was read as a FILE LISTING naming a finding nobody has
   # filed -- exit 0 on a commit whose trees refuse at exit 1. No index entry and
-  # no tree entry is named `findings` at all: `reviews` is a 120000
+  # no tree entry is named `ledger/findings` at all: `ledger` is a 120000
   # blob, so the path is unnameable and holds nothing, whatever the checkout put
   # at the end of it.
   behind_repo="$fixture_dir/repo-materialised-behind-a-link"
@@ -2188,7 +2197,7 @@ if [[ -L "$symlink_probe" ]]; then
   git -C "$behind_repo" add -A && git -C "$behind_repo" commit -q -m base
   behind_base="$(git -C "$behind_repo" rev-parse HEAD)"
   mkdir -p "$behind_repo/elsewhere"
-  ln -s elsewhere "$behind_repo/reviews"
+  ln -s elsewhere "$behind_repo/ledger"
   ln -s P2_correctness_202609100001_shared-name.md "$behind_repo/elsewhere/findings"
   git -C "$behind_repo" add -A \
     && git -C "$behind_repo" commit -q -m 'a findings path that is a link behind a link'
@@ -2201,9 +2210,10 @@ if [[ -L "$symlink_probe" ]]; then
     echo 'note: skipping the link-behind-a-link case (this git left the link a link)' >&2
   else
     both_apis 'a materialised link behind a link invents no finding' \
-      "$behind_repo" "$behind_base" "$behind_head" 'fix-P2/correctness_shared-name' 1
+      "$behind_repo" "$behind_base" "$behind_head" 'fix-P2/correctness_shared-name' 1 \
+      "$behind_repo/ledger/findings"
     spelling_case 'a materialised link behind a link, every spelling' \
-      'fix-P2/correctness_shared-name' 1 "$behind_repo/findings"
+      'fix-P2/correctness_shared-name' 1 "$behind_repo/ledger/findings"
     # And the path the link itself names is a 120000 blob, which is not a
     # listing either: the two ways of asking are one answer.
     behind_direct_rc=0
@@ -2346,7 +2356,6 @@ inject_symlink_repo=''
 if [[ -L "$symlink_probe" ]]; then
   inject_symlink_repo="$fixture_dir/repo-injected-record"
   new_repo "$inject_symlink_repo"
-  mkdir -p "$inject_symlink_repo/reviews"
   ln -s P2_correctness_202609100001_invented-by-a-lost-record.md \
     "$inject_symlink_repo/findings"
   git -C "$inject_symlink_repo" add -A \
@@ -2608,9 +2617,9 @@ if [[ -L "$symlink_probe" ]]; then
   echo more > "$link_untracked/other.txt"
   git -C "$link_untracked" add -A && git -C "$link_untracked" commit -q -m 'nothing to do with findings'
   link_untracked_head="$(git -C "$link_untracked" rev-parse HEAD)"
-  mkdir -p "$link_untracked/elsewhere" "$link_untracked/reviews"
+  mkdir -p "$link_untracked/elsewhere"
   echo fixture > "$link_untracked/elsewhere/P2_correctness_202609100012_at-the-end-of-a-link.md"
-  ln -s ../elsewhere "$link_untracked/findings"
+  ln -s elsewhere "$link_untracked/findings"
   both_apis 'an untracked symlink is not a findings directory' \
     "$link_untracked" "$link_untracked_base" "$link_untracked_head" \
     'fix-P2/correctness_at-the-end-of-a-link' 1
@@ -2646,14 +2655,18 @@ fi
 
 # A RELATIVE LISTING IS RELATIVE TO WHERE THE SHELL IS STANDING, and the
 # components a caller names are the ones they typed PLUS the ones `$PWD` holds.
-# Run from a checkout's `reviews/`, the listing `findings` is `findings`
-# in the index and nothing else -- and a prefix chain that starts at `.` reaches
-# no root above it, which refused an ordinary by-hand invocation that every
-# earlier head accepted. Three spellings of one directory, from three different
-# working directories, and each must resolve the finding that is there.
+# Run from inside a checkout's `findings/`, the listing `.` is `findings` in the
+# index and nothing else -- and a prefix chain that starts at `.` reaches no root
+# above it, which refused an ordinary by-hand invocation that every earlier head
+# accepted. Three spellings of one directory, from three different working
+# directories, and each must resolve the finding that is there.
 relative_repo="$fixture_dir/repo-relative-listing"
 new_repo "$relative_repo"
 commit_finding "$relative_repo" 'P3_liveness_202609100015_named-relatively.md' 'a real finding'
+# A TRACKED subdirectory to stand in, because the walk from the root passes only through
+# components the records call directories -- as `src/` is in the real tree.
+mkdir -p "$relative_repo/src" && echo 'fn main() {}' > "$relative_repo/src/main.rs"
+git -C "$relative_repo" add -A && git -C "$relative_repo" commit -q -m 'a tracked subdirectory'
 relative_case() {  # relative_case <label> <cwd> <listing>
   if ! ( cd "$2" && "$BASH" "$branch_validator" \
     'fix-P3/liveness_named-relatively' "$3" >/dev/null 2>&1 ); then
@@ -2662,29 +2675,42 @@ relative_case() {  # relative_case <label> <cwd> <listing>
   fi
 }
 relative_case 'from the work tree root' "$relative_repo" 'findings'
-relative_case 'from reviews/'           "$relative_repo/reviews" 'findings'
+relative_case 'from a subdirectory'     "$relative_repo/src" '../findings'
 relative_case 'from the directory itself' "$relative_repo/findings" '.'
-# And a relative path that is NOT the ledger's directory still holds nothing:
+# And a relative listing still refuses a name the ledger does not hold:
 # the rule is about naming the path, not about accepting every relative one.
 relative_miss_rc=0
-( cd "$relative_repo/reviews" && "$BASH" "$branch_validator" \
-  'fix-P3/liveness_not-in-this-directory' 'findings' >/dev/null 2>&1 ) \
+( cd "$relative_repo/src" && "$BASH" "$branch_validator" \
+  'fix-P3/liveness_not-in-this-directory' '../findings' >/dev/null 2>&1 ) \
   || relative_miss_rc=$?
 if [[ "$relative_miss_rc" != 1 ]]; then
   echo "a relative listing must still refuse a name it does not hold; got $relative_miss_rc" >&2
+  exit 1
+fi
+# And a relative path that is NOT the ledger's directory holds nothing: from
+# `src/`, the listing `findings` is `src/findings`, which the index records
+# nothing under, however real the finding one directory up is.
+relative_wrong_dir_rc=0
+( cd "$relative_repo/src" && "$BASH" "$branch_validator" \
+  'fix-P3/liveness_named-relatively' 'findings' >/dev/null 2>&1 ) \
+  || relative_wrong_dir_rc=$?
+if [[ "$relative_wrong_dir_rc" != 1 ]]; then
+  echo "a relative listing that is not the ledger's directory must refuse; got $relative_wrong_dir_rc" >&2
   exit 1
 fi
 
 # AND THE LONG WAY ROUND IS THE SAME PATH. The work tree's root is matched
 # against the caller's own components, and a spelling that passes the root on
 # the way down and comes back to it -- `../../<repo>/findings` from
-# inside `<repo>/reviews` -- must be named `findings` in the index and
+# inside `<repo>/src` -- must be named `findings` in the index and
 # not `../<repo>/findings`, which is no index entry and which git refuses
 # as a pathspec leaving the work tree.
 long_way_repo="$fixture_dir/repo-long-way-round"
 new_repo "$long_way_repo"
 commit_finding "$long_way_repo" 'P3_liveness_202609100014_spelled-the-long-way.md' 'a real finding'
-if ! ( cd "$long_way_repo/reviews" && "$BASH" "$branch_validator" \
+mkdir -p "$long_way_repo/src" && echo 'fn main() {}' > "$long_way_repo/src/main.rs"
+git -C "$long_way_repo" add -A && git -C "$long_way_repo" commit -q -m 'a tracked subdirectory'
+if ! ( cd "$long_way_repo/src" && "$BASH" "$branch_validator" \
   'fix-P3/liveness_spelled-the-long-way' \
   '../../repo-long-way-round/findings' >/dev/null 2>&1 ); then
   echo 'a path that passes the work tree root on the way down must still resolve' >&2
@@ -2722,8 +2748,11 @@ fi
 # repository with no finding at the merge base and none deleted between there and
 # the head.
 equivalence_repos=()
-register_equivalence() {  # register_equivalence <repo> <base> <head>
-  equivalence_repos[${#equivalence_repos[@]}]="$1|$2|$3"
+register_equivalence() {  # register_equivalence <repo> <base> <head> [<directory>]
+  # The directory handed to the by-hand way in is the repository's own findings/
+  # unless the shape's subject is a path that is NOT the ledger's own -- a listing
+  # behind a committed ancestor link -- in which case it names the path it hands in.
+  equivalence_repos[${#equivalence_repos[@]}]="$1|$2|$3|${4:-$1/findings}"
 }
 
 eq_plain="$fixture_dir/eq-plain-findings"
@@ -2781,16 +2810,18 @@ register_equivalence "$bare_untracked" "$bare_untracked_base" "$bare_untracked_h
 register_equivalence "$untracked_repo" "$untracked_base" "$untracked_head"
 
 if [[ -L "$symlink_probe" ]]; then
-  # The findings directory itself a committed symlink, and an ancestor of it a
-  # committed symlink: the two shapes an earlier round's P1s were. The link
+  # The findings directory itself a committed symlink, and an ancestor of a
+  # by-hand listing a committed symlink: the two shapes an earlier round's P1s
+  # were. The link
   # behind a link, materialised, is this round's.
   register_equivalence "$repo_p" "$p_base" "$p_head"
-  register_equivalence "$repo_r" "$r_base" "$r_head"
+  register_equivalence "$repo_r" "$r_base" "$r_head" "$repo_r/ledger/findings"
   register_equivalence "$repo_k" "$k_base" "$k_head"
-  register_equivalence "$root_loop_repo" "$root_loop_base" "$root_loop_head"
+  register_equivalence "$root_loop_repo" "$root_loop_base" "$root_loop_head" \
+    "$root_loop_repo/loop/elsewhere"
   register_equivalence "$last_loop_repo" "$last_loop_base" "$last_loop_head"
   if [[ -n "${behind_base:-}" ]]; then
-    register_equivalence "$behind_repo" "$behind_base" "$behind_head"
+    register_equivalence "$behind_repo" "$behind_base" "$behind_head" "$behind_repo/ledger/findings"
   fi
   if [[ -n "${link_untracked_base:-}" ]]; then
     register_equivalence "$link_untracked" "$link_untracked_base" "$link_untracked_head"
@@ -2818,11 +2849,13 @@ for equivalence_entry in "${equivalence_repos[@]}"; do
   eq_repo="${equivalence_entry%%|*}"
   eq_rest="${equivalence_entry#*|}"
   eq_base="${eq_rest%%|*}"
-  eq_head="${eq_rest##*|}"
+  eq_rest="${eq_rest#*|}"
+  eq_head="${eq_rest%%|*}"
+  eq_listing="${eq_rest#*|}"
   for eq_branch in "${equivalence_branches[@]}"; do
     eq_tree="$(verdict "$eq_repo" "$eq_base" "$eq_head" "$eq_branch")"
     eq_dir=0
-    "$BASH" "$branch_validator" "$eq_branch" "$eq_repo/findings" \
+    "$BASH" "$branch_validator" "$eq_branch" "$eq_listing" \
       >/dev/null 2>&1 || eq_dir=$?
     if [[ "$eq_tree" != "$eq_dir" ]]; then
       echo "the two APIs disagree: ${eq_repo##*/} / $eq_branch -> trees $eq_tree, directory $eq_dir" >&2
@@ -2992,6 +3025,46 @@ diff_says 'an added finding named P4_' \
 # EVERY PREFIX, not just findings/. A finding nothing can act on is the same defect on any branch.
 diff_case 'an added finding named P4_ on a docs/ branch' \
   "$repo_diff" "$diff_base" "$diff_p4_name" docs/a-slug 1
+
+# 3b. THE DIRECTORY'S OWN TWO DOCUMENTS ARE NOT FINDINGS, AND THE EXEMPTION IS EXACT. A move of
+#     the whole directory adds or renames findings/README.md and findings/PROCESS.md along with
+#     every finding, and neither is a finding; a rule that refused them would make the directory
+#     immovable. The exemption is the exact path, case and all: a lower-case readme, another
+#     extension, or the same name one directory down is a file this rule still refuses, and a
+#     finding filed beside the documents is still judged on its own name.
+branch_from own-documents
+printf '# The finding ledger\n' > "$repo_diff/findings/README.md"
+printf '# Working the finding ledger\n' > "$repo_diff/findings/PROCESS.md"
+finding_body P3 > "$repo_diff/findings/P3_liveness_202609110019_beside-the-documents.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'add the directory documents'
+diff_own_docs="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'the directory documents added beside a finding' \
+  "$repo_diff" "$diff_base" "$diff_own_docs" findings/add-the-documents 0
+diff_case 'the directory documents added beside a finding, on a refactor/ branch' \
+  "$repo_diff" "$diff_base" "$diff_own_docs" refactor/move-the-ledger 0
+branch_from own-documents-lookalikes
+printf '# not the template\n' > "$repo_diff/findings/readme.md"
+printf '# not the template\n' > "$repo_diff/findings/README.txt"
+mkdir -p "$repo_diff/findings/notes"
+printf '# not the template\n' > "$repo_diff/findings/notes/README.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'add lookalikes of the documents'
+diff_own_lookalikes="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'lookalikes of the directory documents' \
+  "$repo_diff" "$diff_base" "$diff_own_lookalikes" findings/add-lookalikes 1
+for lookalike in 'findings/readme.md' 'findings/README.txt' 'findings/notes/README.md'; do
+  diff_says 'lookalikes of the directory documents' \
+    "$repo_diff" "$diff_base" "$diff_own_lookalikes" findings/add-lookalikes "$lookalike"
+done
+branch_from own-documents-and-a-p4
+printf '# The finding ledger\n' > "$repo_diff/findings/README.md"
+finding_body P3 > "$repo_diff/findings/P4_correctness_202609110020_beside-the-readme.md"
+git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'add the readme and a P4'
+diff_own_docs_p4="$(git -C "$repo_diff" rev-parse HEAD)"
+diff_case 'a P4 filed beside the readme' \
+  "$repo_diff" "$diff_base" "$diff_own_docs_p4" findings/add-a-p4-beside-the-readme 1
+diff_says 'a P4 filed beside the readme' \
+  "$repo_diff" "$diff_base" "$diff_own_docs_p4" findings/add-a-p4-beside-the-readme \
+  'P4_correctness_202609110020_beside-the-readme.md'
 
 # 4. A finding whose NAME is fine and whose FRONTMATTER severity is not.
 branch_from p4-severity

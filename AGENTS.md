@@ -147,7 +147,8 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 | `CONTRIBUTING.md` | Contributor rules and CLA |
 | `docs/internals/` | Internal module notes, one file per module mirroring `src/`. A module with notes carries a single `Extended notes:` pointer in its header and no other prose (§13), held both ways by `test-internals-notes.sh`. `docs/` is also the GitHub Pages source for upstroke.rs, so anything added there is published |
 | `.github/scripts/` | The 6 `test-*.sh` gates and the `validate-*` helpers they exercise |
-| `reviews/` | `findings/`, the standing finding ledger, one file per finding; `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections; historical review records moved to the private lab repository on 2026-09-04 |
+| `findings/` | The standing finding ledger, one file per open finding, moved here from under `reviews/` on 2026-09-12; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
+| `reviews/` | `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections, and the dated review records still on master; historical review records moved to the private lab repository on 2026-09-04 |
 | `effects/` | The effect-governance allowlists the `src/effects/tests.rs` census enforces |
 
 `src/` is one crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters,

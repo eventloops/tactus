@@ -151,7 +151,7 @@
 # followed; the same two under core.symlinks=false, where git materialises a
 # 120000 blob as a REGULAR FILE and `-L` has nothing left to see; a sparse
 # checkout whose index records findings the working tree does not hold; a
-# checkout `reviews` renamed and replaced by a link with the index untouched;
+# checkout `findings` renamed and replaced by a link with the index untouched;
 # and a materialised link BEHIND another link, whose target text was read as a
 # file listing and resolved a finding nobody has filed. Six shapes, one defect:
 # the filesystem was being asked a question only the index can answer.
@@ -274,7 +274,10 @@
 # outside P0-P3, is refused. Severity leads a finding's filename because the
 # directory sorts worst-first (findings/README.md), the lane table reads
 # the severity, and the audit's must-fix set is written in those four tokens; a
-# fifth severity is a finding nothing can act on.
+# fifth severity is a finding nothing can act on. THE DIRECTORY'S OWN TWO
+# DOCUMENTS ARE THE ONE EXEMPTION: `findings/README.md` and `findings/PROCESS.md`,
+# by exact path, are not findings, and a move of the whole directory adds or
+# renames both of them along with every finding.
 #
 # ONLY WHAT THE DIFF ADDS OR RENAMES IS CHECKED, AND THAT IS THE WHOLE POINT.
 # A rule over the directory as it stands would turn every open pull request red
@@ -375,8 +378,8 @@
 # it, and a flag a caller may ignore is not a contract.
 #
 # A PATH IS NORMALISED BEFORE IT IS JUDGED. `findings`,
-# `findings/`, `findings/.`, `reviews//findings` and
-# `reviews/./findings` are one listing, and they answered differently: appending
+# `findings/`, `findings/.`, `<repo>//findings` and
+# `<repo>/./findings` are one listing, and they answered differently: appending
 # `/.` moved the question from `findings` to `.`, and a committed symlink at
 # `findings` that the plain spelling refused at exit 1 conformed at exit
 # 0 with three characters added. The spelling is reduced to components first,
@@ -464,7 +467,9 @@ and the paths are named. It is what makes that prefix's cheap review safe.
 A file this pull request ADDS OR RENAMES under findings/ is a finding:
 its name starts P0_, P1_, P2_ or P3_, and its frontmatter severity: is one of
 P0, P1, P2 and P3. Files the diff leaves alone are not checked, so a name
-already on master never turns another pull request red.
+already on master never turns another pull request red. findings/README.md
+and findings/PROCESS.md, the directory's own documents, are the one exemption,
+by exact path.
 
 There is deliberately no prefix for a `test`, `chore`, `perf`, `security` or
 `build` change even though those are valid title types. If you need one, that is
@@ -740,7 +745,7 @@ list_dir() {
 # normalise_listing_path <path>: the same path written one way, in
 # `normalised_listing`. Empty components, `.` components and a trailing separator
 # are removed, because `findings`, `findings/`,
-# `findings/.`, `reviews//findings` and `reviews/./findings` are one
+# `findings/.`, `<repo>//findings` and `<repo>/./findings` are one
 # listing and gave two answers: the last component decides what the path IS, and
 # with `/.` appended the last component was `.`, so a committed symlink at
 # `findings` conformed at exit 0 where the plain spelling refused it at
@@ -963,8 +968,9 @@ repository_above() {
 # those two halves are why an ancestor that is a symlink can no longer change an
 # answer. Finding it means entering a directory, which follows links; naming the
 # listing means taking the caller's own components, which does not. With
-# `reviews` a link to `saved-reviews` and the index untouched, entering
-# `findings` lands in `saved-findings` -- where git records
+# `findings` renamed to `saved-findings` and a link left in its place -- or an
+# ancestor of a by-hand listing linked the same way -- and the index untouched,
+# entering `findings` lands in `saved-findings` -- where git records
 # nothing -- while the path the caller NAMED is `findings`, which the
 # index records a finding under. Asking git from inside the link answered the
 # first and the trees answer the second, and that disagreement was a P1. The
@@ -1070,16 +1076,16 @@ locate_listing() {
   #
   # A RELATIVE PATH IS EXTENDED BY `$PWD` FIRST, and lexically: the components a
   # caller names are the ones they typed PLUS the ones the shell is standing in,
-  # and a chain that starts at `.` cannot reach a root above it. Run from
-  # `reviews/`, the listing `findings` is `findings` in the index and
-  # nothing else -- and a chain of `.` then `findings` matches no root, which
+  # and a chain that starts at `.` cannot reach a root above it. Run from inside
+  # `findings/` itself, the listing `.` is `findings` in the index and
+  # nothing else -- and a chain of `.` alone matches no root, which
   # refused an ordinary by-hand invocation the previous head accepted. `$PWD` is
   # the shell's own spelling of where it is, so this stays the caller's
   # components throughout; the INODE match below is what lets that spelling and
   # the physical root git reports be the same directory.
   #
   # Deepest first rather than shallowest, because the shortest name is the one
-  # the index can hold: `../../repo/findings` run from `repo/reviews`
+  # the index can hold: `../../repo/findings` run from `repo/src`
   # meets the root at `..` on the way down and would be named
   # `../repo/findings`, which is no index entry and which git refuses as
   # a pathspec leaving the work tree -- a false red on a path that is simply
@@ -1117,16 +1123,17 @@ locate_listing() {
   done
   # THE ROOT IS MATCHED BY INODE AND THE PATH THROUGH IT BY RECORDED MODE, and
   # the second half is the half an inode comparison cannot do. `-ef` FOLLOWS a
-  # symlink, so with `reviews` a committed symlink to the work tree's own root
-  # the prefix `<repo>/reviews` IS that root by inode: taking the deepest match
-  # named the listing `findings`, answered it out of the root's own `findings/`,
-  # and walked straight past the 120000 the index records for `reviews`. On a
-  # clean checkout of that commit the three tree listings hold no finding under
-  # `findings` and refuse at exit 1; the directory conformed at exit 0.
+  # symlink, so with `loop` a committed symlink to the work tree's own root
+  # the prefix `<repo>/loop` IS that root by inode: handed `<repo>/loop/elsewhere`,
+  # taking the deepest match named the listing `elsewhere`, answered it out of
+  # the root's own `elsewhere/`, and walked straight past the 120000 the index
+  # records for `loop`. On a clean checkout of that commit the three tree
+  # listings hold no finding under `findings/` and refuse at exit 1; the
+  # directory conformed at exit 0.
   #
   # So the root is the SHALLOWEST prefix that is it, and then the caller's
   # components are walked one at a time. A DEEPER prefix may be the root again --
-  # `../../repo/findings` spelled from inside `repo/reviews` comes back
+  # `../../repo/findings` spelled from inside `repo/src` comes back
   # to it, and the shortest name is the one the index can hold -- but the walk
   # reaches that re-entry only THROUGH COMPONENTS THE RECORDS CALL DIRECTORIES.
   # A component recorded as anything else, or recorded as nothing at all, stops
@@ -1136,7 +1143,7 @@ locate_listing() {
   # A `.` or a `..` is stepped over rather than asked about. Neither names an
   # index entry, and a segment holding one is not a path git can be asked about
   # at all -- `a/..` is `a`'s parent only when `a` is a directory. They reach
-  # here only from the leading `..` of a spelling like `../../repo/reviews`,
+  # here only from the leading `..` of a spelling like `../../repo/src`,
   # which is an ordinary one.
   shallow=-1
   deep=-1
@@ -1594,7 +1601,8 @@ listing_text() {
 }
 
 # check_added_findings <listing text>: every file the pull request adds or renames under
-# findings/ is a finding -- P0_ to P3_ in the name, P0 to P3 in the frontmatter.
+# findings/ is a finding -- P0_ to P3_ in the name, P0 to P3 in the frontmatter -- except the
+# directory's own README.md and PROCESS.md, by exact path.
 #
 # EVERY BAD FILE IS NAMED, not the first one: a refusal that stops at one turns a fix into a queue
 # of pushes. A record this cannot read at all is a different thing and refuses at once, because a
@@ -1619,6 +1627,13 @@ check_added_findings() {
   what it carries. It holds the files this pull request adds or renames under that directory:
     $path" ;;
     esac
+    # THE DIRECTORY'S OWN TWO DOCUMENTS ARE NOT FINDINGS. README.md names and shapes the
+    # findings and PROCESS.md is the working process; both sit directly under findings/, and
+    # a move of the whole directory adds or renames both. Exact path, exact case: a lower-case
+    # readme, another extension, or the same name one directory down is still refused.
+    case "$path" in
+      findings/README.md|findings/PROCESS.md) continue ;;
+    esac
     name="${path##*/}"
     case "$name" in
       P[0-3]_*) ;;
@@ -1642,7 +1657,8 @@ check_added_findings() {
   done <<< "$text"
   [[ -z "$bad" ]] || fail "this pull request files something under findings/ that is not a
   finding. A finding is P<n>_<category>_<timestamp>_<description>.md with a matching frontmatter
-  severity, for n in 0..3 (findings/README.md). A file whose frontmatter carries no
+  severity, for n in 0..3 (findings/README.md); findings/README.md and findings/PROCESS.md, the
+  directory's own documents, are exempt by exact path. A file whose frontmatter carries no
   severity: line at all is reported as [-]. Only the files this pull request ADDS or RENAMES are
   checked, so a name already on master never turns another pull request red:
 ${bad%$'\n'}"

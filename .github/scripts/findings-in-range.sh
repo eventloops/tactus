@@ -117,7 +117,7 @@
 #
 # AND NO ENTRY NAME HERE TRAVERSES A SYMLINK, which is the half of the two-API
 # equivalence this end supplies. `ls-tree -- findings/` lists the entries
-# git RECORDS under that path; where `reviews`, or `findings` itself, is a
+# git RECORDS under that path; where `findings` itself is a
 # committed symlink it is a `120000 blob` and nothing is recorded under it, so
 # this listing is empty however many findings sit at the end of the link. That is
 # a property of NAMES IN A TREE and needs no filesystem to hold.
@@ -126,7 +126,7 @@
 # used to answer from the filesystem with git as a cross-check, and every review
 # round found another spelling of the same disagreement: a link followed by `-d`,
 # the same link materialised as a regular file where `-L` had nothing to see, a
-# sparse checkout the index outlived, a `reviews` renamed out from under an
+# sparse checkout the index outlived, a `findings` renamed out from under an
 # unchanged index. It now locates the repository and the path within it and reads
 # `git ls-files -s` alone, which is the same question this file asks of the same
 # ledger one layer along -- names recorded under a path, filtered by recorded

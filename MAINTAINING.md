@@ -309,8 +309,10 @@ are handed to the validator, and a `findings/` branch carrying a path outside `f
 refused with the paths named. It is what makes that prefix's low-effort review safe, and an empty
 changed-path listing is refused there too — a pull request that changes nothing files nothing.
 **A file any pull request adds or renames under `findings/` is a finding**: its name starts
-`P0_`–`P3_` and its frontmatter `severity:` is one of P0–P3, or the pull request is refused. Only
-what the diff **adds or renames** is checked, so a name already on `master` never turns another pull
+`P0_`–`P3_` and its frontmatter `severity:` is one of P0–P3, or the pull request is refused. The
+directory's own `findings/README.md` and `findings/PROCESS.md` are the one exemption, by exact
+path: they are not findings, and a move of the whole directory adds or renames both. Only what
+the diff **adds or renames** is checked, so a name already on `master` never turns another pull
 request red. `.github/scripts/changed-in-range.sh` builds both listings, because nothing below the
 validator's audited region may run a command or open a file.
 `fix-P<n>/` takes `<category>_<description>` and must name exactly one finding filed under
@@ -365,18 +367,19 @@ path git records anything at, under or above — not `-d`, not `-e`, not `-L`, n
 the bytes of a file the checkout materialised. That is what makes the two ways in one code path from
 the index down, so the equivalence below holds by construction: a committed symlink named like a
 finding is a `120000 blob` to both; a sparse checkout's excluded finding is an index entry and a tree
-entry; a `reviews` the checkout renamed and replaced with a link is still the directory the index
+entry; a `findings` the checkout renamed and replaced with a link is still the directory the index
 records; and a link materialised under `core.symlinks=false` — git's own setting, and what it uses
 wherever a link cannot be made — is never read as a listing, which is how one was made to invent a
 finding nobody had filed. A listing path is reduced to its components before it is judged, so
-`findings`, `findings/`, `findings/.`, `reviews//findings` and
-`reviews/./findings` are one listing and answer alike, and the path the index is asked about is built
+`findings`, `findings/`, `findings/.`, `<repo>//findings` and
+`<repo>/./findings` are one listing and answer alike, and the path the index is asked about is built
 from **those** components and never from where the filesystem takes them; a `..` after a named
 component is refused rather than guessed at. The work tree's root is matched against those components
 by inode, so a link above the repository costs nothing — but the path **through** that root is
-matched by recorded mode, because an inode comparison cannot see one: `reviews` committed as a link
-to the work tree's own root is `-ef` that root, and taking it as one named the listing `findings` and
-answered it out of the root's own directory, past the `120000` the index records. The filesystem is the whole of the evidence in one
+matched by recorded mode, because an inode comparison cannot see one: a directory committed as a link
+to the work tree's own root is `-ef` that root, and taking it as one named the listing by its last
+component alone and answered it out of the root's own directory of that name, past the `120000` the
+index records. The filesystem is the whole of the evidence in one
 place only: a listing with no repository over it, which is how the validator is run against a scratch
 directory, and a path inside a work tree that git records nothing at, under **or above** — an
 ordinary untracked scratch directory, and the temporary files a caller builds the three listings in.

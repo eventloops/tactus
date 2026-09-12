@@ -115,7 +115,7 @@ types_line() {
 marker='arrives with|arrive with|not yet|until that merges|until it merges|lands with|forward reference|\*\*no |there is \*\*?no|does not exist|must not exist'
 for doc in CLAUDE.md CONTRIBUTING.md; do
   [[ -f "$doc" ]] || { error "$doc is missing: this gate requires it"; continue; }
-  rooted=$(grep -oE '`(src|infra|\.github|acceptance|decisions|proposals|reviews|examples|fixtures|docs)/[A-Za-z0-9_./-]*`' "$doc" | tr -d '`' || true)
+  rooted=$(grep -oE '`(src|infra|\.github|acceptance|decisions|proposals|reviews|findings|examples|fixtures|docs)/[A-Za-z0-9_./-]*`' "$doc" | tr -d '`' || true)
   bare=$(grep -oE '`[A-Za-z0-9][A-Za-z0-9_.-]*\.(md|toml|lock)`' "$doc" | tr -d '`' || true)
   while IFS= read -r path; do
     [[ -z "$path" ]] && continue
