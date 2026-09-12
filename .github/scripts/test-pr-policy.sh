@@ -1157,6 +1157,35 @@ fi
 # fix-P2/correctness_<desc> at exit 0 on the very commit the workflow path
 # refused at exit 1. Two answers to one documented question is the defect, so
 # both paths are asserted on the same repository.
+
+# seed_link <repo> <name>: a symlink named like a finding, in that repository's
+# findings/, REACHING the repository's own seed.txt.
+#
+# THE TARGET IS RELATIVE TO THE LINK, so it encodes the ledger directory's depth
+# POSITIONALLY and no substitution on the ledger's path can see it. These links
+# read `../../seed.txt` while they lived in `reviews/findings/`, two levels under
+# the root; `findings/` is one, so the move at 1ae480f2 left both of them
+# pointing one level ABOVE the repository at nothing, and `../../` holds no
+# occurrence of `reviews/findings` for the rewrite at 87780333 to correct. What
+# the link REACHES is the whole point of these two fixtures -- `-e` and `-f`
+# follow a link, so a link onto a regular file is the case where the filesystem
+# and the records can disagree, and a link onto nothing is a DIFFERENT case, the
+# one the dangling-directory fixture below covers on its own. So the precondition
+# is asserted rather than assumed: whoever moves this directory next gets a red
+# naming the fixture, not a green from a case that quietly stopped being the case
+# it was written to be.
+seed_link() {
+  local link="$1/findings/$2"
+  ln -s ../seed.txt "$link"
+  if [[ ! -L "$link" ]] || [[ ! -f "$link" ]]; then
+    echo 'a symlink fixture must REACH a regular file, and this one does not:' >&2
+    printf '  %q -> %q\n' "$link" "$(readlink "$link" 2>/dev/null)" >&2
+    echo '  the target is written relative to the LINK, so it carries the depth of the' >&2
+    echo '  directory the link is in. Moving that directory changes what it reaches.' >&2
+    exit 1
+  fi
+}
+
 # The symlink cases need a filesystem that will make one. CI runs this gate on
 # ubuntu-latest alone, but the suite is run by hand on all three platforms the
 # project targets and Windows refuses a symlink without developer mode; a
@@ -1170,7 +1199,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
   git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m base
   k_base="$(git -C "$repo_k" rev-parse HEAD)"
   mkdir -p "$repo_k/findings"
-  ln -s ../../seed.txt "$repo_k/findings/P2_correctness_202609101200_not-a-finding.md"
+  seed_link "$repo_k" 'P2_correctness_202609101200_not-a-finding.md'
   # A real finding beside it, so the case proves a filter and not an empty tree.
   echo fixture > "$repo_k/findings/P3_liveness_202609101300_a-real-finding.md"
   git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m 'a symlink named like a finding'
@@ -1709,7 +1738,7 @@ if : > "$newline_probe" 2>/dev/null && [[ -f "$newline_probe" ]]; then
     mkdir -p "$repo_m/findings"
     echo one > "$repo_m/findings/P2_correctness_202609100001_shared-name.md"
     echo two > "$repo_m/findings/P2_correctness_202609100002_shared-name.md"
-    ln -s ../../seed.txt "$repo_m/findings/$nl_twin"
+    seed_link "$repo_m" "$nl_twin"
     git -C "$repo_m" add -A && git -C "$repo_m" commit -q -m 'a symlink whose name holds a newline'
     m_head="$(git -C "$repo_m" rev-parse HEAD)"
     if ! git -C "$repo_m" ls-tree "$m_head" findings/ | grep -q '^120000 blob '; then
