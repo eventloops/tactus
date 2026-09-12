@@ -6,10 +6,11 @@
   or the signal monitor could not start after it said READY) now reports what `kill` and `waitpid`
   answered, in the words a helper that missed READY already used, instead of discarding both
   answers. A refused signal is a distinct outcome the message names, and a helper's ending left as
-  an unused expression statement is a build error. Each of the two paths keeps the `waitpid` it
-  always made — the descriptor path asks for no exit status, and says so rather than reporting one
-  it did not collect — so a host policy that refuses or kills a wait carrying a status pointer sees
-  no new call (`PR125-CLOSE-DISCARDED-KILL-RESULT`).
+  an unused expression statement is a build error. Both paths keep the `waitpid` they always
+  made: each asks for no exit status, as it did before, and says so rather than reporting one it
+  did not collect — so a host policy that refuses or kills a wait carrying a status pointer sees no
+  new call from either. Measured under both such policies, on each path
+  (`PR125-CLOSE-DISCARDED-KILL-RESULT`).
 - A schema-4 integration verification that ends unavailable — parked for a person, or deferred by
   an infrastructure outage — now records the review passes it paid for, so a resumed run's reported
   spend is the total the incarnation before it reached. `merge_verification_unavailable` gains a

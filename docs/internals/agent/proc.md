@@ -1208,24 +1208,33 @@ member of that exact group is either gone or a non-running zombie.
 ## `impl Guard` › `fn abort_setup(self) -> HelperEnd {`
 
 End a guard whose supervisor setup failed after it said READY, and
-answer what ending it returned. With the identity path off this is the
-`kill` and the `waitpid` by number it always was, the wait retried on
-`EINTR` as before; with the path on it is `end_helper_through_identity`.
-Both answers are kept and handed back as a `HelperEnd`, which `install`
-describes into each of its three failure messages after the monitor's
-own error: the one place the ending can be read, since the guard is
-private to this module. Until row `PR125-CLOSE-DISCARDED-KILL-RESULT`
-was taken up the answers were discarded here, the wait asked for no
-status, and the monitor's failure said nothing about the guard. The
-wait now carries a status pointer so that "collected it" can say how,
-the arguments `end_unready_guard` and `close_and_wait_reporting` pass.
-The `status-pointer` shape of `default_wait_shapes_helper`, which
-pinned this one wait to a null pointer as part of the identity change's
-promise to leave the default path as it was, is retired; that promise
-holds everywhere else, its `options` shape still runs, and
-`guard_abort_end_helper` holds the ending itself: a `kill` refused with
-`EPERM` or answered `ESRCH`, a wait refused with `EPERM`, and the
-identity arm, each reported as the calls answered and nothing else.
+answer what ending it returned. After the descriptors are closed this
+is `end_unready_guard` with `EndingWait::AskingForNoStatus` — the same
+helper and the same arm the descriptor-configuration failure reaches,
+so the two sites that abandon a guard make one call shape between them
+rather than drifting apart. With the identity path off that arm is the
+`kill` and the `waitpid` by number this site always made, asking for no
+exit status and retried on `EINTR` as before; with the path on it is
+`end_helper_through_identity`. Both answers are kept and handed back as
+a `HelperEnd`, which `install` describes into each of its three failure
+messages after the monitor's own error: the one place the ending can be
+read, since the guard is private to this module. Until row
+`PR125-CLOSE-DISCARDED-KILL-RESULT` was taken up the answers were
+discarded here and the monitor's failure said nothing about the guard.
+
+**Reporting the ending needed no status pointer.** A round of this
+repair gave this wait one so that "collected it" could say how, and
+that changed what the site asks the kernel: measured on production code
+with thread creation refused `EAGAIN` so `install` reaches this
+function, a policy refusing a status-bearing `wait4` with `EPERM` left
+the killed guard **unreaped** and one killing that call ended the
+process with `SIGSYS`, shell exit `159`; both exit `0` with the null
+pointer restored and `status: None` reported. `default_wait_shapes_helper`'s
+`status-pointer` shape pins that, and `guard_abort_end_helper` holds
+the ending itself across a delivered `kill`, one refused `EPERM`, one
+answered `ESRCH`, both status-pointer policies and the identity arm —
+each reported as the calls answered, and each followed by a look for a
+leftover child that the fixture does not collect itself.
 
 ## `impl Guard` › `fn stop_parent(self) -> Option<bool> {`
 
@@ -1305,9 +1314,11 @@ The errno `waitpid` left when it returned `-1`.
 The status `waitpid` filled when it returned a pid, and `None` when
 there is no status to report: the wait collected nothing, or it asked
 for none. The two are not the same observation and a zero cannot stand
-for either, so the absence is a value rather than a default. Only the
-descriptor-configuration arm produces `None` beside a collected pid
-today; `EndingWait` below is why.
+for either, so the absence is a value rather than a default. Two arms
+produce `None` beside a collected pid today, and they are the two that
+abandon a guard: the descriptor-configuration failure and
+`Guard::abort_setup`, which share `EndingWait::AskingForNoStatus`.
+`EndingWait` below is why.
 
 ## `struct HelperEnd` › `through_identity: bool,`
 
@@ -1335,7 +1346,8 @@ failed setting itself up" and "it was still working when we gave up".
 
 A third outcome the words now separate: a child that **was** collected
 by a wait that asked for no status, which is "collected it, asking for
-no exit status". That is the descriptor-configuration arm, and the
+no exit status". That is the two arms that abandon a guard — the
+descriptor-configuration failure and `Guard::abort_setup` — and the
 sentence says what was observed rather than reading a zero back as an
 exit.
 
@@ -1613,32 +1625,45 @@ reports what that shape can answer.
 `CollectingStatus` is `waitpid(pid, &mut status, 0)`, which the READY
 failure has made since `end_unready_guard` existed.
 `AskingForNoStatus` is `waitpid(pid, std::ptr::null_mut(), 0)`, the
-call the descriptor-configuration failure makes on `master` and makes
-again here, and its `HelperEnd` carries `status: None` rather than a
-fabricated zero. It is the only site that asks for it.
+call both sites that abandon a guard make on `master` and make again
+here — the descriptor-configuration failure and `Guard::abort_setup` —
+and its `HelperEnd` carries `status: None` rather than a fabricated
+zero. Those two are the sites that ask for it; the READY failure is the
+one that does not.
 
-Measured on the head before this arm was restored, where the
-descriptor-configuration failure had been routed through the
-status-collecting shape: under a policy refusing a status-bearing
-`wait4` with `EPERM` the launch returned its error and left the guard
-**unreaped**, and under one killing it the process died of `SIGSYS`,
-shell exit `159`. `a_guard_whose_descriptors_cannot_be_configured_reports_its_end`
-drives both policies through the fixture's `wait-with-status-refused`
-and `wait-with-status-killed` answers.
+Each was measured on the head where it had been routed through the
+status-collecting shape instead. Under a policy refusing a
+status-bearing `wait4` with `EPERM` the launch returned its error and
+left the guard **unreaped**; under one killing that call the process
+died of `SIGSYS`, shell exit `159`. Both exit `0` with this arm in
+place. `a_guard_whose_descriptors_cannot_be_configured_reports_its_end`
+and `the_end_of_an_aborted_guard_is_what_its_kill_and_its_wait_answered`
+drive both policies through their fixtures'
+`wait-with-status-refused` and `wait-with-status-killed` answers, and
+`the_default_teardown_makes_the_waits_it_always_made` drives the fatal
+one at `abort_setup` a second time through its `status-pointer` shape.
 
 ## `mod termination` › `fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int, wait: EndingWait) -> HelperEnd {`
 
-The teardown of a guard the launch gives up on before it is
-established: the READY failure, and the descriptor-configuration
-failure just before it, which discarded its own `kill` and `waitpid`
-and said nothing of them until row `PR125-CLOSE-DISCARDED-KILL-RESULT`
-was taken up. Moved out of `spawn_guard`'s body so the identity arm and
-the base's arm sit side by side. The base's arm is the code that was
-inline: one `kill`, then the one `waitpid` the calling site has always
-made, their answers kept for the message. The identity arm is
-`end_helper_through_identity`, which signals and waits through the
-descriptor and so has no status pointer for a policy to see; `wait` does
-not reach it.
+The teardown of a guard that never became the supervisor's, and the
+only place one is signalled and collected. Three sites reach it: the
+READY failure, the descriptor-configuration failure just before it, and
+`Guard::abort_setup` after the monitor thread fails to start. The
+latter two discarded their own `kill` and `waitpid` and said nothing of
+them until row `PR125-CLOSE-DISCARDED-KILL-RESULT` was taken up. Moved
+out of `spawn_guard`'s body so the identity arm and the base's arm sit
+side by side. The base's arm is the code that was inline: one `kill`,
+then the one `waitpid` the calling site has always made, their answers
+kept for the message. The identity arm is `end_helper_through_identity`,
+which signals and waits through the descriptor and so has no status
+pointer for a policy to see; `wait` does not reach it.
+
+The wait is retried while it answers `EINTR`, which is the retry
+`Guard::abort_setup` made inline before it delegated here and which now
+covers all three sites: an interrupted wait has collected nothing, so
+giving up on it is what would leave the killed guard unreaped — the
+same leak the status pointer caused, by a different route. The two
+`spawn_guard` sites gain that retry; neither had it before.
 
 ## `fn spawn_guard` › `let how = if wait == ReadyWait::Ready {`
 
