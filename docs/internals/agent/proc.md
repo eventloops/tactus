@@ -900,9 +900,10 @@ teardown's wait has collected the helper. Every teardown site tests
 `identity >= 0` and takes the identity arm or the base's code, never a
 mixture: a helper is ended by its name or by its number, and the number
 is never used where the name exists. The same field on `Guard` is the
-same thing; on the platforms where it is never read it carries
-`expect(dead_code)`, because there the guard is only ever ended by
-number.
+same thing, and is read on every unix target: `abort_setup` hands it to
+`end_unready_guard`, whose non-Linux arm discards it there rather than
+leaving the field unread here. It carried `expect(dead_code)` off Linux
+until it did.
 
 ## `struct Guard` › `identity: libc::c_int,`
 

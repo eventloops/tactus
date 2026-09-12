@@ -1560,7 +1560,6 @@ mod termination {
         ack_fd: libc::c_int,
         _command_keepalive_fd: libc::c_int,
         pid: libc::pid_t,
-        #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
         identity: libc::c_int,
     }
 
