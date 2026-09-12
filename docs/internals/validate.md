@@ -204,22 +204,113 @@ The surface stays here — it is the one every caller names, and the one
 `effects/wrappers.toml` classifies under this module — while the table
 it produces is `render::report`.
 
-## `static PATH: OnceLock<PathBuf> = OnceLock::new();`
+## `struct ForeignRoot(PathBuf);`
 
-A real, empty pools file: an explicit `--pools` that does not
-exist is a hard error, and `None` would reach for the
-operator's own `~/.upstroke/pools.toml`.
-Created once: identical for every caller, and rewriting one
-shared path from parallel tests truncates it under a reader.
+One test — [`a_scratch_root_is_unpredictable_and_leaves_a_strangers_directory_alone`]
+— has to stand a directory at a name it chooses rather than at an
+unpredictable one, because the name it needs is the exact name the old
+helper computed. `scratch_tree::acquire` cannot produce that name by
+construction, which is the whole point of it, so this is the one guard in
+this region that reclaims a caller-chosen path. Everything else here goes
+through [`scratch_root`].
 
-## `fn scratch_root(tag: &str) -> PathBuf {`
+## `impl Drop for ForeignRoot {`
 
-A scratch repo root of its own, so a test that rewrites its inputs
-cannot be read half-written by another running beside it.
+Reclaimed on the unwinding path as well as the returning one, so a failing
+assertion does not leave the very shape this region was repaired to stop
+leaving. The reclaim result is reported rather than discarded; the
+`thread::panicking()` arm is the one exception, because a second panic
+during unwinding aborts the process and replaces the failing assertion's
+report with nothing. `ScratchTree`'s own `Drop` makes the same trade for the
+same reason.
 
-## `fn opts_in(root: &Path, plan: &str) -> ValidateOptions {`
+## `struct Fixture {`
 
-[`opts`], rooted in `root` rather than in the shared hermetic directory.
+[`ValidateOptions`] bound to the scratch tree it names, so the directory
+outlives every read of the options and goes when the test does. It derefs to
+the options, so a call site reads and writes them directly and the fixture's
+only other job is to stay alive.
+
+This is why [`opts`] returns a `Fixture` and not a bare `ValidateOptions`:
+`config_root` and `pools_path` are paths into a directory somebody has to
+own, and a struct of bare paths gives no one that job.
+
+## `fs::write(&pools, "# no pools\n").expect("empty pools file");`
+
+A real, empty pools file: an explicit `--pools` that does not exist is a hard
+error, and `None` would reach for the operator's own `~/.upstroke/pools.toml`.
+
+One per fixture, inside that fixture's own scratch tree. It was one per
+process behind a `OnceLock`, on the reasoning that a single shared path
+cannot be truncated under a reader by a parallel test — true of the
+rewriting this region does, and it bought that with a path no guard could
+reclaim, because a `static` is never dropped. A fresh tree per call answers
+both: there is no sharing to race and no residue to sweep.
+
+## `fn scratch_root(tag: &str) -> ScratchTree {`
+
+A scratch repo root of its own, so a test that rewrites its inputs cannot be
+read half-written by another running beside it.
+
+**Through the crate's own helper, and not a ninth hand-rolled one.**
+[`crate::rundir::scratch_tree::acquire`] names the root with a fresh ULID and
+takes it with a single exclusive `create_dir`, so an occupied name is refused
+rather than adopted, and the `ScratchTree` it returns reclaims the tree when
+it drops — on the unwinding path too. That module argues all of this at
+length and tests it; what this file adds is a call to it.
+
+Each of the three properties matters here for a reason this region learned
+the hard way:
+
+*Unpredictable.* Every root in this region used to be
+`env::temp_dir().join(format!("upstroke-validate-<tag>-{}", process::id()))`.
+A pid is not a unique key — it repeats across containers and after
+wraparound, and one host here runs several suites at once. The same class of
+bug is recorded for the fixed container pre-clean key in
+`src/runner/container/fake.rs`.
+
+*Claimed.* `create_dir` refuses a name that exists where `create_dir_all`
+adopts it. Nothing here adopts a directory, so nothing here has any reason to
+pre-clean one — and the `let _ = fs::remove_dir_all(&dir);` that used to open
+this helper, deleting whatever a previous run or another process had left at
+a predictable path and discarding the error, is gone.
+
+*Reclaimed.* `standards/12_standards_tests.md` asks for the first and the
+third in as many words: "unique temporary directories with RAII cleanup".
+
+`tag` survives only for a human reading a leftover tree.
+
+## `fn opts_in(root: &Path, plan: &str) -> Fixture {`
+
+[`opts`], rooted in `root` rather than in its own hermetic directory. The
+fixture still owns — and still reclaims — the pools file it wrote, which
+`root` does not contain.
+
+## `fn a_scratch_root_is_unpredictable_and_leaves_a_strangers_directory_alone() {`
+
+The measured harm, inverted. The reviewer who recorded
+`PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED` pre-created
+`$TMPDIR/upstroke-validate-sample-<pid>/foreign-sentinel`, ran a test in this
+region, and watched it pass having deleted the sentinel. So this test stands
+a stranger at exactly the name the pid-derived helper would have chosen for
+the tag it is given, and asserts the file is still there afterwards.
+
+The tag itself carries a fresh ULID, so the stand-in's own name is no more
+predictable than anything else this region creates. That is not incidental
+tidiness: a fixture that occupied a genuinely predictable path, and then
+removed it, would be committing the defect it exists to disprove.
+
+The other two assertions are what stops that one from being satisfied
+cheaply: two calls with one tag in one process must not share a root, which
+is the property a pid alone cannot give; and the root must be gone once its
+guard drops.
+
+## `fn every_fixture_owns_its_hermetic_root_and_pools_file() {`
+
+The same properties for the fixture the other twenty-odd tests in this region
+reach through [`opts`] rather than through [`scratch_root`] directly: two
+fixtures share neither their config root nor their pools file, and both are
+reclaimed when the first is dropped.
 
 ## `options.config_path = Some(PathBuf::from("fixtures/annotation-invalid-plan.md"));`
 
@@ -257,7 +348,7 @@ when this fires for real.
 
 And it passes what this build really does ship.
 
-## `let root = env::temp_dir().join(format!("upstroke-validate-review-{}", std::process::id()));`
+## `let root = scratch_root("review");`
 
 §18: `validate` and `--dry-run` execute nothing, so they cannot check
 that a named reviewer is installed. Saying "would be, if installed"
