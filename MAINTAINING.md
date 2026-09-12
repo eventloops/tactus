@@ -74,9 +74,103 @@ source, documentation, workflows, release machinery and this file.
    owner's merge commit on a head whose own contexts are green, as before. Enqueueing, or that
    merge, is the owner's attestation that the evidence is real and the
    merged head is accounted for: reviewed directly, or separated from the reviewed SHA only by the
-   deltas step 5 allows. The owner may delegate the merge, in writing, to the agent doing the work
-   on a pull request that has reached this state; the delegation is disclosed in the body. Never
-   push to `master` directly. Delete the branch.
+   deltas step 5 allows. **The owner's delegation of that act is standing, not written per pull
+   request** (2026-09-12): the agent doing the work on a pull request that has reached this state
+   enqueues it without asking, as the owner's act rather than as its own, and the body records that
+   the merge was made under standing delegation and by which agent. What must be true before the
+   merge is untouched — this step's own preconditions, step 4's review on the green head and step
+   5's triage bind exactly as they did; what has gone is the occasion on which the owner authorised,
+   one pull request at a time. **The standing form reaches a pull request only where nothing in its
+   diff can change what a required check runs, or how it judges what it ran, and nothing in its diff
+   amends this rule.** Two limbs, and a pull request clears both or it does not have the standing
+   form.
+
+   **The first limb is a property of a change and not a location in the tree**, so it is asked of
+   the diff rather than matched against a list of directories. Of each changed path: *were this file
+   written to deceive, could a required check report success without having done its work?* What
+   settles it is **what the file governs, not what kind of file it is**. An **instrument** is code
+   or text that decides whether *other* changes are permitted: the gate scripts, the CI-contract
+   tests, and the lint, toolchain and runner configuration a check is handed. A **subject** is what
+   is being changed together with whatever asserts against it — the source a test judges, prose a
+   gate reads to check against the tree, **and the change's own regression tests**. **A `yes`, or an
+   honest *I cannot tell*, leaves the pull request with the owner** — or with a delegation the owner
+   wrote for that pull request, the written per-pull-request form kept for exactly this case and
+   disclosed in the body as it always was.
+
+   **That line is not "is it a test", and it is not "can its assertions be edited".** Both are true
+   of every test in the tree, so a rule resting on either takes the whole repository with it. It is
+   what the assertion is *about*. `no_repository_file_overrides_what_ci_compiles_or_runs`
+   (`src/effects/tests.rs`) asserts a fact about the repository's own CI configuration — that no
+   toolchain file or Cargo config outranks the workflow, and that `Cargo.toml` declares no workspace
+   — so weakening it changes what *every other* pull request may land, and it is an instrument.
+   `only_the_line_builder_introduces_terminal_layout` (`src/util/terminal.rs`) asserts a fact about
+   the product — that control characters in interpolated data are made visible — so weakening it
+   breaks `terminal.rs` and reaches nothing outside it, and it is a subject. Both are tests, both
+   have assertions that decide a required check's exit status, and both can be edited to accept a
+   regression; those three facts are shared, which is precisely why none of them can be the
+   criterion.
+
+   **So an ordinary fix carrying a regression test is a subject, and the standing form reaches it.**
+   It has to: the Review finding ledger contract below demands that test — *every code defect fixed
+   in the pull request gets a regression test that fails on the first-bad shape* — so a rule that
+   read the required test as gate control would send every product fix in the repository back to the
+   owner. That is not a carve-out from the delegation, it is a repeal of it.
+
+   The paths known to be on the wrong side of that line, **as examples and not as the set**:
+   `.github/workflows/`, which is what a required check is; `.github/scripts/`, the gate scripts
+   themselves; `scripts/`, because `.github/scripts/test-pr-ready-audit.sh` sources
+   `scripts/pr-ready-audit.sh`, which sources `scripts/lane.sh` and runs
+   `scripts/pr-review-parse.py`, so an edit confined to `scripts/` can make that gate skip every
+   fixture and exit `0` with the gate file byte-identical; `.cargo/`, `rust-toolchain.toml` and
+   `rust-toolchain`, which rebind the compiler every leg runs and the runner every compiled test
+   harness is handed to — a root `.cargo/config.toml` binding `runner` has Cargo hand each harness
+   to a wrapper that exits zero, so `cargo test --all-targets --all-features` exits `0` having
+   executed nothing; `Cargo.toml`'s `[lints]` block, which is what makes
+   `cargo clippy -- -D warnings` deny `.unwrap()`, `.expect()`, `panic!` and six more; the
+   CI-contract tests under `src/effects/`, which refuse exactly those files; and the effect
+   allowlists under `effects/` —
+   `allowlist.toml`, which decides where a governed lint may be allowed at all, and `wrappers.toml`,
+   both read by that same census. **That list is not closed, and a pull request is not cleared by
+   missing every entry on it.** It has twice been written down as though it were closed and twice
+   been broken by a review, the second time by two paths nobody had listed. There is no third list;
+   there is the question above.
+
+   **The second limb is this rule itself.** A pull request that rewrites the delegation rule, or the
+   review and triage this document requires before a merge, changes no gate and no pass criterion:
+   the first limb answers *no* and would pass it through under the standing form. It could then say
+   that standing delegation reaches gate changes, and the next pull request rides the amended policy
+   with no owner ever reading a gate diff. **So an amendment to those words is the owner's, or
+   carries a delegation the owner wrote for that pull request**, whatever the first limb says of its
+   paths. The sites are this step, the trust boundary under Repository rules, `CLAUDE.md`,
+   `AGENTS.md` and `reviews/findings/PROCESS.md`, and the requirement covers step 4's review and
+   step 5's triage — the preconditions the standing form was built on top of. **This is not another
+   entry on the list above.** That list is paths whose contents change what a check *does*; this is
+   text that defines the delegate's own authority. They are different kinds of thing, and folding
+   them together would make the list read as closed again, which is the failure two earlier rounds
+   already produced. Nothing enforces this limb, and it is worse served than the first: no required
+   check reads this rule at all. Required checks do read these documents, by name and without it:
+   `export::tests::review_finding_ledger_uses_canonical_category_tokens` `include_str!`s this file
+   and checks that three backticked category tokens occur somewhere in it and their underscore
+   spellings nowhere, a substring check on the whole file and not a pin on the ledger's vocabulary;
+   `validate-pr-ledger-evidence.sh` searches every tracked text file for each identifier a ledger
+   row cites, so an edit to any of the four can turn `upstroke-pr-policy` red though it names none.
+   A filename search cannot close the set of a file's readers, and none of them reads what this
+   rule means.
+
+   Which side a pull request falls on is read off its diff, not off its branch prefix, and reading
+   it is the delegate's duty: **no check enforces this**, which is filed as
+   `PR274-NOTHING-ENFORCES-THE-GATE-CONTROL-EXCEPTION`. A property is what an eye can apply to a
+   path nobody wrote down, and a list is not; that is the whole reason the rule is written as one,
+   and why the unsure case goes to the owner rather than through. **A delegation written for a class
+   of pull requests does not satisfy the exception, however it is worded.** One covering, say, every
+   P1 fix is written before the pull requests it covers exist, so it cannot be the occasion of a
+   read of any of their diffs: it satisfies the standing form and not this, and one that says in
+   terms that it reaches pull requests which change what the checks run reaches none of them
+   either, because the words do not supply the read. The cost of saying so is real and is named here
+   rather than discovered: a fix whose whole value is putting a guard into a gate goes back to the
+   owner, who merges it or writes a delegation for that pull request. Nothing written outside this
+   rule lifts that cost, and an amendment to this rule is the owner's act under the second limb.
+   Never push to `master` directly. Delete the branch.
 
 ### Serious P1
 
@@ -361,11 +455,54 @@ fixed whatever its label, as step 5 says.
 **Trust boundary.** There is one trusted same-repository writer: the owner. A pull request can
 edit `ci.yml`, `pr-policy.yml` and the validators they run and still turn both contexts green, so
 the checks catch honest mistakes and are not the security boundary. The boundary is that only the
-owner merges — or an agent the owner has delegated to for that pull request — after an independent
-review recorded per step 4, and that the diff the owner reads includes any change to the gates. No
-automated process merges or mints a merge-gating check: there is no machine review check, no App,
-and no token that can attest. A return of automated attestation needs a signer distinct from the
-owner's token, structurally validated verdicts, and a reviewer that holds no attesting credential.
+owner merges — or an agent the owner has delegated to, under the standing delegation of 2026-09-12
+or a delegation the owner wrote for that pull request — after an independent review recorded per
+step 4, and that the diff the owner reads includes any change to the gates.
+
+**The second half of that is what the standing delegation had to be built around.** A delegation
+written for one pull request was the occasion of the owner's read; a standing one removes the
+occasion, and green checks cannot stand in for it — the opening sentences above say why: a pull
+request can edit the checks that judge it, which is what makes this clause and not them the
+boundary. So the standing form stops where a diff can reach the checks themselves. It reaches a pull
+request only where **nothing in the diff can change what a required check runs, or how it judges
+what it ran, and nothing in the diff amends that rule**; anything else is the owner's to merge, or
+carries a delegation the owner wrote for that pull request — not one written for a class of pull
+requests, which cannot have been the occasion of a read of a diff that did not yet exist. Either way
+the owner has read the diff that moved the boundary.
+
+**The second clause is there because this boundary is prose and nothing but the owner guards it.** A
+pull request that rewrites the delegation rule touches no gate and changes no pass criterion, so the
+first clause clears it; the rewritten rule then licenses the gate change, and the boundary has been
+moved by a pull request the boundary itself let through. An amendment to step 7's rule, to this
+paragraph, or to the review and triage a merge requires is therefore the owner's act on the same
+terms as a gate change is. No check enforces that either — no required check reads this rule.
+
+**That test is a property and not a path set, because a path set was tried and does not close.** Two
+reviews broke two successive lists. `scripts/` was the first: the audit gate sources
+`scripts/pr-ready-audit.sh` and, through it, `scripts/lane.sh`, and runs
+`scripts/pr-review-parse.py`, so a change confined to `scripts/` turns a required context green on a
+defect exactly as a change to the gate file does. `.cargo/` and the CI-contract tests under
+`src/effects/` were the second, and neither sits in any directory the earlier lists named: a root
+`.cargo/config.toml` that binds a target `runner` has Cargo compile every test harness and hand each
+one to a wrapper that exits zero, and the test that refuses such a file is itself in the tree and
+editable by the same pull request. `ci.yml` already names that mechanism, in the self-hosted step
+that counts what libtest reported rather than trusting the exit status. **What the property turns on
+is what a file governs, not what kind of file it is**: the test that refuses a `.cargo/config.toml`
+decides what every other pull request may add, where a test asserting that `src/util/terminal.rs`
+makes control characters visible decides nothing outside that module — so the first is an instrument
+and the second, like the fix it ships beside, is part of the subject. Step 7 carries the rule, both
+its limbs, its worked examples and its cost. What the change does move is the classification —
+whether a diff can reach a check is the delegate's call first, no check enforces it, and the merge
+commit's own diff is the record after the fact. The delegate also merges on the owner's credential
+rather than on one of its own, so the trusted same-repository writer is still the owner and still
+one.
+
+No automated process merges or mints a merge-gating check: there is no machine review check, no
+App, and no token that can attest. A delegate pressing merge is not that process — it is the
+owner's act performed by an agent the owner named, disclosed in the body, resting on the same
+independent review; what this sentence forbids is a machine minting a gating check that stands in
+for that review. A return of automated attestation needs a signer distinct from the owner's token,
+structurally validated verdicts, and a reviewer that holds no attesting credential.
 
 Keep workflow approval for **all** external contributors, and keep release immutability enabled;
 bootstrap and audit both through the API:
