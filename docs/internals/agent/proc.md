@@ -1205,21 +1205,27 @@ The stopped anchor pins the PGID until it becomes our unreaped
 zombie. Only release the reaper-owned run-cleanup lease once every
 member of that exact group is either gone or a non-running zombie.
 
-## `impl Guard` › `fn abort_setup(self) {`
+## `impl Guard` › `fn abort_setup(self) -> HelperEnd {`
 
-End a guard whose supervisor setup failed after it said READY. With the
-identity path off this is master's `kill` and `waitpid` with a null
-status pointer, retried on `EINTR`, exactly as it was; with the path on
-it is `end_helper_through_identity`, whose answers are discarded here
-as the base discards its own (row
-`PR125-CLOSE-DISCARDED-KILL-RESULT` names that at every site, and this
-change does not take it up). `default_wait_shapes_helper`'s
-`status-pointer` shape holds the default's arguments: a policy that
-kills a `wait4` carrying a status pointer is installed after the guard
-is launched and before this is called, and the fixture must exit `0`.
-It was witnessed against a status pointer put back into this wait, the
-shape a previous round of this repair introduced and a reviewer
-executed: `SIGSYS`, shell status 159.
+End a guard whose supervisor setup failed after it said READY, and
+answer what ending it returned. With the identity path off this is the
+`kill` and the `waitpid` by number it always was, the wait retried on
+`EINTR` as before; with the path on it is `end_helper_through_identity`.
+Both answers are kept and handed back as a `HelperEnd`, which `install`
+describes into each of its three failure messages after the monitor's
+own error: the one place the ending can be read, since the guard is
+private to this module. Until row `PR125-CLOSE-DISCARDED-KILL-RESULT`
+was taken up the answers were discarded here, the wait asked for no
+status, and the monitor's failure said nothing about the guard. The
+wait now carries a status pointer so that "collected it" can say how,
+the arguments `end_unready_guard` and `close_and_wait_reporting` pass.
+The `status-pointer` shape of `default_wait_shapes_helper`, which
+pinned this one wait to a null pointer as part of the identity change's
+promise to leave the default path as it was, is retired; that promise
+holds everywhere else, its `options` shape still runs, and
+`guard_abort_end_helper` holds the ending itself: a `kill` refused with
+`EPERM` or answered `ESRCH`, a wait refused with `EPERM`, and the
+identity arm, each reported as the calls answered and nothing else.
 
 ## `impl Guard` › `fn stop_parent(self) -> Option<bool> {`
 
@@ -1229,15 +1235,19 @@ continue/termination cancelled the stop before it was issued.
 
 ## `mod termination` › `struct HelperEnd {`
 
-What ending a helper that never acknowledged its startup actually
-returned.
+What ending a helper actually returned: a helper that never
+acknowledged its startup, a guard whose descriptors could not be
+configured, or a guard aborted after it said READY.
 
 This asks the kernel nothing it was not already going to be asked. The
 teardown sends one `SIGKILL` and takes one `waitpid`, exactly as it
 did before this existed and in the same order; all this does is keep
 the two answers instead of discarding them, which is what §7 asks of a
 signal whose result the caller depends on and what row
-`PR125-CLOSE-DISCARDED-KILL-RESULT` asks for.
+`PR125-CLOSE-DISCARDED-KILL-RESULT` asked for. The type is `must_use`
+for the same reason: an ending computed and dropped is that row's
+defect, `unused_must_use` names it, and the Clippy leg's `-D warnings`
+refuses it.
 
 **Nothing here is a claim about which process the number named.** A
 pid cannot be tied to the helper that was forked with it while an
@@ -1554,11 +1564,14 @@ against a zero remainder (row
 
 ## `mod termination` › `fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int) -> HelperEnd {`
 
-The READY-failure teardown of the guard, moved out of `spawn_guard`'s
-body so the identity arm and the base's arm sit side by side. The
-base's arm is the code that was inline: one `kill`, one `waitpid` with
-a status pointer, their answers kept for the message. The identity arm
-is `end_helper_through_identity`.
+The teardown of a guard the launch gives up on before it is
+established: the READY failure, and the descriptor-configuration
+failure just before it, which discarded its own `kill` and `waitpid`
+and said nothing of them until row `PR125-CLOSE-DISCARDED-KILL-RESULT`
+was taken up. Moved out of `spawn_guard`'s body so the identity arm and
+the base's arm sit side by side. The base's arm is the code that was
+inline: one `kill`, one `waitpid` with a status pointer, their answers
+kept for the message. The identity arm is `end_helper_through_identity`.
 
 ## `fn spawn_guard` › `let how = if wait == ReadyWait::Ready {`
 

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Ending a Unix job-control guard the launch gives up on (its descriptors could not be configured,
+  or the signal monitor could not start after it said READY) now reports what `kill` and `waitpid`
+  answered, in the words a helper that missed READY already used, instead of discarding both
+  answers. A refused signal is a distinct outcome the message names, and a helper's ending can no
+  longer be computed and dropped (`PR125-CLOSE-DISCARDED-KILL-RESULT`).
 - A schema-4 integration verification that ends unavailable — parked for a person, or deferred by
   an infrastructure outage — now records the review passes it paid for, so a resumed run's reported
   spend is the total the incarnation before it reached. `merge_verification_unavailable` gains a

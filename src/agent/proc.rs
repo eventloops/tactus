@@ -1816,22 +1816,25 @@ mod termination {
         let monitor = match monitor {
             Ok(monitor) => monitor,
             Err(error) => {
-                guard.abort_setup();
-                return Err(format!("starting Unix signal monitor: {error}"));
+                let end = describe_helper_end(guard.abort_setup());
+                return Err(format!(
+                    "starting Unix signal monitor: {error}; ending the job-control guard: {end}"
+                ));
             }
         };
         match monitor_started.recv() {
             Ok(Ok(())) => drop(monitor),
             Ok(Err(error)) => {
                 let _ = monitor.join();
-                guard.abort_setup();
-                return Err(error);
+                let end = describe_helper_end(guard.abort_setup());
+                return Err(format!("{error}; ending the job-control guard: {end}"));
             }
             Err(error) => {
                 let _ = monitor.join();
-                guard.abort_setup();
+                let end = describe_helper_end(guard.abort_setup());
                 return Err(format!(
-                    "starting Unix signal monitor: readiness channel closed: {error}"
+                    "starting Unix signal monitor: readiness channel closed: {error}; ending \
+                     the job-control guard: {end}"
                 ));
             }
         }
@@ -2693,7 +2696,7 @@ mod termination {
     }
 
     impl Guard {
-        fn abort_setup(self) {
+        fn abort_setup(self) -> HelperEnd {
             let _ = GUARD_COMMAND_FD.compare_exchange(
                 self.command_fd,
                 -1,
@@ -2706,21 +2709,30 @@ mod termination {
             }
             #[cfg(target_os = "linux")]
             if self.identity >= 0 {
-                let _ = end_helper_through_identity(self.identity);
-                return;
+                return end_helper_through_identity(self.identity);
             }
             // SAFETY: `pid` is the unreaped child returned by `fork`. Killing
             // the guard closes its probe pipe, so the descriptor-scrubbed
             // grandchild exits as well.
-            unsafe {
-                let _ = libc::kill(self.pid, libc::SIGKILL);
-                loop {
-                    if libc::waitpid(self.pid, std::ptr::null_mut(), 0) >= 0
-                        || !last_errno_is_interrupted()
-                    {
-                        break;
-                    }
+            let killed = unsafe { libc::kill(self.pid, libc::SIGKILL) };
+            let kill_errno = if killed == 0 { 0 } else { last_errno() };
+            let mut status = 0;
+            let (waited, wait_errno) = loop {
+                // SAFETY: as above, and `status` is writable for the call.
+                let waited = unsafe { libc::waitpid(self.pid, &mut status, 0) };
+                if waited >= 0 {
+                    break (waited, 0);
                 }
+                if !last_errno_is_interrupted() {
+                    break (waited, last_errno());
+                }
+            };
+            HelperEnd {
+                kill_errno,
+                waited,
+                wait_errno,
+                status: if waited > 0 { status } else { 0 },
+                through_identity: false,
             }
         }
 
@@ -2749,6 +2761,7 @@ mod termination {
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[must_use = "the end of a helper is what its kill and its wait answered; report it"]
     struct HelperEnd {
         kill_errno: libc::c_int,
         waited: libc::pid_t,
@@ -3403,16 +3416,10 @@ mod termination {
             for fd in [command[0], command[1], ack[0]] {
                 close_fd(fd);
             }
-            #[cfg(target_os = "linux")]
-            if identity >= 0 {
-                let _ = end_helper_through_identity(identity);
-                return Err("configuring Unix job-control guard descriptors".to_owned());
-            }
-            unsafe {
-                let _ = libc::kill(pid, libc::SIGKILL);
-                let _ = libc::waitpid(pid, std::ptr::null_mut(), 0);
-            }
-            return Err("configuring Unix job-control guard descriptors".to_owned());
+            let end = describe_helper_end(end_unready_guard(pid, identity));
+            return Err(format!(
+                "configuring Unix job-control guard descriptors; ending it: {end}"
+            ));
         }
         let guard = Guard {
             command_fd: command[1],
@@ -6139,7 +6146,7 @@ mod termination {
                     "a launch with the path off"
                 );
             }
-            guard.abort_setup();
+            assert_guard_ended(guard.abort_setup(), "the aborted guard");
             assert_no_child_left("the aborted guard");
         }
 
@@ -6519,7 +6526,10 @@ mod termination {
                         panic!("a guard launch under a policy fatal on {which}: {error}")
                     });
                     assert_eq!(guard.identity, NO_HELPER_IDENTITY);
-                    guard.abort_setup();
+                    assert_guard_ended(
+                        guard.abort_setup(),
+                        &format!("the guard aborted under a policy fatal on {which}"),
+                    );
                 }
                 "ready-failure" => {
                     for (prefix, message) in launch_failures_before_ready() {
@@ -6583,23 +6593,6 @@ mod termination {
                         );
                     }
                 }
-                "status-pointer" => {
-                    let guard = spawn_guard(quiet_signal_policy()).expect("spawn private guard");
-                    answer_a_wait_by_number_with_a_status_pointer_with(
-                        libc::SECCOMP_RET_KILL_PROCESS,
-                    );
-                    guard.abort_setup();
-                    // The look for a leftover child has to live under the same
-                    // policy, so it asks for no status either.
-                    // SAFETY: `waitpid` writes nothing through the null pointer
-                    // and reaches none but this process's own children.
-                    let waited = unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) };
-                    assert!(
-                        waited < 0 && last_errno() == libc::ECHILD,
-                        "the aborted guard left a child behind: waitpid(-1) answered {waited}"
-                    );
-                    return;
-                }
                 other => panic!("unknown shape {other}"),
             }
             assert_no_child_left(&format!("the {shape} shape"));
@@ -6608,15 +6601,14 @@ mod termination {
         #[cfg(target_os = "linux")]
         #[test]
         fn the_default_teardown_makes_the_waits_it_always_made() {
-            for (shape, extra) in [
-                ("options", Some(EXIT_BEFORE_READY_WITH_SEVEN)),
-                ("status-pointer", None),
-            ] {
-                let mut vars = vec![("UPSTROKE_DEFAULT_WAIT_SHAPES_HELPER", shape)];
-                vars.extend(extra);
-                let output = run_fixture("default_wait_shapes_helper", &vars);
-                assert_fixture_succeeded(&format!("default wait-shapes helper ({shape})"), &output);
-            }
+            let output = run_fixture(
+                "default_wait_shapes_helper",
+                &[
+                    ("UPSTROKE_DEFAULT_WAIT_SHAPES_HELPER", "options"),
+                    EXIT_BEFORE_READY_WITH_SEVEN,
+                ],
+            );
+            assert_fixture_succeeded("default wait-shapes helper (options)", &output);
         }
 
         #[cfg(target_os = "linux")]
@@ -6956,7 +6948,7 @@ mod termination {
                     let reaper = spawn_reaper().expect("spawn private reaper");
                     reaper.cancel();
                     let guard = spawn_guard(quiet_signal_policy()).expect("spawn private guard");
-                    guard.abort_setup();
+                    assert_guard_ended(guard.abort_setup(), "the guard aborted with the path on");
                 }
                 "ready-failure" => {
                     for (prefix, message) in launch_failures_before_ready() {
@@ -6987,6 +6979,181 @@ mod termination {
                 vars.extend(extra);
                 let output = run_fixture("identity_call_set_helper", &vars);
                 assert_fixture_succeeded(&format!("identity call-set helper ({shape})"), &output);
+            }
+        }
+
+        /// A guard ended on the ordinary path answered delivery and was
+        /// collected; anything else is printed as the calls answered it.
+        #[cfg(target_os = "linux")]
+        fn assert_guard_ended(end: HelperEnd, what: &str) {
+            assert!(
+                end.kill_errno == 0 && end.waited > 0,
+                "{what} did not end as expected: {}",
+                describe_helper_end(end)
+            );
+        }
+
+        /// Refuse `fcntl` on one descriptor number with `EPERM`, and answer
+        /// every other call as the kernel does.
+        #[cfg(target_os = "linux")]
+        fn refuse_fcntl_on(fd: libc::c_int) {
+            let (fd_low, fd_high) = seccomp_argument_words(0);
+            let fd = u32::try_from(fd).expect("a descriptor fits the argument word");
+            let mut program = [
+                seccomp_load(SECCOMP_DATA_NR_OFFSET),
+                seccomp_jump_if_equal(seccomp_syscall_number(libc::SYS_fcntl), 0, 4),
+                seccomp_load(fd_high),
+                seccomp_jump_if_equal(0, 0, 2),
+                seccomp_load(fd_low),
+                seccomp_jump_if_equal(fd, 1, 0),
+                seccomp_return(libc::SECCOMP_RET_ALLOW),
+                seccomp_return(seccomp_refuse_with(libc::EPERM)),
+            ];
+            install_seccomp_policy(&mut program);
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn guard_abort_end_helper() {
+            let Some(answer) = fixture_variable("UPSTROKE_GUARD_ABORT_END_HELPER") else {
+                return;
+            };
+            let guard = spawn_guard(quiet_signal_policy()).expect("spawn private guard");
+            let pid = guard.pid;
+            // Installed after the launch, so the policy answers the teardown's
+            // own calls and nothing the launch made. A guard whose command
+            // pipe has closed ends itself with status 0, so a signal that
+            // never reached it leaves a wait that collects exactly that.
+            let words = match answer.as_str() {
+                "EPERM" => {
+                    answer_call_with(libc::SYS_kill, seccomp_refuse_with(libc::EPERM));
+                    "SIGKILL failed: Operation not permitted (os error 1), and the wait collected \
+                     it, having already exited with status 0"
+                }
+                "ESRCH" => {
+                    answer_call_with(libc::SYS_kill, seccomp_refuse_with(libc::ESRCH));
+                    "SIGKILL answered ESRCH, so nothing of that number was there, and the wait \
+                     collected it, having already exited with status 0"
+                }
+                "wait-refused" => {
+                    answer_a_wait_by_number_with_a_status_pointer_with(seccomp_refuse_with(
+                        libc::EPERM,
+                    ));
+                    "SIGKILL was delivered, and the wait collected nothing: Operation not \
+                     permitted (os error 1)"
+                }
+                "identity" => {
+                    assert!(
+                        helper_identity_path_on(),
+                        "this answer is about the path on"
+                    );
+                    "SIGKILL was delivered through the helper's identity, and the wait through \
+                     it collected it"
+                }
+                other => panic!("unknown answer {other}"),
+            };
+            let end = describe_helper_end(guard.abort_setup());
+            assert!(
+                end.starts_with(words),
+                "the end of the aborted guard ({answer}) is not what its calls answered: {end}"
+            );
+            if answer == "wait-refused" {
+                // The refused wait collected nothing, so the killed guard is
+                // still this process's child. This look asks for no status,
+                // which the policy allows, and it must find the guard.
+                // SAFETY: `waitpid` writes nothing through the null pointer
+                // and reaches none but this process's own children.
+                let collected = unsafe { libc::waitpid(-1, std::ptr::null_mut(), 0) };
+                assert_eq!(
+                    collected, pid,
+                    "the guard the refused wait left uncollected was not there to collect"
+                );
+                assert_no_child_left_asking_for_no_status("the aborted guard (wait-refused)");
+                return;
+            }
+            assert_no_child_left(&format!("the aborted guard ({answer})"));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn the_end_of_an_aborted_guard_is_what_its_kill_and_its_wait_answered() {
+            for (answer, extra) in [
+                ("EPERM", None),
+                ("ESRCH", None),
+                ("wait-refused", None),
+                ("identity", Some(IDENTITY_ON)),
+            ] {
+                let mut vars = vec![("UPSTROKE_GUARD_ABORT_END_HELPER", answer)];
+                vars.extend(extra);
+                let output = run_fixture("guard_abort_end_helper", &vars);
+                assert_fixture_succeeded(&format!("guard abort-end helper ({answer})"), &output);
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn guard_descriptor_failure_end_helper() {
+            let Some(answer) = fixture_variable("UPSTROKE_GUARD_DESCRIPTOR_FAILURE_END_HELPER")
+            else {
+                return;
+            };
+            // The command pipe is the first pair the launch takes and `pipe2`
+            // hands out the lowest free numbers, so a fixture with no other
+            // thread allocating learns the write end's number by taking the
+            // pair and giving it back. The policy refuses `fcntl` on that
+            // number alone: the launch's own configuration of the descriptor
+            // it hands the guard's command pipe.
+            let [command_read, command_write] =
+                create_cloexec_pipe().expect("a stand-in for the launch's command pipe");
+            close_fd(command_read);
+            close_fd(command_write);
+            refuse_fcntl_on(command_write);
+            let words = match answer.as_str() {
+                "delivered" => "SIGKILL was delivered, and the wait collected it",
+                "EPERM" => {
+                    answer_call_with(libc::SYS_kill, seccomp_refuse_with(libc::EPERM));
+                    "SIGKILL failed: Operation not permitted (os error 1), and the wait collected it"
+                }
+                "identity" => {
+                    assert!(
+                        helper_identity_path_on(),
+                        "this answer is about the path on"
+                    );
+                    "SIGKILL was delivered through the helper's identity, and the wait through \
+                     it collected it"
+                }
+                other => panic!("unknown answer {other}"),
+            };
+            let Err(message) = spawn_guard(quiet_signal_policy()) else {
+                panic!("a guard whose descriptors could not be configured was accepted as launched")
+            };
+            let expected =
+                format!("configuring Unix job-control guard descriptors; ending it: {words}");
+            assert!(
+                message.starts_with(&expected),
+                "the launch's failure ({answer}) does not carry the end its calls answered: \
+                 {message}"
+            );
+            assert_no_child_left(&format!("the descriptor-configuration failure ({answer})"));
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_guard_whose_descriptors_cannot_be_configured_reports_its_end() {
+            for (answer, extra) in [
+                ("delivered", None),
+                ("EPERM", None),
+                ("identity", Some(IDENTITY_ON)),
+            ] {
+                let mut vars = vec![("UPSTROKE_GUARD_DESCRIPTOR_FAILURE_END_HELPER", answer)];
+                vars.extend(extra);
+                let output = run_fixture("guard_descriptor_failure_end_helper", &vars);
+                assert_fixture_succeeded(
+                    &format!("guard descriptor-failure end helper ({answer})"),
+                    &output,
+                );
             }
         }
 
