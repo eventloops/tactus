@@ -261,7 +261,7 @@ records.
 Every branch an intermediate build *is* entitled to perform survives
 the checkpoint unchanged.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {`
 
 **Which of `Step`'s variants cross the checkpoint, counted rather than
 asserted in prose.** Seven cross and two do not since PR9 moved
@@ -279,12 +279,12 @@ The `match` below has **no wildcard arm**, so adding a variant to `Step`
 stops this file compiling until someone says which side it falls on.
 That is the part a count in a doc comment cannot do.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {` › `let mut names = Vec::new();`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {` › `let mut names = Vec::new();`
 
 Exhaustive by construction: no `_` arm, so a ninth variant is a
 compile error here rather than a silently untested branch.
 
-## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {` › `let mut distinct = names.clone();`
+## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {` › `let mut distinct = names.clone();`
 
 On a COPY: `names` must stay in the list's order, because it is
 zipped with it below. Sorting it in place paired every step with

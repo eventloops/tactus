@@ -2979,12 +2979,6 @@ mod tests {
         }
     }
 
-    /// "the explorer … classifies every reachable state with a resume action
-    /// by running the recovery classifier over it (Complete and Halted
-    /// classify as finalize-then-terminal)", and "the classification computed
-    /// during live emission equals the classification recomputed from the
-    /// durable prefix alone": the incremental fold each state was reached
-    /// with, against a replay of its trace.
     #[test]
     fn every_explored_state_classifies_and_the_classification_is_the_same_live_and_on_replay() {
         let census = census();
@@ -3043,15 +3037,6 @@ mod tests {
         );
     }
 
-    /// "every fault row's durable prefix is a reachable census state and its
-    /// fold-derived classification matches the row's resume action". The
-    /// two-original fixture reaches fifteen of the twenty-one rows; the two
-    /// repair rows are reached from a rejection in
-    /// `a_rejection_and_its_repairs_dispatch_are_reachable_prefixes_classified_as_tabled`,
-    /// the retained and retry rows from a retained session in
-    /// `a_retained_generation_and_its_retry_are_reachable_prefixes_classified_as_tabled`,
-    /// and the two rows outside the fold (a container, an append) have no
-    /// fold state to classify and say so in the summary.
     #[test]
     fn every_fault_rows_durable_prefix_is_a_reachable_state_classified_as_its_resume_action() {
         let census = census();
@@ -3131,12 +3116,6 @@ mod tests {
         })
     }
 
-    /// The repair rows: a conflict rejection registers a repair of aleph
-    /// inside a new lineage (T-REJECT), and the repair's dispatch inherits the
-    /// lineage and names its source candidate (T-REPAIR-DISPATCH). Both
-    /// prefixes are explored as census states from that seed and classify as
-    /// tabled: nothing to settle for the rejection, an open repair generation
-    /// to recreate at its base for the dispatch.
     #[test]
     fn a_rejection_and_its_repairs_dispatch_are_reachable_prefixes_classified_as_tabled() {
         let mut trace = queued_candidate_trace(region(ALEPH));
@@ -3302,11 +3281,6 @@ mod tests {
         ev(TopologyEventBody::AttemptStarted { data })
     }
 
-    /// The retained rows: a retained settlement leaves the generation idle
-    /// with its session (T-RETAINED: a fresh process closes it), and the
-    /// same-session retry the retaining incarnation starts is in flight at
-    /// attempt two (T-RETRY: a fresh process settles it interrupted). Both
-    /// prefixes are explored as census states from that seed.
     #[test]
     fn a_retained_generation_and_its_retry_are_reachable_prefixes_classified_as_tabled() {
         let started_fold = started();
@@ -3458,12 +3432,6 @@ mod tests {
         variants
     }
 
-    /// "every run_resumed with an identical runner identity is accepted and
-    /// every run_resumed with any different field (kind, policy, reference,
-    /// id, digest, volumes) is refused" — offered at every explored state.
-    /// A Complete or Halted state refuses the identical one too, because the
-    /// run is over; every other state accepts it, and the state it reaches
-    /// has the next epoch, no budget stop, no deferral and no end.
     #[test]
     fn run_resumed_is_accepted_with_an_identical_runner_and_refused_with_any_different_field() {
         let census = census();
@@ -3535,9 +3503,6 @@ mod tests {
         assert_eq!(refused, census.states().len() * variants.len());
     }
 
-    /// The summary the G5 gate dumps: every fault row, the two outside the
-    /// fold marked, every action and outcome counted, the bounds it ran
-    /// under. Written to `UPSTROKE_CENSUS_SUMMARY` when that names a file.
     #[test]
     fn the_census_summary_names_every_fault_row_and_serializes() {
         let census = census();

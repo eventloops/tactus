@@ -3849,3 +3849,61 @@ ineligible (`BehindOlderLineage`), the older repair dispatches and
 publishes first, and the younger publishes onto the head it left —
 lineage order, not queue position, each publication satisfying its own
 closure and releasing its own lineage lease.
+
+## `fn with_live_run<R>(`
+
+PR10's loop-level fixture: a resumed `TopologyRun` under a ceiling of the
+test's choosing, handed to a body with its seams and hooks, the resume
+run first so an arming inside the body lands in the loop and not in
+recovery. `with_live_run_hooked` takes the caller's hooks;
+`with_live_run_hooked_runner` the caller's runner as well.
+
+## `fn plant_finished_run_with(`
+
+A run planted at its end for the ST-18 tests: alpha queued, published or
+parked, beta's one attempt failed with the halting policy the outcome
+needs, beta's closed generation still holding its worktree and intent, the
+residue asked for (a snapshot, a staging worktree, a proposal pin), and
+`run_finished` durable — what terminal finalization has to act on, with
+nothing yet done to it.
+
+## `struct ArmedFinalization {`
+
+Hooks that inject an error return at one `(site, phase)` of one
+finalization, the nth time it is reached, so the T-FINALIZE matrix is
+driven at every cleanup site in turn and the next resume is shown to
+converge from each.
+
+## `fn live_vs_replay(`
+
+Q1's comparison, committed at the G4 gate's request: the live incremental
+fold of a stepped run and the report derived from it, against a fresh
+replay of the bytes on disk and its report.
+
+## `fn ledger_inventory(fixture: &Fixture, fold: &TopologyFold, released: &[String]) -> PhysicalInventory {`
+
+The physical half of the ledger, measured from the fixture: slots by
+namespace, refs and pins, the run directory and the private half, the two
+lock files, container intents, the volume classification, and the objects
+the pre-finalization observation saw referenced, checked present after.
+
+## `fn drive_observing(`
+
+`drive` with an observer called after every step with the step number and
+the run, so a test can read the live fold and the process-local ledgers
+before the run is dropped; `drive_handle` is the same loop with a no-op
+observer.
+
+## `struct ArmedAppendError {`
+
+Hooks that return `Err` from the `Written` point of the nth transaction
+append counted from the moment the countdown is set — the append-error
+protocol, aimed at one line of the test's choosing, which is how the
+NoRunFinished ledger is driven rather than planted.
+
+## `fn observation_export_env() -> Vec<(String, String)> {`
+
+The ST-07 observation export directory, handed on to a spawned kill child:
+the host runner composes the child's environment from scratch, so a
+variable the parent test was started with does not reach the child unless
+the request carries it.

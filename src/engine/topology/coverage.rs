@@ -229,13 +229,6 @@ pub fn frozen_sampling_n(declarations: &str, site: EffectSiteId) -> Result<Optio
     Ok(None)
 }
 
-/// The sites the run's end performs at `max_parallel = 1`: the closure's
-/// appends and scrubs, and terminal finalization's report write and cleanup
-/// steps. `Lock.Release` is not among them — the run lock goes with the
-/// handle, outside the hooked funnels — and no site here registers a residue
-/// class, so the document carries no recovery-proven entry; the frozen `N`
-/// such an entry would cite is read from `effects/residue-classes.json` by
-/// [`check_frozen_n`], which the merge check runs regardless.
 #[must_use]
 pub fn range() -> Vec<EffectSiteId> {
     vec![
@@ -254,10 +247,6 @@ pub fn range() -> Vec<EffectSiteId> {
     ]
 }
 
-/// The evidence: for every phase and point of every site in [`range`], the
-/// committed test that executes it, chosen from the suite's own observation
-/// export. A claim here is a statement the merge check holds against a
-/// fresh export; the non-ignored tests hold it against the tree.
 pub const CLAIMS: &[Claim] = &[
     Claim {
         site: EffectSiteId::Event(EventSite::Append),
@@ -457,8 +446,6 @@ pub fn registry_json() -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-/// SWEEP-BIJECTION-005: the frozen `N` a recovery-proven entry cites is the
-/// declarations file's, not the entry's own. One line per disagreement.
 #[must_use]
 pub fn check_frozen_n(entries: &[RegistryEntry], declarations: &str) -> Vec<String> {
     let mut problems = Vec::new();

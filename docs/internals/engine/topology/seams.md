@@ -113,6 +113,14 @@ only a [`crate::topology::effects::SubEffectPoint`], and `hook()` answers
 here, or the 30-plus sites of this slice that expose no sub-effect point
 contribute nothing to coverage.
 
+Since PR10 the five families are wrapped by [`Exporting`], which carries
+the ST-07 observation export: when `UPSTROKE_HOOK_OBSERVATIONS` names a
+directory, what the shared harness observed is written there under the
+current thread's name — the test's — when the last clone of a bundle is
+dropped (`ExportOnDrop`), and again just before a `Kill` injection is
+carried out, since the process that carries it out writes nothing
+afterwards. `engine::topology::coverage` reads the records back.
+
 ## `pub struct HarnessTopologyHooks` › `#[allow(dead_code)]` (trailing)
 
 never called at 610106b; see `PR7-NARROWED-SURFACE-19-UNCALLED` (§2)
@@ -158,6 +166,31 @@ durability ledger and the sync records it collected.
 
 The sites themselves are on the shared [`HookHarness`] and are read
 there; these are the answers a `(site, phase)` key cannot carry.
+
+## `struct Exporting<H> {`
+
+One family's harness adapter, with the harness beside it so the export
+can read it. Every answer the adapter gives passes through `carried`,
+which exports before returning `Injection::Kill`: the funnel aborts the
+process right after, and a kill-mode observation that reached only the
+in-memory harness would be lost with it — which is exactly the
+observation the merge check needs for a `Written`/kill claim.
+
+## `struct ExportOnDrop(Arc<Mutex<HookHarness>>);`
+
+Held in an `Arc` by the bundle and every clone of it, so the export runs
+once, when the last clone drops. A `Drop` on the bundle itself would have
+forbidden the builders that move its fields.
+
+## `mod export {`
+
+The export, compiled two ways. Under `cfg(test)` it reads the variable,
+names the record after the current thread, merges with the record an
+earlier drop or a spawned kill child of the same test wrote, and writes
+through the fixture's `write_file` — the one write this file may make,
+because the test fixture is the allowlisted module and a topology module
+carries no raw `fs` write. Outside tests it is a no-op: the bundle exists
+in production code only so that tests and kill children can name it.
 
 ## `pub trait TimeSource {`
 

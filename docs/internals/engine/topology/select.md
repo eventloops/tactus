@@ -322,33 +322,46 @@ The questions blocking, in id order.
 
 Run-end closure is due, with the outcome the fold derives.
 
+## `pub enum Step` › `NotStarted,`
+
+The fold carries no `run_started`. Nothing is selectable and nothing is
+ending; the checkpoint refuses it by name.
+
+## `pub enum Step` › `Finished(RunOutcome),`
+
+`run_finished` is durable with this outcome. The loop is over: the
+checkpoint refuses continuation, quoting the outcome.
+
 ## `pub enum Admitted {`
 
 The branches an **intermediate build** is entitled to perform.
 
-[`Step`] has **nine** variants and this has **seven**, so **two** do not
-cross: `Closure` and `Poisoned`. The first is the whole of
-`checkpoint_refusals` for PR9 — there is no value of this type that can
-carry a run end, so no caller holding one can append `run_finished`. That
-is the refusal made unrepresentable rather than remembered. `Integrate`
-crossed when PR8 implemented every terminal of
-`merge_verification_started`; `RepairDispatch` when PR9 implemented
+[`Step`] has **eleven** variants and this has **eight**, so **three** do
+not cross: `Poisoned`, `NotStarted` and `Finished`. None of the three is a
+refusal of a *branch* any more. `Closure` was, for PR7 through PR9 — the
+whole of `checkpoint_refusals`, made unrepresentable rather than remembered:
+no value of this type could carry a run end — and it crossed when PR10
+implemented run-end closure and terminal finalization at `max_parallel =
+1`, as `Integrate` crossed when PR8 implemented every terminal of
+`merge_verification_started` and `RepairDispatch` when PR9 implemented
 `T-REPAIR-DISPATCH`.
 
-The second is not a refusal of a *branch*. `Poisoned` is the absence of one:
-an append errored, this process's fold is not authoritative, and nothing
-further is selected at all. It is excluded from this type for the same
-reason the other two are — a caller holding an `Admitted` may act — but not
-for the same cause, and the count said "seven" and "two" until 2026-08-27
-precisely by folding it into them.
+`Poisoned` is the absence of a branch: an append errored, this process's
+fold is not authoritative, and nothing further is selected at all.
+`NotStarted` is a fold without `run_started`, which admits no transition.
+`Finished` is a run whose `run_finished` is durable: the loop refuses to
+continue it, and a resume finalizes it and refuses too (recovery step (b)).
+All three are excluded for the same reason — a caller holding an
+`Admitted` may act — and the counts said "nine", "seven" and "two" until
+PR10.
 
 Both counts are computed, per §22:
 
 ```text
 $ awk '/^pub enum Step \{/,/^\}/'     src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-9
+11
 $ awk '/^pub enum Admitted \{/,/^\}/' src/engine/topology/select.rs | grep -cE '^    [A-Z]'
-6
+8
 ```
 
 ## `pub enum Admitted` › `BudgetExceeded(Box<BudgetExceeded4>),`
@@ -403,6 +416,14 @@ Whether the generation already exists. See [`Step::Dispatch`].
 ## `pub enum Admitted` › `questions: Vec<QuestionId>,`
 
 The questions blocking, in id order.
+
+## `pub enum Admitted` › `Closure(DerivedOutcome),`
+
+Run-end closure crosses since PR10: `TopologyRun::close_run` performs the
+closure procedure and terminal finalization (`closure.md`, `finalize.md`).
+The `DerivedOutcome` it carries is the fold's derivation at selection; the
+closure reads the ending outcome again for itself, because a budget stop or
+a halt outranks a derivation that a retained generation still blocks.
 
 ## `pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {`
 

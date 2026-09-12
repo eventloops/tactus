@@ -59,11 +59,11 @@ so nothing after the resume can present one.
 
 ### What this slice does *not* do
 
-**Step (b) is "terminal finalization then refuse continuation", and PR7
-implements the refusal only.** `RunDir.WriteReport` carries `fault_row:
-t_finalize`, which is not one of this slice's eleven rows; a lane that
-finalized here would write an out-of-row effect with no fault coverage.
-[`refuse_if_finished`] is the refusal, and it is the whole of PR7's (b).
+**Step (b) is "terminal finalization then refuse continuation".** PR7
+implemented the refusal only — `RunDir.WriteReport` carries `fault_row:
+t_finalize`, which was not one of that slice's rows — and PR10 implemented
+the finalization: [`finalize_if_finished`] finalizes a Complete or Halted
+run (`finalize.md`) and only then refuses continuation.
 
 Step (f) is `checkpoint_refusals` territory for the same reason: "an
 intermediate build refuses, before any append, any operation whose terminals
@@ -112,7 +112,7 @@ step (d)'s first append, and every bound on it is a separate clause:
   promotion, cleanup, admission or report, and before any recovery event —
   that is, before every durable thing a resume derives from the record. A
   ref creation is such a thing, so it is not exempt.
-* **After (b).** [`refuse_if_finished`] refuses a Complete or Halted run,
+* **After (b).** [`finalize_if_finished`] refuses a Complete or Halted run,
   and publishing a finished run's integration ref is continuing it.
 * **After (c).** The repository is touched only once the recorded Runner has
   been rebuilt by inspection and its probes have answered, so a resume that
@@ -1240,9 +1240,9 @@ the fold is poisoned and the next resume repeats from (a0).
 
 (a) the census, under the barrier and never before it.
 
-## `refuse_if_finished(&censused)?;`
+## `finalize_if_finished(&censused, seams.manager, hooks)?;`
 
-(b) Complete or Halted: finalize then refuse. PR7 refuses.
+(b) Complete or Halted: finalize, then refuse.
 
 ## `let rebuilt = RunnerRebuilt::rebuild(censused, seams.today, Some(seams.runtime))?;`
 
@@ -1353,39 +1353,43 @@ run before (h): `run_resumed` consumes the witness this step reads.
 
 (h) — and the witness is consumed here.
 
-## `pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError> {`
+## `pub fn finalize_if_finished(`
 
 ---------------------------------------------------------------------------
-Step (b) — the refusal, and only the refusal
+Step (b) — terminal finalization, then the refusal
 ---------------------------------------------------------------------------
 
-## `pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError> {`
+## `pub fn finalize_if_finished(`
 
 Step (b): "if the fold outcome is Complete or Halted: terminal finalization
-then refuse continuation" — **PR7 implements the refusal**.
-
-`RunDir.WriteReport` carries `fault_row: t_finalize`, which is not one of
-this slice's eleven rows, so a lane that finalized here would write an
-out-of-row effect with no fault coverage in this slice. The finalization is
-therefore deferred and this is the half that is in range:
-`refusal_condition`'s "continuation of Complete or Halted after
-finalization".
+then refuse continuation". PR7 implemented the refusal; PR10 the
+finalization. A Complete or Halted run found on disk is finalized through
+`finalize::finalize` — the report regenerated when missing or stale by
+digest, the cleanup steps run in their fixed order — and then, and only
+then, continuation is refused with what the finalization did in the
+message (`finalize::refuse_continuation`). Repeated resumes converge:
+each finds the report current and nothing left to prune (ST-18,
+`resume_finalizes_halted_then_refuses`).
 
 Read from the barrier-proven fold and nowhere else — that is what O18's
 "before any promotion, cleanup, admission, or report" buys, and a (b) that
 consulted a fold built anywhere else would be deciding a run's outcome from
-bytes nobody proved.
+bytes nobody proved. The finalization's effects are the first fold-derived
+effects of the resume, and they come after the barrier for the same reason.
 
 ### Errors
 
 [`UpstrokeError::Refused`] when the proven prefix ends in `run_finished`
-with [`RunOutcome::Complete`] or [`RunOutcome::Halted`].
+with [`RunOutcome::Complete`] or [`RunOutcome::Halted`], after the
+finalization; whatever the finalization itself fails at, before.
 
-## `pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError> {` › `RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(()),`
+## `pub fn finalize_if_finished(` › `RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(()),`
 
 Parked and BudgetExceeded are resumable outcomes: the fold's own
 guard lets `run_resumed` through for exactly these two, which is what
-makes "raise the ceiling and resume" the response to a budget stop.
+makes "raise the ceiling and resume" the response to a budget stop. Their
+finalization already ran in the incarnation that ended them, and a resume
+recreates the execution root it pruned (record §3 R7).
 
 ## `pub fn finish_integration(`
 
@@ -1715,11 +1719,11 @@ that append and its scrub: the next recovery found the generation already
 reclaim is no longer the closing step's own: [`reclaim_closed_generations`]
 runs once after (e) over the durable state — every `Closed` generation whose
 intent the execution root still carries — whichever incarnation appended the
-close. The live retry close (`RetryOutcome::Close`, `WorktreeMissing`) still
-scrubs nothing in the live run: the attempt-level test pins that a retry
-itself removes nothing, and a live run's closed worktree is run-end
-closure's (PR10); the next resume's sweep reclaims it like any other closed
-generation's.
+close. The live retry close (`RetryOutcome::Close`, `WorktreeMissing`) scrubs
+the closed generation's worktree and intent after its append since PR10
+(`G4B-O3`), as does every closed settlement and run-end closure; this
+sweep is what reclaims a close a killed incarnation appended but never
+scrubbed.
 
 ### Errors
 

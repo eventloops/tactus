@@ -153,14 +153,6 @@ impl TopologyHooks for HarnessTopologyHooks {
     }
 }
 
-/// The ST-07 observation export: when [`OBSERVATIONS_ENV`] names a
-/// directory, what the shared harness observed is written there under the
-/// current thread's name — the test's — when the last clone of a
-/// [`HarnessTopologyHooks`] is dropped, and again just before a `Kill`
-/// injection is carried out, since the process that carries it out writes
-/// nothing afterwards.
-///
-/// [`OBSERVATIONS_ENV`]: super::coverage::OBSERVATIONS_ENV
 #[derive(Debug, Clone)]
 struct Exporting<H> {
     inner: H,

@@ -713,7 +713,7 @@ fn the_checkpoint_admits_every_branch_this_build_implements() {
 }
 
 #[test]
-fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {
+fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {
     let every: Vec<Step> = vec![
         Step::Poisoned,
         budget_exceeded(

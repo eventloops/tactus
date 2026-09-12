@@ -280,3 +280,9 @@ replay agree by construction.
 How many repairs lineage `root` already holds, which is also the index
 the next member records and the count `check_merge_rejected` holds against
 the frozen `max_merge_repairs` (INV-11).
+
+## `impl TopologyFold` › `pub fn task_count(&self) -> usize {`
+
+How many tasks the registry holds — a read-only reader (Class A) PR10's
+engine modules iterate keys with, so that closure, the ledger and the
+reachability classifier need no view of the registry's shape.

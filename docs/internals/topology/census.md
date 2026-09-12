@@ -8,7 +8,7 @@ as it is in the source, so the heading is the grep string that finds the code.
 
 ## Module
 
-The bounded reachability census (ST-14), as a skeleton.
+The bounded reachability census (ST-14).
 
 `decisions.bounded_census` asks for an executable breadth-first exploration
 of abstract fold states: at every state, every event class is offered to the
@@ -31,14 +31,23 @@ That last one is why the arm is a value rather than a `panic!`: "this is
 unreachable" is a claim, and a claim wants a census rather than an
 assertion.
 
-### Skeleton
+### What the skeleton shipped, and what PR10 added
 
-This slice ships the explorer, the bounds, the recording, and the totality
-assertions over fixtures. PR10 raises the fixtures to the packet's full
-bounds and adds the per-arm coverage assertion. What is deliberately *not*
-claimed here is stated by [`Census::truncated`] and by this module's tests:
-a census that stopped early says so rather than reporting the states it did
-reach as if they were all of them.
+PR3 shipped the explorer, the bounds, the recording, and the totality
+assertions over fixtures. PR10 added the resume classifier
+(`engine::topology::reachability`, called from the tests below: every
+explored state classifies, and the classification is the same live and on
+replay), every fault row's durable prefix as a reachable state classified
+as the row's resume action — fifteen rows from the two-original fixture,
+the repair and retained rows from seeded states, the two rows outside the
+fold said so — the `run_resumed` runner-identity sweep at every state, and
+the summary the G5 gate dumps. What PR10 did **not** do is raise the
+fixture to the packet's bounds (three originals, two repairs, two
+lineages): the fixture is still two originals, and the bounds test states
+what it generated. What is deliberately *not* claimed is stated by
+[`Census::truncated`] and by this module's tests: a census that stopped
+early says so rather than reporting the states it did reach as if they
+were all of them.
 
 ## `pub struct CensusBounds {`
 
@@ -787,17 +796,20 @@ first one. Both halves are asserted.
 
 ## `fn the_skeleton_states_the_bounds_it_ran_under_and_the_ones…` › `let bounds = CensusBounds::default();`
 
-What this slice does *not* establish, as an assertion rather than as
-a paragraph: the fixture is two originals with no repairs, and the
-packet's bounds are three originals with two repairs and two
-lineages. PR10 raises them; nothing here should read as if it
-already had.
+What this fixture does *not* establish, as an assertion rather than
+as a paragraph: it is two originals with no repairs, and the packet's
+bounds are three originals with two repairs and two lineages. PR10 did
+not raise it; its classifier, fault-row and identity tests run over
+this fixture and over seeded states, and nothing here should read as if
+the packet's fixture had been explored.
 
 ## `fn the_skeleton_states_the_bounds_it_ran_under_and_the_ones…` › `assert!(`
 
-No repair is spawned by any class this skeleton offers, so no
-lineage lease is ever taken: the lineage half of the census is
-PR10's.
+No repair is spawned by any class this fixture offers, so no
+lineage lease is ever taken here: the lineage half is reached from a
+seeded rejection — a repair inside a new lineage — in
+`a_rejection_and_its_repairs_dispatch_are_reachable_prefixes_classified_as_tabled`,
+not from the fixture's own classes.
 
 ## `fn the_fixture_varies_every_field_a_relation_reads()` › `let started = run_started();`
 
@@ -1307,3 +1319,56 @@ forgotten here would make "exactly one" a claim about a subset.
 
 And only then the answers: the positive accepted somewhere, this
 negative refused everywhere.
+
+## `mod tests` › `fn every_explored_state_classifies_and_the_classification_is_the_same_live_and_on_replay() {`
+
+"the explorer … classifies every reachable state with a resume action
+by running the recovery classifier over it (Complete and Halted
+classify as finalize-then-terminal)", and "the classification computed
+during live emission equals the classification recomputed from the
+durable prefix alone": the incremental fold each state was reached
+with, against a replay of its trace.
+
+## `mod tests` › `fn every_fault_rows_durable_prefix_is_a_reachable_state_classified_as_its_resume_action() {`
+
+"every fault row's durable prefix is a reachable census state and its
+fold-derived classification matches the row's resume action". The
+two-original fixture reaches fifteen of the twenty-one rows; the two
+repair rows are reached from a rejection in
+`a_rejection_and_its_repairs_dispatch_are_reachable_prefixes_classified_as_tabled`,
+the retained and retry rows from a retained session in
+`a_retained_generation_and_its_retry_are_reachable_prefixes_classified_as_tabled`,
+and the two rows outside the fold (a container, an append) have no
+fold state to classify and say so in the summary.
+
+## `mod tests` › `fn a_rejection_and_its_repairs_dispatch_are_reachable_prefixes_classified_as_tabled() {`
+
+The repair rows: a conflict rejection registers a repair of aleph
+inside a new lineage (T-REJECT), and the repair's dispatch inherits the
+lineage and names its source candidate (T-REPAIR-DISPATCH). Both
+prefixes are explored as census states from that seed and classify as
+tabled: nothing to settle for the rejection, an open repair generation
+to recreate at its base for the dispatch.
+
+## `mod tests` › `fn a_retained_generation_and_its_retry_are_reachable_prefixes_classified_as_tabled() {`
+
+The retained rows: a retained settlement leaves the generation idle
+with its session (T-RETAINED: a fresh process closes it), and the
+same-session retry the retaining incarnation starts is in flight at
+attempt two (T-RETRY: a fresh process settles it interrupted). Both
+prefixes are explored as census states from that seed.
+
+## `mod tests` › `fn run_resumed_is_accepted_with_an_identical_runner_and_refused_with_any_different_field() {`
+
+"every run_resumed with an identical runner identity is accepted and
+every run_resumed with any different field (kind, policy, reference,
+id, digest, volumes) is refused" — offered at every explored state.
+A Complete or Halted state refuses the identical one too, because the
+run is over; every other state accepts it, and the state it reaches
+has the next epoch, no budget stop, no deferral and no end.
+
+## `mod tests` › `fn the_census_summary_names_every_fault_row_and_serializes() {`
+
+The summary the G5 gate dumps: every fault row, the two outside the
+fold marked, every action and outcome counted, the bounds it ran
+under. Written to `UPSTROKE_CENSUS_SUMMARY` when that names a file.
