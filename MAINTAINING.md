@@ -148,7 +148,7 @@ source, documentation, workflows, release machinery and this file.
    text that defines the delegate's own authority. They are different kinds of thing, and folding
    them together would make the list read as closed again, which is the failure two earlier rounds
    already produced. Nothing enforces this limb, and it is worse served than the first: no required
-   check reads these sentences at all. The one required check that reads `MAINTAINING.md` is
+   check reads this rule at all. The one required check that reads `MAINTAINING.md` is
    `export::tests::review_finding_ledger_uses_canonical_category_tokens`, which `include_str!`s the
    file to check that three backticked category tokens occur somewhere in it and that their
    underscore spellings occur nowhere — a substring check on the whole file, not a pin on the
@@ -159,13 +159,15 @@ source, documentation, workflows, release machinery and this file.
    `PR274-NOTHING-ENFORCES-THE-GATE-CONTROL-EXCEPTION`. A property is what an eye can apply to a
    path nobody wrote down, and a list is not; that is the whole reason the rule is written as one,
    and why the unsure case goes to the owner rather than through. **A delegation written for a class
-   of pull requests does not satisfy the exception.** One covering, say, every P1 fix is written
-   before the pull requests it covers exist, so it cannot be the occasion of a read of any of their
-   diffs: it satisfies the standing form and not this. The cost of saying so is real and is named
-   here rather than discovered — a fix whose whole value is putting a guard into a gate goes back to
-   the owner — and an owner who does not want that cost writes a class delegation that says it
-   reaches pull requests which change what the checks run, which is a decision to stop reading them
-   and should be taken as one. Never push to `master` directly. Delete the branch.
+   of pull requests does not satisfy the exception, however it is worded.** One covering, say, every
+   P1 fix is written before the pull requests it covers exist, so it cannot be the occasion of a
+   read of any of their diffs: it satisfies the standing form and not this, and one that says in
+   terms that it reaches pull requests which change what the checks run reaches none of them
+   either, because the words do not supply the read. The cost of saying so is real and is named here
+   rather than discovered: a fix whose whole value is putting a guard into a gate goes back to the
+   owner, who merges it or writes a delegation for that pull request. Nothing written outside this
+   rule lifts that cost, and an amendment to this rule is the owner's act under the second limb.
+   Never push to `master` directly. Delete the branch.
 
 ### Serious P1
 
@@ -470,7 +472,7 @@ pull request that rewrites the delegation rule touches no gate and changes no pa
 first clause clears it; the rewritten rule then licenses the gate change, and the boundary has been
 moved by a pull request the boundary itself let through. An amendment to step 7's rule, to this
 paragraph, or to the review and triage a merge requires is therefore the owner's act on the same
-terms as a gate change is. No check enforces that either — no required check reads these sentences.
+terms as a gate change is. No check enforces that either — no required check reads this rule.
 
 **That test is a property and not a path set, because a path set was tried and does not close.** Two
 reviews broke two successive lists. `scripts/` was the first: the audit gate sources

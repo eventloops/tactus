@@ -134,9 +134,9 @@ is the owner's, or carries a delegation written for that PR. It is a separate cl
 path on the list above.
 
 Classifying the diff is the delegate's duty and no check enforces either limb — no required check
-reads these sentences. A delegation written for a class of PRs — every P1 fix, say — does not
-satisfy the exception: it was written before the PR existed, so it cannot be the owner's read of
-that PR's diff. `MAINTAINING.md` step 7 governs.
+reads this rule. A delegation written for a class of PRs — every P1 fix, say — does not
+satisfy the exception, however it is worded: it was written before the PR existed, so it cannot be
+the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 
 ## Where things are
 

@@ -32,8 +32,13 @@ parent reads the pipe and kills faster than the child leaves `write` and reaches
 parent kills precisely because it does not know the child has ended, so the race is inherent to
 the path and the assertion is about its winner.
 
-The test's first assertion — that the refused lease's path and the errno reach the message — is
-what the test exists for, and it held in the sighting: the message read
+The test's first assertion — that the refused lease's path reaches the message, checked as a prefix
+that ends at `failed: ` — is what the test exists for, and it held in the sighting. That assertion
+never examines the errno. The errno is pinned by a different test in the same module,
+`a_setup_failure_report_names_the_step_the_lease_and_the_errno`, which feeds a frame straight to
+`await_ready` and compares the whole described report with `assert_eq!`. Measured in a copy of
+`0cf95b9b` with the errno dropped from `describe_setup_failure`'s message: the lease test stays at
+exit `0`, `1 passed`, and the errno test fails at exit `101`. The sighting's message read
 
 ```
 Unix cleanup reaper did not initialize; waited 247.533µs of 2s; descriptor ceiling 65536;
@@ -75,5 +80,7 @@ reached the message and the child was reaped — or, on a received failure repor
 `spawn_reaper` give a child that has promised to exit a short bounded wait before it kills, so the
 status is the child's own. Which of those is right is the module owner's call: the second changes
 `spawn_reaper`'s behaviour for every caller, the first changes only the test. Whatever is chosen,
-keep the first assertion exactly as it is — the lease path and the errno reaching the message is
-the thing `b0ff0edf` was written to establish.
+keep the first assertion exactly as it is — the lease path reaching the message is the thing
+`b0ff0edf` was written to establish — and leave the errno's guard where it is, in
+`a_setup_failure_report_names_the_step_the_lease_and_the_errno`, which spawns nothing and so never
+meets this race.

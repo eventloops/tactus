@@ -629,17 +629,16 @@ keeps the standing form** — which matters here more than anywhere, because eve
 carries such a test, and reading them as gate control would send the whole queue back to the owner.
 
 Neither the standing delegation nor a class delegation covering every P1 fix reaches a batch that
-does change what the checks run — a class delegation is written before the pull request exists, so
-it cannot be the owner's read of its diff — and such a batch goes back to the owner until a class
-delegation says in terms that it reaches pull requests which change what the checks run, which step
-7 calls a decision to stop reading them, to be taken as one. **That escape belongs to the first limb
-only.** A batch that amends the delegation rule itself — at any of the sites step 7 names, this
-section among them — is the owner's, or carries a delegation the owner wrote for that pull request;
-no class delegation reaches it, however it is worded. The second limb is what stops a delegate from
-licensing the next gate change by rewriting the rule, and a delegation written before the amendment
-existed is not the owner's read of it. Never push to `master` directly. Delete the batch branch and
-every member fix branch after the merge — a fix branch left behind still reads as a live claim on
-its module.
+does change what the checks run, however the class delegation is worded: it is written before the
+pull request exists, so it cannot be the owner's read of its diff, and saying in terms that it
+reaches such batches does not supply that read. Such a batch is the owner's to merge, or carries a
+delegation the owner wrote for that pull request. The same holds on the second limb of a batch that
+amends the delegation rule itself — at any of the sites step 7 names, this section among them: it is
+the owner's, or carries a delegation the owner wrote for that pull request, and no class delegation
+reaches it. The second limb is what stops a delegate from licensing the next gate change by
+rewriting the rule, and a delegation written before the amendment existed is not the owner's read of
+it. Never push to `master` directly. Delete the batch branch and every member fix branch after the
+merge — a fix branch left behind still reads as a live claim on its module.
 
 **Which is why every fix commit carries its finding in a trailer.** The branches are deleted; the
 trailer is what survives them, and it is how a landed commit is attributed to the finding it closed:
