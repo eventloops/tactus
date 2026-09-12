@@ -150,8 +150,9 @@ source, documentation, workflows, release machinery and this file.
    already produced. Nothing enforces this limb, and it is worse served than the first: no required
    check reads these sentences at all. The one required check that reads `MAINTAINING.md` is
    `export::tests::review_finding_ledger_uses_canonical_category_tokens`, which `include_str!`s the
-   file to assert three category tokens and reject their underscore spellings, and never reaches the
-   delegation rule.
+   file to check that three backticked category tokens occur somewhere in it and that their
+   underscore spellings occur nowhere — a substring check on the whole file, not a pin on the
+   ledger's vocabulary — and never reaches the delegation rule.
 
    Which side a pull request falls on is read off its diff, not off its branch prefix, and reading
    it is the delegate's duty: **no check enforces this**, which is filed as

@@ -45,12 +45,15 @@ floor of 1700, so a runner bound with `cfg(all())` reddens `test (winguest)` —
 place in the tree that refuses this effect, and it refuses it for the Windows suite only. Binding the
 runner per target triple instead is measured, not reasoned: `[target.x86_64-unknown-linux-gnu]` with
 the same runner gives **exit `0`, zero `test result:` lines** on this Linux box. The remaining step is
-read off `ci.yml` and not executed here, having no CI of my own to run: such a binding leaves
-`test (winguest)` counting a real Windows suite while `test (ubuntu-latest)` and `test (macos-latest)`
-execute nothing, and the validator — which does run on the Windows leg — is what then has to be
-weakened. Both changed paths are outside every directory the two earlier revisions of this rule
-named, and a delegate who checked each changed path against those lists would have found nothing and
-merged.
+read off `ci.yml` and not executed here, having no CI of my own to run, and it reaches one leg: such
+a binding leaves `test (ubuntu-latest)` executing nothing, while `test (winguest)` counts a real
+Windows suite and `test (macos-latest)` — which runs `cargo test` natively with no target selected,
+so a runner bound to the Linux triple never applies to it — keeps executing its suite. A Darwin
+binding would need its own target entry, which was not written and is not claimed here. The
+validator is not platform-gated, so it runs on both legs that still execute and refuses the file on
+each, and it is what then has to be weakened. Both changed paths are outside every directory the two
+earlier revisions of this rule named, and a delegate who checked each changed path against those
+lists would have found nothing and merged.
 
 ## Why it is P2 and not P1
 
