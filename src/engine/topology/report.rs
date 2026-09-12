@@ -12,7 +12,9 @@ use crate::topology::events::{
     RejectionDisposition, RunnerPolicy, TopologyEvent, TopologyEventBody, UnavailableCause,
     UnavailableOutcome, VerificationBasis, VerificationRecord,
 };
-use crate::topology::fold::{GenerationClass, QuestionOrigin, TaskState, TopologyFold, TransactionClass};
+use crate::topology::fold::{
+    GenerationClass, QuestionOrigin, TaskState, TopologyFold, TransactionClass,
+};
 use crate::topology::leases::LeaseOwner;
 use crate::topology::paths::PathSet;
 use crate::topology::schema::TOPOLOGY_SCHEMA;
@@ -348,7 +350,10 @@ impl TopologyReport {
         let mut undigested = self.clone();
         undigested.digest = String::new();
         let bytes = serde_json::to_vec(&undigested).map_err(|error| UpstrokeError::Parse {
-            message: format!("the report of run `{}` does not serialize: {error}", self.run_id),
+            message: format!(
+                "the report of run `{}` does not serialize: {error}",
+                self.run_id
+            ),
         })?;
         Ok(format!("{:x}", Sha256::digest(&bytes)))
     }
@@ -434,7 +439,10 @@ impl TopologyReport {
             }
         }
         if !self.open_questions.is_empty() {
-            out.push(format_args!("open questions: {}", self.open_questions.len()));
+            out.push(format_args!(
+                "open questions: {}",
+                self.open_questions.len()
+            ));
             for open in &self.open_questions {
                 out.push(format_args!(
                     "  {} ({}) for task k{}",
@@ -519,7 +527,10 @@ fn state_name(state: TaskState) -> &'static str {
 }
 
 fn review_cost(reviews: &[ReviewRecord]) -> (Option<f64>, bool) {
-    let known: Vec<f64> = reviews.iter().filter_map(|review| review.cost_usd).collect();
+    let known: Vec<f64> = reviews
+        .iter()
+        .filter_map(|review| review.cost_usd)
+        .collect();
     let incomplete = known.len() < reviews.len();
     if known.is_empty() {
         (None, incomplete)
@@ -615,8 +626,10 @@ pub fn integration_ledger(events: &[TopologyEvent]) -> Vec<LedgerRow> {
                 match &data.disposition {
                     RejectionDisposition::Conflict { .. } => {
                         row.basis = "conflict".to_owned();
-                        row.detail =
-                            format!("conflict at {}; repair k{}", data.rejecting_head.0, data.repair.key.0);
+                        row.detail = format!(
+                            "conflict at {}; repair k{}",
+                            data.rejecting_head.0, data.repair.key.0
+                        );
                     }
                     RejectionDisposition::CodeRejected { verification } => {
                         row.detail = format!(
@@ -683,14 +696,7 @@ pub fn merged_and_parked(fold: &TopologyFold) -> (u32, u32) {
 
 pub fn topology_status(
     run_id: &str,
-    inputs: crate::topology::fold::FrozenInputs,
-    log: &[u8],
+    prefix: &crate::events::log::StablePrefix,
 ) -> Result<TopologyReport, UpstrokeError> {
-    let events = TopologyFold::parse_log(log).map_err(|error| UpstrokeError::Refused {
-        message: format!("run `{run_id}`'s log does not parse: {error}"),
-    })?;
-    let fold = TopologyFold::replay(inputs, &events).map_err(|error| UpstrokeError::Refused {
-        message: format!("run `{run_id}`'s log does not replay: {error}"),
-    })?;
-    TopologyReport::derive(run_id, &fold, &events)
+    TopologyReport::derive(run_id, prefix.fold(), prefix.events())
 }

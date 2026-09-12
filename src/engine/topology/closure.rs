@@ -168,9 +168,9 @@ pub fn blockers(fold: &TopologyFold) -> Vec<String> {
 }
 
 fn keys(fold: &TopologyFold) -> impl Iterator<Item = TaskKey> + '_ {
-    let len = fold
-        .registry()
-        .map_or(0, |registry| u32::try_from(registry.len()).unwrap_or(u32::MAX));
+    let len = fold.registry().map_or(0, |registry| {
+        u32::try_from(registry.len()).unwrap_or(u32::MAX)
+    });
     (0..len).map(TaskKey)
 }
 

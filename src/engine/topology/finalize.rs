@@ -113,9 +113,9 @@ pub fn finalize(
             continue;
         }
         let count = match step {
-            CleanupStep::TaskWorktrees => {
-                scrub_slots(inputs.manager, hooks, |slot| matches!(slot, Slot::Task { .. }))?
-            }
+            CleanupStep::TaskWorktrees => scrub_slots(inputs.manager, hooks, |slot| {
+                matches!(slot, Slot::Task { .. })
+            })?,
             CleanupStep::Snapshots => scrub_slots(inputs.manager, hooks, |slot| {
                 matches!(slot, Slot::Snapshot { .. })
             })?,

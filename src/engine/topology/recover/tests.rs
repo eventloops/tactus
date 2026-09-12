@@ -1777,67 +1777,152 @@ fn run_finished(outcome: RunOutcome, halted_at: Option<TaskKey>) -> TopologyEven
     }
 }
 
+/// A run planted at its end: alpha's candidate queued (Halted) or published
+/// fast (Complete), beta's one attempt failed with the halting policy the
+/// outcome needs, beta's closed generation still holding its worktree and
+/// intent, and `run_finished` durable. What terminal finalization then has to
+/// act on, with nothing yet done to it.
+struct FinishedPlanting {
+    fixture: Fixture,
+    candidate: crate::topology::events::CandidateRef,
+    prepared_pin: GitRef,
+    beta_slot: crate::workspace_manager::Slot,
+    beta_worktree: PathBuf,
+}
+
+fn plant_finished_run(tag: &str, outcome: RunOutcome) -> FinishedPlanting {
+    use crate::workspace_manager::fixture::git;
+
+    let fixture = Fixture::two_tasks(tag);
+    let planted = plant_queued_candidate(&fixture);
+    let names = crate::engine::topology::candidate::CandidateNames::of(RUN_ID, ALPHA, GEN);
+    let head = match outcome {
+        RunOutcome::Complete => {
+            append_events(
+                &fixture,
+                &[
+                    fast_prepared(&fixture, &planted),
+                    TopologyEventBody::TaskMerged {
+                        data: crate::topology::events::TaskMerged {
+                            sequence: crate::topology::events::SequenceId(0),
+                            merged_sha: planted.commit.clone(),
+                            satisfies: vec![ALPHA],
+                            lease_release: crate::topology::events::MergeLeaseRelease::Candidate {
+                                key: ALPHA,
+                                generation: GEN,
+                            },
+                        },
+                    },
+                ],
+            );
+            git(
+                &fixture.repo_root,
+                &[
+                    "update-ref",
+                    fixture.started.integration_ref.as_str(),
+                    planted.commit.as_str(),
+                ],
+            );
+            planted.commit.clone()
+        }
+        RunOutcome::Halted | RunOutcome::Parked | RunOutcome::BudgetExceeded => {
+            fixture.base_sha.clone()
+        }
+    };
+    let halts_run = outcome == RunOutcome::Halted;
+    append_events(
+        &fixture,
+        &[
+            for_task(BETA, "beta", dispatched_at(&head)),
+            for_task(BETA, "beta", attempt_started_in(&fixture, 1)),
+            for_task(
+                BETA,
+                "beta",
+                attempt_finished(
+                    1,
+                    AttemptSettlement::Closed {
+                        transition: SettlementTransition::Failed {
+                            halts_run,
+                            reason: if halts_run {
+                                "the ladder ran out".to_owned()
+                            } else {
+                                "the ladder ran out and the policy does not halt".to_owned()
+                            },
+                        },
+                        lease: LeaseDisposition::PredictedReleased,
+                    },
+                ),
+            ),
+            run_finished(outcome, halts_run.then_some(BETA)),
+        ],
+    );
+    let manager = fixture.manager();
+    manager
+        .create_execution_root(&mut crate::workspace_manager::NoHooks)
+        .expect("the execution root the run left behind");
+    let beta_worktree = plant_task_worktree(&fixture, BETA, head.as_str());
+    let beta_slot = crate::engine::topology::dispatch::task_slot(BETA, GEN);
+    FinishedPlanting {
+        fixture,
+        candidate: planted.candidate,
+        prepared_pin: names.prepared_ref,
+        beta_slot,
+        beta_worktree,
+    }
+}
+
+fn report_of(fixture: &Fixture) -> crate::engine::topology::report::TopologyReport {
+    let bytes = std::fs::read(fixture.public().join("report.json")).expect("report.json exists");
+    serde_json::from_slice(&bytes).expect("report.json parses as the schema-4 report")
+}
+
+/// Recovery step (b): a Complete or Halted run is finalized — the report
+/// regenerated, the cleanup steps run in the packet's fixed order — and only
+/// then is continuation refused. The name is the packet's (`T-RESUME`,
+/// `T-FINALIZE`); until PR10 it asserted the refusal alone and the report's
+/// **absence**.
 #[test]
 fn resume_finalizes_halted_then_refuses() {
-    for (tag, outcome, extra) in [
-        (
-            "halted",
-            RunOutcome::Halted,
-            vec![
-                dispatched(),
-                attempt_started(1),
-                attempt_finished(
-                    1,
-                    AttemptSettlement::Closed {
-                        transition: SettlementTransition::Failed {
-                            halts_run: true,
-                            reason: "the ladder ran out".to_owned(),
-                        },
-                        lease: LeaseDisposition::PredictedReleased,
-                    },
-                ),
-                run_finished(RunOutcome::Halted, Some(ALPHA)),
-            ],
-        ),
-        (
-            "complete",
-            RunOutcome::Complete,
-            vec![
-                dispatched(),
-                attempt_started(1),
-                attempt_finished(
-                    1,
-                    AttemptSettlement::Closed {
-                        transition: SettlementTransition::Failed {
-                            halts_run: false,
-                            reason: "the ladder ran out and the policy does not halt".to_owned(),
-                        },
-                        lease: LeaseDisposition::PredictedReleased,
-                    },
-                ),
-                run_finished(RunOutcome::Complete, None),
-            ],
-        ),
+    for (tag, outcome) in [
+        ("halted", RunOutcome::Halted),
+        ("complete", RunOutcome::Complete),
     ] {
-        let fixture = Fixture::build(
-            &format!("finished-{tag}"),
-            Damage {
-                extra,
-                ..Damage::default()
-            },
+        let planted = plant_finished_run(&format!("finished-{tag}"), outcome.clone());
+        let fixture = &planted.fixture;
+        let manager = fixture.manager();
+        assert!(
+            planted.beta_worktree.exists()
+                && manager
+                    .intents()
+                    .expect("intents")
+                    .contains(&planted.beta_slot),
+            "the closed generation's worktree and intent are what step (i) prunes ({tag})"
+        );
+        assert_eq!(
+            ref_target(fixture, planted.candidate.candidate_ref.as_str()).as_deref(),
+            Some(planted.candidate.commit_sha.as_str()),
+            "the candidates ref is there before finalization ({tag})"
+        );
+        assert!(
+            ref_target(fixture, planted.prepared_pin.as_str()).is_some(),
+            "and so is the candidate-prepared pin ({tag})"
         );
         let harness = harness();
         let runtime = runtime_holding_the_record();
         let certifies = AlwaysCertifies;
-        let given = Given::healthy(&fixture, &runtime, &certifies);
+        let given = Given::healthy(fixture, &runtime, &certifies);
 
         let before = fixture.log_bytes();
-        let (result, _) = resume(&fixture, &harness, &given);
+        let (result, _) = resume(fixture, &harness, &given);
 
         let text = message(&result.expect_err("a finished run does not continue"));
         assert!(
-            text.contains("already finished"),
+            text.contains("already finished as"),
             "the refusal says the run is over ({tag}): {text}"
+        );
+        assert!(
+            text.contains("finalized"),
+            "and that step (b) finalized it before refusing ({tag}): {text}"
         );
         assert!(
             text.contains(match outcome {
@@ -1849,19 +1934,129 @@ fn resume_finalizes_halted_then_refuses() {
         assert_eq!(
             fixture.log_bytes(),
             before,
-            "a (b) refusal appends nothing ({tag})"
+            "finalization appends nothing: the log is byte-identical ({tag})"
+        );
+
+        let report = report_of(fixture);
+        assert_eq!(report.outcome, Some(outcome.clone()), "{tag}");
+        assert_eq!(
+            report.runner, fixture.started.runner,
+            "the report names the run's runner: kind, policy, image reference, id and digest \
+             from `run_started` ({tag})"
+        );
+        assert_eq!(report.run_id, RUN_ID);
+        {
+            let seen = harness.lock().unwrap_or_else(PoisonError::into_inner);
+            assert_eq!(
+                seen.count(
+                    EffectSiteId::RunDir(RunDirSite::WriteReport),
+                    HookPhase::After
+                ),
+                1,
+                "`RunDir.WriteReport` ran once ({tag})"
+            );
+            assert!(
+                seen.touched(EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot)),
+                "step (vi) ran ({tag})"
+            );
+        }
+
+        assert!(
+            !planted.beta_worktree.exists(),
+            "step (i) prunes the closed generation's worktree ({tag})"
         );
         assert!(
-            !fixture.public().join("report.json").exists(),
-            "PR7 does not finalize: `RunDir.WriteReport` is `t_finalize`, out of this slice's \
-             rows ({tag})"
+            !manager
+                .intents()
+                .expect("intents")
+                .contains(&planted.beta_slot),
+            "and its intent ({tag})"
         );
         assert!(
-            !harness
+            ref_target(fixture, planted.prepared_pin.as_str()).is_none(),
+            "step (iv) prunes the candidate-prepared pin ({tag})"
+        );
+        match outcome {
+            RunOutcome::Halted => {
+                assert_eq!(
+                    ref_target(fixture, planted.candidate.candidate_ref.as_str()).as_deref(),
+                    Some(planted.candidate.commit_sha.as_str()),
+                    "Halted retains the candidates ref as forensic output (R11)"
+                );
+                assert_eq!(
+                    report
+                        .retained_candidates
+                        .iter()
+                        .map(|retained| (
+                            retained.key,
+                            retained.generation,
+                            retained.candidates_ref.as_str(),
+                            retained.commit_sha.as_str(),
+                        ))
+                        .collect::<Vec<_>>(),
+                    vec![(
+                        ALPHA.0,
+                        GEN.0,
+                        planted.candidate.candidate_ref.as_str(),
+                        planted.candidate.commit_sha.as_str(),
+                    )],
+                    "and the report lists it with its SHA"
+                );
+            }
+            _ => {
+                assert_eq!(
+                    ref_target(fixture, planted.candidate.candidate_ref.as_str()),
+                    None,
+                    "Complete prunes the candidates ref (step (v))"
+                );
+                assert!(
+                    report.retained_candidates.is_empty(),
+                    "and the report, written before the pruning, already describes the pruned \
+                     state: {:?}",
+                    report.retained_candidates
+                );
+            }
+        }
+        assert!(
+            !manager.execution_root().exists(),
+            "step (vi) removes the emptied execution root (R18) ({tag})"
+        );
+        assert!(
+            manager
+                .refs_under(&crate::engine::topology::candidate::run_namespace(RUN_ID))
+                .expect("refs")
+                .iter()
+                .all(|(refname, _)| !refname.contains("/candidate-prepared/")),
+            "no candidate-prepared pin survives finalization ({tag})"
+        );
+
+        let report_bytes = std::fs::read(fixture.public().join("report.json")).expect("report");
+        let (again, _) = resume(fixture, &harness, &given);
+        let text = message(&again.expect_err("a finalized run refuses again"));
+        assert!(
+            text.contains("already finished as") && text.contains("already current"),
+            "the second resume finds the report current and refuses ({tag}): {text}"
+        );
+        assert_eq!(
+            std::fs::read(fixture.public().join("report.json")).expect("report"),
+            report_bytes,
+            "the report is regenerated only when missing or stale ({tag})"
+        );
+        assert_eq!(
+            harness
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
-                .touched(EffectSiteId::RunDir(RunDirSite::WriteReport)),
-            "and the report site never ran ({tag})"
+                .count(
+                    EffectSiteId::RunDir(RunDirSite::WriteReport),
+                    HookPhase::After
+                ),
+            1,
+            "and `RunDir.WriteReport` did not run again ({tag})"
+        );
+        assert_eq!(
+            fixture.log_bytes(),
+            before,
+            "still nothing appended ({tag})"
         );
     }
 }
@@ -12008,16 +12203,25 @@ fn declining_a_repairs_admission_fails_its_lineage_and_halts_the_run_only_when_a
             halts_run,
             "halts_run={halts_run}: the run ends on a decline exactly when the seam says so"
         );
-        let closure = match driven.progress.get(1) {
-            Some(Err(error)) => error.to_string(),
-            other => panic!(
-                "halts_run={halts_run}: with alpha failed and beta merged the run has only \
-                 its closure left, which this build refuses: {other:?}"
-            ),
+        let expected = if halts_run {
+            RunOutcome::Halted
+        } else {
+            RunOutcome::Complete
         };
         assert!(
-            closure.contains("closure derives"),
-            "halts_run={halts_run}: {closure}"
+            matches!(
+                driven.progress.get(1),
+                Some(Ok(Progress::Finished { outcome, closed: 0, .. })) if *outcome == expected
+            ),
+            "halts_run={halts_run}: with alpha failed and beta merged the run has only its \
+             closure left, and closure ends it as `{expected:?}` with no generation to close: \
+             {:?}",
+            driven.progress
+        );
+        assert_eq!(
+            replayed(&fixture).finished(),
+            Some(&expected),
+            "halts_run={halts_run}: the durable `run_finished` records the same outcome"
         );
         assert_eq!(driven.entitlements_held, 0, "halts_run={halts_run}");
     }

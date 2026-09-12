@@ -1067,7 +1067,10 @@ pub fn finalize_if_finished(
                 },
                 hooks,
             )?;
-            Err(super::finalize::refuse_continuation(root.run_id(), &finalized))
+            Err(super::finalize::refuse_continuation(
+                root.run_id(),
+                &finalized,
+            ))
         }
         RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(()),
     }

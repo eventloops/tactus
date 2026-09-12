@@ -26,11 +26,11 @@ use super::attempt::{
     Judge, JudgeError, JudgeIdentities, JudgeNames, Judgement, Judging, PlanRequest,
     ReviewInputPolicy, ReviewPasses, SnapshotDisposal, SnapshotOf, Subject, VerificationRequest,
 };
-use super::closure;
 use super::candidate::{
     CandidateJournal, JudgedTree, append_candidate_created, append_candidate_prepared,
     create_candidates_ref, pin_candidate, reclaim_after_creation, write_candidate_commit,
 };
+use super::closure;
 use super::dispatch::{
     DispatchKind, DispatchRequest, Dispatched, EventEmitter, OpenGeneration, dispatch,
     resume_open_no_attempt, task_slot,
