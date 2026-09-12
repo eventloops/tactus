@@ -867,19 +867,9 @@ impl Judge<'_> {
                 )
                 .map_err(JudgeError::Other)?;
 
-            let ids = (subject.invocations)(pass);
-            for ordinal in 0..outcome.invocations {
-                let id = if ordinal == 0 {
-                    ids.pass.clone()
-                } else {
-                    subject.identities.review_reask(pass, ordinal - 1)
-                };
-                self.ledger.register(&id).map_err(JudgeError::Other)?;
-                self.ledger.complete(&id).map_err(JudgeError::Other)?;
-            }
-
             let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
             let cost_usd = outcome.cost_usd;
+            let invocations = outcome.invocations;
             failure = review_failure(outcome.result, outcome.never_started);
             let record = super::super::classify::ReviewPassFacts {
                 pass: reviewer.lens.name(),
@@ -896,6 +886,18 @@ impl Judge<'_> {
             .record();
             account.charge(&record);
             reviews.push(record);
+
+            let ids = (subject.invocations)(pass);
+            for ordinal in 0..invocations {
+                let id = if ordinal == 0 {
+                    ids.pass.clone()
+                } else {
+                    subject.identities.review_reask(pass, ordinal - 1)
+                };
+                self.ledger.register(&id).map_err(JudgeError::Other)?;
+                self.ledger.complete(&id).map_err(JudgeError::Other)?;
+            }
+
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
                 self.manager
                     .remove_snapshot(self.hooks.effects(), &snapshot)

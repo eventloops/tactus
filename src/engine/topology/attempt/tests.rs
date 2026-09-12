@@ -222,6 +222,131 @@ fn every_process_of_an_attempt_is_recorded_reviewers_included() {
     assert!(process.balances(), "and every one of them settled");
 }
 
+struct CostedReview {
+    cost_usd: f64,
+}
+
+impl ReviewPasses for CostedReview {
+    fn run(
+        &self,
+        _cx: &review::ReviewCx<'_>,
+        _runner: &dyn Runner,
+        _invocations: &review::ReviewInvocations,
+    ) -> Result<review::ReviewOutcome, UpstrokeError> {
+        Ok(review::ReviewOutcome {
+            result: review::ReviewResult::Judged(crate::ir::Verdict {
+                pass: true,
+                reasons: Vec::new(),
+                required_changes: Vec::new(),
+                needs_human: false,
+            }),
+            cost_usd: Some(self.cost_usd),
+            invocations: 1,
+            transcript: PathBuf::new(),
+            never_started: false,
+        })
+    }
+}
+
+#[derive(Default)]
+struct SpendingAccount {
+    spend: crate::engine::topology::select::Spend,
+    charged: Vec<ReviewRecord>,
+}
+
+impl ReviewAccount for SpendingAccount {
+    fn charge(&mut self, review: &ReviewRecord) {
+        self.spend.record_review_cost(ALPHA, review.cost_usd);
+        self.charged.push(review.clone());
+    }
+}
+
+#[test]
+fn a_completed_review_is_charged_before_its_identity_is_settled() {
+    const SEQUENCE: u32 = 1;
+
+    let mut run = Run::started("charge-before-settle");
+    let mut process = Process::new();
+    let reviewers = vec![ReviewerPlan {
+        agent: AgentId::new(crate::engine::topology::scaffold::REVIEW_AGENT),
+        profile: crate::review::profile_for(
+            crate::engine::topology::scaffold::REVIEW_AGENT,
+            "review-model",
+            "review",
+            crate::ir::Effort::High,
+        ),
+        lens: review::Lens::Acceptance,
+        preflight_cli_version: None,
+        timeout: std::time::Duration::from_secs(120),
+    }];
+    let inputs = run.review_inputs();
+    let identities = SequenceIdentities::new(crate::topology::events::SequenceId(SEQUENCE));
+    let proposed = ObjectId::new(run.base().0).expect("the fixture's head commit is an object id");
+
+    process
+        .ledger
+        .register(&identities.review_pass(0, 0))
+        .expect("the injected registration takes the identity the pass will report");
+
+    let reviews = CostedReview { cost_usd: 2.5 };
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
+    let mut account = SpendingAccount::default();
+    let error = Judge {
+        manager: &run.fixture.manager,
+        hooks: &mut run.hooks,
+        runner: &run.runner,
+        slots: &mut process.slots,
+        ledger: &mut process.ledger,
+        adapters: &adapters,
+        paths: &run.paths,
+        reviews: &reviews,
+    }
+    .judge(
+        &Subject {
+            snapshot: SnapshotOf::Commit(proposed),
+            disposal: SnapshotDisposal::AfterTheTerminal,
+            names: JudgeNames::Integration {
+                sequence: u64::from(SEQUENCE),
+            },
+            identities: JudgeIdentities::Sequence(identities),
+            stem: format!("integration-s{SEQUENCE}"),
+            gates: &[],
+            reviewers: &reviewers,
+            inputs: &inputs,
+            prior_failure: None,
+            invocations: &move |pass| review::ReviewInvocations {
+                pass: identities.review_pass(pass, 0),
+                reask: identities.review_reask(pass, 0),
+            },
+        },
+        &mut account,
+    )
+    .expect_err("the injected registration refuses the identity the pass reported");
+
+    assert!(
+        matches!(
+            &error,
+            JudgeError::Other(UpstrokeError::Refused { message })
+                if message.contains("is already registered")
+        ),
+        "the refusal is the duplicate registration and not something before it: {error:?}"
+    );
+    assert_eq!(
+        account
+            .charged
+            .iter()
+            .map(|review| review.cost_usd)
+            .collect::<Vec<_>>(),
+        vec![Some(2.5)],
+        "the pass that returned is charged, whatever the settlement after it does"
+    );
+    assert!(
+        (account.spend.run_total() - 2.5).abs() < 1e-9,
+        "and the run total a ceiling reads carries it: {}",
+        account.spend.run_total()
+    );
+}
+
 #[test]
 fn a_refused_gate_ends_the_set_and_its_cause_survives() {
     let mut run = Run::started("gate-short-circuit");
