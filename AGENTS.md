@@ -102,15 +102,21 @@ against it locally.
 
 Merging is the owner's act, and since 2026-09-12 the delegation of it is standing rather than
 written per PR: the agent doing the work merges once the bar is met, and the body records that the
-merge was made under standing delegation and by which agent. The exception is a PR that edits
-`.github/workflows/`, `.github/scripts/` or `scripts/` — the three directories holding code that
-runs inside a required gate, `scripts/` among them because `.github/scripts/test-pr-ready-audit.sh`
-sources `scripts/pr-ready-audit.sh`, which sources `scripts/lane.sh` and runs
-`scripts/pr-review-parse.py`, so an edit there alone can make that gate exit `0` without running a
-fixture. The trust boundary rests on the owner reading any change to the gates, so that one is the
-owner's to merge unless the owner delegates it in writing for that PR. A delegation written for a
-class of PRs — every P1 fix, say — does not reach it: it was written before the PR existed, so it
-cannot be the owner's read of that PR's diff.
+merge was made under standing delegation and by which agent. **The standing form reaches a PR only
+where nothing in its diff can change what a required check runs, or how it judges what it ran** —
+ask it of every changed path: *were this file written to deceive, could a required check report
+success without having done its work?* Code a check executes, and configuration that binds what it
+executes or decides whether it passes, are on that side of the line; what a check reads as its
+subject is not. A `yes`, or an honest *I cannot tell*, leaves the PR with the owner — or with a
+delegation the owner wrote for that PR. Known examples, **not a closed set, and not a checklist that
+clears a PR by omission**: `.github/workflows/` and `.github/scripts/`; `scripts/`, which
+`.github/scripts/test-pr-ready-audit.sh` sources and executes, so an edit there alone can make that
+gate exit `0` without running a fixture; `.cargo/` and a root toolchain file, which rebind the
+compiler every leg runs and the runner every compiled test harness is handed to; `Cargo.toml`'s
+`[lints]` block; the CI-contract tests under `src/effects/`; the effect allowlists.
+Classifying the diff is the delegate's duty and no check enforces it. A delegation written for a
+class of PRs — every P1 fix, say — does not satisfy the exception: it was written before the PR
+existed, so it cannot be the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 
 ## Where things are
 
