@@ -1505,7 +1505,7 @@ parse_why() {  # parse_why FILE: what one refused parse said on stderr, and noth
 }
 # The shape the finding reported, and its control: valid head and base, `"verdict":"PASS"`, a
 # findings array carrying a P1, and then the second `findings` that erased it.
-dup_finding='{"id":"CRITICAL","severity":"P1"}'
+dup_finding='{"id":"CRITICAL","severity":"P\u0031"}'   # the escape the review that found this wrote: no `P1` for the stray scan to catch
 repeated_object \
   "{\"reviewed_sha\":\"$revived_head\",\"base_sha\":\"$revived_base\",\"verdict\":\"PASS\",\"findings\":[$dup_finding],\"findings\":[]}" \
   "$tmp/dup-findings.md"
