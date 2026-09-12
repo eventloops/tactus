@@ -29,6 +29,14 @@
 #       attestation workflows that record once pinned were retired with the App
 #       check (decisions/2026-08-23-retire-app-attestation.md); there is no
 #       privileged workflow left to pin.
+#   C5  No tracked path exists under reviews/findings/. The finding ledger
+#       moved to findings/ on 2026-09-12 (pull request #276), and git tracks
+#       files rather than directories: a branch cut before the move that adds
+#       a finding under the old prefix merges with no conflict and recreates
+#       the directory, holding findings no gate, lane rule or ledger reads.
+#       The prefix is matched case-sensitively and with its trailing slash, so
+#       reviews/FINDINGS.md, the closed ledger that differs from the moved
+#       directory only in case, never matches.
 #
 # WITHDRAWN, DELIBERATELY (round 5 of this file's review): this gate makes NO
 # claim about which cargo commands CI runs, whether CI executes them, or which
@@ -238,6 +246,30 @@ if [[ -f .github/workflows/pr-policy.yml ]]; then
   pin_branches .github/workflows/pr-policy.yml pull_request "$branch_list"
   pin_branches .github/workflows/pr-policy.yml merge_group "$branch_list"
   pin_types .github/workflows/pr-policy.yml merge_group "$merge_group_types"
+fi
+
+# --- C5. the finding ledger lives at findings/ and nowhere else -------------
+# Git tracks files, not directories. reviews/findings/ was moved to findings/
+# on 2026-09-12 (pull request #276). A branch cut before the move that ADDS a
+# file under the old prefix merges with no conflict -- the move deleted the old
+# paths and the branch adds new ones -- and master ends up with both
+# directories, the old one holding findings that no gate, lane rule or ledger
+# reads any more. A branch that MODIFIES an old path raises a modify/rename
+# conflict and needs no help from here. `git ls-files` answers from the index,
+# which on a clean checkout is the commit under test; the prefix test is bash's
+# own, case-sensitive whatever core.ignorecase says, so reviews/FINDINGS.md --
+# the closed ledger, which differs from the moved directory only in case -- is
+# never matched. The message says what to do, because whoever reads it is in
+# the middle of a rebase.
+old_ledger_paths=''
+while IFS= read -r -d '' path; do
+  [[ "$path" == reviews/findings/* ]] || continue
+  old_ledger_paths+="  $path"$'\n'
+done < <(git ls-files -z)
+if [[ -n "$old_ledger_paths" ]]; then
+  error "reviews/findings/ was moved to findings/ in pull request #276 (2026-09-12) and must not come back. This head tracks these paths under the old prefix:"
+  error "${old_ledger_paths%$'\n'}"
+  error "Rebase onto master and move them under findings/ with git mv: nothing reads reviews/findings/ any more, so a finding left there is filed nowhere."
 fi
 
 if (( failed )); then

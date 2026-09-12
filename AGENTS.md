@@ -185,3 +185,9 @@ one unset value. CI is unaffected.
 **`src/export.rs` pins sentences in the docs.** Its tests `include_str!` `README.md`,
 `MAINTAINING.md`, `design/15_design_event_log_resume_run_layout.md` and
 `design/25_design_export_decisions_schema.md`; a rewording there fails the suite.
+
+**`reviews/findings/` must not exist.** The finding ledger moved to `findings/` on 2026-09-12 (PR
+#276), and git tracks files, not directories: a branch cut before the move that adds a finding under
+the old prefix merges with no conflict and recreates the directory, holding findings nothing reads.
+`test-docs-consistency.sh` (C5) fails on any tracked path under the old prefix; the remedy is to
+rebase onto `master` and `git mv` the file under `findings/`.
