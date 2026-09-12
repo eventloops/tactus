@@ -89,6 +89,36 @@ were not — the ledger balanced the whole time, because an unregistered
 process is not an unsettled one. Balance is not the assertion; the **count**
 is.
 
+## `struct CostedReview {`
+
+A review pass that returns, reporting a cost, and touches no ledger.
+
+The production passes register nothing themselves: [`Judge::judge`] settles the
+identities a pass reports once it has returned, and that settlement is what the
+witness below puts after the charge.
+
+## `struct SpendingAccount {`
+
+`run.rs`'s `SpendAccount`, which is private to it: the run total a ceiling
+reads, and the records an unavailable terminal carries out.
+
+## `fn a_completed_review_is_charged_before_its_identity_is_settled() {`
+
+**A review pass that returned, billed, is charged before anything fallible runs
+after it.**
+
+PR8-R2-CHARGE-ORDER. Settling the identities the pass reports is fallible — an
+identity already registered is refused — and a refusal there must not discard a
+cost the agent has already incurred. A completed, billed review whose cost is
+carried nowhere is the defect this pull request exists to close; after the
+record gained the charge, the ordering is the whole of what keeps it closed on
+this path.
+
+The duplicate registration is injected. Ordinary scheduler generation of a
+duplicate review identity is not established, here or in the review that found
+this; what is established is that no fallible step may sit between the pass
+returning and the charge.
+
 ## `fn a_refused_gate_ends_the_set_and_its_cause_survives() {`
 
 **A refused gate ends the gate set, and its cause survives.**

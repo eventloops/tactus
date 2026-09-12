@@ -305,6 +305,76 @@ fn reported_spend_replays_integration_verification_records() {
 }
 
 #[test]
+fn reported_spend_replays_an_unavailable_terminals_reviews_against_the_candidate_it_verified() {
+    let unavailable = |sequence: u32, reviews: Vec<crate::events::ReviewRecord>| {
+        ev(TopologyEventBody::MergeVerificationUnavailable {
+            data: crate::topology::events::MergeVerificationUnavailable {
+                sequence: crate::topology::events::SequenceId(sequence),
+                cause: crate::topology::events::UnavailableCause::Infrastructure {
+                    kind: crate::topology::events::InfrastructureKind::ReviewerTimeout,
+                },
+                outcome: crate::topology::events::UnavailableOutcome::Deferred { defers: 1 },
+                reviews,
+            },
+        })
+    };
+    let started_at = |sequence: u32, key: TaskKey| {
+        ev(TopologyEventBody::MergeVerificationStarted {
+            data: crate::topology::events::MergeVerificationStarted {
+                sequence: crate::topology::events::SequenceId(sequence),
+                candidate: candidate_of(key, 0),
+                basis: crate::topology::events::VerificationBasis::StaleClean {
+                    prepared_ref: GitRef(format!("refs/upstroke/select/prepared/{sequence}")),
+                },
+                expected_head: sha("head"),
+                proposed_sha: sha("proposal"),
+            },
+        })
+    };
+
+    let paired = Spend::replay(&[
+        started_at(1, ALEPH),
+        unavailable(1, vec![review_costing(Some(2.5)), review_costing(None)]),
+    ]);
+    assert!(
+        (paired.run_usd() - 2.5).abs() < f64::EPSILON,
+        "the terminal's reviews reach the run total: {}",
+        paired.run_usd()
+    );
+    assert!(
+        (paired.task_usd(ALEPH) - 2.5).abs() < f64::EPSILON,
+        "and the task the started event named: {}",
+        paired.task_usd(ALEPH)
+    );
+    assert!(paired.task_usd(BET).abs() < f64::EPSILON);
+
+    let unpaired = Spend::replay(&[unavailable(1, vec![review_costing(Some(2.5))])]);
+    assert!(
+        (unpaired.run_usd() - 2.5).abs() < f64::EPSILON,
+        "a terminal the slice gives no start for still charges the run, because losing the cost \
+         is the overspend this replay exists to prevent: {}",
+        unpaired.run_usd()
+    );
+    for key in [ALEPH, BET, GIMEL] {
+        assert!(
+            unpaired.task_usd(key).abs() < f64::EPSILON,
+            "and it is attributed to no task, because nothing in the slice names one"
+        );
+    }
+
+    let crossed = Spend::replay(&[
+        started_at(1, ALEPH),
+        unavailable(2, vec![review_costing(Some(2.5))]),
+    ]);
+    assert!(
+        (crossed.run_usd() - 2.5).abs() < f64::EPSILON,
+        "a terminal whose sequence is not the open one is not attributed to that candidate: {}",
+        crossed.run_usd()
+    );
+    assert!(crossed.task_usd(ALEPH).abs() < f64::EPSILON);
+}
+
+#[test]
 fn reported_spend_replays_both_record_carrying_events() {
     let mut fold = started();
     let mut log = Vec::new();

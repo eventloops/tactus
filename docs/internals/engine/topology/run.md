@@ -418,9 +418,11 @@ asked it (`pr8-triage.md` §5, adequacy 2).
 
 The ceiling's ledger, charged before the terminal is appended, exactly as
 an attempt's reviews are charged in `settle`; `Spend::replay` rebuilds it
-from the terminal's record. An unavailable terminal carries no review
-record, so a review that ended in a park or an outage is charged live and
-not on replay (`pr8-plan.md` R22).
+from the terminal's record. All three record-carrying terminals do carry
+one: `merge_prepared` and `merge_rejected` inside their verification
+record, and `merge_verification_unavailable` in its own `reviews`, so a
+review that ended in a park or an outage is charged live *and* on replay
+(`PR8-R2-SPEND-REPLAY`; `pr8-plan.md` R22 is superseded).
 
 ## `impl Verification for IntegrationCx<'_, '_>` › `Err(JudgeError::Runner(error)) => match error.fate {`
 
@@ -1743,7 +1745,7 @@ sequence), `Pending` for an admission, a failed lineage for a decline
 with its queue position consumed and its lease released, halting per
 `decline_halts_run`.
 
-## `impl Verification for IntegrationCx<'_, '_> {` › `match self.judge_proposal(request) {`
+## `impl Verification for IntegrationCx<'_, '_> {` › `match self.judge_proposal(request, &mut charged) {`
 
 The reviews are charged as each pass completes, inside `judge` (`SpendAccount`
 below), and **not** from the judgement returned here: a judgement that fails
@@ -1752,18 +1754,28 @@ after a paid pass carries no reviews, and the Git-error arm settles the sequence
 another sequence in the same incarnation against a total that pass is missing
 from.
 
+`charged` is why that same failure no longer loses the record as well as the
+judgement. The account fills it as it charges, so it holds every pass the
+verification paid for whether or not a `Judgement` came back, and each
+[`Verified::Unavailable`] arm carries it to the terminal. The list is the
+account's, not the judgement's, which is the only reading under which the
+unjudged arm has anything to record.
+
 ## `struct SpendAccount<'a> {`
 
 The run's live account: each completed integration review is charged to the
 run's `Spend` as it returns, so the ceiling the next selection is admitted
-against has already paid for it.
+against has already paid for it. It also keeps the record it charged, in
+`charged`, because the terminal that ends this verification has to carry the
+same passes: without them a restart replayed a total without whatever a park or
+an infrastructure deferral had already paid for, and the incarnation after the
+restart admitted an integration the one before it refused
+(`PR8-R2-SPEND-REPLAY`).
 
-The replay of this path is a separate and deferred matter. A verification that
-reaches `merge_verification_unavailable` carries no review record in the frozen
-terminal, so a restart restores a total without it — `PR8-R2-SPEND-REPLAY`,
-which needs a wire-vocabulary change this slice may not make. That gap is about
-a restart; this account is about one incarnation, and holding the cost inside
-it needs no vocabulary at all.
+The seam takes the whole `ReviewRecord` rather than its cost for that reason,
+and the charge happens where the record is built, before the ledger and
+snapshot steps that can fail — so nothing is charged that is not also
+retained, and nothing is retained that is not also charged.
 
 ## `struct OpenAsked {`
 

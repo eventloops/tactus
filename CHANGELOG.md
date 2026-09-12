@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A schema-4 integration verification that ends unavailable — parked for a person, or deferred by
+  an infrastructure outage — now records the review passes it paid for, so a resumed run's reported
+  spend is the total the incarnation before it reached. `merge_verification_unavailable` gains a
+  required `reviews` field; a schema-4 log written without it is refused rather than replayed to a
+  total it cannot account for. Schema 4 is unreleased and inert by default, so no released run is
+  affected (`DESIGN.md` §26, "The unavailable terminal's spend").
 - A Unix private helper (the cleanup reaper, the job-control guard) can be ended through a name
   the kernel cannot re-issue instead of through its pid. **Opt-in, Linux 5.4+, off by default:**
   with `UPSTROKE_HELPER_IDENTITY=1` each helper is created by `clone3` with `CLONE_PIDFD`,

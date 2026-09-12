@@ -110,13 +110,13 @@ pub trait ReviewPasses {
 }
 
 pub trait ReviewAccount {
-    fn charge(&mut self, cost_usd: Option<f64>);
+    fn charge(&mut self, review: &ReviewRecord);
 }
 
 pub struct NoReviewAccount;
 
 impl ReviewAccount for NoReviewAccount {
-    fn charge(&mut self, _cost_usd: Option<f64>) {}
+    fn charge(&mut self, _review: &ReviewRecord) {}
 }
 
 #[derive(Debug, Clone)]
@@ -866,10 +866,29 @@ impl Judge<'_> {
                     &(subject.invocations)(pass),
                 )
                 .map_err(JudgeError::Other)?;
-            account.charge(outcome.cost_usd);
+
+            let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
+            let cost_usd = outcome.cost_usd;
+            let invocations = outcome.invocations;
+            failure = review_failure(outcome.result, outcome.never_started);
+            let record = super::super::classify::ReviewPassFacts {
+                pass: reviewer.lens.name(),
+                agent: &reviewer.profile.agent,
+                model: &reviewer.profile.model,
+                adapter: adapter.id(),
+                preflight_cli_version: reviewer.preflight_cli_version.clone(),
+                effort: reviewer.profile.effort,
+                pool: crate::engine::attempt::pool_option(&reviewer.profile.pool),
+                cost_usd,
+                unavailable,
+                failed: failure.is_some(),
+            }
+            .record();
+            account.charge(&record);
+            reviews.push(record);
 
             let ids = (subject.invocations)(pass);
-            for ordinal in 0..outcome.invocations {
+            for ordinal in 0..invocations {
                 let id = if ordinal == 0 {
                     ids.pass.clone()
                 } else {
@@ -879,24 +898,6 @@ impl Judge<'_> {
                 self.ledger.complete(&id).map_err(JudgeError::Other)?;
             }
 
-            let unavailable = matches!(outcome.result, review::ReviewResult::Unavailable { .. });
-            let cost_usd = outcome.cost_usd;
-            failure = review_failure(outcome.result, outcome.never_started);
-            reviews.push(
-                super::super::classify::ReviewPassFacts {
-                    pass: reviewer.lens.name(),
-                    agent: &reviewer.profile.agent,
-                    model: &reviewer.profile.model,
-                    adapter: adapter.id(),
-                    preflight_cli_version: reviewer.preflight_cli_version.clone(),
-                    effort: reviewer.profile.effort,
-                    pool: crate::engine::attempt::pool_option(&reviewer.profile.pool),
-                    cost_usd,
-                    unavailable,
-                    failed: failure.is_some(),
-                }
-                .record(),
-            );
             if subject.disposal == SnapshotDisposal::AsEachRoleFinishes {
                 self.manager
                     .remove_snapshot(self.hooks.effects(), &snapshot)

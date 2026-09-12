@@ -822,6 +822,7 @@ impl super::integrate::Verification for Run {
                 Ok(super::integrate::Verified::Unavailable {
                     kind: crate::topology::events::InfrastructureKind::RunnerSpawnFailure,
                     detail: error.to_string(),
+                    reviews: Vec::new(),
                 })
             }
             Err(super::attempt::JudgeError::Other(error)) => Err(error),

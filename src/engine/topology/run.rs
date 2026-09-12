@@ -140,12 +140,14 @@ fn implementer_binding(
 
 impl Verification for IntegrationCx<'_, '_> {
     fn verify(&mut self, request: &VerifyRequest<'_>) -> Result<Verified, UpstrokeError> {
-        match self.judge_proposal(request) {
+        let mut charged = Vec::new();
+        match self.judge_proposal(request, &mut charged) {
             Ok(judgement) => Ok(Verified::Judged(judgement)),
             Err(JudgeError::Runner(error)) => match error.fate {
                 ProcessFate::NeverStarted => Ok(Verified::Unavailable {
                     kind: InfrastructureKind::RunnerSpawnFailure,
                     detail: error.to_string(),
+                    reviews: charged,
                 }),
                 ProcessFate::Gone => Ok(Verified::Unavailable {
                     kind: InfrastructureKind::Other {
@@ -156,6 +158,7 @@ impl Verification for IntegrationCx<'_, '_> {
                         ),
                     },
                     detail: error.to_string(),
+                    reviews: charged,
                 }),
                 ProcessFate::Unresolved => Err(error.into()),
             },
@@ -167,6 +170,7 @@ impl Verification for IntegrationCx<'_, '_> {
                     ),
                 },
                 detail: message,
+                reviews: charged,
             }),
             Err(JudgeError::Other(error)) => Err(error),
         }
@@ -178,7 +182,11 @@ impl Verification for IntegrationCx<'_, '_> {
 }
 
 impl IntegrationCx<'_, '_> {
-    fn judge_proposal(&mut self, request: &VerifyRequest<'_>) -> Result<Judgement, JudgeError> {
+    fn judge_proposal(
+        &mut self,
+        request: &VerifyRequest<'_>,
+        charged: &mut Vec<crate::events::ReviewRecord>,
+    ) -> Result<Judgement, JudgeError> {
         let key = request.candidate.key;
         let (entry, base, implementer) = {
             let fold = &*self.emitter.state.fold;
@@ -293,6 +301,7 @@ impl IntegrationCx<'_, '_> {
         let mut account = SpendAccount {
             spend: &mut *self.spend,
             key,
+            charged,
         };
         judge.judge(
             &Subject {
@@ -320,11 +329,13 @@ impl IntegrationCx<'_, '_> {
 struct SpendAccount<'a> {
     spend: &'a mut Spend,
     key: TaskKey,
+    charged: &'a mut Vec<crate::events::ReviewRecord>,
 }
 
 impl crate::engine::topology::attempt::ReviewAccount for SpendAccount<'_> {
-    fn charge(&mut self, cost_usd: Option<f64>) {
-        self.spend.record_review_cost(self.key, cost_usd);
+    fn charge(&mut self, review: &crate::events::ReviewRecord) {
+        self.spend.record_review_cost(self.key, review.cost_usd);
+        self.charged.push(review.clone());
     }
 }
 

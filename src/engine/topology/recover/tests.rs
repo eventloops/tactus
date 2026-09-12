@@ -9139,7 +9139,7 @@ fn the_production_verifier_judges_the_recorded_proposal_and_removes_its_snapshot
 }
 
 #[test]
-fn a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_vocabulary_gap() {
+fn a_paid_review_that_parks_is_charged_live_and_its_cost_replays() {
     let options =
         crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify);
     let fixture = Fixture::two_tasks("paid-park");
@@ -9190,15 +9190,106 @@ fn a_paid_review_that_parks_is_charged_live_and_its_replay_loss_is_the_deferred_
         driven.spend_after
     );
 
+    assert_eq!(
+        unavailable_terminals(&driven.log)
+            .iter()
+            .map(|terminal| terminal
+                .reviews
+                .iter()
+                .map(|review| review.cost_usd)
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        vec![vec![Some(2.5)]],
+        "the parked terminal carries the review pass its verification charged"
+    );
     let replayed = crate::engine::topology::select::Spend::replay(&driven.log).run_total();
     assert!(
-        (replayed - driven.spend_before).abs() < 1e-9,
-        "PR8-R2-SPEND-REPLAY (deferred): the frozen `merge_verification_unavailable` carries no \
-         review record, so a replay restores {replayed} where the incarnation that parked the \
-         candidate had reached {}; `decisions.coordinator_integration.dispositions` requires the \
-         spend recorded and the vocabulary cannot carry it (Class C). When the terminal gains its \
-         record this assertion fails and the ledger row closes",
+        (replayed - driven.spend_after).abs() < 1e-9,
+        "PR8-R2-SPEND-REPLAY: a replay restores {replayed} where the incarnation that parked the \
+         candidate reached {}; `merge_verification_unavailable` now carries the review records \
+         the verification charged, so replay and the live charge agree",
         driven.spend_after
+    );
+}
+
+/// PR8-R2-SPEND-REPLAY's own sequence, across the restart that is the whole of
+/// it: the paid park charges the run live, the answer returns the candidate,
+/// and a second incarnation replaying that log must refuse the integration the
+/// first one refused. Before the terminal carried its reviews the replayed
+/// total came back without the 2.50 and the restarted selector admitted it.
+#[test]
+fn the_cost_of_a_parked_verification_still_refuses_the_next_integration_after_a_restart() {
+    let options =
+        crate::engine::coordinator::topology_question_options(crate::ir::QuestionKind::Clarify);
+    let fixture = Fixture::two_tasks("paid-park-restart");
+    plant_stale_verification(&fixture);
+    let paid = DriveSeams {
+        review_needs_human: true,
+        review_cost_usd: Some(2.5),
+        run_ceiling_usd: Some(2.2),
+        answer: Some(crate::ir::Answer::Answered {
+            text: options[0].clone(),
+        }),
+        ..DriveSeams::default()
+    };
+    let first = drive_as(
+        &fixture,
+        "resumer-park",
+        &runtime_holding_the_record(),
+        &paid,
+        2,
+        &driven_runner(&paid),
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    let shapes: Vec<String> = first
+        .progress
+        .iter()
+        .map(|step| match step {
+            Ok(Progress::Unavailable { parked, .. }) => format!("unavailable(parked={parked})"),
+            Ok(Progress::Answered { declined, .. }) => format!("answered(declined={declined})"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shapes,
+        vec!["unavailable(parked=true)", "answered(declined=false)"],
+        "the paid review parks and the answer returns the candidate to the queue"
+    );
+    assert!(
+        first.spend_before < 2.2 && first.spend_after > 2.2,
+        "the ceiling sits between the first incarnation's opening and closing total: {} < 2.2 < {}",
+        first.spend_before,
+        first.spend_after
+    );
+
+    let restarted = DriveSeams {
+        run_ceiling_usd: Some(2.2),
+        ..DriveSeams::default()
+    };
+    let second = drive_as(
+        &fixture,
+        "resumer-restart",
+        &runtime_holding_the_record(),
+        &restarted,
+        1,
+        &driven_runner(&restarted),
+        &mut HarnessTopologyHooks::new(harness()),
+    );
+    assert!(
+        matches!(second.progress.first(), Some(Ok(Progress::BudgetExceeded))),
+        "the restarted incarnation refuses the integration the one before it refused: {:?}",
+        second.progress
+    );
+    assert!(
+        second.reviewer_models.is_empty(),
+        "so no reviewer was invoked by it: {:?}",
+        second.reviewer_models
+    );
+    assert!(
+        (second.spend_before - first.spend_after).abs() < 1e-9,
+        "and its replayed total is the one the parked incarnation reached: {} vs {}",
+        second.spend_before,
+        first.spend_after
     );
 }
 
@@ -9293,6 +9384,7 @@ fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {
                         options: options.clone(),
                     },
                 },
+                reviews: Vec::new(),
             },
         }],
     );
@@ -10615,6 +10707,26 @@ fn a_completed_integration_review_is_charged_when_the_next_reviewers_snapshot_fa
         1,
         "one review crossed the ceiling, so this incarnation admits no further review: {:?}",
         driven.reviewer_models
+    );
+    assert_eq!(
+        unavailable
+            .iter()
+            .map(|terminal| terminal
+                .reviews
+                .iter()
+                .map(|review| review.cost_usd)
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        vec![vec![Some(2.5)]],
+        "the deferred terminal carries the pass that returned, which is the whole of the spend \
+         this verification made: {unavailable:?}"
+    );
+    let replayed = crate::engine::topology::select::Spend::replay(&driven.log).run_total();
+    assert!(
+        (replayed - driven.spend_after).abs() < 1e-9,
+        "and a replay charges it again, so a restart is refused where this incarnation was: \
+         {replayed} vs {}",
+        driven.spend_after
     );
 }
 

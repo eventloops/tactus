@@ -617,6 +617,22 @@ rejection's — carries them, so a replay charges the same total.
 Any registered entry will do: `Spend::replay` reads the record's
 reviews and never the spawn it registers.
 
+## `fn reported_spend_replays_an_unavailable_terminals_reviews_against_the_candidate_it_verified() {`
+
+`Spend::replay`'s third review-carrying terminal, over the three shapes
+the pairing can take. Paired with the start of its own sequence, the
+reviews reach the run and the candidate's task. With no start in the
+slice, the run is charged and no task is — the only wrong answer that
+matters is losing the cost, since that is the overspend the whole path
+exists to prevent. With a start of another sequence, the terminal is not
+attributed to that candidate, so a mispairing cannot silently bill the
+wrong task.
+
+The middle two cases are unreachable through a resume: the fold refuses
+an unavailable record that is not the open transaction's. They are here
+because `replay` is `pub` over an arbitrary slice, and because the
+failure direction has to be the safe one wherever it is called from.
+
 ## `fn register_runnable_repair(fold: &mut TopologyFold) {`
 
 Reject the queued candidate of `GIMEL` on a conflict, registering a

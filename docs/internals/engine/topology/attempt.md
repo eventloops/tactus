@@ -1439,9 +1439,16 @@ the account holding what was spent.
 A pass whose `run` returns an error is not charged: no outcome means no cost was
 reported, and unknown spend is reported as unknown (INV-14).
 
-## `pub trait ReviewAccount {` › `fn charge(&mut self, cost_usd: Option<f64>);`
+## `pub trait ReviewAccount {` › `fn charge(&mut self, review: &ReviewRecord);`
 
 Charge one completed review pass, whose reported cost may be unknown.
+
+The whole record and not just its cost, because the caller that charges is
+also the one that has to *record* what it charged. An integration verification
+ends in a durable terminal carrying its review records, and on the arm where
+`judge` failed after a paid pass there is no `Judgement` to take them from — so
+the account is the only thing that saw them. Handing over the record costs the
+callers that keep no account nothing: [`NoReviewAccount`] ignores it.
 
 ## `pub struct NoReviewAccount;`
 
@@ -1452,8 +1459,12 @@ writes, and the test scaffold judges nothing it pays for. It is a named type
 rather than an `Option`, so a caller that judges cannot reach `judge` without
 saying what it does with the cost.
 
-## `for (index, reviewer) in subject.reviewers.iter().enumerate() {` › `account.charge(outcome.cost_usd);`
+## `for (index, reviewer) in subject.reviewers.iter().enumerate() {` › `account.charge(&record);`
 
 The pass has returned, so its cost is spent. Charge it before anything below
 can fail and discard the judgement: the invocation ledger, the snapshot
 removal, and the next iteration's snapshot creation are all `?` from here on.
+
+The record is built first and charged from, then pushed, so the account and
+`reviews` hold the same value and the charge still sits above every `?` that
+follows. Nothing fallible runs between the pass returning and the charge.
