@@ -379,22 +379,23 @@ fixed whatever its label, as step 5 says.
 **Trust boundary.** There is one trusted same-repository writer: the owner. A pull request can
 edit `ci.yml`, `pr-policy.yml` and the validators they run and still turn both contexts green, so
 the checks catch honest mistakes and are not the security boundary. The boundary is that only the
-owner merges — or an agent the owner has delegated to, which since 2026-09-12 is a standing
-delegation rather than one written per pull request — after an independent review recorded per step
-4, and that the diff the owner reads includes any change to the gates.
+owner merges — or an agent the owner has delegated to, under the standing delegation of 2026-09-12
+or a delegation the owner wrote for that pull request — after an independent review recorded per
+step 4, and that the diff the owner reads includes any change to the gates.
 
 **The second half of that is what the standing delegation had to be built around.** A delegation
 written for one pull request was the occasion of the owner's read; a standing one removes the
-occasion, and green checks cannot stand in for it — the opening sentences above are the reason, and
-they are why this clause and not the checks is the boundary. So the standing form stops at the
-gates: a pull request editing `.github/workflows/` or `.github/scripts/` is the owner's to merge,
-or carries a delegation the owner wrote for that pull request — not one written for a class of pull
-requests, which cannot have been the occasion of a read of a diff that did not yet exist. Either
-way the owner has read the diff that changed them. Step 7 states the rule and its cost. What the
-change does move is the classification — whether a diff touches the gates is the delegate's call
-first, no check enforces it, and the merge commit's own diff is the record after the fact. The
-delegate also merges on the owner's credential rather than on one of its own, so the trusted
-same-repository writer is still the owner and still one.
+occasion, and green checks cannot stand in for it — the opening sentences above say why: a pull
+request can edit the checks that judge it, which is what makes this clause and not them the
+boundary. So the standing form stops at the gates: a pull request editing `.github/workflows/` or
+`.github/scripts/` is the owner's to merge, or carries a delegation the owner wrote for that pull
+request — not one written for a class of pull requests, which cannot have been the occasion of a
+read of a diff that did not yet exist. Either way the owner has read the diff that changed the
+gates. Step 7 states the rule and its cost. What the change does move is the classification —
+whether a diff touches the gates is the delegate's call first, no check enforces it, and the merge
+commit's own diff is the record after the fact. The delegate also merges on the owner's credential
+rather than on one of its own, so the trusted same-repository writer is still the owner and still
+one.
 
 No automated process merges or mints a merge-gating check: there is no machine review check, no
 App, and no token that can attest. A delegate pressing merge is not that process — it is the
