@@ -2706,12 +2706,19 @@ mod termination {
             for fd in [self.command_fd, self.ack_fd, self._command_keepalive_fd] {
                 close_fd(fd);
             }
-            // The same ending the descriptor-configuration failure makes, and
-            // the same wait: `kill` then `waitpid` asking for no exit status,
-            // which is the call this site has always made. Killing the guard
-            // closes its probe pipe, so the descriptor-scrubbed grandchild
-            // exits as well.
-            end_unready_guard(self.pid, self.identity, EndingWait::AskingForNoStatus)
+            // The same ending the descriptor-configuration failure makes, with
+            // this site's own wait and this site's own answer to an interrupted
+            // one: `kill` then `waitpid` asking for no exit status, made again
+            // while it is interrupted, which is what this site has always done
+            // — now up to `INTERRUPTED_WAIT_ATTEMPTS` times rather than without
+            // a bound. Killing the guard closes its probe pipe, so the
+            // descriptor-scrubbed grandchild exits as well.
+            end_unready_guard(
+                self.pid,
+                self.identity,
+                EndingWait::AskingForNoStatus,
+                EndingRetry::WhileInterrupted,
+            )
         }
 
         fn arm(self) -> bool {
@@ -3393,10 +3400,13 @@ mod termination {
             for fd in [command[0], command[1], ack[0]] {
                 close_fd(fd);
             }
+            // The wait this site has always made: once, asking for no exit
+            // status. An interrupted wait is reported, not made again.
             let end = describe_helper_end(end_unready_guard(
                 pid,
                 identity,
                 EndingWait::AskingForNoStatus,
+                EndingRetry::Once,
             ));
             return Err(format!(
                 "configuring Unix job-control guard descriptors; ending it: {end}"
@@ -3425,10 +3435,13 @@ mod termination {
             for fd in [command[0], command[1], ack[0]] {
                 close_fd(fd);
             }
+            // The wait this site has always made: once, collecting the exit
+            // status. An interrupted wait is reported, not made again.
             let end = describe_helper_end(end_unready_guard(
                 pid,
                 identity,
                 EndingWait::CollectingStatus,
+                EndingRetry::Once,
             ));
             return Err(format!(
                 "Unix job-control guard did not initialize; waited {waited:?} of \
@@ -3446,7 +3459,44 @@ mod termination {
         AskingForNoStatus,
     }
 
-    fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int, wait: EndingWait) -> HelperEnd {
+    /// How a site answers an interrupted wait, which is a per-site choice for
+    /// the same reason `EndingWait` is: these sites do not all wait alike.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum EndingRetry {
+        /// Make the wait once and report what it answered, interrupted or not.
+        /// This is what the descriptor-configuration failure and the readiness
+        /// failure have each always done.
+        Once,
+        /// Make the wait again while it is interrupted, up to
+        /// `INTERRUPTED_WAIT_ATTEMPTS` times, because giving up on the first
+        /// `EINTR` is what would leave the killed helper unreaped. This is what
+        /// `Guard::abort_setup` has always done, now with the bound §7 requires:
+        /// a wait that is always interrupted returns instead of never returning.
+        WhileInterrupted,
+    }
+
+    /// The bound on `EndingRetry::WhileInterrupted`. A wait is interrupted by a
+    /// signal that arrived while it blocked, so the retry exists for a handful
+    /// of deliveries, not for a stream of them; a wait that is refused this many
+    /// times running is being refused, not interrupted, and the caller is told
+    /// so rather than waiting for an answer that is not coming.
+    const INTERRUPTED_WAIT_ATTEMPTS: u32 = 1024;
+
+    impl EndingRetry {
+        fn attempts(self) -> u32 {
+            match self {
+                EndingRetry::Once => 1,
+                EndingRetry::WhileInterrupted => INTERRUPTED_WAIT_ATTEMPTS,
+            }
+        }
+    }
+
+    fn end_unready_guard(
+        pid: libc::pid_t,
+        identity: libc::c_int,
+        wait: EndingWait,
+        retry: EndingRetry,
+    ) -> HelperEnd {
         #[cfg(target_os = "linux")]
         if identity >= 0 {
             return end_helper_through_identity(identity);
@@ -3460,11 +3510,11 @@ mod termination {
         let killed = unsafe { libc::kill(pid, libc::SIGKILL) };
         let kill_errno = if killed == 0 { 0 } else { last_errno() };
         let mut status = 0;
-        // An interrupted wait has collected nothing, so it is made again;
-        // giving up on `EINTR` is what would leave the killed helper unreaped.
-        // This is the retry `Guard::abort_setup` has always made.
-        let (waited_pid, wait_errno) = loop {
-            let waited_pid = match wait {
+        let attempts = retry.attempts();
+        let mut waited_pid = -1;
+        let mut wait_errno = 0;
+        for attempt in 1..=attempts {
+            waited_pid = match wait {
                 // SAFETY: as above, and `status` is writable for the call.
                 EndingWait::CollectingStatus => unsafe { libc::waitpid(pid, &mut status, 0) },
                 // SAFETY: as above, and `waitpid` writes nothing through the
@@ -3474,12 +3524,14 @@ mod termination {
                 },
             };
             if waited_pid >= 0 {
-                break (waited_pid, 0);
+                wait_errno = 0;
+                break;
             }
-            if !last_errno_is_interrupted() {
-                break (waited_pid, last_errno());
+            wait_errno = last_errno();
+            if wait_errno != libc::EINTR || attempt == attempts {
+                break;
             }
-        };
+        }
         HelperEnd {
             kill_errno,
             waited: waited_pid,
@@ -7212,6 +7264,147 @@ mod termination {
                     &output,
                 );
             }
+        }
+
+        /// Run a fixture that must *return*, and fail if it does not.
+        /// `run_fixture` blocks until its child exits, so a fixture whose wait
+        /// never returns would hang the suite instead of failing it. This one
+        /// carries a deadline and kills the fixture's process group when the
+        /// deadline passes.
+        #[cfg(target_os = "linux")]
+        fn run_fixture_within(fixture: &str, vars: &[(&str, &str)], bound: Duration) {
+            use std::os::unix::process::CommandExt;
+
+            let mut command = Command::new(std::env::current_exe().expect("test executable"));
+            command.args([fixture, "--ignored", "--nocapture"]);
+            command.env_remove(HELPER_IDENTITY_SWITCH);
+            for (name, value) in vars {
+                command.env(name, value);
+            }
+            let mut fixture_process = command
+                .process_group(0)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap_or_else(|error| panic!("spawn the {fixture} fixture: {error}"));
+            let group =
+                i32::try_from(fixture_process.id()).expect("the fixture's process-group id");
+            let deadline = Instant::now() + bound;
+            loop {
+                match fixture_process.try_wait() {
+                    Ok(Some(status)) => {
+                        assert!(status.success(), "{fixture}: status {status}");
+                        return;
+                    }
+                    Ok(None) => {}
+                    Err(error) => panic!("poll the {fixture} fixture: {error}"),
+                }
+                if Instant::now() >= deadline {
+                    // SAFETY: the fixture is our unreaped process-group leader
+                    // and `CommandExt::process_group` isolated its group, so
+                    // this reaches the fixture and its children and nothing
+                    // else.
+                    let signalled = unsafe { libc::kill(-group, libc::SIGKILL) };
+                    let reaped = fixture_process.wait().is_ok();
+                    panic!(
+                        "{fixture} did not return within {bound:?}; kill={signalled}, \
+                         reaped={reaped}"
+                    );
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        /// The launch's own descriptor-configuration failure, with every
+        /// `wait4` answered `EINTR`. That site ends the guard with the single
+        /// wait master made, so the launch reports what the interrupted wait
+        /// answered rather than making the wait again for as long as it is
+        /// interrupted.
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn guard_descriptor_failure_interrupted_wait_helper() {
+            if fixture_variable("UPSTROKE_GUARD_DESCRIPTOR_FAILURE_INTERRUPTED_WAIT_HELPER")
+                .is_none()
+            {
+                return;
+            }
+            // As in `guard_descriptor_failure_end_helper`: the command pipe is
+            // the first pair the launch takes and `pipe2` hands out the lowest
+            // free numbers, so taking a pair and giving it back learns the
+            // write end's number.
+            let [command_read, command_write] =
+                create_cloexec_pipe().expect("a stand-in for the launch's command pipe");
+            close_fd(command_read);
+            close_fd(command_write);
+            refuse_fcntl_on(command_write);
+            answer_call_with(libc::SYS_wait4, seccomp_refuse_with(libc::EINTR));
+            // Through the public entry point rather than `spawn_guard`: this is
+            // the path a caller takes, and what the caller receives is what is
+            // asserted below.
+            let Err(error) = crate::agent::proc::test_support::run_with_timeout(
+                Command::new("/bin/true"),
+                "",
+                Duration::from_secs(5),
+            ) else {
+                panic!("a launch whose guard descriptors could not be configured was accepted")
+            };
+            let reported = error.to_string();
+            assert!(
+                reported.contains(
+                    "configuring Unix job-control guard descriptors; ending it: SIGKILL was \
+                     delivered, and the wait collected nothing: Interrupted system call"
+                ),
+                "the launch does not report what its interrupted wait answered: {reported}"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn a_descriptor_failure_whose_wait_is_interrupted_reports_that_and_returns() {
+            run_fixture_within(
+                "guard_descriptor_failure_interrupted_wait_helper",
+                &[(
+                    "UPSTROKE_GUARD_DESCRIPTOR_FAILURE_INTERRUPTED_WAIT_HELPER",
+                    "1",
+                )],
+                Duration::from_secs(60),
+            );
+        }
+
+        /// `Guard::abort_setup`'s wait, with every `wait4` answered `EINTR`.
+        /// That site makes the wait again while it is interrupted, so this
+        /// drives the retry to its bound: the only way out of the loop here is
+        /// the bound, and what the caller then receives is the interrupted end.
+        #[cfg(target_os = "linux")]
+        #[test]
+        #[ignore = "subprocess helper"]
+        fn guard_abort_interrupted_wait_helper() {
+            if fixture_variable("UPSTROKE_GUARD_ABORT_INTERRUPTED_WAIT_HELPER").is_none() {
+                return;
+            }
+            let guard = spawn_guard(quiet_signal_policy()).expect("spawn private guard");
+            // Installed after the launch, so the policy answers the teardown's
+            // own wait and nothing the launch made.
+            answer_call_with(libc::SYS_wait4, seccomp_refuse_with(libc::EINTR));
+            let end = describe_helper_end(guard.abort_setup());
+            assert_eq!(
+                end,
+                "SIGKILL was delivered, and the wait collected nothing: Interrupted system call \
+                 (os error 4)",
+                "the aborted guard's end is not what its exhausted retry answered"
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn an_aborted_guard_whose_waits_are_all_interrupted_reports_that_and_returns() {
+            run_fixture_within(
+                "guard_abort_interrupted_wait_helper",
+                &[("UPSTROKE_GUARD_ABORT_INTERRUPTED_WAIT_HELPER", "1")],
+                Duration::from_secs(60),
+            );
         }
 
         #[test]
