@@ -192,6 +192,16 @@
 #                                accounted for by the structure scan, nothing but whitespace after
 #                                the block, no `VERDICT:` line outside it, and the form taken from
 #                                the comment's marker rather than from whichever parser answers
+#   MUT-JSON-REPEATED-NAME-CHOSEN  the verdict object was decoded with unrestricted
+#                                `json.loads`, which KEEPS THE LAST OCCURRENCE of a repeated
+#                                name: a `findings` array carrying a P1 followed by a second
+#                                `"findings":[]` deserialised to a clean PASS with no findings at
+#                                all, the blocking array discarded before validation saw it and
+#                                the severity spelled `P\u0031` so the stray scan could not see it
+#                                either -- READY and a merge call out of a review that blocks. One
+#                                level down the same shape erases a witness instead. The decode
+#                                builds every object through a hook that refuses a repeated name,
+#                                so the ambiguity is never a value, at any depth
 #   MUT-PARSE-SHORT-WRITE        `write()` returned a smaller count than the payload and the count
 #                                was discarded: under `PYTHONUNBUFFERED=1`, with `RLIMIT_FSIZE` at
 #                                1,024 and a 3,560-byte result, `write(1, ..., 3560) = 1024` and
@@ -1467,6 +1477,132 @@ Reviewed head: 4ad962f000000000000000000000000000000001
 EOF
 expect MUT-JSON-SPLIT-BY-REGEX "$(review_rows "$tmp/pretty.md")" \
   '0|json/4ad962f000000000000000000000000000000001/CHANGES_REQUIRED/-/-;P3:FIRST:0;P1:SECOND:0'
+
+# --- a repeated name is two readings, and two readings do not resolve ---------------------------
+# `json.loads` KEEPS THE LAST OCCURRENCE OF A REPEATED NAME
+# (https://docs.python.org/3/library/json.html#repeated-names-within-an-object), so one fenced
+# object could carry a `findings` array with a P1 in it AND a second `"findings":[]` after it, and
+# the blocking array was discarded before validation ever saw it. Nothing else was left to block:
+# the object IS the recognised verdict block, so its severities are inside it rather than loose in
+# the prose the stray scan reads -- and the severity is written `P1` here, as the review that
+# found this wrote it, because a JSON escape carries no `P1` for that scan to catch either. PASS,
+# zero findings, exit 0, READY and a merge call, out of a review that blocks.
+#
+# THE DECODE IS WHERE THIS CLOSES, AND IT CLOSES AT EVERY DEPTH. The hook that refuses a repeated
+# name is the object's CONSTRUCTOR, not a check run over a decoded object -- a check like that
+# would be asking the decoded dict what the text said, which is the question the duplicate already
+# answered wrongly. `json.loads` calls it for every object it builds, so the top level, each
+# finding, and anything nested under a finding are one rule. Each case below is paired with the
+# SAME OBJECT NAMING THE KEY ONCE, which must parse and must still block: a refusal that fires on
+# the fixture rather than on the repetition is not this test.
+repeated_object() {  # repeated_object OBJECT FILE: OBJECT as the comment's one fenced verdict
+  { printf 'Reviewed head: %s\n\nUnedited verdict:\n\n```json\n' "$revived_head"
+    printf '%s' "$1"
+    printf '\n```\n'; } > "$2"
+}
+parse_why() {  # parse_why FILE: what one refused parse said on stderr, and nothing it said on stdout
+  "$parser_python" scripts/pr-review-parse.py review "$1" 2>&1 > /dev/null || true
+}
+# The shape the finding reported, and its control: valid head and base, `"verdict":"PASS"`, a
+# findings array carrying a P1, and then the second `findings` that erased it.
+dup_finding='{"id":"CRITICAL","severity":"P\u0031"}'   # the escape the review that found this wrote: no `P1` for the stray scan to catch
+repeated_object \
+  "{\"reviewed_sha\":\"$revived_head\",\"base_sha\":\"$revived_base\",\"verdict\":\"PASS\",\"findings\":[$dup_finding],\"findings\":[]}" \
+  "$tmp/dup-findings.md"
+repeated_object \
+  "{\"reviewed_sha\":\"$revived_head\",\"base_sha\":\"$revived_base\",\"verdict\":\"PASS\",\"findings\":[$dup_finding]}" \
+  "$tmp/one-findings.md"
+# THE CONTROL FIRST, so the cases below cannot pass on a fixture this parser refuses anyway: one
+# `findings` key and the P1 is read, recorded and blocking.
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(review_rows "$tmp/one-findings.md")" \
+  "0|json/$revived_head/PASS/$revived_base/-;P1:CRITICAL:0"
+# The same object naming `findings` twice has no result at all -- not the empty array, not the
+# blocking one, and not a PASS.
+got="$(review_rows "$tmp/dup-findings.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-JSON-REPEATED-NAME-CHOSEN: an object naming findings twice parsed, got [$got]"
+[[ "$got" == *PASS* ]] \
+  && error "MUT-JSON-REPEATED-NAME-CHOSEN: a repeated name left a PASS standing, got [$got]"
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(parse_nul review "$tmp/dup-findings.md")" '1|'
+# AND IT REFUSED FOR THE REASON THIS CASE IS ABOUT. A parse that fails here because some other
+# rule of this file moved is not a witness to anything; the diagnostic names the repeated key.
+contains MUT-JSON-REPEATED-NAME-CHOSEN "$(parse_why "$tmp/dup-findings.md")" \
+  "names 'findings' twice"
+# A NAME IS THE NAME THE DECODER BUILDS, not the characters the comment spells it with. Written
+# with an escape the second key is the same key, and a guard looking for the literal `"findings"`
+# twice would not see it.
+repeated_object \
+  "{\"verdict\":\"PASS\",\"findings\":[$dup_finding],\"finding\\u0073\":[]}" \
+  "$tmp/dup-escaped.md"
+got="$(review_rows "$tmp/dup-escaped.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-JSON-REPEATED-NAME-CHOSEN: an escape-spelled repeated name parsed, got [$got]"
+contains MUT-JSON-REPEATED-NAME-CHOSEN "$(parse_why "$tmp/dup-escaped.md")" "names 'findings' twice"
+# ONE LEVEL DOWN THE SAME SHAPE ERASES A WITNESS instead of the findings list. A finding recording
+# a failing test blocks in every lane; the same finding naming `failing_test` twice, the second
+# time `null`, is a bare P3 the audit defers. The control is the same finding naming it once.
+repeated_object \
+  '{"verdict":"PASS","findings":[{"id":"WITNESSED","severity":"P3","failing_test":"a_test_that_fails","failing_test":null}]}' \
+  "$tmp/dup-witness.md"
+repeated_object \
+  '{"verdict":"PASS","findings":[{"id":"WITNESSED","severity":"P3","failing_test":"a_test_that_fails"}]}' \
+  "$tmp/one-witness.md"
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(review_rows "$tmp/one-witness.md")" \
+  '0|json/-/PASS/-/-;P3:WITNESSED:1'
+got="$(review_rows "$tmp/dup-witness.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-JSON-REPEATED-NAME-CHOSEN: a finding naming a witness field twice parsed, got [$got]"
+contains MUT-JSON-REPEATED-NAME-CHOSEN "$(parse_why "$tmp/dup-witness.md")" \
+  "names 'failing_test' twice"
+# AND AT ANY DEPTH BELOW THAT. `finding()` walks a finding's keys whole and `MUST_KEY` matches
+# their NAMES, so the set of names that change a verdict is not a list anybody can keep: the rule
+# is every name, everywhere, and a nested object is where a rule written for the top level stops.
+repeated_object \
+  '{"verdict":"PASS","findings":[{"id":"DEEP","severity":"P3","detail":{"note":{"must_fix":"a MUST deviation","must_fix":null}}}]}' \
+  "$tmp/dup-deep.md"
+repeated_object \
+  '{"verdict":"PASS","findings":[{"id":"DEEP","severity":"P3","detail":{"note":{"must_fix":"a MUST deviation"}}}]}' \
+  "$tmp/one-deep.md"
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(review_rows "$tmp/one-deep.md")" \
+  '0|json/-/PASS/-/-;P3:DEEP:0'
+got="$(review_rows "$tmp/dup-deep.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-JSON-REPEATED-NAME-CHOSEN: a repeated name three objects down parsed, got [$got]"
+contains MUT-JSON-REPEATED-NAME-CHOSEN "$(parse_why "$tmp/dup-deep.md")" "names 'must_fix' twice"
+# The older bare form goes through the same decode, so it is held to the same rule -- and its
+# control parses, which is what says the refusal is the repetition and not the missing fence.
+printf 'Reviewed head: %s\n\n{"role_understanding":"x","verdict":"PASS","findings":[%s],"findings":[]}\n' \
+  "$revived_head" "$dup_finding" > "$tmp/dup-bare.md"
+got="$(review_rows "$tmp/dup-bare.md")"
+[[ "$got" == 0\|* ]] \
+  && error "MUT-JSON-REPEATED-NAME-CHOSEN: a bare object naming findings twice parsed, got [$got]"
+contains MUT-JSON-REPEATED-NAME-CHOSEN "$(parse_why "$tmp/dup-bare.md")" "names 'findings' twice"
+printf 'Reviewed head: %s\n\n{"role_understanding":"x","verdict":"PASS","findings":[%s]}\n' \
+  "$revived_head" "$dup_finding" > "$tmp/one-bare.md"
+expect MUT-JSON-REPEATED-NAME-CHOSEN "$(review_rows "$tmp/one-bare.md")" \
+  "0|json/-/PASS/-/-;P1:CRITICAL:0"
+# Through main, because the parser refusing is only half of it: READY with a merge call is what
+# the audit did with the erased findings array.
+got="$(STUB_REVIEW_BODY="$tmp/dup-findings.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "review-parse-failed"
+contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "NOT-READY"
+[[ "$got" == *"verdict=PASS"* ]] \
+  && error "MUT-JSON-REPEATED-NAME-CHOSEN: the audit read PASS out of an object naming findings twice"
+# and the control reaches the audit as the blocking review it is, so the case above is about the
+# repeated name and not about the fixture.
+got="$(STUB_REVIEW_BODY="$tmp/one-findings.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-JSON-REPEATED-NAME-CHOSEN "$got" "open-P1:CRITICAL"
+[[ "$got" == *review-parse-failed* ]] \
+  && error "MUT-JSON-REPEATED-NAME-CHOSEN: the control review was refused, got [$got]"
+# THE SHAPE, NOT THE INSTANCE. One `json.loads` reads review content today and the hook is on it;
+# a second one added without the hook is this finding again, in a place no fixture here is
+# pointed at. So the class is named: every `json.loads(` in the parser carries the hook, and at
+# least one of them exists to carry it.
+expect MUT-JSON-REPEATED-NAME-CHOSEN \
+  "$(grep -nE 'json\.loads\(' scripts/pr-review-parse.py \
+     | grep -vcF 'object_pairs_hook=one_reading' || true)" 0
+expect MUT-JSON-REPEATED-NAME-CHOSEN \
+  "$(grep -cE 'json\.loads\(.*object_pairs_hook=one_reading' scripts/pr-review-parse.py || true)" 1
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'

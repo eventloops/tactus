@@ -86,6 +86,11 @@ refusal:
     structure is NOT what this program thinks it is, and there is no result;
   * nothing but whitespace follows the block the verdict is read from, and no `VERDICT:` line
     stands outside it. Not "nothing this program recognises as a block" -- nothing;
+  * no object the verdict is read from names anything twice, AT ANY DEPTH. `json.loads` keeps
+    the LAST occurrence of a repeated name, so an object carrying a `findings` array with a P1 in
+    it and then a second `"findings":[]` deserialises to a clean PASS with no findings -- one
+    document, two readings, and the reading this program would have taken is the one a reader of
+    the comment does not see;
   * and the form is not chosen by which parser gets an answer. A comment carrying the prose
     form's marker is the prose form, and one carrying a verdict block as well is a comment
     claiming to be both, which is a refusal rather than a choice.
@@ -550,6 +555,46 @@ def the_verdict_block(text, candidates):
     return block
 
 
+class RepeatedName(ValueError):
+    """A JSON object named the same thing twice, so the document has two readings.
+
+    A `ValueError`, because that is the vocabulary every other unreadable verdict object arrives
+    in and the decode below has exactly two outcomes either way: a whole object, or a refusal.
+    Subclassing it means a rewrite that stops naming this class by hand still cannot turn a
+    repeated name into a result -- the `except ValueError` it falls into is a refusal too.
+    """
+
+    def __init__(self, name):
+        # The name is REVIEW CONTENT and it is rendered as `repr` rather than as itself: a name
+        # holding a newline would otherwise write a second diagnostic line of its own, which is
+        # the in-band-marker shape this file exists to keep out of its own channels. `repr`
+        # escapes every control character and every lone surrogate, and the length is bounded the
+        # way every other quoted fragment here is bounded.
+        super().__init__("names %.40r twice" % name)
+
+
+def one_reading(pairs):
+    """One JSON object built from PAIRS -- or a refusal, because A REPEATED NAME IS NOT A VALUE.
+
+    `json.loads` KEEPS THE LAST OCCURRENCE OF A REPEATED NAME
+    (https://docs.python.org/3/library/json.html#repeated-names-within-an-object), and that is a
+    verdict this program would be choosing rather than reading. One fenced object with a valid
+    head and base, `"verdict":"PASS"`, a `findings` array carrying a P1, and then a second
+    `"findings":[]`, deserialised to a clean PASS with no findings AT ALL -- the blocking array
+    discarded before validation ever saw it, and the stray scan silent because the object is the
+    recognised verdict block and its severities are inside it. READY, and a merge call, out of a
+    review that blocks. The same shape one level down erases a witness instead: a finding with
+    `"witness":"a failing test"` and then `"witness":null` is a finding the audit stops holding
+    in every lane.
+    """
+    seen = set()
+    for name, _ in pairs:
+        if name in seen:
+            raise RepeatedName(name)
+        seen.add(name)
+    return dict(pairs)
+
+
 def parse_json_review(text, candidates):
     """The workflow form: the comment's one verdict object, and it is the only source.
 
@@ -558,7 +603,14 @@ def parse_json_review(text, candidates):
     """
     block = the_verdict_block(text, candidates)
     try:
-        verdict = json.loads(block.content)
+        verdict = json.loads(block.content, object_pairs_hook=one_reading)
+    except RepeatedName as exc:
+        # AMBIGUITY REFUSES, and a repeated name is the ambiguity this file's own rule was written
+        # about: two readers read two verdicts out of one document. The hook is the object's
+        # CONSTRUCTOR, so the refusal is not a check run over a decoded object that could be
+        # fooled about what the text said -- the object is never built, at any depth, and there is
+        # no value for a later reader to disagree about.
+        raise Unparsed("the review's verdict object %s, so it has two readings" % exc)
     except ValueError as exc:
         # THE ONE CANDIDATE IS THE VERDICT, and this one does not read as a whole object. Reaching
         # past it to another block is the defect; reporting it as a review with no findings is the
