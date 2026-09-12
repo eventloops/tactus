@@ -443,16 +443,21 @@ pub(crate) const REPLACEMENT_CONTROLS_REMOVED: &[&str] = &[
 
 /// Removed by prefix: the indexed configuration pairs, every index of them.
 ///
-/// Measured on git 2.43.0, and **not** what `git-config(1)` describes: with
-/// `GIT_CONFIG_COUNT` *absent* a lone `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
-/// still takes effect, so removing the count alone would leave the vector
-/// open. What closes it is the `GIT_CONFIG_COUNT=0` pin below, and these
-/// removals are a second, independent way: measured, emptying this list
-/// leaves `the_neutraliser_defeats_every_ambient_control_it_enumerates`
-/// green, so it is defence in depth and not the load-bearing half. They also
-/// close the case the pin cannot -- a pair set on the `Command` itself rather
-/// than inherited, which the sweep over this process's environment would not
-/// see.
+/// **Version-dependent, and measured both ways.** On git 2.43.0, with
+/// `GIT_CONFIG_COUNT` *absent*, a lone `GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
+/// still takes effect -- which is not what `git-config(1)` describes, and it
+/// says nothing about an absent count. On git 2.55.0 it does not, measured on
+/// all three CI platforms; that difference turned
+/// `the_neutraliser_defeats_every_ambient_control_it_enumerates` red on its
+/// first CI run while the box it was written on stayed green, and it is why
+/// that row is `Reach::SomeGits`.
+///
+/// What closes the vector on the Gits that have it is the `GIT_CONFIG_COUNT=0`
+/// pin below, and these removals are a second, independent way: measured on
+/// git 2.43.0, emptying this list leaves that grid green, so it is defence in
+/// depth and not the load-bearing half. They also close the case the pin
+/// cannot -- a pair set on the `Command` itself rather than inherited, which
+/// the sweep over this process's environment would not see.
 pub(crate) const REPLACEMENT_CONTROL_PREFIXES: &[&str] = &["GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
 
 /// Pinned to a fixed value rather than removed, because an absent value is

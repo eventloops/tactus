@@ -5982,6 +5982,22 @@ fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
 /// anything.
 const REPLACEMENT_CONTROL_PROBE: &str = "UPSTROKE_PR271_REPLACEMENT_CONTROL_PROBE";
 
+/// Whether a row of [`hostile_replacement_environments`] has to be a control on
+/// every Git this suite runs on, or only on the ones that have it.
+///
+/// [`Reach::SomeGits`] is not a loophole: the row's neutralised leg is asserted
+/// either way, and a row that is inert on this Git cannot be a masking vector
+/// on this Git. What it admits is that Git changed. The one row that needs it
+/// is the uncounted indexed configuration pair -- a control on git 2.43.0 and
+/// **not** on git 2.55.0, measured on all three CI platforms, which is the
+/// difference that turned this grid red on its first CI run while the box it
+/// was written on stayed green.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Reach {
+    EveryGit,
+    SomeGits,
+}
+
 /// One hostile environment per mechanism the enumeration claims to close,
 /// built over `root`.
 ///
@@ -5990,7 +6006,9 @@ const REPLACEMENT_CONTROL_PROBE: &str = "UPSTROKE_PR271_REPLACEMENT_CONTROL_PROB
 /// The last row sets all of them at once, because a neutraliser that closes
 /// each in isolation and leaves one open in combination is the shape this
 /// pull request has already shipped twice.
-fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(String, OsString)>)> {
+type HostileEnvironment = (&'static str, Reach, Vec<(String, OsString)>);
+
+fn hostile_replacement_environments(root: &Path) -> Vec<HostileEnvironment> {
     let disables = root.join("disables.cfg");
     write_file(&disables, b"[core]\n\tuseReplaceRefs = false\n");
     let including = root.join("including.cfg");
@@ -6012,13 +6030,15 @@ fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(Stri
     create_dir(&empty_home);
 
     let set = |key: &str, value: &OsStr| (key.to_owned(), value.to_owned());
-    let rows: Vec<(&'static str, Vec<(String, OsString)>)> = vec![
+    let rows: Vec<HostileEnvironment> = vec![
         (
             "GIT_NO_REPLACE_OBJECTS",
+            Reach::EveryGit,
             vec![set("GIT_NO_REPLACE_OBJECTS", OsStr::new("1"))],
         ),
         (
             "an indexed config pair, counted",
+            Reach::EveryGit,
             vec![
                 set("GIT_CONFIG_COUNT", OsStr::new("1")),
                 set("GIT_CONFIG_KEY_0", OsStr::new("core.useReplaceRefs")),
@@ -6027,6 +6047,7 @@ fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(Stri
         ),
         (
             "an indexed config pair, uncounted",
+            Reach::SomeGits,
             vec![
                 set("GIT_CONFIG_KEY_0", OsStr::new("core.useReplaceRefs")),
                 set("GIT_CONFIG_VALUE_0", OsStr::new("false")),
@@ -6034,6 +6055,7 @@ fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(Stri
         ),
         (
             "GIT_CONFIG_PARAMETERS",
+            Reach::EveryGit,
             vec![set(
                 "GIT_CONFIG_PARAMETERS",
                 OsStr::new("'core.usereplacerefs'='false'"),
@@ -6041,19 +6063,23 @@ fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(Stri
         ),
         (
             "GIT_CONFIG_GLOBAL",
+            Reach::EveryGit,
             vec![set("GIT_CONFIG_GLOBAL", disables.as_os_str())],
         ),
         (
             "GIT_CONFIG_SYSTEM",
+            Reach::EveryGit,
             vec![set("GIT_CONFIG_SYSTEM", disables.as_os_str())],
         ),
         (
             "GIT_CONFIG_GLOBAL through include.path",
+            Reach::EveryGit,
             vec![set("GIT_CONFIG_GLOBAL", including.as_os_str())],
         ),
-        ("HOME", vec![set("HOME", home.as_os_str())]),
+        ("HOME", Reach::EveryGit, vec![set("HOME", home.as_os_str())]),
         (
             "XDG_CONFIG_HOME",
+            Reach::EveryGit,
             vec![
                 set("HOME", empty_home.as_os_str()),
                 set("XDG_CONFIG_HOME", xdg.as_os_str()),
@@ -6061,12 +6087,13 @@ fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(Stri
         ),
         (
             "GIT_REPLACE_REF_BASE",
+            Reach::EveryGit,
             vec![set("GIT_REPLACE_REF_BASE", OsStr::new("refs/elsewhere/"))],
         ),
     ];
     let mut everything: Vec<(String, OsString)> = rows
         .iter()
-        .flat_map(|(_, pairs)| pairs.iter().cloned())
+        .flat_map(|(_, _, pairs)| pairs.iter().cloned())
         .collect();
     // `GIT_CONFIG` is enumerated and neutralised but is not a row of its own,
     // because it is not a control over what a Git child *reads*: measured, a
@@ -6078,7 +6105,7 @@ fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(Stri
     // survive it beside everything else.
     everything.push(set("GIT_CONFIG", disables.as_os_str()));
     let mut rows = rows;
-    rows.push(("all of them at once", everything));
+    rows.push(("all of them at once", Reach::EveryGit, everything));
     rows
 }
 
@@ -6119,10 +6146,13 @@ fn run_replacement_control_probe(
 /// be dropped from [`without_ambient_replacement_controls`] and nothing would
 /// go red until a reviewer exported it, which is exactly how rounds 1 and 2
 /// were found. Each row is run twice: neutralised, where the probe must still
-/// see `refs/replace/*` honoured, and raw, where it must not. The raw leg asks
-/// the measurement alone -- see [`REPLACEMENT_CONTROL_PROBE`] -- so what it
-/// establishes is that the row really is a control on the Git running this
-/// suite, which is what keeps the neutralised leg from being vacuous.
+/// see `refs/replace/*` honoured, and raw, where -- unless the row is
+/// [`Reach::SomeGits`] -- it must not. The raw leg asks the measurement alone
+/// -- see [`REPLACEMENT_CONTROL_PROBE`] -- so what it establishes is that the
+/// row really is a control on the Git running this suite, which is what keeps
+/// the neutralised leg from being vacuous. Every row is reported rather than
+/// the first failing one, because a grid that stops at row 3 tells a CI run's
+/// reader nothing about rows 4 to 11.
 ///
 /// `HOME` and `XDG_CONFIG_HOME` are in the grid and in **neither** name list:
 /// they are closed by pinning `GIT_CONFIG_GLOBAL`, and their raw legs fail in
@@ -6139,18 +6169,35 @@ fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
         "one row per mechanism, plus the combination"
     );
 
-    for (name, hostile) in &rows {
-        assert!(
-            run_replacement_control_probe(hostile, true).success(),
-            "`{name}` survived the neutralisation: a Git child of the probe did \
-             not honour `refs/replace/*`"
-        );
-        assert!(
-            !run_replacement_control_probe(hostile, false).success(),
-            "`{name}` is not a control at all on this Git: the probe passed with \
-             it set and nothing taken away, so the row above proves nothing"
-        );
+    let mut wrong: Vec<String> = Vec::new();
+    let mut inert: Vec<&str> = Vec::new();
+    for (name, reach, hostile) in &rows {
+        if !run_replacement_control_probe(hostile, true).success() {
+            wrong.push(format!(
+                "`{name}` survived the neutralisation: a Git child of the probe \
+                 did not honour `refs/replace/*`"
+            ));
+        }
+        if run_replacement_control_probe(hostile, false).success() {
+            if *reach == Reach::EveryGit {
+                wrong.push(format!(
+                    "`{name}` is not a control at all on this Git: the probe \
+                     passed with it set and nothing taken away, so the \
+                     neutralised leg above it proves nothing"
+                ));
+            }
+            inert.push(name);
+        }
     }
+    assert!(
+        wrong.is_empty(),
+        "the enumeration does not hold on this Git: {wrong:#?}"
+    );
+    assert!(
+        inert.len() < rows.len(),
+        "no row is a control on the Git running this suite, so this grid \
+         measured nothing at all"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
