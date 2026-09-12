@@ -55,6 +55,7 @@ pub enum Verified {
     Unavailable {
         kind: InfrastructureKind,
         detail: String,
+        reviews: Vec<crate::events::ReviewRecord>,
     },
 }
 
@@ -701,7 +702,11 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
         already_present,
     })? {
         Verified::Judged(judgement) => judgement,
-        Verified::Unavailable { kind, detail } => {
+        Verified::Unavailable {
+            kind,
+            detail,
+            reviews,
+        } => {
             return unavailable(
                 journal,
                 manager,
@@ -711,7 +716,7 @@ fn start_and_verify<J: IntegrationJournal + Verification>(
                 proposed,
                 UnavailableCause::Infrastructure { kind },
                 Some(detail),
-                Vec::new(),
+                reviews,
             );
         }
     };
