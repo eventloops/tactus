@@ -609,19 +609,32 @@ Merging is the owner's act under a standing delegation (2026-09-12) rather than 
 request: a batch that has met the bar above is merged by the agent doing the work, and the body
 records that it merged under standing delegation and which agent merged it. **The standing form
 reaches a batch only where nothing in its diff can change what a required check runs, or how it
-judges what it ran** — a property asked of each changed path, not a list of directories matched
-against it, and a `yes` or an honest *I cannot tell* leaves the batch with the owner unless the
-owner delegated it in writing for that pull request. `MAINTAINING.md` step 7 states the rule, its
-worked examples and its cost; the examples are not a closed set and a batch is not cleared by
-missing them. **A fix whose value is putting a guard into a gate is exactly the shape that stays
-with the owner**, and so is one landing in `scripts/`, `.cargo/`, `Cargo.toml`'s `[lints]`, the
-CI-contract tests under `src/effects/` or the effect allowlists: the gates execute or consult all of
-them, so a fix that lands only there still changes what a required check does. Neither the standing
-delegation nor a class delegation covering every P1 fix reaches such a batch — a class delegation is
-written before the pull request exists, so it cannot be the owner's read of its diff — and it goes
-back to the owner until a class delegation says in terms that it reaches pull requests which change
-what the checks run. Never push to `master` directly. Delete the batch branch and every member fix
-branch after the merge — a fix branch left behind still reads as a live claim on its module.
+judges what it ran, and nothing in its diff amends that rule** — two limbs, each asked of the diff
+rather than matched against a list of directories, and a `yes` or an honest *I cannot tell* leaves
+the batch with the owner unless the owner delegated it in writing for that pull request.
+`MAINTAINING.md` step 7 states both limbs, their worked examples and their cost; the examples are
+not a closed set and a batch is not cleared by missing them. **A fix whose value is putting a guard
+into a gate is exactly the shape that stays with the owner**, and so is one landing in `scripts/`,
+`.cargo/`, `Cargo.toml`'s `[lints]`, the CI-contract tests under `src/effects/` or the effect
+allowlists: the gates execute or consult all of them, so a fix that lands only there still changes
+what a required check does.
+
+**The regression test `MAINTAINING.md` requires of every fix does not, and that distinction is load
+bearing.** Its assertions decide a required check's exit status and they can be edited to accept the
+regression — both true of a CI-contract test as well, which is why neither fact settles anything.
+What differs is what the assertion is *about*: a test pinning the module a fix repairs governs no
+other pull request's diff, so it is part of the subject, where a test pinning the repository's CI
+configuration governs what everyone may land and is an instrument. **So an ordinary P1 fix batch
+keeps the standing form** — which matters here more than anywhere, because every fix in every batch
+carries such a test, and reading them as gate control would send the whole queue back to the owner.
+
+Neither the standing delegation nor a class delegation covering every P1 fix reaches a batch that
+does change what the checks run, or that amends the delegation rule itself — a class delegation is
+written before the pull request exists, so it cannot be the owner's read of its diff — and such a
+batch goes back to the owner until a class delegation says in terms that it reaches pull requests
+which change what the checks run. Never push to `master` directly. Delete the batch branch and every
+member fix branch after the merge — a fix branch left behind still reads as a live claim on its
+module.
 
 **Which is why every fix commit carries its finding in a trailer.** The branches are deleted; the
 trailer is what survives them, and it is how a landed commit is attributed to the finding it closed:
