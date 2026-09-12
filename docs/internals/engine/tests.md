@@ -1247,14 +1247,6 @@ t1 commits; the process dies inside t2's first attempt.
 Only reachable if the adapter never got a second invocation, which
 would mean this test is not exercising what it claims to.
 
-## `const V1_OBJECT_GRAPH: &str = "UPSTROKE_PR271_V1_OBJECT_GRAPH";`
-
-The marker the helper below refuses to run without, for the reason every
-`#[ignore]` helper in this crate has one: a run with `--include-ignored`
-would otherwise execute its body in a process whose environment nobody
-prepared, which is the one environment this witness must never be measured
-in.
-
 ## `const V1_OBJECT_GRAPH_GATE: &str = "[[gates]]\nname = \"object-graph\"\n\`
 
 A gate whose verdict *is* the object graph it reads, and nothing else.
@@ -1266,7 +1258,18 @@ are two commits one blob apart and it exits 1. No shell builtin, no `grep`,
 no platform-specific quoting — the whole of the Windows leg is `git` and two
 ref names.
 
-## `fn v1_object_graph_child(test: &str) -> std::process::ExitStatus {`
+## `fn v1_object_graph_helper()` › `crate::workspace_manager::fixture::REPLACEMENT_WITNESS`
+
+The marker the helper refuses to run without, for the reason every
+`#[ignore]` helper in this crate has one: a run with `--include-ignored`
+would otherwise execute its body in a process whose environment nobody
+prepared, which is the one environment this witness must never be measured
+in. It is
+[`fixture`](../../../src/workspace_manager/fixture.rs)'s rather than this
+module's because every replacement witness in the crate now shares one, and
+one marker beside one door is the whole of that (PR #271, round 4).
+
+## `fn the_v1_conductor_runs_and_resumes_on_the_graph_its_own_workspace_wrote()` › `run_replacement_witness_child`
 
 The helper runs in a child because what it measures is
 `HostEnvironment::from_process()`, which is production's own read of the
@@ -1276,6 +1279,11 @@ so the environment is prepared instead —
 states what it takes away and why, and
 `assert_replacement_controls_pinned` refuses in the child if any of it
 survived.
+
+The spawn itself was this module's own function until round 4. It is
+`fixture::run_replacement_witness_child` now, shared with
+`src/workspace_manager/tests.rs` and `src/gates.rs`, because three copies of
+a door is three places a later repair can reach two of.
 
 ## `fn replaced_probe_repo(tag: &str, plan: &str, config: &str) -> PathBuf {`
 

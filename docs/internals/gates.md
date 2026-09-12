@@ -287,6 +287,18 @@ the one thing under test.
 A v0.1 gate judges the tree its own workspace materialised (PR #271,
 round 1's regression finding).
 
+**The work is in `v1_gate_replacement_helper`, a neutralised child** (round
+4). Every `git` below already runs with the ambient controls taken away, so
+nothing here could be decided by the operator's environment — but "nothing
+could be" was the claim rounds 1, 2 and 3 each made about a witness that
+then could be, and what this process does not carry cannot be asserted from
+inside a process that carries it. `fixture::run_replacement_witness_child`
+is the shared door; `assert_replacement_controls_pinned` is the first
+statement on the other side of it, and it refuses on the enumerated names
+and then on a measurement of whether a Git child honours `refs/replace/*` at
+all. An eighteenth mechanism nobody has listed fails there, loudly, instead
+of letting these two legs agree for the wrong reason.
+
 The schema-1..3 path shares `HostRunner` with the schema-4 one, and its
 producer is frozen: `src/workspace.rs`'s Git children set no
 `NO_REPLACEMENT_OBJECTS`, so with `refs/replace/<tree A> -> <tree B>`
@@ -430,6 +442,14 @@ them both would still be caught by the count below.
 
 `git config` with a quoted value round-trips only if the shell
 preserved the quote grouping.
+
+The read-back that follows is neutralised **and its exit status is
+asserted** (round 4). `git config --get` prints nothing on every failure it
+has, so an observer that reads stdout alone reports "the key is absent" for
+a read that never ran, and would have reported this test's own `129` under
+`GIT_CONFIG` as a lost value rather than as a broken observer. That is every
+observer's rule, not the one a reviewer named — the same assertion is in
+`a_redirected_git_config_cannot_capture_a_fixtures_own_pin`.
 
 ## `fn resolution_enforces_simple_commands_and_skips_shelly_ones() {` › `for complex in [`
 
