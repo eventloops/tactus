@@ -12711,7 +12711,10 @@ fn a_swap_that_reclaimed_a_lock_refuses_when_packed_refs_then_holds_the_ref_else
 fn the_one_update_ref_spawn_gives_its_child_the_cleanup_lease() {
     let source =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/workspace_manager.rs"))
-            .expect("this module's source");
+            .expect("this module's source")
+            // Normalised, so a checkout with Windows line endings reads the same
+            // source as one without: the body search below ends on a newline.
+            .replace("\r\n", "\n");
     let code = crate::effects::production_code(&source);
     assert_eq!(
         code.matches("hold_cleanup_lease_for_child(").count(),

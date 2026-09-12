@@ -436,6 +436,13 @@ pub(crate) fn run_kill_child(test: &str, env: &[(&str, &OsStr)]) -> std::process
 /// For the suites under `src/engine/topology/**`, where `clippy.toml` denies
 /// `std::process::Command` to tests as well as production and which therefore
 /// cannot spawn a helper of their own.
+///
+/// Unix only, because its one caller is: the helper it spawns holds a shared
+/// `flock`, which Windows has no counterpart of. An ungated definition with a
+/// `cfg(unix)` caller is dead code on the Windows legs, and CI's `-D warnings`
+/// makes that a build error the Linux box cannot see (`#275`, CI run
+/// 34693369689).
+#[cfg(unix)]
 pub(crate) fn spawn_ready_helper(
     test: &str,
     env: &[(&str, &OsStr)],
