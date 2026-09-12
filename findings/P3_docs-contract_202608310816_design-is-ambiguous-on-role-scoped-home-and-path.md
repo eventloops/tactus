@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 4
 reviewed_sha:
-location: 
+location: design/08_design_trait_surface.md:59
 provenance: undetermined
 first_bad:
 guard: project owner

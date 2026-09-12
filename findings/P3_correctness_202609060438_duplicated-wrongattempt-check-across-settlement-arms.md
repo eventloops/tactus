@@ -5,7 +5,7 @@ disposition: accepted-risk     # a real duplication, but de-duplicating it chang
 category: correctness
 pr: 180
 reviewed_sha: 50bcfab07c89488e354a7183ecbddcf35f18c2cc
-location: src/topology/fold/check_attempt.rs:552-560,621-629
+location: src/topology/fold/check_attempt.rs:576, src/topology/fold/check_attempt.rs:645
 provenance: pre_existing
 first_bad:
 guard: a future change to check_attempt_finished's error-priority contract, if one is ever specified

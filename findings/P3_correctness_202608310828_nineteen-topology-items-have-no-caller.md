@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 7
 reviewed_sha:
-location: engine/topology.rs
+location: src/engine/topology.rs:3
 provenance: undetermined
 first_bad:
 guard: PR8/PR12, or whichever slice next opens these modules

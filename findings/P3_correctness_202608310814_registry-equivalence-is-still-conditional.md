@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 4
 reviewed_sha:
-location: 
+location: src/topology/effects.rs:338
 provenance: undetermined
 first_bad:
 guard: PR4–PR10 implementer

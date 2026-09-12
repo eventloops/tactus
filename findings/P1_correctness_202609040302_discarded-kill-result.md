@@ -21,3 +21,38 @@ deferred: the end of a helper reports what `kill` returned (0, ESRCH, EPERM) and
 
 Recorded by PR #125, closed after eight frontier passes; the row is carried out of `reviews/FINDINGS.md` in the words it
 was written in.
+
+## Adjacency, recorded 2026-09-10 by the findings-sweep Phase 0 triage
+
+**Not a duplicate of `PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`, not
+schedulable beside it, and — corrected 2026-09-10 after review — not the same
+scope as it.**
+
+Both rows carry `location: src/agent/proc.rs:2320`, recorded against `0bff83df`,
+and the line has drifted. Re-derive the sites from the failure sequence rather
+than trusting `:2320`.
+
+**The failure sequence's "every one of the five sites writes
+`let _ = libc::kill(pid, libc::SIGKILL)`" is no longer true of all five.**
+Censused at this head, in the production region (the `termination` module's tests
+begin at `:4384`), the five calls that signal a helper by PID split three to two:
+
+| site | result | in this row's scope |
+|---|---|---|
+| `:2694` guard-setup failure | `let _ = …` | yes |
+| `:3214` descriptor-configuration failure | `let _ = …` | yes |
+| `:4359` `reap_bounded` | `let _ = …` | yes |
+| `:2244` `Reaper::abandon` | keeps `kill_errno`, reported via `describe_helper_end` (`:2737`) | **no** |
+| `:3245` guard failed-READY path | keeps `kill_errno`, reported in the error string | **no** |
+
+Four further discarded kills target a **process group** (`:2558`, `:2613`,
+`:2623`, `:3975`); whether §7's rule reaches those is this row's question, but
+PID reuse is not their hazard.
+
+`:2244` and `:3245` are outside this row and squarely inside
+`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER`: checking what `kill`
+returned says the call succeeded, not which process it reached. Do not treat a
+repair here as covering them.
+
+The three sites above are where the two rows overlap. Whichever is repaired first
+moves the other's line numbers, so the two may not share a batch.

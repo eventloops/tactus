@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 43
 reviewed_sha:
-location: reviews/2026-08-28-macos-proc-signal-single-failure.md
+location: src/agent/proc/tests.rs:2724
 provenance: undetermined
 first_bad:
 guard: project owner / the slice that next opens src/agent/proc.rs, once a controlled macOS environment can measure it

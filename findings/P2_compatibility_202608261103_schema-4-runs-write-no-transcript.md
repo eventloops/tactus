@@ -5,7 +5,7 @@ disposition: deferred
 category: compatibility
 pr: 7
 reviewed_sha: 
-location: 
+location: src/engine/topology/attempt.rs:437
 provenance: pre_existing
 first_bad: 
 guard: the project owner, for the G2 erratum list

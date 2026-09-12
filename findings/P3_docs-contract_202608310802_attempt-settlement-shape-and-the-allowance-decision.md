@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 3
 reviewed_sha:
-location: 
+location: design/11_design_verification_ladder.md:10
 provenance: undetermined
 first_bad:
 guard: project owner

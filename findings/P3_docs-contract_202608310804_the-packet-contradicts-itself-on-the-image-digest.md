@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 3
 reviewed_sha:
-location: 
+location: src/topology/events.rs:232
 provenance: undetermined
 first_bad:
 guard: project owner

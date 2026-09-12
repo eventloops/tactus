@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 3
 reviewed_sha:
-location: 
+location: src/topology/effects/residue_authority.rs:1053
 provenance: undetermined
 first_bad:
 guard: PR7–PR10 implementer

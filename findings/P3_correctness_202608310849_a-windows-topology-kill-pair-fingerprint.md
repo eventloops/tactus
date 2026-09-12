@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 43
 reviewed_sha:
-location: reviews/2026-08-28-windows-topology-kill-single-failure.md
+location: src/engine/topology/attempt/tests.rs:1252, src/engine/topology/attempt/tests.rs:1308
 provenance: undetermined
 first_bad:
 guard: project owner / the slice that next opens the Windows topology kill harness

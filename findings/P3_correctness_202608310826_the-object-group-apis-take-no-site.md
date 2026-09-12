@@ -5,7 +5,7 @@ disposition: deferred
 category: correctness
 pr: 5
 reviewed_sha:
-location: rundir.rs
+location: src/workspace_manager.rs:2971, src/rundir/tests.rs:3655, src/engine/topology/attempt.rs:496
 provenance: undetermined
 first_bad:
 guard: project owner
