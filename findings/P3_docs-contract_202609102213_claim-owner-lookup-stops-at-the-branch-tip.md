@@ -5,10 +5,10 @@ disposition: deferred
 category: docs-contract
 pr: 261
 reviewed_sha: 57bbbc51147aed90e19a6ee2a8532dc4854e491e
-location: reviews/findings/PROCESS.md:119
+location: findings/PROCESS.md:119
 provenance: introduced_by_feature
 first_bad: c5be6877
-guard: the change that next edits §2 of `reviews/findings/PROCESS.md`
+guard: the change that next edits §2 of `findings/PROCESS.md`
 ---
 
 ## Failure sequence
@@ -77,4 +77,4 @@ lookup and not a branch-tip one, and should not offer the tip's author identity 
 §1 resolves every Claude seat to one account.
 
 Recording only. `PROCESS.md` is not edited by the pull request that filed this, so that a push
-confined to `reviews/findings/` keeps its frontier review under `MAINTAINING.md`.
+confined to `findings/` keeps its frontier review under `MAINTAINING.md`.

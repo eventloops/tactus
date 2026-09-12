@@ -8,7 +8,7 @@
 #                               --name-only` spells it, with rename detection OFF so that BOTH
 #                               ENDPOINTS of a rename are listed and not the destination alone.
 #   <out-dir>/added-findings    one line per file the pull request ADDS or RENAMES under
-#                               reviews/findings/: `<severity><TAB><path>`, where <severity> is the
+#                               findings/: `<severity><TAB><path>`, where <severity> is the
 #                               value of the `severity:` line in the file's YAML frontmatter AT THE
 #                               HEAD, or `-` where the frontmatter carries none.
 #
@@ -27,7 +27,7 @@
 # current head, which moves for reasons that have nothing to do with this pull request. Where the
 # histories criss-cross there is more than one best common ancestor, and each one's diff is taken
 # and the results are UNIONED -- which is the conservative direction for both listings here, since
-# a wider set of changed paths can only add a path outside reviews/findings/, and a wider set of
+# a wider set of changed paths can only add a path outside findings/, and a wider set of
 # added files can only add a file to check.
 #
 # AN END THAT WILL NOT RESOLVE FAILS CLOSED rather than being dropped. A listing that is short is a
@@ -37,9 +37,9 @@
 # THE TWO LISTINGS SPELL A PATH DIFFERENTLY, ON PURPOSE.
 #
 #   changed-paths is git's own `--name-only` output, which C-QUOTES a path holding a control
-#   character or a byte outside ASCII: `"reviews/findings/\303\244.md"`, quotes and all. That keeps
+#   character or a byte outside ASCII: `"findings/\303\244.md"`, quotes and all. That keeps
 #   the guarantee the listing needs -- ONE PATH PER LINE, whatever the path holds, since a newline
-#   in a name is escaped rather than written. A quoted path does not begin `reviews/findings/`, so
+#   in a name is escaped rather than written. A quoted path does not begin `findings/`, so
 #   the validator reads it as a path OUTSIDE the ledger and a `findings/` branch carrying one is
 #   refused. That is a false refusal for a finding whose name is not ASCII, and it is the safe
 #   direction: a finding's name is `P<n>_<category>_<timestamp>_<description>.md`, every byte of
@@ -48,7 +48,7 @@
 #   added-findings carries the path RAW, because the severity comes from the file's own bytes and
 #   `git cat-file blob <head>:<path>` needs the path git records rather than a quoted rendering of
 #   it. A raw path can hold a newline, and one line per record is what the listing promises, so a
-#   newline in an ADDED path under reviews/findings/ is refused here rather than written out to be
+#   newline in an ADDED path under findings/ is refused here rather than written out to be
 #   split into two records downstream.
 #
 # ONLY THE FILES THE DIFF ADDS OR RENAMES ARE LISTED. An existing finding must never turn somebody
@@ -88,15 +88,15 @@ git merge-base --all "$target" "$head" > "$out/merge-bases" \
 
 # --no-renames, BECAUSE A RENAME PRINTS ONLY ITS DESTINATION and both of its endpoints are paths
 # this pull request changes. With detection on -- which is git's default, and is what `-M` asks for
-# on the other listing -- `git mv src/engine.rs reviews/findings/P3_<...>.md` plus frontmatter is
-# reported as one path under reviews/findings/, and `src/engine.rs` is absent: the findings/
+# on the other listing -- `git mv src/engine.rs findings/P3_<...>.md` plus frontmatter is
+# reported as one path under findings/, and `src/engine.rs` is absent: the findings/
 # confinement limit, which is the whole of what makes that lane's low review safe, then sees a diff
 # confined to the ledger while the pull request deletes a source file. Off, the rename is a delete
 # and an add and both paths are listed. It is also the conservative direction the header argues
-# for: a wider set of changed paths can only ADD a path outside reviews/findings/.
+# for: a wider set of changed paths can only ADD a path outside findings/.
 #
 # The other listing keeps `-M` on purpose. There the question is what the pull request LEAVES
-# BEHIND under reviews/findings/, which is the destination alone.
+# BEHIND under findings/, which is the destination alone.
 while read -r merge_base; do
   git diff --no-renames --name-only "$merge_base" "$head" || exit 1
 done < "$out/merge-bases" | sort -u > "$out/changed-paths"
@@ -148,7 +148,7 @@ severity_of() {
 seen=$'\n'
 : > "$out/added-findings"
 while read -r merge_base; do
-  git diff --name-status -M --diff-filter=AR -z "$merge_base" "$head" -- reviews/findings/ \
+  git diff --name-status -M --diff-filter=AR -z "$merge_base" "$head" -- findings/ \
     > "$out/added-status" || exit 1
   status=''
   expect_old=0
@@ -169,7 +169,7 @@ while read -r merge_base; do
     status=''
     case "$path" in
       *$'\n'*)
-        echo "a path this pull request adds under reviews/findings/ holds a newline, and a" >&2
+        echo "a path this pull request adds under findings/ holds a newline, and a" >&2
         echo "  listing line cannot carry one. Refusing rather than writing a record that" >&2
         echo "  would be split in two downstream:" >&2
         printf '  %q\n' "$path" >&2
@@ -191,8 +191,8 @@ while read -r merge_base; do
       || { echo "no severity could be read for $path at $head" >&2; exit 1; }
     # A VALUE THAT CAN HOLD THE FIELD DELIMITER FORGES THE RECORD, so it is refused before it is
     # serialised. The record is `<severity><TAB><path>` and the severity is whatever the
-    # frontmatter said: a file whose block reads `severity: P3<TAB>reviews/findings/forged` emitted
-    # `P3<TAB>reviews/findings/forged<TAB><the real path>`, and the validator -- which takes the
+    # frontmatter said: a file whose block reads `severity: P3<TAB>findings/forged` emitted
+    # `P3<TAB>findings/forged<TAB><the real path>`, and the validator -- which takes the
     # severity up to the FIRST tab and the path after it -- read severity `P3` and a path of the
     # attacker's choosing, so the real file's severity was never judged at all. Measured: three
     # such payloads on a correctly named P3_ file, all accepted. A line ending in the value splits
@@ -204,7 +204,7 @@ while read -r merge_base; do
     # with no finding named. What is refused here is a value that cannot be carried in a record.
     case "$sev" in
       *$'\t'* | *$'\n'* | *$'\r'*)
-        echo "the frontmatter severity of a file this pull request adds under reviews/findings/" >&2
+        echo "the frontmatter severity of a file this pull request adds under findings/" >&2
         echo "  holds a tab or a line ending, and a <severity><TAB><path> record cannot carry" >&2
         echo "  one: read back, the value would be taken for a path and the real severity would" >&2
         echo "  never be judged. A severity is P0, P1, P2 or P3 and nothing else. Refusing:" >&2

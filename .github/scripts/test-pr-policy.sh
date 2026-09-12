@@ -59,7 +59,7 @@ fixture_dir="$(mktemp -d)"
 # fails, and `rm -rf` cannot descend into it.
 trap 'chmod -R u+rwX "$fixture_dir" 2>/dev/null; rm -rf "$fixture_dir"' EXIT
 
-# The merge-base listing: what reviews/findings/ holds at the branch point --
+# The merge-base listing: what findings/ holds at the branch point --
 # the commit the branch was cut from, and NOT the target branch's current head.
 cat > "$fixture_dir/findings.txt" <<'EOF'
 P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
@@ -82,7 +82,7 @@ P2_correctness_202609081500_filed-by-the-pull-request-that-repairs-it.md
 P2_performance_202609071000_split-twin.md
 EOF
 
-# The pull request's own commits: reviews/findings/ as each commit between the
+# The pull request's own commits: findings/ as each commit between the
 # merge base and the head left it. A finding filed in one commit and deleted by
 # its repair in the next appears here TWICE -- once for the commit that held it
 # and once for a second commit that did -- and in NEITHER endpoint tree.
@@ -161,7 +161,7 @@ branch_pass 'findings'  'findings/pr8-review-round'
 branch_pass 'single digit slug word' 'feature/w10-census'
 
 # findings/<slug> is a prefix like any other after the slash, and it is for a
-# pull request that touches reviews/findings/ and nothing else. The validator
+# pull request that touches findings/ and nothing else. The validator
 # sees a name and not a diff, so that half is a review duty; the grammar is not.
 branch_fail 'findings empty name'  'findings/'
 branch_fail 'findings upper case'  'findings/PR8-Review'
@@ -236,7 +236,7 @@ pair_fail   'ambiguous at both ends'  'fix-P3/liveness_twinned-description'
 # ---- the range, and not the two endpoints -------------------------------------------------
 #
 # The endpoints are not enough. A pull request that files a finding in one commit
-# and repairs it in the next -- deleting the file, as reviews/findings/README.md
+# and repairs it in the next -- deleting the file, as findings/README.md
 # requires -- has the finding at NEITHER end, and that is precisely the
 # single-pull-request path retiring fix/ depends on. Keeping the file to satisfy
 # the check is not an answer: it leaves finished work in the outstanding queue.
@@ -567,7 +567,7 @@ fi
 #
 # Everything above tests what the validator does with a listing. NOTHING above
 # tests whether the listing is right, and that is where two frontier reviews
-# found defects: the range was built with `git log -- reviews/findings/`, which
+# found defects: the range was built with `git log -- findings/`, which
 # answers which commits CHANGED the path after simplification rather than which
 # findings EXISTED, and it missed them two ways. So these build real
 # repositories and call .github/scripts/findings-in-range.sh, the script the
@@ -602,8 +602,8 @@ new_repo() {  # new_repo <dir>
 }
 
 commit_finding() {  # commit_finding <dir> <filename> <message>
-  mkdir -p "$1/reviews/findings"
-  echo fixture > "$1/reviews/findings/$2"
+  mkdir -p "$1/findings"
+  echo fixture > "$1/findings/$2"
   git -C "$1" add -A
   git -C "$1" commit -q -m "$3"
 }
@@ -632,7 +632,7 @@ verdict() {
 # both_apis <label> <repo> <target> <head> <branch> <expected>: THE TWO
 # DOCUMENTED WAYS IN, ASKED ABOUT ONE COMMIT. The workflow builds three listings
 # with findings-in-range.sh; a maintainer running the validator by hand gives it
-# that working tree's reviews/findings/ as a directory. One commit gets one
+# that working tree's findings/ as a directory. One commit gets one
 # answer whichever way it is asked -- that equivalence is what this pull request
 # claims, and three P1s have been two APIs disagreeing -- so the two answers are
 # compared WITH EACH OTHER first and against the expectation second. The
@@ -646,7 +646,7 @@ verdict() {
 both_apis() {
   local label="$1" repo="$2" target="$3" head="$4" branch="$5" want="$6" tree_rc dir_rc=0
   tree_rc="$(verdict "$repo" "$target" "$head" "$branch")"
-  "$BASH" "$branch_validator" "$branch" "$repo/reviews/findings" >/dev/null 2>&1 || dir_rc=$?
+  "$BASH" "$branch_validator" "$branch" "$repo/findings" >/dev/null 2>&1 || dir_rc=$?
   if [[ "$tree_rc" != "$dir_rc" ]]; then
     echo "$label ($branch): the tree listings answered $tree_rc, the directory $dir_rc" >&2
     exit 1
@@ -657,12 +657,12 @@ both_apis() {
   fi
 }
 
-# ONE LISTING HAS MANY SPELLINGS AND THEY MUST ANSWER ALIKE. `reviews/findings`,
-# `reviews/findings/`, `reviews/findings/.`, `reviews/findings/./`,
+# ONE LISTING HAS MANY SPELLINGS AND THEY MUST ANSWER ALIKE. `findings`,
+# `findings/`, `findings/.`, `findings/./`,
 # `reviews//findings` and `reviews/./findings` name one directory, and they did
 # not answer alike: the last component decides what the path IS, and with `/.`
 # appended the last component was `.`, so a COMMITTED SYMLINK at
-# `reviews/findings` that the plain spelling refused at exit 1 conformed at exit 0
+# `findings` that the plain spelling refused at exit 1 conformed at exit 0
 # with three characters added. Every case that asserts a verdict for a path
 # asserts it for all six.
 spellings_of() {  # spellings_of <path> -> the same path, written every way
@@ -682,7 +682,7 @@ spelling_case() {  # spelling_case <label> <branch> <want-exit> <path>
 }
 
 # A completed repair: commit A files the finding, commit B repairs it and
-# DELETES the file as reviews/findings/README.md requires, and the whole thing
+# DELETES the file as findings/README.md requires, and the whole thing
 # is merged into the pull request's branch after an unrelated commit. The
 # finding is in neither endpoint tree, and history simplification prunes the
 # side branch entirely because its net effect on the path is nothing.
@@ -693,7 +693,7 @@ git -C "$repo_a" add -A && git -C "$repo_a" commit -q -m base
 a_base="$(git -C "$repo_a" rev-parse HEAD)"
 git -C "$repo_a" checkout -q -b side "$a_base"
 commit_finding "$repo_a" 'P2_correctness_202609101200_a-new-bug.md' 'A: file the finding'
-git -C "$repo_a" rm -q "reviews/findings/P2_correctness_202609101200_a-new-bug.md"
+git -C "$repo_a" rm -q "findings/P2_correctness_202609101200_a-new-bug.md"
 git -C "$repo_a" commit -q -m 'B: repair it and delete the finding'
 git -C "$repo_a" checkout -q -b trunk "$a_base"
 echo unrelated > "$repo_a/other.txt"
@@ -718,7 +718,7 @@ git -C "$repo_b" add -A && git -C "$repo_b" commit -q -m base
 b_base="$(git -C "$repo_b" rev-parse HEAD)"
 git -C "$repo_b" checkout -q -b side "$b_base"
 commit_finding "$repo_b" 'P2_correctness_202609101200_a-new-bug.md' 'A: file the finding'
-git -C "$repo_b" rm -q "reviews/findings/P2_correctness_202609101200_a-new-bug.md"
+git -C "$repo_b" rm -q "findings/P2_correctness_202609101200_a-new-bug.md"
 git -C "$repo_b" commit -q -m 'B: repair it and delete the finding'
 git -C "$repo_b" checkout -q -b trunk "$b_base"
 commit_finding "$repo_b" 'P2_correctness_202609111500_a-new-bug.md' 'the receiving branch files its own'
@@ -747,8 +747,8 @@ echo a > "$repo_c/a.txt"; git -C "$repo_c" add -A; git -C "$repo_c" commit -q -m
 git -C "$repo_c" checkout -q -b trunk "$c_base"
 echo b > "$repo_c/b.txt"; git -C "$repo_c" add -A; git -C "$repo_c" commit -q -m c2
 git -C "$repo_c" merge -q --no-commit --no-ff p1 >/dev/null 2>&1 || true
-mkdir -p "$repo_c/reviews/findings"
-echo fixture > "$repo_c/reviews/findings/P2_correctness_202609101200_only-in-merges.md"
+mkdir -p "$repo_c/findings"
+echo fixture > "$repo_c/findings/P2_correctness_202609101200_only-in-merges.md"
 git -C "$repo_c" add -A
 git -C "$repo_c" commit -q -m 'M1: a merge that files the finding in the merge itself'
 git -C "$repo_c" checkout -q -b q
@@ -756,7 +756,7 @@ echo c > "$repo_c/c.txt"; git -C "$repo_c" add -A; git -C "$repo_c" commit -q -m
 git -C "$repo_c" checkout -q trunk
 echo d > "$repo_c/d.txt"; git -C "$repo_c" add -A; git -C "$repo_c" commit -q -m c4
 git -C "$repo_c" merge -q --no-commit --no-ff q >/dev/null 2>&1 || true
-git -C "$repo_c" rm -q "reviews/findings/P2_correctness_202609101200_only-in-merges.md"
+git -C "$repo_c" rm -q "findings/P2_correctness_202609101200_only-in-merges.md"
 git -C "$repo_c" commit -q -m 'M2: a merge that removes it in the merge itself'
 c_head="$(git -C "$repo_c" rev-parse HEAD)"
 
@@ -820,17 +820,17 @@ fi
 # acceptance this whole gate exists to prevent.
 repo_e="$fixture_dir/repo-divergent-ambiguous"
 new_repo "$repo_e"
-mkdir -p "$repo_e/reviews/findings"
-echo one > "$repo_e/reviews/findings/P2_correctness_202609010000_shared-name.md"
-echo two > "$repo_e/reviews/findings/P2_correctness_202609020000_shared-name.md"
+mkdir -p "$repo_e/findings"
+echo one > "$repo_e/findings/P2_correctness_202609010000_shared-name.md"
+echo two > "$repo_e/findings/P2_correctness_202609020000_shared-name.md"
 git -C "$repo_e" add -A && git -C "$repo_e" commit -q -m 'branch point: two findings share a description'
 e_branch_point="$(git -C "$repo_e" rev-parse HEAD)"
 git -C "$repo_e" checkout -q -b pr
-git -C "$repo_e" rm -q 'reviews/findings/P2_correctness_202609010000_shared-name.md'
+git -C "$repo_e" rm -q 'findings/P2_correctness_202609010000_shared-name.md'
 git -C "$repo_e" commit -q -m 'the pull request repairs the first, deleting the file'
 e_head="$(git -C "$repo_e" rev-parse HEAD)"
 git -C "$repo_e" checkout -q -B trunk "$e_branch_point"
-git -C "$repo_e" rm -q 'reviews/findings/P2_correctness_202609010000_shared-name.md'
+git -C "$repo_e" rm -q 'findings/P2_correctness_202609010000_shared-name.md'
 git -C "$repo_e" commit -q -m 'master deletes the same finding, independently'
 e_advanced="$(git -C "$repo_e" rev-parse HEAD)"
 
@@ -852,11 +852,11 @@ new_repo "$repo_f"
 commit_finding "$repo_f" 'P2_correctness_202609010000_repaired-both-sides.md' 'branch point files it'
 f_branch_point="$(git -C "$repo_f" rev-parse HEAD)"
 git -C "$repo_f" checkout -q -b pr
-git -C "$repo_f" rm -q 'reviews/findings/P2_correctness_202609010000_repaired-both-sides.md'
+git -C "$repo_f" rm -q 'findings/P2_correctness_202609010000_repaired-both-sides.md'
 git -C "$repo_f" commit -q -m 'the pull request repairs it, deleting the file'
 f_head="$(git -C "$repo_f" rev-parse HEAD)"
 git -C "$repo_f" checkout -q -B trunk "$f_branch_point"
-git -C "$repo_f" rm -q 'reviews/findings/P2_correctness_202609010000_repaired-both-sides.md'
+git -C "$repo_f" rm -q 'findings/P2_correctness_202609010000_repaired-both-sides.md'
 git -C "$repo_f" commit -q -m 'master deletes it too'
 f_advanced="$(git -C "$repo_f" rev-parse HEAD)"
 
@@ -882,16 +882,16 @@ fi
 # property of the ledger, and other pull requests legitimately change it.
 repo_i="$fixture_dir/repo-absorbed-commit"
 new_repo "$repo_i"
-mkdir -p "$repo_i/reviews/findings"
-echo one > "$repo_i/reviews/findings/P2_correctness_202609010000_shared-name.md"
-echo two > "$repo_i/reviews/findings/P2_correctness_202609020000_shared-name.md"
+mkdir -p "$repo_i/findings"
+echo one > "$repo_i/findings/P2_correctness_202609010000_shared-name.md"
+echo two > "$repo_i/findings/P2_correctness_202609020000_shared-name.md"
 git -C "$repo_i" add -A && git -C "$repo_i" commit -q -m 'branch point: two findings share a description'
 i_branch_point="$(git -C "$repo_i" rev-parse HEAD)"
 # C, the repair, on a commit that this pull request and an earlier one both
 # carry. Nothing about it is exotic: a batch pull request opened from this
 # branch point legitimately holds it.
 git -C "$repo_i" checkout -q -b shared-repair
-git -C "$repo_i" rm -q 'reviews/findings/P2_correctness_202609010000_shared-name.md'
+git -C "$repo_i" rm -q 'findings/P2_correctness_202609010000_shared-name.md'
 git -C "$repo_i" commit -q -m 'C: the shared repair deletes the first twin'
 i_shared="$(git -C "$repo_i" rev-parse HEAD)"
 git -C "$repo_i" checkout -q -b pr
@@ -931,10 +931,10 @@ echo seed > "$repo_g/seed.txt"
 git -C "$repo_g" add -A && git -C "$repo_g" commit -q -m base
 g_base="$(git -C "$repo_g" rev-parse HEAD)"
 commit_finding "$repo_g" 'P2_correctness_202609101200_a-new-bug.md' 'A: file the finding'
-git -C "$repo_g" rm -q 'reviews/findings/P2_correctness_202609101200_a-new-bug.md'
+git -C "$repo_g" rm -q 'findings/P2_correctness_202609101200_a-new-bug.md'
 git -C "$repo_g" commit -q -m 'B: repair it and delete the finding'
 g_head="$(git -C "$repo_g" rev-parse HEAD)"
-if [[ -n "$(git -C "$repo_g" diff --name-only "$g_base" "$g_head" -- reviews/findings/)" ]]; then
+if [[ -n "$(git -C "$repo_g" diff --name-only "$g_base" "$g_head" -- findings/)" ]]; then
   echo 'the two-tree diff was expected to be empty for a filed-and-repaired finding' >&2
   exit 1
 fi
@@ -947,7 +947,7 @@ fi
 # ---- a finding is a regular file, not a directory wearing its name -------------------------
 #
 # `git ls-tree --name-only` does not say whether an entry is a file or a tree,
-# so committing reviews/findings/P2_correctness_<ts>_<desc>.md/placeholder --
+# so committing findings/P2_correctness_<ts>_<desc>.md/placeholder --
 # which creates a DIRECTORY and no finding -- satisfied fix-P2/correctness_<desc>
 # and all three workflow steps returned exit 0 with no finding in existence.
 repo_h="$fixture_dir/repo-directory-not-a-finding"
@@ -955,13 +955,13 @@ new_repo "$repo_h"
 echo seed > "$repo_h/seed.txt"
 git -C "$repo_h" add -A && git -C "$repo_h" commit -q -m base
 h_base="$(git -C "$repo_h" rev-parse HEAD)"
-mkdir -p "$repo_h/reviews/findings/P2_correctness_202609101200_missing-repair.md"
-echo placeholder > "$repo_h/reviews/findings/P2_correctness_202609101200_missing-repair.md/placeholder"
+mkdir -p "$repo_h/findings/P2_correctness_202609101200_missing-repair.md"
+echo placeholder > "$repo_h/findings/P2_correctness_202609101200_missing-repair.md/placeholder"
 # A real finding beside it, so the case proves the filter and not an empty tree.
-echo fixture > "$repo_h/reviews/findings/P3_liveness_202609101300_a-real-finding.md"
+echo fixture > "$repo_h/findings/P3_liveness_202609101300_a-real-finding.md"
 git -C "$repo_h" add -A && git -C "$repo_h" commit -q -m 'a directory named like a finding'
 h_head="$(git -C "$repo_h" rev-parse HEAD)"
-if ! git -C "$repo_h" ls-tree "$h_head" reviews/findings/ | grep -q '^040000 tree '; then
+if ! git -C "$repo_h" ls-tree "$h_head" findings/ | grep -q '^040000 tree '; then
   echo 'the fixture was meant to commit a TREE named like a finding' >&2
   exit 1
 fi
@@ -1040,7 +1040,7 @@ j_root="$(git -C "$repo_j" rev-parse HEAD)"
 # swallow.
 git -C "$repo_j" checkout -q -b left "$j_root"
 commit_finding "$repo_j" 'P2_correctness_202609010000_shared-name.md' 'left files the first twin'
-git -C "$repo_j" rm -q 'reviews/findings/P2_correctness_202609010000_shared-name.md'
+git -C "$repo_j" rm -q 'findings/P2_correctness_202609010000_shared-name.md'
 git -C "$repo_j" commit -q -m 'left repairs and deletes its twin'
 j_left="$(git -C "$repo_j" rev-parse HEAD)"
 # R carries the second twin, and one finding nothing else names.
@@ -1100,13 +1100,13 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
   echo seed > "$repo_k/seed.txt"
   git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m base
   k_base="$(git -C "$repo_k" rev-parse HEAD)"
-  mkdir -p "$repo_k/reviews/findings"
-  ln -s ../../seed.txt "$repo_k/reviews/findings/P2_correctness_202609101200_not-a-finding.md"
+  mkdir -p "$repo_k/findings"
+  ln -s ../../seed.txt "$repo_k/findings/P2_correctness_202609101200_not-a-finding.md"
   # A real finding beside it, so the case proves a filter and not an empty tree.
-  echo fixture > "$repo_k/reviews/findings/P3_liveness_202609101300_a-real-finding.md"
+  echo fixture > "$repo_k/findings/P3_liveness_202609101300_a-real-finding.md"
   git -C "$repo_k" add -A && git -C "$repo_k" commit -q -m 'a symlink named like a finding'
   k_head="$(git -C "$repo_k" rev-parse HEAD)"
-  if ! git -C "$repo_k" ls-tree "$k_head" reviews/findings/ | grep -q '^120000 blob '; then
+  if ! git -C "$repo_k" ls-tree "$k_head" findings/ | grep -q '^120000 blob '; then
     echo 'the fixture was meant to commit a SYMLINK named like a finding' >&2
     exit 1
   fi
@@ -1116,10 +1116,10 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
     exit 1
   fi
   # The same commit judged the documented by-hand way: that working tree's
-  # reviews/findings/ handed straight in as the listing. This is the path that
+  # findings/ handed straight in as the listing. This is the path that
   # accepted, and it must now agree with the one above.
   if "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
-    "$repo_k/reviews/findings" >/dev/null 2>&1; then
+    "$repo_k/findings" >/dev/null 2>&1; then
     echo 'a symlink named like a finding resolved when a directory was the listing' >&2
     exit 1
   fi
@@ -1131,7 +1131,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
     exit 1
   fi
   if ! "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
-    "$repo_k/reviews/findings" >/dev/null 2>&1; then
+    "$repo_k/findings" >/dev/null 2>&1; then
     echo 'the regular file beside the symlink must still resolve from a directory listing' >&2
     exit 1
   fi
@@ -1163,7 +1163,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
   # refuse at exit 1 -- the two answers to one question this whole section
   # exists to close, back again one repair later. What git RECORDS decides an
   # entry, and this is the case that says so.
-  k_materialised='reviews/findings/P2_correctness_202609101200_not-a-finding.md'
+  k_materialised='findings/P2_correctness_202609101200_not-a-finding.md'
   git -C "$repo_k" config core.symlinks false
   rm "$repo_k/$k_materialised"
   git -C "$repo_k" checkout -- "$k_materialised"
@@ -1172,14 +1172,14 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
     echo 'note: skipping the core.symlinks=false case (this git left the link a link)' >&2
   else
     if "$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
-      "$repo_k/reviews/findings" >/dev/null 2>&1; then
+      "$repo_k/findings" >/dev/null 2>&1; then
       echo 'a committed symlink checked out as a regular file resolved through the directory listing' >&2
       exit 1
     fi
     # And it is still a filter and not a listing read as empty: the regular file
     # beside it resolves, through a checkout that materialised neither as a link.
     if ! "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
-      "$repo_k/reviews/findings" >/dev/null 2>&1; then
+      "$repo_k/findings" >/dev/null 2>&1; then
       echo 'the regular file beside the materialised symlink must still resolve' >&2
       exit 1
     fi
@@ -1194,10 +1194,10 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
     # its recorded modes. Root can read anything, so this only means something
     # as an ordinary user.
     if [[ "$(id -u)" -ne 0 ]] && chmod 000 "$repo_k/.git/config" 2>/dev/null \
-      && ! git -C "$repo_k/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      && ! git -C "$repo_k/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
       unreadable_rc=0
       unreadable_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_not-a-finding' \
-        "$repo_k/reviews/findings" 2>&1)" || unreadable_rc=$?
+        "$repo_k/findings" 2>&1)" || unreadable_rc=$?
       # The other API cannot be built at all where git cannot read the
       # repository, which is `verdict`'s 99. Neither may report conformance.
       unreadable_tree="$(verdict "$repo_k" "$k_base" "$k_head" 'fix-P2/correctness_not-a-finding')"
@@ -1214,7 +1214,7 @@ if ln -s ./nowhere-in-particular "$symlink_probe" 2>/dev/null && [[ -L "$symlink
       # about the unreadable config and not about the directory being in a
       # repository at all.
       if ! "$BASH" "$branch_validator" 'fix-P3/liveness_a-real-finding' \
-        "$repo_k/reviews/findings" >/dev/null 2>&1; then
+        "$repo_k/findings" >/dev/null 2>&1; then
         echo 'restoring the config must restore the verdict' >&2
         exit 1
       fi
@@ -1231,9 +1231,9 @@ fi
 #
 # The ENTRIES were decided by the mode git records; the listing PATH itself was
 # still followed before its own recorded type was looked at. Commit
-# `reviews/findings` as a SYMLINK to a sibling directory and git calls it a
+# `findings` as a SYMLINK to a sibling directory and git calls it a
 # `120000 blob`, `git status` stays empty, and the tree listings hold no finding
-# under reviews/findings/ and refuse at exit 1 -- while handing that path
+# under findings/ and refuse at exit 1 -- while handing that path
 # straight in FOLLOWED the link and resolved the name out of files no ledger
 # holds, at exit 0. It is the rule one level up from the entries: a symlink is
 # not a finding, and a symlink is not the findings directory either. Both APIs,
@@ -1246,12 +1246,12 @@ if [[ -L "$symlink_probe" ]]; then
   p_base="$(git -C "$repo_p" rev-parse HEAD)"
   mkdir -p "$repo_p/elsewhere" "$repo_p/reviews"
   echo fixture > "$repo_p/elsewhere/P2_correctness_202609100001_no-ledger-entry.md"
-  ln -s ../elsewhere "$repo_p/reviews/findings"
+  ln -s ../elsewhere "$repo_p/findings"
   git -C "$repo_p" add -A && git -C "$repo_p" commit -q -m 'a findings directory that is a symlink'
   p_head="$(git -C "$repo_p" rev-parse HEAD)"
-  if ! git -C "$repo_p" ls-tree "$p_head" reviews/ | grep -q '^120000 blob .*reviews/findings$' \
+  if ! git -C "$repo_p" ls-tree "$p_head" reviews/ | grep -q '^120000 blob .*findings$' \
     || [[ -n "$(git -C "$repo_p" status --porcelain)" ]]; then
-    echo 'the fixture was meant to COMMIT reviews/findings as a symlink, cleanly' >&2
+    echo 'the fixture was meant to COMMIT findings as a symlink, cleanly' >&2
     exit 1
   fi
   both_apis 'a symlinked findings directory holds no finding' \
@@ -1260,7 +1260,7 @@ if [[ -L "$symlink_probe" ]]; then
   # the question moved from `findings` to `.` -- the same listing, refused one way
   # and accepted the other.
   spelling_case 'a symlinked findings directory, every spelling' \
-    'fix-P2/correctness_no-ledger-entry' 1 "$repo_p/reviews/findings"
+    'fix-P2/correctness_no-ledger-entry' 1 "$repo_p/findings"
 
   # The same name in a REAL findings directory resolves, so the case above is a
   # filter on the listing path and not a listing read as empty.
@@ -1280,9 +1280,9 @@ if [[ -L "$symlink_probe" ]]; then
   # listing it names one absent finding, and the recorded mode is what catches
   # it, because it is the same 120000 either way.
   git -C "$repo_p" config core.symlinks false
-  rm "$repo_p/reviews/findings"
-  git -C "$repo_p" checkout -- reviews/findings
-  if [[ -L "$repo_p/reviews/findings" ]] || [[ ! -f "$repo_p/reviews/findings" ]]; then
+  rm "$repo_p/findings"
+  git -C "$repo_p" checkout -- findings
+  if [[ -L "$repo_p/findings" ]] || [[ ! -f "$repo_p/findings" ]]; then
     echo 'note: skipping the materialised symlinked-directory case (this git left the link a link)' >&2
   else
     both_apis 'a symlinked findings directory materialised as a file holds none either' \
@@ -1301,9 +1301,9 @@ if [[ -L "$symlink_probe" ]]; then
   # RESOLVES and the link's own contents do NOT.
   mkdir -p "$repo_q/elsewhere"
   echo fixture > "$repo_q/elsewhere/P3_liveness_202609100009_not-in-the-ledger.md"
-  rm -rf "$repo_q/reviews/findings"
-  ln -s ../elsewhere "$repo_q/reviews/findings"
-  if [[ "$(git -C "$repo_q" ls-files -- reviews/findings/ | wc -l)" != 1 ]]; then
+  rm -rf "$repo_q/findings"
+  ln -s ../elsewhere "$repo_q/findings"
+  if [[ "$(git -C "$repo_q" ls-files -- findings/ | wc -l)" != 1 ]]; then
     echo 'the fixture was meant to leave the findings directory in the index' >&2
     exit 1
   fi
@@ -1313,7 +1313,7 @@ if [[ -L "$symlink_probe" ]]; then
     "$repo_q" "$q_base" "$q_head" 'fix-P3/liveness_not-in-the-ledger' 1
   # Every spelling of it, because appending `/.` used to move the question.
   spelling_case 'a replaced findings directory, every spelling' \
-    'fix-P2/correctness_no-ledger-entry' 0 "$repo_q/reviews/findings"
+    'fix-P2/correctness_no-ledger-entry' 0 "$repo_q/findings"
 else
   echo 'note: skipping the symlinked-findings-directory cases (this filesystem will not create one)' >&2
 fi
@@ -1330,15 +1330,15 @@ recorded_repo="$fixture_dir/repo-recorded-not-materialised"
 new_repo "$recorded_repo"
 echo seed > "$recorded_repo/seed.txt"
 git -C "$recorded_repo" add -A && git -C "$recorded_repo" commit -q -m base
-mkdir -p "$recorded_repo/reviews/findings"
-echo one > "$recorded_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo two > "$recorded_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+mkdir -p "$recorded_repo/findings"
+echo one > "$recorded_repo/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$recorded_repo/findings/P2_correctness_202609100002_shared-name.md"
 git -C "$recorded_repo" add -A \
   && git -C "$recorded_repo" commit -q -m 'two findings share a description'
-rm "$recorded_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+rm "$recorded_repo/findings/P2_correctness_202609100002_shared-name.md"
 recorded_rc=0
 recorded_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-  "$recorded_repo/reviews/findings" 2>&1)" || recorded_rc=$?
+  "$recorded_repo/findings" 2>&1)" || recorded_rc=$?
 if [[ "$recorded_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$recorded_out"; then
   echo "a finding the index records and the checkout lacks must still be a candidate; got $recorded_rc" >&2
   exit 1
@@ -1364,33 +1364,33 @@ phrase_wt="$fixture_dir/linked-worktree"
 new_repo "$phrase_repo"
 echo seed > "$phrase_repo/seed.txt"
 git -C "$phrase_repo" add -A && git -C "$phrase_repo" commit -q -m base
-mkdir -p "$phrase_repo/reviews/findings"
-echo one > "$phrase_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo two > "$phrase_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+mkdir -p "$phrase_repo/findings"
+echo one > "$phrase_repo/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$phrase_repo/findings/P2_correctness_202609100002_shared-name.md"
 git -C "$phrase_repo" add -A \
   && git -C "$phrase_repo" commit -q -m 'two findings share a description'
 if ! git -C "$phrase_repo" worktree add -q --detach "$phrase_wt" HEAD 2>/dev/null; then
   echo 'note: skipping the path-shaped-like-a-message case (this git will not add a worktree)' >&2
 elif [[ "$(id -u)" -eq 0 ]] || ! chmod 000 "$phrase_repo/.git/config" 2>/dev/null \
-  || git -C "$phrase_wt/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  || git -C "$phrase_wt/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   chmod 600 "$phrase_repo/.git/config" 2>/dev/null || true
   echo 'note: skipping the path-shaped-like-a-message case (running as root, or chmod had no effect)' >&2
 else
   # The linked worktree keeps its own index, and one twin is removed from its
   # CHECKOUT alone: the filesystem fallback -- which cannot see an index at all
   # -- answers `conforms` here rather than merely answering for another reason.
-  rm "$phrase_wt/reviews/findings/P2_correctness_202609100002_shared-name.md"
+  rm "$phrase_wt/findings/P2_correctness_202609100002_shared-name.md"
   # git's message must really carry the path, or the case is about nothing.
   # Captured and then matched: git exits 128 here, and under `pipefail` a
   # pipeline out of it fails whatever grep found.
-  phrase_probe="$(git -C "$phrase_wt/reviews/findings" rev-parse --is-inside-work-tree 2>&1 || true)"
+  phrase_probe="$(git -C "$phrase_wt/findings" rev-parse --is-inside-work-tree 2>&1 || true)"
   if ! grep -qF 'not a git repository - fixture' <<< "$phrase_probe"; then
     echo 'the fixture was meant to put the repository PATH into git-s diagnostic' >&2
     exit 1
   fi
   phrase_rc=0
   phrase_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-    "$phrase_wt/reviews/findings" 2>&1)" || phrase_rc=$?
+    "$phrase_wt/findings" 2>&1)" || phrase_rc=$?
   chmod 600 "$phrase_repo/.git/config"
   if [[ "$phrase_rc" == 0 ]]; then
     echo 'a repository whose PATH holds git-s no-repository sentence conformed' >&2
@@ -1404,7 +1404,7 @@ else
   # index records both twins, so the name is ambiguous and says which two.
   phrase_ok_rc=0
   phrase_ok_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-    "$phrase_wt/reviews/findings" 2>&1)" || phrase_ok_rc=$?
+    "$phrase_wt/findings" 2>&1)" || phrase_ok_rc=$?
   if [[ "$phrase_ok_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$phrase_ok_out"; then
     echo "restoring the config must restore the verdict; got $phrase_ok_rc" >&2
     exit 1
@@ -1428,24 +1428,24 @@ unexaminable_wt="$fixture_dir/unexaminable-worktree"
 new_repo "$unexaminable_repo"
 echo seed > "$unexaminable_repo/seed.txt"
 git -C "$unexaminable_repo" add -A && git -C "$unexaminable_repo" commit -q -m base
-mkdir -p "$unexaminable_repo/reviews/findings"
-echo one > "$unexaminable_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo two > "$unexaminable_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+mkdir -p "$unexaminable_repo/findings"
+echo one > "$unexaminable_repo/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$unexaminable_repo/findings/P2_correctness_202609100002_shared-name.md"
 git -C "$unexaminable_repo" add -A \
   && git -C "$unexaminable_repo" commit -q -m 'two findings share a description'
-unexaminable_twin='reviews/findings/P2_correctness_202609100002_shared-name.md'
+unexaminable_twin='findings/P2_correctness_202609100002_shared-name.md'
 
 # unexaminable_verdict <checkout> -> the exit code, with stderr on stdout
 unexaminable_verdict() {
   "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-    "$1/reviews/findings" 2>&1
+    "$1/findings" 2>&1
 }
 
 if ! git -C "$unexaminable_repo" worktree add -q --detach "$unexaminable_wt" HEAD 2>/dev/null \
   || [[ ! -f "$unexaminable_wt/.git" ]]; then
   echo 'note: skipping the unexaminable-.git cases (this git made no linked worktree)' >&2
 elif [[ "$(id -u)" -eq 0 ]] || ! chmod 000 "$unexaminable_wt/.git" 2>/dev/null \
-  || git -C "$unexaminable_wt/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  || git -C "$unexaminable_wt/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   chmod 644 "$unexaminable_wt/.git" 2>/dev/null || true
   echo 'note: skipping the unexaminable-.git cases (running as root, or chmod had no effect)' >&2
 else
@@ -1493,7 +1493,7 @@ else
     exit 1
   fi
   if chmod 000 "$unexaminable_repo/.git" 2>/dev/null \
-    && ! git -C "$unexaminable_repo/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1
+    && ! git -C "$unexaminable_repo/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1
   then
     dir_rc=0
     dir_out="$(unexaminable_verdict "$unexaminable_repo")" || dir_rc=$?
@@ -1538,23 +1538,23 @@ new_repo "$repo_n"
 echo seed > "$repo_n/seed.txt"
 git -C "$repo_n" add -A && git -C "$repo_n" commit -q -m base
 n_base="$(git -C "$repo_n" rev-parse HEAD)"
-mkdir -p "$repo_n/reviews/findings"
-echo one > "$repo_n/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo two > "$repo_n/reviews/findings/P2_correctness_202609100002_shared-name.md"
-echo three > "$repo_n/reviews/findings/P3_liveness_202609100003_left-out-of-the-checkout.md"
-echo four > "$repo_n/reviews/findings/P3_liveness_202609100004_a-real-finding.md"
+mkdir -p "$repo_n/findings"
+echo one > "$repo_n/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$repo_n/findings/P2_correctness_202609100002_shared-name.md"
+echo three > "$repo_n/findings/P3_liveness_202609100003_left-out-of-the-checkout.md"
+echo four > "$repo_n/findings/P3_liveness_202609100004_a-real-finding.md"
 git -C "$repo_n" add -A && git -C "$repo_n" commit -q -m 'four findings, two sharing a description'
 n_head="$(git -C "$repo_n" rev-parse HEAD)"
 both_apis 'the control: a full checkout' \
   "$repo_n" "$n_base" "$n_head" 'fix-P2/correctness_shared-name' 1
-n_twin='reviews/findings/P2_correctness_202609100002_shared-name.md'
-n_unique='reviews/findings/P3_liveness_202609100003_left-out-of-the-checkout.md'
+n_twin='findings/P2_correctness_202609100002_shared-name.md'
+n_unique='findings/P3_liveness_202609100003_left-out-of-the-checkout.md'
 if git -C "$repo_n" sparse-checkout set --no-cone '/*' "!/$n_twin" "!/$n_unique" >/dev/null 2>&1 \
   && [[ ! -e "$repo_n/$n_twin" && ! -e "$repo_n/$n_unique" ]] \
   && [[ -z "$(git -C "$repo_n" status --porcelain)" ]]; then
   # The exclusion is the CHECKOUT's and not the index's, which is what makes
   # this a narrowed listing rather than a ledger that lost two findings.
-  if [[ "$(git -C "$repo_n" ls-files -- reviews/findings/ | wc -l)" != 4 ]]; then
+  if [[ "$(git -C "$repo_n" ls-files -- findings/ | wc -l)" != 4 ]]; then
     echo 'the fixture was meant to leave all four findings in the index' >&2
     exit 1
   fi
@@ -1602,20 +1602,20 @@ if : > "$newline_probe" 2>/dev/null && [[ -f "$newline_probe" ]]; then
   echo seed > "$repo_l/seed.txt"
   git -C "$repo_l" add -A && git -C "$repo_l" commit -q -m base
   l_base="$(git -C "$repo_l" rev-parse HEAD)"
-  mkdir -p "$repo_l/reviews/findings"
-  echo one > "$repo_l/reviews/findings/P2_correctness_202609100001_shared-name.md"
-  echo two > "$repo_l/reviews/findings/P2_correctness_202609100002_shared-name.md"
-  echo noise > "$repo_l/reviews/findings/noise"
+  mkdir -p "$repo_l/findings"
+  echo one > "$repo_l/findings/P2_correctness_202609100001_shared-name.md"
+  echo two > "$repo_l/findings/P2_correctness_202609100002_shared-name.md"
+  echo noise > "$repo_l/findings/noise"
   # The tail of this name is the second twin's name exactly, so a split hands
   # the set a name that IS a finding and takes the finding itself away.
-  echo split > "$repo_l/reviews/findings/$nl_twin"
+  echo split > "$repo_l/findings/$nl_twin"
   # And the tail of this one is a finding NOTHING has filed, so a split invents
   # a finding, or refuses for a name that is not in the directory at all.
-  echo invented > "$repo_l/reviews/findings/$nl_ghost"
-  echo real > "$repo_l/reviews/findings/P3_liveness_202609101300_a-real-finding.md"
+  echo invented > "$repo_l/findings/$nl_ghost"
+  echo real > "$repo_l/findings/P3_liveness_202609101300_a-real-finding.md"
   git -C "$repo_l" add -A && git -C "$repo_l" commit -q -m 'a name with a newline in it'
   l_head="$(git -C "$repo_l" rev-parse HEAD)"
-  if [[ ! -f "$repo_l/reviews/findings/$nl_twin" ]] \
+  if [[ ! -f "$repo_l/findings/$nl_twin" ]] \
     || [[ -n "$(git -C "$repo_l" status --porcelain)" ]]; then
     echo 'the fixture was meant to COMMIT a filename holding a newline' >&2
     exit 1
@@ -1637,13 +1637,13 @@ if : > "$newline_probe" 2>/dev/null && [[ -f "$newline_probe" ]]; then
     echo seed > "$repo_m/seed.txt"
     git -C "$repo_m" add -A && git -C "$repo_m" commit -q -m base
     m_base="$(git -C "$repo_m" rev-parse HEAD)"
-    mkdir -p "$repo_m/reviews/findings"
-    echo one > "$repo_m/reviews/findings/P2_correctness_202609100001_shared-name.md"
-    echo two > "$repo_m/reviews/findings/P2_correctness_202609100002_shared-name.md"
-    ln -s ../../seed.txt "$repo_m/reviews/findings/$nl_twin"
+    mkdir -p "$repo_m/findings"
+    echo one > "$repo_m/findings/P2_correctness_202609100001_shared-name.md"
+    echo two > "$repo_m/findings/P2_correctness_202609100002_shared-name.md"
+    ln -s ../../seed.txt "$repo_m/findings/$nl_twin"
     git -C "$repo_m" add -A && git -C "$repo_m" commit -q -m 'a symlink whose name holds a newline'
     m_head="$(git -C "$repo_m" rev-parse HEAD)"
-    if ! git -C "$repo_m" ls-tree "$m_head" reviews/findings/ | grep -q '^120000 blob '; then
+    if ! git -C "$repo_m" ls-tree "$m_head" findings/ | grep -q '^120000 blob '; then
       echo 'the fixture was meant to commit a SYMLINK whose name holds a newline' >&2
       exit 1
     fi
@@ -1712,18 +1712,18 @@ inside_repo="$fixture_dir/repo-unreadable-inside-git"
 new_repo "$inside_repo"
 echo seed > "$inside_repo/seed.txt"
 git -C "$inside_repo" add -A && git -C "$inside_repo" commit -q -m base
-mkdir -p "$inside_repo/reviews/findings"
-echo one > "$inside_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo two > "$inside_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+mkdir -p "$inside_repo/findings"
+echo one > "$inside_repo/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$inside_repo/findings/P2_correctness_202609100002_shared-name.md"
 git -C "$inside_repo" add -A \
   && git -C "$inside_repo" commit -q -m 'two findings share a description'
 # The twin leaves the CHECKOUT and stays in the index, so the filesystem
 # fallback answers `conforms` here rather than merely answering for some other
 # reason.
-rm "$inside_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+rm "$inside_repo/findings/P2_correctness_202609100002_shared-name.md"
 inside_verdict() {  # inside_verdict -> the exit code, with stderr on stdout
   "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-    "$inside_repo/reviews/findings" 2>&1
+    "$inside_repo/findings" 2>&1
 }
 inside_control_rc=0
 inside_control_out="$(inside_verdict)" || inside_control_rc=$?
@@ -1742,7 +1742,7 @@ else
     victim_mode=755
     [[ -d "$inside_repo/.git/$victim" ]] || victim_mode=644
     if ! chmod 000 "$inside_repo/.git/$victim" 2>/dev/null \
-      || git -C "$inside_repo/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1
+      || git -C "$inside_repo/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1
     then
       chmod "$victim_mode" "$inside_repo/.git/$victim" 2>/dev/null || true
       echo "note: skipping .git/$victim (chmod had no effect on git)" >&2
@@ -1792,14 +1792,14 @@ else
   new_repo "$pointed_repo"
   echo seed > "$pointed_repo/seed.txt"
   git -C "$pointed_repo" add -A && git -C "$pointed_repo" commit -q -m base
-  mkdir -p "$pointed_repo/reviews/findings"
-  echo one > "$pointed_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
-  echo two > "$pointed_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+  mkdir -p "$pointed_repo/findings"
+  echo one > "$pointed_repo/findings/P2_correctness_202609100001_shared-name.md"
+  echo two > "$pointed_repo/findings/P2_correctness_202609100002_shared-name.md"
   git -C "$pointed_repo" add -A \
     && git -C "$pointed_repo" commit -q -m 'two findings share a description'
   pointed_verdict() {
     "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-      "$pointed_wt/reviews/findings" 2>&1
+      "$pointed_wt/findings" 2>&1
   }
   if ! git -C "$pointed_repo" worktree add -q --detach "$pointed_wt" HEAD 2>/dev/null \
     || [[ ! -f "$pointed_wt/.git" ]]; then
@@ -1808,7 +1808,7 @@ else
     # The twin leaves this worktree's CHECKOUT and stays in its index, so the
     # filesystem fallback answers `conforms` rather than answering for some other
     # reason.
-    rm "$pointed_wt/reviews/findings/P2_correctness_202609100002_shared-name.md"
+    rm "$pointed_wt/findings/P2_correctness_202609100002_shared-name.md"
     pointed_control_rc=0
     pointed_control_out="$(pointed_verdict)" || pointed_control_rc=$?
     if [[ "$pointed_control_rc" != 1 ]] \
@@ -1831,7 +1831,7 @@ else
           continue
         fi
         if ! chmod 000 "$pointed_gitdir/$pointed_victim" 2>/dev/null \
-          || git -C "$pointed_wt/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1
+          || git -C "$pointed_wt/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1
         then
           chmod 644 "$pointed_gitdir/$pointed_victim" 2>/dev/null || true
           continue
@@ -1870,7 +1870,7 @@ else
   # index and answers `true`, so the refusal cannot come from discovery: it has to
   # come from `ls-files` exiting 128, which was thrown away by a process
   # substitution followed by an unconditional `return 0`. What followed was
-  # worse than a narrowed set. With reviews/findings a COMMITTED SYMLINK whose
+  # worse than a narrowed set. With findings a COMMITTED SYMLINK whose
   # target text is a finding's filename -- which core.symlinks=false
   # materialises as a REGULAR FILE holding that name -- the recorded mode went
   # unread, the file was read as a FILE LISTING, and the link's target resolved
@@ -1880,17 +1880,17 @@ else
   invented_name='P2_correctness_202609100001_invented-by-a-read-failure.md'
   new_repo "$invented_repo"
   mkdir -p "$invented_repo/reviews"
-  if [[ -L "$symlink_probe" ]] && ln -s "$invented_name" "$invented_repo/reviews/findings"; then
+  if [[ -L "$symlink_probe" ]] && ln -s "$invented_name" "$invented_repo/findings"; then
     git -C "$invented_repo" add -A \
       && git -C "$invented_repo" commit -q -m 'a findings directory that is a symlink naming a finding'
     git -C "$invented_repo" config core.symlinks false
-    rm "$invented_repo/reviews/findings"
-    git -C "$invented_repo" checkout -- reviews/findings
+    rm "$invented_repo/findings"
+    git -C "$invented_repo" checkout -- findings
     invented_verdict() {
       "$BASH" "$branch_validator" 'fix-P2/correctness_invented-by-a-read-failure' \
-        "$invented_repo/reviews/findings" 2>&1
+        "$invented_repo/findings" 2>&1
     }
-    if [[ -L "$invented_repo/reviews/findings" ]] || [[ ! -f "$invented_repo/reviews/findings" ]]; then
+    if [[ -L "$invented_repo/findings" ]] || [[ ! -f "$invented_repo/findings" ]]; then
       echo 'note: skipping the invented-finding case (this git left the link a link)' >&2
     else
       invented_control_rc=0
@@ -1942,14 +1942,14 @@ fi
 # itself -- and the path ABOVE it was not. Commit `reviews` as a SYMLINK to a
 # sibling directory holding a finding and git calls it a `120000 blob`, `git
 # status` stays empty, and no tree entry and no index entry is NAMED
-# `reviews/findings/...`: the tree listings hold no finding and refuse at exit 1.
-# Handing `reviews/findings` straight in asked the index from INSIDE the link --
+# `findings/...`: the tree listings hold no finding and refuse at exit 1.
+# Handing `findings` straight in asked the index from INSIDE the link --
 # `git -C reviews` chdirs to `elsewhere` -- and resolved the name out of files no
 # ledger holds at that path, at exit 0.
 #
-# AND THE SAME LISTING WRITTEN FIVE WAYS IS ONE LISTING. `reviews/findings/.`
+# AND THE SAME LISTING WRITTEN FIVE WAYS IS ONE LISTING. `findings/.`
 # moved the question from `findings` to `.`, so the committed symlink AT
-# `reviews/findings` that the plain spelling refused at exit 1 conformed at exit 0
+# `findings` that the plain spelling refused at exit 1 conformed at exit 0
 # with three characters added. Every spelling is asserted, both for the paths that
 # must refuse and for a real findings directory that must still resolve --
 # otherwise "normalised" is indistinguishable from "rejected".
@@ -1972,7 +1972,7 @@ if [[ -L "$symlink_probe" ]]; then
   both_apis 'a findings directory reached through a committed symlink holds none' \
     "$repo_r" "$r_base" "$r_head" 'fix-P2/correctness_no-ledger-entry' 1
   spelling_case 'a symlinked ancestor, every spelling' \
-    'fix-P2/correctness_no-ledger-entry' 1 "$repo_r/reviews/findings"
+    'fix-P2/correctness_no-ledger-entry' 1 "$repo_r/findings"
 
   # The same name through the REAL directory the link points at resolves, so the
   # case above is a rule about the path and not a listing read as empty.
@@ -1984,7 +1984,7 @@ if [[ -L "$symlink_probe" ]]; then
 
   # THE SAME COMMIT CHECKED OUT WHERE THE FILESYSTEM CARRIES NO SYMLINK. Under
   # core.symlinks=false the 120000 blob at `reviews` is materialised as a REGULAR
-  # FILE holding `elsewhere`, so `reviews/findings` is not there at all: both APIs
+  # FILE holding `elsewhere`, so `findings` is not there at all: both APIs
   # refuse, one for a name it cannot find in the trees and one for a listing that
   # is neither a file nor a directory. One answer, two ways of arriving at it.
   git -C "$repo_r" config core.symlinks false
@@ -1996,7 +1996,7 @@ if [[ -L "$symlink_probe" ]]; then
     both_apis 'a symlinked ancestor materialised as a file holds no finding either' \
       "$repo_r" "$r_base" "$r_head" 'fix-P2/correctness_no-ledger-entry' 1
     spelling_case 'a materialised ancestor, every spelling' \
-      'fix-P2/correctness_no-ledger-entry' 1 "$repo_r/reviews/findings"
+      'fix-P2/correctness_no-ledger-entry' 1 "$repo_r/findings"
   fi
   # Put the link back, because the equivalence property below registers this
   # repository and the shape it registers is the committed symlink.
@@ -2018,7 +2018,7 @@ if [[ -L "$symlink_probe" ]]; then
   commit_finding "$repo_s" 'P3_liveness_202609100007_under-a-linked-parent.md' 'a real finding'
   if ln -s outer "$outer_link" 2>/dev/null && [[ -L "$outer_link" ]]; then
     if ! "$BASH" "$branch_validator" 'fix-P3/liveness_under-a-linked-parent' \
-      "$outer_link/repo-under-a-linked-parent/reviews/findings" >/dev/null 2>&1; then
+      "$outer_link/repo-under-a-linked-parent/findings" >/dev/null 2>&1; then
       echo 'a symlink ABOVE the work tree must not refuse a listing inside it' >&2
       exit 1
     fi
@@ -2032,7 +2032,7 @@ if [[ -L "$symlink_probe" ]]; then
   # match named the listing `findings`, answered it out of the root's own
   # `findings/`, and never consulted the 120000 the index records for `reviews`.
   # The checkout is clean, the tree listings hold nothing under
-  # `reviews/findings` and refuse at exit 1, and the directory conformed at exit
+  # `findings` and refuse at exit 1, and the directory conformed at exit
   # 0 -- the last counter-example to the equivalence on a clean checkout. The
   # root is matched by inode; the path through it is matched by RECORDED MODE,
   # and this is the half that asserts the second.
@@ -2055,7 +2055,7 @@ if [[ -L "$symlink_probe" ]]; then
   both_apis 'a symlink to the work tree root names no findings directory' \
     "$root_loop_repo" "$root_loop_base" "$root_loop_head" 'fix-P2/correctness_root-loop' 1
   spelling_case 'a symlink to the work tree root, every spelling' \
-    'fix-P2/correctness_root-loop' 1 "$root_loop_repo/reviews/findings"
+    'fix-P2/correctness_root-loop' 1 "$root_loop_repo/findings"
   # And the real directory the link comes back to still answers for its OWN
   # name, so the case above is a rule about the path and not a listing read as
   # empty.
@@ -2066,7 +2066,7 @@ if [[ -L "$symlink_probe" ]]; then
   fi
 
   # AND THE SAME THING AT THE LAST COMPONENT. `reviews` is a tracked directory
-  # and `reviews/findings` a committed link to `..`, so the LISTING PATH ITSELF
+  # and `findings` a committed link to `..`, so the LISTING PATH ITSELF
   # is the work tree root by inode while the index records it as a 120000 blob.
   # Found by sweeping shapes for more counter-examples rather than by review, and
   # it was one: trees 1, directory 0 on the unrepaired file.
@@ -2078,9 +2078,9 @@ if [[ -L "$symlink_probe" ]]; then
   mkdir -p "$last_loop_repo/reviews"
   echo fixture > "$last_loop_repo/P2_correctness_202609110002_loops-to-the-root.md"
   echo keep > "$last_loop_repo/reviews/keep.txt"
-  ln -s .. "$last_loop_repo/reviews/findings"
+  ln -s .. "$last_loop_repo/findings"
   git -C "$last_loop_repo" add -A \
-    && git -C "$last_loop_repo" commit -q -m 'reviews/findings is a link to the work tree root'
+    && git -C "$last_loop_repo" commit -q -m 'findings is a link to the work tree root'
   last_loop_head="$(git -C "$last_loop_repo" rev-parse HEAD)"
   if [[ -n "$(git -C "$last_loop_repo" status --porcelain)" ]]; then
     echo 'the loop-to-the-root fixture was meant to be a clean checkout' >&2
@@ -2090,7 +2090,7 @@ if [[ -L "$symlink_probe" ]]; then
     "$last_loop_repo" "$last_loop_base" "$last_loop_head" \
     'fix-P2/correctness_loops-to-the-root' 1
   spelling_case 'a listing that loops to the root, every spelling' \
-    'fix-P2/correctness_loops-to-the-root' 1 "$last_loop_repo/reviews/findings"
+    'fix-P2/correctness_loops-to-the-root' 1 "$last_loop_repo/findings"
 fi
 
 # And a real findings directory answers the same in every spelling, which is what
@@ -2099,9 +2099,9 @@ spelling_repo="$fixture_dir/repo-spellings"
 new_repo "$spelling_repo"
 commit_finding "$spelling_repo" 'P3_liveness_202609100005_written-five-ways.md' 'a real finding'
 spelling_case 'a real findings directory, every spelling' \
-  'fix-P3/liveness_written-five-ways' 0 "$spelling_repo/reviews/findings"
+  'fix-P3/liveness_written-five-ways' 0 "$spelling_repo/findings"
 spelling_case 'and a name it does not hold, every spelling' \
-  'fix-P3/liveness_not-in-this-directory' 1 "$spelling_repo/reviews/findings"
+  'fix-P3/liveness_not-in-this-directory' 1 "$spelling_repo/findings"
 
 # A `..` AFTER A NAMED COMPONENT IS REFUSED AND NOT GUESSED AT. `a/b/..` is `a`
 # when `b` is a directory and the LINK'S parent when `b` is a symlink, so
@@ -2111,14 +2111,14 @@ spelling_case 'and a name it does not hold, every spelling' \
 # and is accepted.
 dotdot_rc=0
 dotdot_out="$("$BASH" "$branch_validator" 'fix-P3/liveness_written-five-ways' \
-  "$spelling_repo/reviews/findings/../findings" 2>&1)" || dotdot_rc=$?
+  "$spelling_repo/findings/../findings" 2>&1)" || dotdot_rc=$?
 if [[ "$dotdot_rc" != 1 ]] || ! grep -q "holds a '\.\.' after a named component" <<< "$dotdot_out"; then
   echo "a '..' after a named component must be refused, saying so; got $dotdot_rc" >&2
   exit 1
 fi
 if ! ( cd "$spelling_repo/reviews" && "$BASH" "$branch_validator" \
   'fix-P3/liveness_written-five-ways' \
-  '../reviews/findings' >/dev/null 2>&1 ); then
+  '../findings' >/dev/null 2>&1 ); then
   echo 'a LEADING .. is a starting directory and must still resolve' >&2
   exit 1
 fi
@@ -2134,7 +2134,7 @@ fi
 
 # A CHECKOUT DIRECTORY RENAMED AND REPLACED BY A LINK IS STILL THE INDEX'S
 # DIRECTORY. `mv reviews saved-reviews; ln -s saved-reviews reviews` leaves the
-# index recording `reviews/findings/<twin>.md` and leaves `git ls-tree` holding
+# index recording `findings/<twin>.md` and leaves `git ls-tree` holding
 # it too -- and the ancestor rule that used to see the link returned the EMPTY
 # SET before looking at what the index records, so the twin vanished and an
 # ambiguous name conformed at exit 0 where the parent refuses at exit 1. The
@@ -2144,13 +2144,13 @@ if [[ -L "$symlink_probe" ]]; then
   new_repo "$renamed_repo"
   echo seed > "$renamed_repo/seed.txt"
   git -C "$renamed_repo" add -A && git -C "$renamed_repo" commit -q -m base
-  mkdir -p "$renamed_repo/reviews/findings"
-  echo two > "$renamed_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+  mkdir -p "$renamed_repo/findings"
+  echo two > "$renamed_repo/findings/P2_correctness_202609100002_shared-name.md"
   git -C "$renamed_repo" add -A && git -C "$renamed_repo" commit -q -m 'one twin, committed'
   printf 'P2_correctness_202609100001_shared-name.md\n' > "$fixture_dir/renamed-twin-a.txt"
   renamed_verdict() {
     "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-      "$fixture_dir/renamed-twin-a.txt" "$renamed_repo/reviews/findings" 2>&1
+      "$fixture_dir/renamed-twin-a.txt" "$renamed_repo/findings" 2>&1
   }
   renamed_control_rc=0
   renamed_control_out="$(renamed_verdict)" || renamed_control_rc=$?
@@ -2161,7 +2161,7 @@ if [[ -L "$symlink_probe" ]]; then
   mv "$renamed_repo/reviews" "$renamed_repo/saved-reviews"
   ln -s saved-reviews "$renamed_repo/reviews"
   # The point of the fixture is that the INDEX did not move.
-  if [[ "$(git -C "$renamed_repo" ls-files -- reviews/findings/ | wc -l)" != 1 ]]; then
+  if [[ "$(git -C "$renamed_repo" ls-files -- findings/ | wc -l)" != 1 ]]; then
     echo 'the fixture was meant to leave the index recording the finding' >&2
     exit 1
   fi
@@ -2177,9 +2177,9 @@ if [[ -L "$symlink_probe" ]]; then
   # CHECKOUT. `reviews -> elsewhere` and `elsewhere/findings -> <finding>.md`
   # are both committed; under core.symlinks=false the second is materialised as
   # a REGULAR FILE holding that filename, `git status` stays empty, and
-  # `reviews/findings` was read as a FILE LISTING naming a finding nobody has
+  # `findings` was read as a FILE LISTING naming a finding nobody has
   # filed -- exit 0 on a commit whose trees refuse at exit 1. No index entry and
-  # no tree entry is named `reviews/findings` at all: `reviews` is a 120000
+  # no tree entry is named `findings` at all: `reviews` is a 120000
   # blob, so the path is unnameable and holds nothing, whatever the checkout put
   # at the end of it.
   behind_repo="$fixture_dir/repo-materialised-behind-a-link"
@@ -2203,7 +2203,7 @@ if [[ -L "$symlink_probe" ]]; then
     both_apis 'a materialised link behind a link invents no finding' \
       "$behind_repo" "$behind_base" "$behind_head" 'fix-P2/correctness_shared-name' 1
     spelling_case 'a materialised link behind a link, every spelling' \
-      'fix-P2/correctness_shared-name' 1 "$behind_repo/reviews/findings"
+      'fix-P2/correctness_shared-name' 1 "$behind_repo/findings"
     # And the path the link itself names is a 120000 blob, which is not a
     # listing either: the two ways of asking are one answer.
     behind_direct_rc=0
@@ -2232,14 +2232,14 @@ worktrees_wt="$fixture_dir/unsearchable-worktrees-checkout"
 new_repo "$worktrees_repo"
 echo seed > "$worktrees_repo/seed.txt"
 git -C "$worktrees_repo" add -A && git -C "$worktrees_repo" commit -q -m base
-mkdir -p "$worktrees_repo/reviews/findings"
-echo one > "$worktrees_repo/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo two > "$worktrees_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+mkdir -p "$worktrees_repo/findings"
+echo one > "$worktrees_repo/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$worktrees_repo/findings/P2_correctness_202609100002_shared-name.md"
 git -C "$worktrees_repo" add -A \
   && git -C "$worktrees_repo" commit -q -m 'two findings share a description'
 worktrees_verdict() {
   "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-    "$worktrees_wt/reviews/findings" 2>&1
+    "$worktrees_wt/findings" 2>&1
 }
 if ! git -C "$worktrees_repo" worktree add -q --detach "$worktrees_wt" HEAD 2>/dev/null \
   || [[ ! -d "$worktrees_repo/.git/worktrees" ]]; then
@@ -2248,7 +2248,7 @@ else
   # The twin leaves the linked worktree's CHECKOUT and stays in its index, so the
   # filesystem fallback -- which cannot see an index at all -- answers `conforms`
   # here rather than merely answering for some other reason.
-  rm "$worktrees_wt/reviews/findings/P2_correctness_202609100002_shared-name.md"
+  rm "$worktrees_wt/findings/P2_correctness_202609100002_shared-name.md"
   worktrees_control_rc=0
   worktrees_control_out="$(worktrees_verdict)" || worktrees_control_rc=$?
   if [[ "$worktrees_control_rc" != 1 ]] \
@@ -2289,7 +2289,7 @@ else
     exit 1
   fi
   if [[ "$(id -u)" -eq 0 ]] || ! chmod 000 "$worktrees_repo/.git/worktrees" 2>/dev/null \
-    || git -C "$worktrees_wt/reviews/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    || git -C "$worktrees_wt/findings" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     chmod 755 "$worktrees_repo/.git/worktrees" 2>/dev/null || true
     echo 'note: skipping the unsearchable-worktrees case (running as root, or chmod had no effect)' >&2
   else
@@ -2348,14 +2348,14 @@ if [[ -L "$symlink_probe" ]]; then
   new_repo "$inject_symlink_repo"
   mkdir -p "$inject_symlink_repo/reviews"
   ln -s P2_correctness_202609100001_invented-by-a-lost-record.md \
-    "$inject_symlink_repo/reviews/findings"
+    "$inject_symlink_repo/findings"
   git -C "$inject_symlink_repo" add -A \
     && git -C "$inject_symlink_repo" commit -q -m 'a findings path that is a symlink naming a finding'
   git -C "$inject_symlink_repo" config core.symlinks false
-  rm "$inject_symlink_repo/reviews/findings"
-  git -C "$inject_symlink_repo" checkout -- reviews/findings
-  if [[ -L "$inject_symlink_repo/reviews/findings" ]] \
-    || [[ ! -f "$inject_symlink_repo/reviews/findings" ]]; then
+  rm "$inject_symlink_repo/findings"
+  git -C "$inject_symlink_repo" checkout -- findings
+  if [[ -L "$inject_symlink_repo/findings" ]] \
+    || [[ ! -f "$inject_symlink_repo/findings" ]]; then
     inject_symlink_repo=''
     echo 'note: skipping the injected-record case (this git left the link a link)' >&2
   fi
@@ -2438,14 +2438,14 @@ else
     'fix-P2/correctness_shared-name' \
     "$fixture_dir/inject-twin-a.txt" "$fixture_dir/inject-twin-b.txt"
   # git's own output, on the shape where losing it INVENTS a finding rather than
-  # merely dropping one: reviews/findings is a committed symlink whose target
+  # merely dropping one: findings is a committed symlink whose target
   # text is a finding's filename, materialised by core.symlinks=false as a
   # regular file holding that name. Read the recorded mode and it is a 120000
   # blob and no listing; lose it and the file's BYTES resolve a fix-P*/ branch.
   if [[ -n "$inject_symlink_repo" ]]; then
     inject_case git git.out 120000 000 'git_probe' \
       'fix-P2/correctness_invented-by-a-lost-record' \
-      "$inject_symlink_repo/reviews/findings"
+      "$inject_symlink_repo/findings"
   fi
   # git's destination unwritable, on the shape where the LOST RECORD drops a
   # whole listing: a file listing naming one twin, and a repository directory
@@ -2460,7 +2460,7 @@ else
   inject_toplevel_control_rc=0
   inject_toplevel_control_out="$(TMPDIR="$inject_dir" \
     "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
-    "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/reviews/findings" 2>&1)" \
+    "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/findings" 2>&1)" \
     || inject_toplevel_control_rc=$?
   if [[ "$inject_toplevel_control_rc" != 1 ]] \
     || ! grep -q 'names 2 findings' <<< "$inject_toplevel_control_out"; then
@@ -2469,7 +2469,7 @@ else
   fi
   inject_case git git.out repo-injected-toplevel 400 'git_probe, destination unwritable' \
     'fix-P2/correctness_shared-name' \
-    "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/reviews/findings"
+    "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/findings"
 fi
 
 # ---- a directory's NAMES and its STATUS must come from one run of one command ------------------
@@ -2553,7 +2553,7 @@ fi
 
 # ---- the cost of answering from the records, asserted rather than described -------------------
 #
-# An UNTRACKED finding file inside a tracked reviews/findings/ no longer counts:
+# An UNTRACKED finding file inside a tracked findings/ no longer counts:
 # the ledger is what is committed, and a merge gate decides about commits and
 # never about a work tree. That is a deliberate loosening and this is where it
 # is pinned, because a silent return to counting it would part the two APIs
@@ -2569,7 +2569,7 @@ commit_finding "$untracked_repo" 'P2_correctness_202609100001_shared-name.md' 'o
 untracked_head="$(git -C "$untracked_repo" rev-parse HEAD)"
 both_apis 'the control: one filed finding resolves' \
   "$untracked_repo" "$untracked_base" "$untracked_head" 'fix-P2/correctness_shared-name' 0
-echo twin > "$untracked_repo/reviews/findings/P2_correctness_202609100002_shared-name.md"
+echo twin > "$untracked_repo/findings/P2_correctness_202609100002_shared-name.md"
 if [[ -z "$(git -C "$untracked_repo" status --porcelain)" ]]; then
   echo 'the fixture was meant to leave an UNTRACKED file in the findings directory' >&2
   exit 1
@@ -2579,7 +2579,7 @@ both_apis 'and an untracked twin beside it changes nothing' \
 
 # AND AN UNTRACKED FINDINGS DIRECTORY IS THE EMPTY SET, which is the same rule
 # one level up and the one that would otherwise be the whole disagreement back
-# again: nothing under reviews/findings/ is committed, a finding file sits there
+# again: nothing under findings/ is committed, a finding file sits there
 # untracked, and the trees hold none. Both ends must say none.
 bare_untracked="$fixture_dir/repo-untracked-findings-dir"
 new_repo "$bare_untracked"
@@ -2589,8 +2589,8 @@ bare_untracked_base="$(git -C "$bare_untracked" rev-parse HEAD)"
 echo more > "$bare_untracked/other.txt"
 git -C "$bare_untracked" add -A && git -C "$bare_untracked" commit -q -m 'nothing to do with findings'
 bare_untracked_head="$(git -C "$bare_untracked" rev-parse HEAD)"
-mkdir -p "$bare_untracked/reviews/findings"
-echo fixture > "$bare_untracked/reviews/findings/P2_correctness_202609100011_never-committed.md"
+mkdir -p "$bare_untracked/findings"
+echo fixture > "$bare_untracked/findings/P2_correctness_202609100011_never-committed.md"
 both_apis 'an untracked findings directory holds no filed finding' \
   "$bare_untracked" "$bare_untracked_base" "$bare_untracked_head" \
   'fix-P2/correctness_never-committed' 1
@@ -2610,7 +2610,7 @@ if [[ -L "$symlink_probe" ]]; then
   link_untracked_head="$(git -C "$link_untracked" rev-parse HEAD)"
   mkdir -p "$link_untracked/elsewhere" "$link_untracked/reviews"
   echo fixture > "$link_untracked/elsewhere/P2_correctness_202609100012_at-the-end-of-a-link.md"
-  ln -s ../elsewhere "$link_untracked/reviews/findings"
+  ln -s ../elsewhere "$link_untracked/findings"
   both_apis 'an untracked symlink is not a findings directory' \
     "$link_untracked" "$link_untracked_base" "$link_untracked_head" \
     'fix-P2/correctness_at-the-end-of-a-link' 1
@@ -2646,7 +2646,7 @@ fi
 
 # A RELATIVE LISTING IS RELATIVE TO WHERE THE SHELL IS STANDING, and the
 # components a caller names are the ones they typed PLUS the ones `$PWD` holds.
-# Run from a checkout's `reviews/`, the listing `findings` is `reviews/findings`
+# Run from a checkout's `reviews/`, the listing `findings` is `findings`
 # in the index and nothing else -- and a prefix chain that starts at `.` reaches
 # no root above it, which refused an ordinary by-hand invocation that every
 # earlier head accepted. Three spellings of one directory, from three different
@@ -2661,9 +2661,9 @@ relative_case() {  # relative_case <label> <cwd> <listing>
     exit 1
   fi
 }
-relative_case 'from the work tree root' "$relative_repo" 'reviews/findings'
+relative_case 'from the work tree root' "$relative_repo" 'findings'
 relative_case 'from reviews/'           "$relative_repo/reviews" 'findings'
-relative_case 'from the directory itself' "$relative_repo/reviews/findings" '.'
+relative_case 'from the directory itself' "$relative_repo/findings" '.'
 # And a relative path that is NOT the ledger's directory still holds nothing:
 # the rule is about naming the path, not about accepting every relative one.
 relative_miss_rc=0
@@ -2677,16 +2677,16 @@ fi
 
 # AND THE LONG WAY ROUND IS THE SAME PATH. The work tree's root is matched
 # against the caller's own components, and a spelling that passes the root on
-# the way down and comes back to it -- `../../<repo>/reviews/findings` from
-# inside `<repo>/reviews` -- must be named `reviews/findings` in the index and
-# not `../<repo>/reviews/findings`, which is no index entry and which git refuses
+# the way down and comes back to it -- `../../<repo>/findings` from
+# inside `<repo>/reviews` -- must be named `findings` in the index and
+# not `../<repo>/findings`, which is no index entry and which git refuses
 # as a pathspec leaving the work tree.
 long_way_repo="$fixture_dir/repo-long-way-round"
 new_repo "$long_way_repo"
 commit_finding "$long_way_repo" 'P3_liveness_202609100014_spelled-the-long-way.md' 'a real finding'
 if ! ( cd "$long_way_repo/reviews" && "$BASH" "$branch_validator" \
   'fix-P3/liveness_spelled-the-long-way' \
-  '../../repo-long-way-round/reviews/findings' >/dev/null 2>&1 ); then
+  '../../repo-long-way-round/findings' >/dev/null 2>&1 ); then
   echo 'a path that passes the work tree root on the way down must still resolve' >&2
   exit 1
 fi
@@ -2712,7 +2712,7 @@ fi
 # ways in disagreeing about one commit, so the claim is tested as a property: for
 # every repository below and every branch name below, the answer through the
 # three tree listings EQUALS the answer through the working tree's
-# reviews/findings/ directory. The expectation is not asserted here at all --
+# findings/ directory. The expectation is not asserted here at all --
 # each shape's expected answer is asserted in its own section above -- because
 # what this checks is that the two APIs cannot part company, including for pairs
 # nobody thought to write down.
@@ -2731,10 +2731,10 @@ new_repo "$eq_plain"
 echo seed > "$eq_plain/seed.txt"
 git -C "$eq_plain" add -A && git -C "$eq_plain" commit -q -m base
 eq_plain_base="$(git -C "$eq_plain" rev-parse HEAD)"
-mkdir -p "$eq_plain/reviews/findings"
-echo one > "$eq_plain/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo two > "$eq_plain/reviews/findings/P2_correctness_202609100002_shared-name.md"
-echo three > "$eq_plain/reviews/findings/P3_liveness_202609100003_a-real-finding.md"
+mkdir -p "$eq_plain/findings"
+echo one > "$eq_plain/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$eq_plain/findings/P2_correctness_202609100002_shared-name.md"
+echo three > "$eq_plain/findings/P3_liveness_202609100003_a-real-finding.md"
 git -C "$eq_plain" add -A && git -C "$eq_plain" commit -q -m 'three findings, two sharing a description'
 register_equivalence "$eq_plain" "$eq_plain_base" "$(git -C "$eq_plain" rev-parse HEAD)"
 
@@ -2754,12 +2754,12 @@ new_repo "$eq_recorded"
 echo seed > "$eq_recorded/seed.txt"
 git -C "$eq_recorded" add -A && git -C "$eq_recorded" commit -q -m base
 eq_recorded_base="$(git -C "$eq_recorded" rev-parse HEAD)"
-mkdir -p "$eq_recorded/reviews/findings"
-echo one > "$eq_recorded/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo two > "$eq_recorded/reviews/findings/P2_correctness_202609100002_shared-name.md"
+mkdir -p "$eq_recorded/findings"
+echo one > "$eq_recorded/findings/P2_correctness_202609100001_shared-name.md"
+echo two > "$eq_recorded/findings/P2_correctness_202609100002_shared-name.md"
 git -C "$eq_recorded" add -A && git -C "$eq_recorded" commit -q -m 'two findings share a description'
 register_equivalence "$eq_recorded" "$eq_recorded_base" "$(git -C "$eq_recorded" rev-parse HEAD)"
-rm "$eq_recorded/reviews/findings/P2_correctness_202609100002_shared-name.md"
+rm "$eq_recorded/findings/P2_correctness_202609100002_shared-name.md"
 
 # A subdirectory wearing a finding's name, which is a tree and not a finding.
 eq_subdir="$fixture_dir/eq-directory-named-like-a-finding"
@@ -2767,9 +2767,9 @@ new_repo "$eq_subdir"
 echo seed > "$eq_subdir/seed.txt"
 git -C "$eq_subdir" add -A && git -C "$eq_subdir" commit -q -m base
 eq_subdir_base="$(git -C "$eq_subdir" rev-parse HEAD)"
-mkdir -p "$eq_subdir/reviews/findings/P2_correctness_202609100001_shared-name.md"
-echo inside > "$eq_subdir/reviews/findings/P2_correctness_202609100001_shared-name.md/inside.txt"
-echo real > "$eq_subdir/reviews/findings/P3_liveness_202609100003_a-real-finding.md"
+mkdir -p "$eq_subdir/findings/P2_correctness_202609100001_shared-name.md"
+echo inside > "$eq_subdir/findings/P2_correctness_202609100001_shared-name.md/inside.txt"
+echo real > "$eq_subdir/findings/P3_liveness_202609100003_a-real-finding.md"
 git -C "$eq_subdir" add -A && git -C "$eq_subdir" commit -q -m 'a directory wearing a finding name'
 register_equivalence "$eq_subdir" "$eq_subdir_base" "$(git -C "$eq_subdir" rev-parse HEAD)"
 
@@ -2822,7 +2822,7 @@ for equivalence_entry in "${equivalence_repos[@]}"; do
   for eq_branch in "${equivalence_branches[@]}"; do
     eq_tree="$(verdict "$eq_repo" "$eq_base" "$eq_head" "$eq_branch")"
     eq_dir=0
-    "$BASH" "$branch_validator" "$eq_branch" "$eq_repo/reviews/findings" \
+    "$BASH" "$branch_validator" "$eq_branch" "$eq_repo/findings" \
       >/dev/null 2>&1 || eq_dir=$?
     if [[ "$eq_tree" != "$eq_dir" ]]; then
       echo "the two APIs disagree: ${eq_repo##*/} / $eq_branch -> trees $eq_tree, directory $eq_dir" >&2
@@ -2899,24 +2899,24 @@ finding_body() {  # finding_body <severity> -> a finding file's bytes, frontmatt
   printf -- '---\nid: FIXTURE-1\nseverity: %s\ndisposition: deferred\n---\n\n## Failure sequence\n' "$1"
 }
 
-# A repository whose BASE ALREADY CARRIES A BADLY NAMED FILE under reviews/findings/. Every case
+# A repository whose BASE ALREADY CARRIES A BADLY NAMED FILE under findings/. Every case
 # below branches from it, so every one of them also asserts the rule that matters most here: a name
 # already on master must never turn somebody else's pull request red. A rule over the directory as it
 # stands would refuse every open pull request the day such a file landed -- including the pull
 # request that was going to fix it.
 repo_diff="$fixture_dir/repo-diff-rules"
 new_repo "$repo_diff"
-mkdir -p "$repo_diff/reviews/findings" "$repo_diff/src"
+mkdir -p "$repo_diff/findings" "$repo_diff/src"
 echo seed > "$repo_diff/seed.txt"
 echo 'fn main() {}' > "$repo_diff/src/engine.rs"
 # A source file with enough content for git to CALL a move of it a rename. `fn main() {}` moved
-# under reviews/findings/ with frontmatter bolted on is too dissimilar to be detected as one, and
+# under findings/ with frontmatter bolted on is too dissimilar to be detected as one, and
 # case 10 is about what happens when detection fires.
 awk 'BEGIN { for (i = 0; i < 200; i++) print "pub fn archived_" i "() { let _ = " i "; }" }' \
   > "$repo_diff/src/archive-me.rs"
-finding_body P9 > "$repo_diff/reviews/findings/P9_correctness_202609010000_already-here.md"
-finding_body P2 > "$repo_diff/reviews/findings/NOT-A-FINDING.md"
-finding_body P2 > "$repo_diff/reviews/findings/P2_correctness_202609010001_to-be-renamed.md"
+finding_body P9 > "$repo_diff/findings/P9_correctness_202609010000_already-here.md"
+finding_body P2 > "$repo_diff/findings/NOT-A-FINDING.md"
+finding_body P2 > "$repo_diff/findings/P2_correctness_202609010001_to-be-renamed.md"
 git -C "$repo_diff" add -A
 git -C "$repo_diff" commit -q -m base
 diff_base="$(git -C "$repo_diff" rev-parse HEAD)"
@@ -2925,10 +2925,10 @@ branch_from() {  # branch_from <name>: a branch off the base, checked out
   git -C "$repo_diff" checkout -q -B "$1" "$diff_base"
 }
 
-# 1. A findings/ pull request confined to reviews/findings/, with two badly named files sitting in
+# 1. A findings/ pull request confined to findings/, with two badly named files sitting in
 #    the directory it never touches.
 branch_from confined
-finding_body P3 > "$repo_diff/reviews/findings/P3_liveness_202609110000_a-new-one.md"
+finding_body P3 > "$repo_diff/findings/P3_liveness_202609110000_a-new-one.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding'
 diff_confined="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'a findings/ branch confined to the ledger' \
@@ -2936,7 +2936,7 @@ diff_case 'a findings/ branch confined to the ledger' \
 
 # 2. The same pull request with one file outside the ledger. THE PATH IS NAMED.
 branch_from outside
-finding_body P3 > "$repo_diff/reviews/findings/P3_liveness_202609110000_a-new-one.md"
+finding_body P3 > "$repo_diff/findings/P3_liveness_202609110000_a-new-one.md"
 echo '// repaired' >> "$repo_diff/src/engine.rs"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding and repair it'
 diff_outside="$(git -C "$repo_diff" rev-parse HEAD)"
@@ -2948,21 +2948,21 @@ diff_says 'a findings/ branch that repairs code' \
 # code is exactly what that prefix is for.
 diff_case 'the same diff on a prefix that admits code' \
   "$repo_diff" "$diff_base" "$diff_outside" fix-P3/liveness_a-new-one 0
-# A PATH THAT MERELY CONTAINS `reviews/findings/` IS NOT UNDER IT. The test is the start of the
-# path and not a substring of it: matched anywhere, `src/reviews/findings/sneaky.rs` is inside the
+# A PATH THAT MERELY CONTAINS `findings/` IS NOT UNDER IT. The test is the start of the
+# path and not a substring of it: matched anywhere, `src/findings/sneaky.rs` is inside the
 # ledger and a findings/ branch may carry any code that sits under a directory of that name.
 branch_from outside-lookalike
-mkdir -p "$repo_diff/src/reviews/findings" "$repo_diff/reviews/findings-archive"
-echo 'fn sneaky() {}' > "$repo_diff/src/reviews/findings/sneaky.rs"
-echo archived > "$repo_diff/reviews/findings-archive/old.md"
+mkdir -p "$repo_diff/src/findings" "$repo_diff/findings-archive"
+echo 'fn sneaky() {}' > "$repo_diff/src/findings/sneaky.rs"
+echo archived > "$repo_diff/findings-archive/old.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'paths that look like the ledger'
 diff_lookalike="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'a findings/ branch adding a path that only looks like the ledger' \
   "$repo_diff" "$diff_base" "$diff_lookalike" findings/tidy-up 1
 diff_says 'a findings/ branch adding a path that only looks like the ledger' \
-  "$repo_diff" "$diff_base" "$diff_lookalike" findings/tidy-up 'src/reviews/findings/sneaky.rs'
+  "$repo_diff" "$diff_base" "$diff_lookalike" findings/tidy-up 'src/findings/sneaky.rs'
 diff_says 'a findings/ branch adding a sibling of the ledger directory' \
-  "$repo_diff" "$diff_base" "$diff_lookalike" findings/tidy-up 'reviews/findings-archive/old.md'
+  "$repo_diff" "$diff_base" "$diff_lookalike" findings/tidy-up 'findings-archive/old.md'
 
 # A DELETION outside the ledger is a path this pull request touches too. `--name-only` lists it, and
 # a limit that only saw additions would let a findings/ branch remove a gate.
@@ -2972,7 +2972,7 @@ git -C "$repo_diff" rm -q src/engine.rs
 # the diff, an implementation that dropped deletions would hand over an EMPTY listing, and the empty
 # rule would refuse the pull request for a reason that has nothing to do with the deletion -- a
 # fixture passing for the wrong reason, and one that would not notice deletions going missing.
-finding_body P3 > "$repo_diff/reviews/findings/P3_liveness_202609110006_alongside.md"
+finding_body P3 > "$repo_diff/findings/P3_liveness_202609110006_alongside.md"
 git -C "$repo_diff" add -A
 git -C "$repo_diff" commit -q -m 'delete a source file and file a finding'
 diff_outside_delete="$(git -C "$repo_diff" rev-parse HEAD)"
@@ -2982,7 +2982,7 @@ diff_case 'a findings/ branch that deletes a source file' \
 # 3. A finding whose NAME carries a severity the ladder does not have. Its frontmatter is P3, so the
 #    refusal is about the name alone.
 branch_from p4-name
-finding_body P3 > "$repo_diff/reviews/findings/P4_correctness_202609110001_out-of-range.md"
+finding_body P3 > "$repo_diff/findings/P4_correctness_202609110001_out-of-range.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a P4'
 diff_p4_name="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'an added finding named P4_' \
@@ -2995,7 +2995,7 @@ diff_case 'an added finding named P4_ on a docs/ branch' \
 
 # 4. A finding whose NAME is fine and whose FRONTMATTER severity is not.
 branch_from p4-severity
-finding_body P4 > "$repo_diff/reviews/findings/P3_correctness_202609110002_mismatched.md"
+finding_body P4 > "$repo_diff/findings/P3_correctness_202609110002_mismatched.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a mismatched severity'
 diff_p4_sev="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'an added finding whose frontmatter severity is P4' \
@@ -3008,7 +3008,7 @@ diff_says 'an added finding whose frontmatter severity is P4' \
 # severity read from anywhere in the file would make it a P2 finding.
 branch_from no-frontmatter
 printf 'no frontmatter here\n\nseverity: P2\n' \
-  > "$repo_diff/reviews/findings/P3_correctness_202609110003_bare.md"
+  > "$repo_diff/findings/P3_correctness_202609110003_bare.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a bare file'
 diff_bare="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'an added file with no frontmatter' \
@@ -3021,7 +3021,7 @@ diff_says 'an added file with no frontmatter' \
 # launder a severity past this check by adding a line.
 branch_from two-severities
 { printf -- '---\nid: FIXTURE-2\nseverity: P4\nseverity: P3\n---\n\n## Failure sequence\n'; } \
-  > "$repo_diff/reviews/findings/P3_correctness_202609110008_twice.md"
+  > "$repo_diff/findings/P3_correctness_202609110008_twice.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding with two severities'
 diff_twice="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'an added finding with two frontmatter severities' \
@@ -3033,7 +3033,7 @@ diff_says 'an added finding with two frontmatter severities' \
 # P3, and the block is what the ladder reads.
 branch_from severity-in-the-body
 { finding_body P4; printf '\nA quoted row: severity: P3\n'; } \
-  > "$repo_diff/reviews/findings/P3_correctness_202609110007_quoting.md"
+  > "$repo_diff/findings/P3_correctness_202609110007_quoting.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding quoting a severity'
 diff_quoting="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'an added finding whose body quotes another severity' \
@@ -3042,19 +3042,19 @@ diff_says 'an added finding whose body quotes another severity' \
   "$repo_diff" "$diff_base" "$diff_quoting" findings/file-a-quoting-one 'its frontmatter severity is [P4]'
 
 # 5. A RENAME is checked, and it is checked at the name it leaves behind. Renaming a finding is how
-#    a reviewer reclassifies one (reviews/findings/README.md), so this is the live path into a bad
+#    a reviewer reclassifies one (findings/README.md), so this is the live path into a bad
 #    name and not a hypothetical.
 branch_from rename-into-range
-git -C "$repo_diff" mv reviews/findings/P2_correctness_202609010001_to-be-renamed.md \
-  reviews/findings/P3_correctness_202609010001_to-be-renamed.md
-finding_body P3 > "$repo_diff/reviews/findings/P3_correctness_202609010001_to-be-renamed.md"
+git -C "$repo_diff" mv findings/P2_correctness_202609010001_to-be-renamed.md \
+  findings/P3_correctness_202609010001_to-be-renamed.md
+finding_body P3 > "$repo_diff/findings/P3_correctness_202609010001_to-be-renamed.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'reclassify P2 as P3'
 diff_rename_ok="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'a reclassifying rename inside P0-P3' \
   "$repo_diff" "$diff_base" "$diff_rename_ok" findings/reclassify-a-finding 0
 branch_from rename-out-of-range
-git -C "$repo_diff" mv reviews/findings/P2_correctness_202609010001_to-be-renamed.md \
-  reviews/findings/P4_correctness_202609010001_to-be-renamed.md
+git -C "$repo_diff" mv findings/P2_correctness_202609010001_to-be-renamed.md \
+  findings/P4_correctness_202609010001_to-be-renamed.md
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'reclassify P2 as P4'
 diff_rename_bad="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'a rename out of P0-P3' \
@@ -3084,10 +3084,10 @@ diff_case 'a code-only pull request beside two badly named files' \
 # A file ADDED AND DELETED inside the pull request is in neither the diff nor the listing: what the
 # pull request leaves behind is nothing, and there is nothing to hold it to.
 branch_from added-then-deleted
-finding_body P3 > "$repo_diff/reviews/findings/P4_correctness_202609110004_transient.md"
-finding_body P3 > "$repo_diff/reviews/findings/P3_liveness_202609110005_the-real-one.md"
+finding_body P3 > "$repo_diff/findings/P4_correctness_202609110004_transient.md"
+finding_body P3 > "$repo_diff/findings/P3_liveness_202609110005_the-real-one.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a P4 and a P3'
-git -C "$repo_diff" rm -q reviews/findings/P4_correctness_202609110004_transient.md
+git -C "$repo_diff" rm -q findings/P4_correctness_202609110004_transient.md
 git -C "$repo_diff" commit -q -m 'and take the P4 away again'
 diff_transient="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'a badly named file added and deleted inside the pull request' \
@@ -3101,11 +3101,11 @@ diff_case 'a badly named file added and deleted inside the pull request' \
 #    It costs the same on the other listing and in the other direction: master DELETES a badly named
 #    file that is still present at this branch's head, and rooted at the target that deletion reads
 #    as this pull request ADDING the file -- so a pull request that has never been near
-#    reviews/findings/ is refused over a name somebody else wrote and somebody else removed.
+#    findings/ is refused over a name somebody else wrote and somebody else removed.
 git -C "$repo_diff" checkout -q -B trunk-advanced "$diff_base"
 echo '// master moved on' >> "$repo_diff/src/engine.rs"
 echo 'more' > "$repo_diff/src/other.rs"
-git -C "$repo_diff" rm -q reviews/findings/NOT-A-FINDING.md
+git -C "$repo_diff" rm -q findings/NOT-A-FINDING.md
 git -C "$repo_diff" add -A
 git -C "$repo_diff" commit -q -m 'master advances over src/ and tidies the ledger'
 diff_advanced="$(git -C "$repo_diff" rev-parse HEAD)"
@@ -3145,7 +3145,7 @@ builder_refuses 'two ends with no merge base' "$unrelated_commit" "$diff_confine
 # filename and it is the separator both listings are built from, so a record carrying one would
 # arrive at the validator as two -- and the validator refuses a record with no tab in it, which is
 # the second line of defence and not this one. This is the first: the builder does not write it.
-newline_branch="$repo_diff/reviews/findings/$(printf 'P2_correctness_202609110009_a\nb.md')"
+newline_branch="$repo_diff/findings/$(printf 'P2_correctness_202609110009_a\nb.md')"
 branch_from newline-in-a-name
 finding_body P2 > "$newline_branch"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding whose name has a newline'
@@ -3204,16 +3204,16 @@ fi
 #
 #     A RENAME INTO THE LEDGER IS A PATH OUTSIDE THE LEDGER TOO. `git diff --name-only` detects
 #     renames by default and prints ONLY THE DESTINATION, so `git mv src/archive-me.rs
-#     reviews/findings/P3_<...>.md` with frontmatter added arrived as a changed-path listing holding
-#     one path under reviews/findings/ and nothing else -- and the confinement limit, which is the
+#     findings/P3_<...>.md` with frontmatter added arrived as a changed-path listing holding
+#     one path under findings/ and nothing else -- and the confinement limit, which is the
 #     whole of what makes the findings/ lane's low review safe, accepted a pull request that
 #     deletes a source file. No push access is needed to open one: anyone can, from a fork.
 branch_from rename-into-the-ledger
-git -C "$repo_diff" mv src/archive-me.rs reviews/findings/P3_correctness_202609110012_archived.md
+git -C "$repo_diff" mv src/archive-me.rs findings/P3_correctness_202609110012_archived.md
 { finding_body P3
-  cat "$repo_diff/reviews/findings/P3_correctness_202609110012_archived.md"
+  cat "$repo_diff/findings/P3_correctness_202609110012_archived.md"
 } > "$fixture_dir/archived.md"
-cp -- "$fixture_dir/archived.md" "$repo_diff/reviews/findings/P3_correctness_202609110012_archived.md"
+cp -- "$fixture_dir/archived.md" "$repo_diff/findings/P3_correctness_202609110012_archived.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'archive a source file as a finding'
 diff_rename_in="$(git -C "$repo_diff" rev-parse HEAD)"
 # THE PRECONDITION IS ASSERTED, because without it this case passes for the wrong reason: if the
@@ -3236,19 +3236,19 @@ diff_case 'the same rename on a prefix that admits code' \
 
 #     A SEVERITY HOLDING THE FIELD DELIMITER FORGES THE RECORD. added-findings is
 #     `<severity><TAB><path>` and the severity is whatever the frontmatter said, so a block reading
-#     `severity: P3<TAB>reviews/findings/forged` emitted three fields: the validator read severity
+#     `severity: P3<TAB>findings/forged` emitted three fields: the validator read severity
 #     `P3`, took the injected text as the path, and the real file's severity was never judged.
 #     Measured on the unrepaired builder: accepted, rc=0, on three payloads.
-for forged_tail in 'reviews/findings/forged' \
-                   'reviews/findings/P3_correctness_202609110009_forged.md' \
-                   'reviews/findings/P3_correctness_202609110013_forged.md'; do
+for forged_tail in 'findings/forged' \
+                   'findings/P3_correctness_202609110009_forged.md' \
+                   'findings/P3_correctness_202609110013_forged.md'; do
   branch_from severity-holding-a-tab
   # The injected severity is P3 -- a value the validator ACCEPTS -- which is what makes this the
   # exploit and not a refusal for some other reason: read back, the record says P3 and names a
   # path of the author's choosing, while the file's real severity is the whole injected string
   # and is judged by nothing.
   printf -- '---\nid: FIXTURE-6\nseverity: P3\t%s\ndisposition: deferred\n---\n' "$forged_tail" \
-    > "$repo_diff/reviews/findings/P3_correctness_202609110013_forged.md"
+    > "$repo_diff/findings/P3_correctness_202609110013_forged.md"
   git -C "$repo_diff" add -A
   git -C "$repo_diff" commit -q -m 'file a finding whose severity holds a tab'
   diff_forged="$(git -C "$repo_diff" rev-parse HEAD)"
@@ -3259,7 +3259,7 @@ done
 # is: one record per line is what this listing promises.
 branch_from severity-holding-a-carriage-return
 printf -- '---\nid: FIXTURE-6\nseverity: P3\rP3\ndisposition: deferred\n---\n' \
-  > "$repo_diff/reviews/findings/P3_correctness_202609110015_split.md"
+  > "$repo_diff/findings/P3_correctness_202609110015_split.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a finding whose severity holds a CR'
 diff_split="$(git -C "$repo_diff" rev-parse HEAD)"
 builder_refuses 'a frontmatter severity holding a carriage return' \
@@ -3272,10 +3272,10 @@ builder_refuses 'a frontmatter severity holding a carriage return' \
 branch_from a-large-finding
 { finding_body P3
   awk 'BEGIN { for (i = 0; i < 4000; i++) print "padding padding padding padding padding padding" }'
-} > "$repo_diff/reviews/findings/P3_liveness_202609110014_large.md"
+} > "$repo_diff/findings/P3_liveness_202609110014_large.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a large finding'
 diff_large="$(git -C "$repo_diff" rev-parse HEAD)"
-large_bytes="$(wc -c < "$repo_diff/reviews/findings/P3_liveness_202609110014_large.md")"
+large_bytes="$(wc -c < "$repo_diff/findings/P3_liveness_202609110014_large.md")"
 (( large_bytes > 100000 )) \
   || { echo "the large-finding fixture is only $large_bytes bytes, which is not comfortably past a pipe buffer" >&2; exit 1; }
 diff_case 'a findings/ branch filing a finding larger than a pipe buffer' \
@@ -3285,7 +3285,7 @@ diff_case 'a findings/ branch filing a finding larger than a pipe buffer' \
 branch_from a-large-mismatched-finding
 { finding_body P4
   awk 'BEGIN { for (i = 0; i < 4000; i++) print "padding padding padding padding padding padding" }'
-} > "$repo_diff/reviews/findings/P3_liveness_202609110016_large-mismatch.md"
+} > "$repo_diff/findings/P3_liveness_202609110016_large-mismatch.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a large mismatched finding'
 diff_large_bad="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_says 'a large finding whose frontmatter severity is P4' \
@@ -3297,7 +3297,7 @@ diff_says 'a large finding whose frontmatter severity is P4' \
 #     already takes CRLF as a line ending in every listing it reads and this reader has to agree.
 branch_from crlf-frontmatter
 printf -- '---\r\nid: FIXTURE-7\r\nseverity: P3\r\ndisposition: deferred\r\n---\r\n' \
-  > "$repo_diff/reviews/findings/P3_correctness_202609110017_crlf.md"
+  > "$repo_diff/findings/P3_correctness_202609110017_crlf.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a CRLF finding'
 diff_crlf="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_case 'a findings/ branch filing a CRLF-authored finding' \
@@ -3306,7 +3306,7 @@ diff_case 'a findings/ branch filing a CRLF-authored finding' \
 # reader that answered `-` for every CRLF file would report as [-].
 branch_from crlf-frontmatter-mismatched
 printf -- '---\r\nid: FIXTURE-7\r\nseverity: P4\r\ndisposition: deferred\r\n---\r\n' \
-  > "$repo_diff/reviews/findings/P3_correctness_202609110018_crlf-bad.md"
+  > "$repo_diff/findings/P3_correctness_202609110018_crlf-bad.md"
 git -C "$repo_diff" add -A && git -C "$repo_diff" commit -q -m 'file a mismatched CRLF finding'
 diff_crlf_bad="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_says 'a CRLF-authored finding whose frontmatter severity is P4' \

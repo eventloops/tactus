@@ -13,7 +13,7 @@ guard: project owner
 
 ## Failure sequence
 
-`reviews/findings/PROCESS.md` §7 gives every findings-sweep pull request two review lenses, fix-check
+`findings/PROCESS.md` §7 gives every findings-sweep pull request two review lenses, fix-check
 and regression, and a third by lane. `MAINTAINING.md` step 4 describes one review pass whose verdict
 the driver posts as one SHA-bound comment. `scripts/pr-ready-audit.sh` reads exactly one comment.
 `review_comment_filter` keeps the trusted reviewer's comments that carry `<!-- upstroke-frontier-review`

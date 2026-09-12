@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 146
 reviewed_sha: 94e024ebce234cc3e59b476e72f5869cdceb57af
-location: reviews/findings/P3_correctness_202609042224_sampling-n-is-the-registrys-own-number.md:41
+location: findings/P3_correctness_202609042224_sampling-n-is-the-registrys-own-number.md:41
 provenance: introduced_by_feature
 first_bad:
 guard: correct the sampling deferral's design citation; schedule a future authority gate only through a reviewed design change

@@ -13,7 +13,7 @@ guard: gpt-6-astra/max review round 2 of PR #269
 
 ## Failure sequence
 
-Commit a correctly named finding under `reviews/findings/` whose frontmatter severity line holds a
+Commit a correctly named finding under `findings/` whose frontmatter severity line holds a
 NUL byte, `severity: P<NUL>3`. `severity_of` reads the value through a Bash command substitution,
 and **command substitution deletes NUL bytes** — bash says so on stderr and carries on:
 
@@ -22,7 +22,7 @@ warning: command substitution: ignored null byte in input
 ```
 
 The value that reaches the record is therefore `P3`, the builder writes
-`P3<TAB>reviews/findings/P3_..._nul.md` and exits **0**, and the validator exits **0** with all six
+`P3<TAB>findings/P3_..._nul.md` and exits **0**, and the validator exits **0** with all six
 workflow inputs supplied. The file's actual frontmatter severity is `P<NUL>3`, which is outside
 P0-P3, and the severity rule this pull request adds is the rule that was supposed to refuse it.
 

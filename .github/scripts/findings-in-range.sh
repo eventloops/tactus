@@ -58,7 +58,7 @@
 #   base, so a finding the TARGET filed after the branch point is in none of
 #   the three on the queue entry either. Replayed on a queue merge whose target
 #   had added two same-description findings, the name conformed at exit 0 while
-#   the queue commit's own reviews/findings/ named 2 findings at exit 1. What a
+#   the queue commit's own findings/ named 2 findings at exit 1. What a
 #   green check says is the narrow thing: the name resolved to exactly one
 #   filed finding in the listings built here, at the moment they were built.
 #
@@ -89,7 +89,7 @@
 #   single-pull-request path the absence of a fix/ prefix depends on. It is
 #   visible only in the pull request's own commits, so the third source is the
 #   pull request's diff against the merge base taken COMMIT BY COMMIT: every
-#   commit in <merge base>..<head>, and reviews/findings/ as that commit left
+#   commit in <merge base>..<head>, and findings/ as that commit left
 #   it. Taken only at the two ends the diff is empty for such a finding -- the
 #   add and the delete cancel -- which is measured in test-pr-policy.sh.
 #
@@ -98,7 +98,7 @@
 #   this branch's own commits, which moves the merge base and is the case the
 #   boundary paragraph above refuses to pretend it can prevent.
 #
-# THE TREES ARE LISTED, NOT ASKED WHAT CHANGED. `git log -- reviews/findings/`
+# THE TREES ARE LISTED, NOT ASKED WHAT CHANGED. `git log -- findings/`
 # answers a different question -- which commits changed that path, after
 # simplification -- and it misses findings two ways, both measured on
 # purpose-built ranges: HISTORY SIMPLIFICATION prunes a side branch whose net
@@ -110,14 +110,14 @@
 #
 # ONLY REGULAR FILES ARE FINDINGS. `git ls-tree --name-only` does not say
 # whether an entry is a file or a directory, and a committed DIRECTORY named
-# `reviews/findings/P2_correctness_<ts>_<desc>.md/` satisfied
+# `findings/P2_correctness_<ts>_<desc>.md/` satisfied
 # `fix-P2/correctness_<desc>` with no finding in existence. The mode is checked:
 # 100644 and 100755 are findings, a tree is not, and neither is a symlink or a
 # submodule.
 #
 # AND NO ENTRY NAME HERE TRAVERSES A SYMLINK, which is the half of the two-API
-# equivalence this end supplies. `ls-tree -- reviews/findings/` lists the entries
-# git RECORDS under that path; where `reviews`, or `reviews/findings` itself, is a
+# equivalence this end supplies. `ls-tree -- findings/` lists the entries
+# git RECORDS under that path; where `reviews`, or `findings` itself, is a
 # committed symlink it is a `120000 blob` and nothing is recorded under it, so
 # this listing is empty however many findings sit at the end of the link. That is
 # a property of NAMES IN A TREE and needs no filesystem to hold.
@@ -132,7 +132,7 @@
 # ledger one layer along -- names recorded under a path, filtered by recorded
 # mode. Same commit, same answer, and now by construction rather than by fixture.
 # The cost is stated in MAINTAINING.md: an untracked file in the working tree's
-# reviews/findings/ counts for neither end.
+# findings/ counts for neither end.
 
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
@@ -164,11 +164,11 @@ git merge-base --all "$target" "$head" > "$out/merge-bases" \
   || { echo "no merge base between $target and $head" >&2; exit 1; }
 
 # findings_in <commit-ish>: the bare filenames of the REGULAR FILES directly in
-# reviews/findings/ at that commit. `git ls-tree` prints `<mode> <type> <object>
+# findings/ at that commit. `git ls-tree` prints `<mode> <type> <object>
 # TAB <path>`; the mode is what separates a finding from a directory carrying a
 # finding's name. Splitting on the tab keeps a path with spaces in it whole.
 findings_in() {
-  git ls-tree "$1" -- reviews/findings/ \
+  git ls-tree "$1" -- findings/ \
     | awk -F'\t' '$1 ~ /^100[0-7][0-7][0-7] blob / {
         name = $2; sub(/.*\//, "", name); if (name != "") print name }'
 }

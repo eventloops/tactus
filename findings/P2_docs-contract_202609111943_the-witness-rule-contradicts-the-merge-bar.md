@@ -15,7 +15,7 @@ guard: project owner
 
 `MAINTAINING.md` step 5, lines 40 to 44, says a finding carrying a failing test, reproduction or
 mutation witness is fixed whatever its severity, and may be `rejected` only by a row showing the
-evidence invalid. `CLAUDE.md:98` and `reviews/findings/PROCESS.md` §7 say the same, and the checkbox at
+evidence invalid. `CLAUDE.md:98` and `findings/PROCESS.md` §7 say the same, and the checkbox at
 `.github/pull_request_template.md:40` rules out `deferred` for such a finding. `scripts/pr-ready-audit.sh`
 enforces it in every lane as the `witnessed:` blocker at line 1136, for findings in the JSON review
 form.

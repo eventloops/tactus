@@ -32,7 +32,7 @@ the top. Two findings from the same pass are two files, as above.
 
 **The stable identifier is not in the filename.** It lives in `id`, because that is what pull
 request bodies, ledger rows and source comments cite, and a citation must not break when a finding
-is reclassified. `grep -rl 'id: PR135-…' reviews/findings/` finds the file.
+is reclassified. `grep -rl 'id: PR135-…' findings/` finds the file.
 
 ## The file
 
@@ -67,7 +67,7 @@ A deleted finding is not lost. Three things outlive it:
 - **The pull request body's ledger table**, which lists every finding of that pull request with
   its disposition, including the ones fixed before merge. That table is validated by
   `validate-pr-body.sh` and `validate-pr-ledger-evidence.sh` and is the auditable record.
-- **Git history.** `git log --diff-filter=D -- reviews/findings/` lists every finding ever closed,
+- **Git history.** `git log --diff-filter=D -- findings/` lists every finding ever closed,
   and `git show` recovers the file.
 - **`reviews/FINDINGS.md`**, for everything up to 2026-09-04.
 

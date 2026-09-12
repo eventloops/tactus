@@ -79,7 +79,7 @@
 #     with its fenced JSON verdict, or the `<!-- upstroke-frontier-review -->` prose form) reviewed
 #     the head itself, or a commit the head differs from only by clean merge commits (git's own
 #     merge of the two parents, the branch diff byte-identical before and after, and no gate
-#     edited by the pull request) and pushes confined to reviews/findings/ or reviews/FINDINGS.md
+#     edited by the pull request) and pushes confined to findings/ or reviews/FINDINGS.md
 #     (MAINTAINING step 5 keeps the review across both)
 #   - the review is against the pull request's own base: the workflow form must record its base
 #     commit, which must lie on the current base branch (and, for a base other than master, not
@@ -89,7 +89,7 @@
 #     pull request
 #   - no finding in that review has a severity the lane must fix
 #   - every allowed finding has a ledger row in the body whose disposition is deferred, with
-#     exactly one file under reviews/findings/ on the branch whose YAML frontmatter (the block
+#     exactly one file under findings/ on the branch whose YAML frontmatter (the block
 #     between the opening --- and the next) carries `id: <the finding id>`; a rejected or
 #     accepted-risk row is the owner's call and sends the pull request to MANUAL
 #
@@ -306,7 +306,7 @@ frontmatter_has_id() {
   '
 }
 
-# finding_file_count ID TREEISH: how many files under reviews/findings/ in TREEISH carry `id: ID`
+# finding_file_count ID TREEISH: how many files under findings/ in TREEISH carry `id: ID`
 # in their YAML frontmatter. A non-zero status means the listing, or one of the files it named,
 # could not be read -- which is not a count of zero. This rule wants exactly one file, so a read
 # that quietly does not count can turn two files into one as easily as one into none.
@@ -322,7 +322,7 @@ frontmatter_has_id() {
 # THE MODE GIT RECORDS DECIDES WHAT AN ENTRY IS, so the listing keeps it: `--name-only` drops it,
 # and a name is not a file. A committed symlink is a `120000` blob whose CONTENT IS ITS TARGET
 # STRING, and `git show` hands that string over exactly as it hands over a file's text -- so
-# `reviews/findings/symlink.md`, a broken link whose target reads `---\nid: X\n---`, was counted
+# `findings/symlink.md`, a broken link whose target reads `---\nid: X\n---`, was counted
 # as the file filing X and a finding that had never been written was filed. A `160000` gitlink is
 # not a finding either. Only `100644` and `100755` are, which is the rule PR #251 settled for
 # `validate-pr-branch.sh` against the same defect, from the same source: what git records, never
@@ -352,7 +352,7 @@ finding_file_count() {
   local id="$1" treeish="$2" cand_file blob_file status=0 n=0 entry cand answer complete=0
   cand_file="$(mktemp)"
   blob_file="$(mktemp)"
-  git ls-tree -r -z "$treeish" -- reviews/findings/ > "$cand_file" 2>/dev/null \
+  git ls-tree -r -z "$treeish" -- findings/ > "$cand_file" 2>/dev/null \
     || status=$?
   if ((status != 0)); then rm -f "$cand_file" "$blob_file"; return 1; fi
   # The end-of-listing record. `ls-tree -z` writes `<mode> <type> <object><TAB><path>`, six digits
@@ -1080,7 +1080,7 @@ audit_one() {
           # An empty path is not a ledger path. `grep -v` returned a blank line as a line outside
           # the ledger and this must agree with it: the rewrite is here to stop a failed read
           # granting the exemption, not to widen who gets it.
-          [[ "$t" == reviews/findings/* || "$t" == reviews/FINDINGS.md ]] && continue
+          [[ "$t" == findings/* || "$t" == reviews/FINDINGS.md ]] && continue
           outside=1
           break
         done

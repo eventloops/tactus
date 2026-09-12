@@ -128,7 +128,7 @@ compiler every leg runs and the runner every compiled test harness is handed to;
 **Second limb: this rule itself.** Amending the delegation rule, or the review and triage required
 before a merge, changes no gate, so the first limb clears it — and the amended rule can then license
 the gate change the first limb exists to stop. An amendment to these paragraphs in `CLAUDE.md` and
-`AGENTS.md`, to `MAINTAINING.md` step 7 or its trust boundary, or to `reviews/findings/PROCESS.md`
+`AGENTS.md`, to `MAINTAINING.md` step 7 or its trust boundary, or to `findings/PROCESS.md`
 is the owner's, or carries a delegation written for that PR. It is a separate clause, not another
 path on the list above.
 
@@ -147,7 +147,7 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 | `CONTRIBUTING.md` | Contributor rules and CLA |
 | `docs/internals/` | Internal module notes, one file per module mirroring `src/`. A module with notes carries a single `Extended notes:` pointer in its header and no other prose (§13), held both ways by `test-internals-notes.sh`. `docs/` is also the GitHub Pages source for upstroke.rs, so anything added there is published |
 | `.github/scripts/` | The 6 `test-*.sh` gates and the `validate-*` helpers they exercise |
-| `reviews/` | `reviews/findings/`, the standing finding ledger, one file per finding; `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections; historical review records moved to the private lab repository on 2026-09-04 |
+| `reviews/` | `findings/`, the standing finding ledger, one file per finding; `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections; historical review records moved to the private lab repository on 2026-09-04 |
 | `effects/` | The effect-governance allowlists the `src/effects/tests.rs` census enforces |
 
 `src/` is one crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters,

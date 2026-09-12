@@ -29,7 +29,7 @@
 #   standards/<slug>                a standards/ section, or a sweep under one
 #   ci/<slug>                       gates, workflows, scripts/ and .github/
 #   gate/<slug>                     a cumulative review-gate report
-#   findings/<slug>                 reviews/findings/ alone: filing or curating
+#   findings/<slug>                 findings/ alone: filing or curating
 #   fix-P<n>/<category>_<desc>      exactly one finding, n in 0..3
 #   bulk-fix-P<n>/<slug>            a batch of findings, n in 2..3
 #
@@ -49,7 +49,7 @@
 # second to repair it.
 #
 # findings/<slug> IS NOT ITS REPLACEMENT. It is for a pull request that touches
-# reviews/findings/ and nothing else: filing what a review produced, or curating
+# findings/ and nothing else: filing what a review produced, or curating
 # what is already there. It repairs no code. A branch that files a finding AND
 # repairs it is a fix-P<n>/ branch, because the repair is the half that binds a
 # merge and it is the half the name has to declare.
@@ -85,7 +85,7 @@
 #
 #   BOTH ENDPOINTS TOGETHER STILL FAIL THE ONE PULL REQUEST THE PREFIX EXISTS
 #   FOR: one that files the finding in commit A and repairs it in commit B,
-#   deleting the file as reviews/findings/README.md requires. The branch point
+#   deleting the file as findings/README.md requires. The branch point
 #   has no finding, the head has no finding, and the file existed only in
 #   between. Keeping the file to get past the check is not the answer either:
 #   that leaves finished work sitting in the outstanding queue, which the ledger
@@ -123,7 +123,7 @@
 # queue entry alike, because the tree of the commit being merged is never
 # listed -- replayed on a queue merge whose target had added two
 # same-description findings, the name conformed at exit 0 while the queue
-# commit's own reviews/findings/ named 2 findings at exit 1. So the answer is
+# commit's own findings/ named 2 findings at exit 1. So the answer is
 # the narrow one: the name resolved to exactly one filed finding in the
 # listings handed over, at the moment they were built. It is not a statement
 # about the head, it is not a statement about the ledger a merge lands on, and
@@ -147,7 +147,7 @@
 # `git ls-tree` and has been right every round. The directory way in used to
 # answer from the filesystem, with git as a cross-check, and every round found
 # another spelling of the same disagreement: a committed symlink named like a
-# finding that `-f` followed; a committed symlink AT reviews/findings that `-d`
+# finding that `-f` followed; a committed symlink AT findings that `-d`
 # followed; the same two under core.symlinks=false, where git materialises a
 # 120000 blob as a REGULAR FILE and `-L` has nothing left to see; a sparse
 # checkout whose index records findings the working tree does not hold; a
@@ -164,7 +164,7 @@
 # this gate claims holds by construction rather than by fixture.
 #
 # WHAT THAT COSTS, STATED PLAINLY. An UNTRACKED finding file inside a tracked
-# reviews/findings/ no longer counts for the directory input: the ledger is what
+# findings/ no longer counts for the directory input: the ledger is what
 # is committed, and a merge gate decides about commits and never about a work
 # tree. A finding its author has written and not yet added is refused by a
 # by-hand run, and the answer is `git add`. The disagreement this closes ran the
@@ -264,15 +264,15 @@
 # reviewed at low effort (scripts/lane.sh) because a pull request on it files or
 # curates findings and repairs no code. That is a claim about the DIFF and not
 # about the name, so the diff is checked: a `findings/` branch whose changed
-# paths include anything outside `reviews/findings/` is refused, and the
+# paths include anything outside `findings/` is refused, and the
 # offending paths are named. Without it the prefix is a way to have code
 # reviewed at the cheapest setting there is by choosing a branch name.
 #
 # AND EVERY FINDING IT FILES CARRIES A SEVERITY THE LADDER KNOWS. A file the
-# pull request ADDS OR RENAMES under `reviews/findings/` whose name does not
+# pull request ADDS OR RENAMES under `findings/` whose name does not
 # start `P0_`, `P1_`, `P2_` or `P3_`, or whose frontmatter `severity:` is
 # outside P0-P3, is refused. Severity leads a finding's filename because the
-# directory sorts worst-first (reviews/findings/README.md), the lane table reads
+# directory sorts worst-first (findings/README.md), the lane table reads
 # the severity, and the audit's must-fix set is written in those four tokens; a
 # fifth severity is a finding nothing can act on.
 #
@@ -291,7 +291,7 @@
 #
 #   changed-paths    one path per line, as `git diff --name-only` spells it.
 #   added-findings   `<severity><TAB><path>` per file the diff adds or renames
-#                    under reviews/findings/; `-` where the frontmatter carries
+#                    under findings/; `-` where the frontmatter carries
 #                    no severity line.
 #
 # A LISTING THAT CANNOT BE READ IS A REFUSAL HERE TOO, and an EMPTY changed-path
@@ -374,11 +374,11 @@
 # and 3, where 3 is a NUL in the bytes. That was a flag until a caller ignored
 # it, and a flag a caller may ignore is not a contract.
 #
-# A PATH IS NORMALISED BEFORE IT IS JUDGED. `reviews/findings`,
-# `reviews/findings/`, `reviews/findings/.`, `reviews//findings` and
+# A PATH IS NORMALISED BEFORE IT IS JUDGED. `findings`,
+# `findings/`, `findings/.`, `reviews//findings` and
 # `reviews/./findings` are one listing, and they answered differently: appending
 # `/.` moved the question from `findings` to `.`, and a committed symlink at
-# `reviews/findings` that the plain spelling refused at exit 1 conformed at exit
+# `findings` that the plain spelling refused at exit 1 conformed at exit
 # 0 with three characters added. The spelling is reduced to components first,
 # and the path the ledger is asked about is built from THOSE components -- never
 # from where the filesystem takes them, which is the whole of why an ancestor
@@ -409,8 +409,8 @@ merge_base_findings="${2:-}"
 head_findings="${3:-}"
 range_findings="${4:-}"
 # The two diff listings. They are always FILES a caller built, never a directory to enumerate, so
-# they are not put through normalise_listing_path -- which exists because `reviews/findings` and
-# `reviews/findings/.` are one DIRECTORY and answered differently, a question a file does not raise.
+# they are not put through normalise_listing_path -- which exists because `findings` and
+# `findings/.` are one DIRECTORY and answered differently, a question a file does not raise.
 changed_paths="${5:-}"
 added_findings="${6:-}"
 
@@ -434,7 +434,7 @@ The head branch must be one of:
   standards/<slug>                a standards/ section, or a sweep under one
   ci/<slug>                       gates, workflows, scripts/ and .github/
   gate/<slug>                     a cumulative review-gate report
-  findings/<slug>                 reviews/findings/ alone: filing or curating
+  findings/<slug>                 findings/ alone: filing or curating
   fix-P<n>/<category>_<desc>      exactly one finding, n in 0..3
   bulk-fix-P<n>/<slug>            a batch of findings, n in 2..3
 
@@ -443,7 +443,7 @@ The head branch must be one of:
 crash-consistency, security-trust, portability, liveness, performance,
 compatibility, docs-contract, and a fix-P*/ branch names one finding:
 
-  reviews/findings/P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
+  findings/P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
   fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter
 
 That finding is looked for anywhere in this pull request, not just at its two
@@ -456,12 +456,12 @@ file the checkout holds and the index does not.
 
 There is no fix/<slug> prefix. A bug worth a branch is worth a finding, so file
 the finding and branch fix-P<n>/ after it. findings/<slug> is for a pull request
-that touches reviews/findings/ and nothing else; it is not somewhere to put a
+that touches findings/ and nothing else; it is not somewhere to put a
 repair. That limit is checked against the pull request's own diff, not taken on
-trust: a findings/ branch changing a path outside reviews/findings/ is refused,
+trust: a findings/ branch changing a path outside findings/ is refused,
 and the paths are named. It is what makes that prefix's cheap review safe.
 
-A file this pull request ADDS OR RENAMES under reviews/findings/ is a finding:
+A file this pull request ADDS OR RENAMES under findings/ is a finding:
 its name starts P0_, P1_, P2_ or P3_, and its frontmatter severity: is one of
 P0, P1, P2 and P3. Files the diff leaves alone are not checked, so a name
 already on master never turns another pull request red.
@@ -739,11 +739,11 @@ list_dir() {
 
 # normalise_listing_path <path>: the same path written one way, in
 # `normalised_listing`. Empty components, `.` components and a trailing separator
-# are removed, because `reviews/findings`, `reviews/findings/`,
-# `reviews/findings/.`, `reviews//findings` and `reviews/./findings` are one
+# are removed, because `findings`, `findings/`,
+# `findings/.`, `reviews//findings` and `reviews/./findings` are one
 # listing and gave two answers: the last component decides what the path IS, and
 # with `/.` appended the last component was `.`, so a committed symlink at
-# `reviews/findings` conformed at exit 0 where the plain spelling refused it at
+# `findings` conformed at exit 0 where the plain spelling refused it at
 # exit 1.
 #
 # A `..` is NOT collapsed and is refused where it could matter. `a/b/..` is `a`
@@ -964,8 +964,8 @@ repository_above() {
 # answer. Finding it means entering a directory, which follows links; naming the
 # listing means taking the caller's own components, which does not. With
 # `reviews` a link to `saved-reviews` and the index untouched, entering
-# `reviews/findings` lands in `saved-reviews/findings` -- where git records
-# nothing -- while the path the caller NAMED is `reviews/findings`, which the
+# `findings` lands in `saved-findings` -- where git records
+# nothing -- while the path the caller NAMED is `findings`, which the
 # index records a finding under. Asking git from inside the link answered the
 # first and the trees answer the second, and that disagreement was a P1. The
 # work tree's root is matched against the caller's components by INODE and not
@@ -1071,7 +1071,7 @@ locate_listing() {
   # A RELATIVE PATH IS EXTENDED BY `$PWD` FIRST, and lexically: the components a
   # caller names are the ones they typed PLUS the ones the shell is standing in,
   # and a chain that starts at `.` cannot reach a root above it. Run from
-  # `reviews/`, the listing `findings` is `reviews/findings` in the index and
+  # `reviews/`, the listing `findings` is `findings` in the index and
   # nothing else -- and a chain of `.` then `findings` matches no root, which
   # refused an ordinary by-hand invocation the previous head accepted. `$PWD` is
   # the shell's own spelling of where it is, so this stays the caller's
@@ -1079,9 +1079,9 @@ locate_listing() {
   # the physical root git reports be the same directory.
   #
   # Deepest first rather than shallowest, because the shortest name is the one
-  # the index can hold: `../../repo/reviews/findings` run from `repo/reviews`
+  # the index can hold: `../../repo/findings` run from `repo/reviews`
   # meets the root at `..` on the way down and would be named
-  # `../repo/reviews/findings`, which is no index entry and which git refuses as
+  # `../repo/findings`, which is no index entry and which git refuses as
   # a pathspec leaving the work tree -- a false red on a path that is simply
   # spelled the long way round. It also takes the name the checkout shows where a
   # link points back inside the same work tree.
@@ -1122,11 +1122,11 @@ locate_listing() {
   # named the listing `findings`, answered it out of the root's own `findings/`,
   # and walked straight past the 120000 the index records for `reviews`. On a
   # clean checkout of that commit the three tree listings hold no finding under
-  # `reviews/findings` and refuse at exit 1; the directory conformed at exit 0.
+  # `findings` and refuse at exit 1; the directory conformed at exit 0.
   #
   # So the root is the SHALLOWEST prefix that is it, and then the caller's
   # components are walked one at a time. A DEEPER prefix may be the root again --
-  # `../../repo/reviews/findings` spelled from inside `repo/reviews` comes back
+  # `../../repo/findings` spelled from inside `repo/reviews` comes back
   # to it, and the shortest name is the one the index can hold -- but the walk
   # reaches that re-entry only THROUGH COMPONENTS THE RECORDS CALL DIRECTORIES.
   # A component recorded as anything else, or recorded as nothing at all, stops
@@ -1315,7 +1315,7 @@ add_candidate() {
 # the same question `git ls-tree` answers for the same commit: a committed
 # symlink named like a finding is a `120000 blob` here and there; a sparse
 # checkout's excluded finding is an index entry here and a tree entry there; a
-# `reviews/findings` the checkout replaced with a link is still the directory the
+# `findings` the checkout replaced with a link is still the directory the
 # index records; and a materialised link's BYTES are never read as a listing,
 # whatever the checkout put in its place.
 read_listing() {
@@ -1555,7 +1555,7 @@ read_listing() {
 # listing; a NUL is a caller who wrote records where lines were asked for; and CRLF is a line ending
 # and never part of a path, because a listing written on Windows otherwise leaves a carriage return
 # on every line and every one of them stops matching -- which for THESE listings would drop a path
-# outside reviews/findings/ out of the set, and dropping one is an acceptance.
+# outside findings/ out of the set, and dropping one is an acceptance.
 listing_bytes=''
 listing_text() {
   local path="$1" what="$2" status=0
@@ -1594,7 +1594,7 @@ listing_text() {
 }
 
 # check_added_findings <listing text>: every file the pull request adds or renames under
-# reviews/findings/ is a finding -- P0_ to P3_ in the name, P0 to P3 in the frontmatter.
+# findings/ is a finding -- P0_ to P3_ in the name, P0 to P3 in the frontmatter.
 #
 # EVERY BAD FILE IS NAMED, not the first one: a refusal that stops at one turns a fix into a queue
 # of pushes. A record this cannot read at all is a different thing and refuses at once, because a
@@ -1614,8 +1614,8 @@ check_added_findings() {
     # else is a listing built wrongly, and judging finding names by it would refuse files that are
     # not findings at all.
     case "$path" in
-      reviews/findings/?*) ;;
-      *) fail "the added-findings listing names a path outside reviews/findings/, which is not
+      findings/?*) ;;
+      *) fail "the added-findings listing names a path outside findings/, which is not
   what it carries. It holds the files this pull request adds or renames under that directory:
     $path" ;;
     esac
@@ -1640,15 +1640,15 @@ check_added_findings() {
         ;;
     esac
   done <<< "$text"
-  [[ -z "$bad" ]] || fail "this pull request files something under reviews/findings/ that is not a
+  [[ -z "$bad" ]] || fail "this pull request files something under findings/ that is not a
   finding. A finding is P<n>_<category>_<timestamp>_<description>.md with a matching frontmatter
-  severity, for n in 0..3 (reviews/findings/README.md). A file whose frontmatter carries no
+  severity, for n in 0..3 (findings/README.md). A file whose frontmatter carries no
   severity: line at all is reported as [-]. Only the files this pull request ADDS or RENAMES are
   checked, so a name already on master never turns another pull request red:
 ${bad%$'\n'}"
 }
 
-# check_findings_confined <listing text>: a findings/ branch changes reviews/findings/ and nothing
+# check_findings_confined <listing text>: a findings/ branch changes findings/ and nothing
 # else.
 #
 # AN EMPTY LISTING IS A REFUSAL HERE. Everything else in this file treats "no records" as a set with
@@ -1659,29 +1659,29 @@ ${bad%$'\n'}"
 check_findings_confined() {
   local text="$1" line outside=''
   [[ -n "$text" ]] || fail "'$branch' changes no path at all, so there is nothing here to file or
-  curate. A findings/ branch carries work under reviews/findings/; a pull request that changes
+  curate. A findings/ branch carries work under findings/; a pull request that changes
   nothing is refused rather than accepted on an empty list of changed paths."
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     case "$line" in
-      reviews/findings/?*) continue ;;
+      findings/?*) continue ;;
     esac
     outside="$outside  $line"$'\n'
   done <<< "$text"
-  [[ -z "$outside" ]] || fail "'$branch' changes paths outside reviews/findings/:
+  [[ -z "$outside" ]] || fail "'$branch' changes paths outside findings/:
 ${outside%$'\n'}
   A findings/ branch files or curates findings and repairs no code, which is why it is reviewed at
   the lowest effort there is. Work that touches anything else belongs on the prefix that names it:
   a repair on fix-P<n>/ or bulk-fix-P<n>/, and everything else on feature/, refactor/, docs/,
   standards/, ci/ or gate/. A path git C-quotes -- one holding a control character or a byte
-  outside ASCII -- does not begin reviews/findings/ and is reported here; a finding's name is
+  outside ASCII -- does not begin findings/ and is reported here; a finding's name is
   ASCII throughout."
 }
 
 # collect_candidates: the merge base, the head and the pull request's own
 # commits taken as one set. A filename in more than one of them is one finding
 # and not several, which is every fix-P*/ pull request that has not touched
-# reviews/findings/ yet.
+# findings/ yet.
 #
 # Each listing is read in THIS shell and appends to the set, so a failure on one
 # is a failure here: read through a pipeline it would have been a subshell's, and
@@ -1752,7 +1752,7 @@ resolve_finding() {
   re="^P${n}_${cat}_[0-9]+_${desc}\.md\$"
   # One filename in two listings is ONE finding: the same name matching twice is
   # counted once, which is every fix-P*/ pull request that has not touched
-  # reviews/findings/ yet. A name matching two DISTINCT findings is ambiguous and
+  # findings/ yet. A name matching two DISTINCT findings is ambiguous and
   # is refused, which is the whole point of counting.
   seen=$'\n'
   while IFS= read -r line; do
@@ -1803,7 +1803,7 @@ case "$branch" in
     # allowed to be filed by the pull request that repairs it, and a bare "not a
     # known prefix" would send its author looking for a typo.
     fail "'fix/' was retired from the vocabulary: a repair names the finding it
-  closes. File the finding under reviews/findings/ if it is not filed already,
+  closes. File the finding under findings/ if it is not filed already,
   and branch fix-P<n>/<category>_<description> after it. The finding is looked
   for at the merge base, at the head AND in this pull request's own commits, so
   filing and repairing it in one pull request works.
@@ -1823,7 +1823,7 @@ esac
 # answer, and the two rules below are the only questions it asks about what the pull request DID.
 # A branch outside the vocabulary has already been refused, so these run on a name that is in it.
 #
-# What a pull request files under reviews/findings/ is checked whatever its prefix, because a
+# What a pull request files under findings/ is checked whatever its prefix, because a
 # finding with a severity nothing can act on is the same defect on every branch.
 if [[ -n "$added_findings" ]]; then
   check_added_findings "$added_findings_text"

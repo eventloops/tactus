@@ -1992,22 +1992,22 @@ expect MUT-FINDING-BLOB-OPEN-AS-MISS "$(has_id TARGET-ID "$tmp/no-such-finding-f
 # NUL-separated, which a command substitution silently drops -- leaving a loop with no separators,
 # no iterations, and a count of zero for every finding in a tree that holds the file.
 findings_repo="$tmp/findings-repo"
-mkdir -p "$findings_repo/reviews/findings"
+mkdir -p "$findings_repo/findings"
 git init -q "$findings_repo"
-printf -- '---\nid: A-DEFERRABLE\nseverity: P3\n---\n\nBody.\n' > "$findings_repo/reviews/findings/a.md"
-printf -- '---\nid: B-OTHER\nseverity: P3\n---\n\nBody.\n' > "$findings_repo/reviews/findings/b with space.md"
-printf -- '---\nid: C-TWICE\n---\n\nBody.\n' > "$findings_repo/reviews/findings/c1.md"
-printf -- '---\nid: C-TWICE\n---\n\nBody.\n' > "$findings_repo/reviews/findings/c2.md"
-printf -- 'id: D-PROSE-ONLY\nnot frontmatter\n' > "$findings_repo/reviews/findings/d.md"
+printf -- '---\nid: A-DEFERRABLE\nseverity: P3\n---\n\nBody.\n' > "$findings_repo/findings/a.md"
+printf -- '---\nid: B-OTHER\nseverity: P3\n---\n\nBody.\n' > "$findings_repo/findings/b with space.md"
+printf -- '---\nid: C-TWICE\n---\n\nBody.\n' > "$findings_repo/findings/c1.md"
+printf -- '---\nid: C-TWICE\n---\n\nBody.\n' > "$findings_repo/findings/c2.md"
+printf -- 'id: D-PROSE-ONLY\nnot frontmatter\n' > "$findings_repo/findings/d.md"
 # Two files filing one id, the second with a long line after the id inside its frontmatter. The
 # match is on the id line, so `grep -q` exited there and the `awk` still writing the rest took
 # SIGPIPE: `pipefail` reported 141, the caller read any non-zero as "this file does not carry the
 # id", and the duplicate counted as no file at all. One file, and the pull request was ready.
-printf -- '---\nid: E-LONG-LINE\n---\n\nBody.\n' > "$findings_repo/reviews/findings/e1.md"
+printf -- '---\nid: E-LONG-LINE\n---\n\nBody.\n' > "$findings_repo/findings/e1.md"
 { printf -- '---\nid: E-LONG-LINE\ndescription: '
   head -c 262144 /dev/zero | tr '\0' 'x'
   printf -- '\n---\n\nBody.\n'
-} > "$findings_repo/reviews/findings/e2.md"
+} > "$findings_repo/findings/e2.md"
 git -C "$findings_repo" add -A
 git -C "$findings_repo" -c user.email=t@example -c user.name=t commit -qm "file the findings"
 count_in_fixture() { (cd "$findings_repo" && finding_file_count "$1" HEAD); }
@@ -2028,20 +2028,20 @@ expect MUT-FINDING-FILE-READ-AS-MISS "$(count_in_fixture E-LONG-LINE)" 2
 # and a status of 0, from a read that went to the end of a frontmatter block a quarter of a
 # megabyte long.
 expect MUT-FINDING-FILE-READ-AS-MISS \
-  "$(has_id E-LONG-LINE "$findings_repo/reviews/findings/e2.md")" "0|1"
+  "$(has_id E-LONG-LINE "$findings_repo/findings/e2.md")" "0|1"
 
 # A blob the tree still names and the object store no longer holds. `git grep` cannot find this
 # one for anybody: it printed `unable to read` on stderr, exited 0, and returned only the readable
 # name -- so checking its status catches nothing, and the candidates have to come from the tree.
 broken_repo="$tmp/broken-repo"
-mkdir -p "$broken_repo/reviews/findings"
+mkdir -p "$broken_repo/findings"
 git init -q "$broken_repo"
-printf -- '---\nid: F-TWICE\n---\n\nBody.\n' > "$broken_repo/reviews/findings/f1.md"
-printf -- '---\nid: F-TWICE\n---\n\nAnother body.\n' > "$broken_repo/reviews/findings/f2.md"
+printf -- '---\nid: F-TWICE\n---\n\nBody.\n' > "$broken_repo/findings/f1.md"
+printf -- '---\nid: F-TWICE\n---\n\nAnother body.\n' > "$broken_repo/findings/f2.md"
 git -C "$broken_repo" add -A
 git -C "$broken_repo" -c user.email=t@example -c user.name=t commit -qm "file one id twice"
 expect MUT-FINDING-FILE-READ-AS-MISS "$( (cd "$broken_repo" && finding_file_count F-TWICE HEAD) )" 2
-broken_blob="$(git -C "$broken_repo" rev-parse HEAD:reviews/findings/f2.md)"
+broken_blob="$(git -C "$broken_repo" rev-parse HEAD:findings/f2.md)"
 rm -f "$broken_repo/.git/objects/${broken_blob:0:2}/${broken_blob:2}"
 if (cd "$broken_repo" && finding_file_count F-TWICE HEAD) > "$tmp/blob.out" 2>&1; then
   error "MUT-FINDING-FILE-READ-AS-MISS: a file whose blob could not be read was counted, got [$(cat "$tmp/blob.out")]"
@@ -2065,10 +2065,10 @@ if grep -qF 'SECOND-FILE-MARKER' "$in"; then rm -f "$in"; exit 2; fi
 STUB
 chmod +x "$awk_stub/awk"
 dup_repo="$tmp/dup-repo"
-mkdir -p "$dup_repo/reviews/findings"
+mkdir -p "$dup_repo/findings"
 git init -q "$dup_repo"
-printf -- '---\nid: G-TWICE\n---\n\nBody.\n' > "$dup_repo/reviews/findings/g1.md"
-printf -- '---\nid: G-TWICE\nnote: SECOND-FILE-MARKER\n---\n\nBody.\n' > "$dup_repo/reviews/findings/g2.md"
+printf -- '---\nid: G-TWICE\n---\n\nBody.\n' > "$dup_repo/findings/g1.md"
+printf -- '---\nid: G-TWICE\nnote: SECOND-FILE-MARKER\n---\n\nBody.\n' > "$dup_repo/findings/g2.md"
 git -C "$dup_repo" add -A
 git -C "$dup_repo" -c user.email=t@example -c user.name=t commit -qm "file one id twice"
 expect MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS "$( (cd "$dup_repo" && finding_file_count G-TWICE HEAD) )" 2
@@ -2087,7 +2087,7 @@ front_status=0
 front_out="$(
   export REAL_AWK="$(command -v awk)" PATH="$awk_stub:$PATH"
   hash -r
-  frontmatter_has_id G-TWICE < "$dup_repo/reviews/findings/g2.md" 2>/dev/null
+  frontmatter_has_id G-TWICE < "$dup_repo/findings/g2.md" 2>/dev/null
 )" || front_status=$?
 ((front_status != 0)) \
   || error "MUT-FRONTMATTER-UPSTREAM-ERROR-AS-MISS: a read that died reported success"
@@ -2189,21 +2189,21 @@ expect MUT-FINDING-LIST-SHORT-READ "$(
 # that had never been written. The entry is built through the index rather than with `ln -s`, so
 # the case is the same one wherever this suite is run by hand.
 link_repo="$tmp/link-repo"
-mkdir -p "$link_repo/reviews/findings"
+mkdir -p "$link_repo/findings"
 git init -q "$link_repo"
 link_blob="$(printf -- '---\nid: SYMLINK-ID\n---\n' | git -C "$link_repo" hash-object -w --stdin)"
-git -C "$link_repo" update-index --add --cacheinfo "120000,$link_blob,reviews/findings/symlink.md"
+git -C "$link_repo" update-index --add --cacheinfo "120000,$link_blob,findings/symlink.md"
 git -C "$link_repo" -c user.email=t@example -c user.name=t commit -qm "commit a link named like a finding"
-expect MUT-FINDING-SYMLINK-AS-FILE "$(git -C "$link_repo" ls-tree -r HEAD -- reviews/findings/ | cut -c1-6)" 120000
+expect MUT-FINDING-SYMLINK-AS-FILE "$(git -C "$link_repo" ls-tree -r HEAD -- findings/ | cut -c1-6)" 120000
 expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count SYMLINK-ID HEAD) )" 0
 # The regular file beside it still counts, so the mode filter is a filter and not a refusal. The
 # new file is staged BY PATH: `add -A` would see no `symlink.md` in a work tree that never had one
 # and stage its deletion, and the case under test would leave the tree it is testing.
-printf -- '---\nid: REGULAR-ID\n---\n\nBody.\n' > "$link_repo/reviews/findings/regular.md"
-git -C "$link_repo" add -- reviews/findings/regular.md
+printf -- '---\nid: REGULAR-ID\n---\n\nBody.\n' > "$link_repo/findings/regular.md"
+git -C "$link_repo" add -- findings/regular.md
 git -C "$link_repo" -c user.email=t@example -c user.name=t commit -qm "file one finding properly"
 expect MUT-FINDING-SYMLINK-AS-FILE \
-  "$(git -C "$link_repo" ls-tree -r HEAD -- reviews/findings/ | cut -c1-6 | sort -u | tr '\n' ' ')" "100644 120000 "
+  "$(git -C "$link_repo" ls-tree -r HEAD -- findings/ | cut -c1-6 | sort -u | tr '\n' ' ')" "100644 120000 "
 expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count REGULAR-ID HEAD) )" 1
 expect MUT-FINDING-SYMLINK-AS-FILE "$( (cd "$link_repo" && finding_file_count SYMLINK-ID HEAD) )" 0
 

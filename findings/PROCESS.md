@@ -74,7 +74,7 @@ follows from that and §9 records it as owed work.
 resolves a `fix-P*/` branch back to exactly one finding file, with the timestamp free:
 
 ```
-reviews/findings/P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
+findings/P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md
 fix-P1/correctness_pid-identity-under-a-host-wildcard-waiter
 ```
 
@@ -242,13 +242,13 @@ and the second is the one exclusion needs. Scheduling from the first has a hole 
 the ledger:
 
 - `PR146-ASTRA-001` is a defect *inside another finding's file* — its `location:` is
-  `reviews/findings/P3_correctness_202609042224_sampling-n-is-the-registrys-own-number.md:41`, and
+  `findings/P3_correctness_202609042224_sampling-n-is-the-registrys-own-number.md:41`, and
   its fix repairs prose there.
 - `SWEEP-BIJECTION-005` **is** that other finding, with
   `location: src/topology/effects/bijection.rs:450`. §8 requires the pull request that resolves it
   to delete that file.
 
-The two `location:` values fall in different lanes — one a path under `reviews/findings/`, the other
+The two `location:` values fall in different lanes — one a path under `findings/`, the other
 `topology/effects` — so a disjointness check computed over `location:` permits both pull requests at
 once. It should not. Measured in a disposable repository carrying those two findings' real text,
 exit codes captured directly:
@@ -272,7 +272,7 @@ is spawned, and made of three parts:
   below;
 - **its own finding file, always**, because §8 deletes it on resolution;
 - **any other finding file it will write** — which is what `PR146-ASTRA-001` is. A `location:` under
-  `reviews/findings/` means the fix writes another finding's file, and that file is deleted by
+  `findings/` means the fix writes another finding's file, and that file is deleted by
   whichever pull request resolves *its* finding.
 
 Two pull requests may be in flight together only when those sets are disjoint. A historical defect

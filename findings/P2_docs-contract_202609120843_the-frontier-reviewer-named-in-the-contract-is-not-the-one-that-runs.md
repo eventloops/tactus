@@ -21,7 +21,7 @@ the one that executes.** Measured at `0d5a72463c428403d77563e19e02183bef8da207`:
 | `MAINTAINING.md:25` | "an independent frontier-class reviewer at `max` effort — today **`gpt-5.6-sol`** through `codex exec`" |
 | `AGENTS.md:96` | "(**`gpt-5.6-sol`** at `max`, the verdict posted to the PR as one SHA-bound comment)" |
 | `CLAUDE.md:96` | the same sentence, these two files being kept in lockstep |
-| `reviews/findings/PROCESS.md:28` | \| **Reviewer** \| **`gpt-6-astra`** \| `max` \| `codex` \| OpenAI \| |
+| `findings/PROCESS.md:28` | \| **Reviewer** \| **`gpt-6-astra`** \| `max` \| `codex` \| OpenAI \| |
 
 What runs is `gpt-6-astra`. The review poller invokes it by name —
 `REVIEW_MODEL=gpt-6-astra REVIEW_EFFORT="$REV_EFFORT"` — and every lens log of this programme opens
