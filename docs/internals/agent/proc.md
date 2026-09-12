@@ -1245,9 +1245,17 @@ did before this existed and in the same order; all this does is keep
 the two answers instead of discarding them, which is what §7 asks of a
 signal whose result the caller depends on and what row
 `PR125-CLOSE-DISCARDED-KILL-RESULT` asked for. The type is `must_use`
-for the same reason: an ending computed and dropped is that row's
-defect, `unused_must_use` names it, and the Clippy leg's `-D warnings`
-refuses it.
+for the same reason, and it reaches exactly as far as that lint does:
+an ending left as an **unused expression statement** is
+`unused_must_use`, which the Clippy leg's `-D warnings` refuses. An
+explicit discard is not one, and passes — measured, a fixture holding
+`let _ = guard.abort_setup();` runs `cargo clippy --all-targets
+--all-features -- -D warnings` to exit `0`, removing only the
+`let _ =` gives exit `101`, and the compiler's own help there is "use
+`let _ = ...` to ignore the resulting value". So the attribute catches
+the ending nobody wrote a use for, which is the shape the row's five
+sites had; a reader who means to throw one away still has to say so in
+the source, where review can see it.
 
 **The row's scope is the end of a helper, which is five sites and not
 every `kill` in the module.** Its sibling row
@@ -1292,9 +1300,14 @@ The pid `waitpid` returned, or `-1`.
 
 The errno `waitpid` left when it returned `-1`.
 
-## `struct HelperEnd` › `status: libc::c_int,`
+## `struct HelperEnd` › `status: Option<libc::c_int>,`
 
-The status `waitpid` filled when it returned a pid.
+The status `waitpid` filled when it returned a pid, and `None` when
+there is no status to report: the wait collected nothing, or it asked
+for none. The two are not the same observation and a zero cannot stand
+for either, so the absence is a value rather than a default. Only the
+descriptor-configuration arm produces `None` beside a collected pid
+today; `EndingWait` below is why.
 
 ## `struct HelperEnd` › `through_identity: bool,`
 
@@ -1319,6 +1332,12 @@ exit status then names, or by being gone from the process table
 altogether. A helper that exits before READY does so through one of
 its own `_exit(1)` paths, so a status is the difference between "it
 failed setting itself up" and "it was still working when we gave up".
+
+A third outcome the words now separate: a child that **was** collected
+by a wait that asked for no status, which is "collected it, asking for
+no exit status". That is the descriptor-configuration arm, and the
+sentence says what was observed rather than reading a zero back as an
+exit.
 
 Through the identity the same outcomes get the same sentences with
 "through the helper's identity" and "the wait through it" in them, one
@@ -1581,7 +1600,33 @@ flood of unexpected bytes after the deadline ends at the first read
 against a zero remainder (row
 `PR125-CLOSE-FLOODED-CANCEL-UNBOUNDED-BY-THE-FINAL-LOOK`).
 
-## `mod termination` › `fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int) -> HelperEnd {`
+## `mod termination` › `enum EndingWait {`
+
+Which `waitpid` an ending makes, chosen by the calling site and never by
+`end_unready_guard` itself. It exists because the two arms are not interchangeable to a
+host: a syscall policy sees `wait4`'s status-pointer argument and may
+permit one shape while refusing or killing the other. A site that
+changed shape in order to say more would be making a call the host
+never agreed to, so each site names the shape it has always made and
+reports what that shape can answer.
+
+`CollectingStatus` is `waitpid(pid, &mut status, 0)`, which the READY
+failure has made since `end_unready_guard` existed.
+`AskingForNoStatus` is `waitpid(pid, std::ptr::null_mut(), 0)`, the
+call the descriptor-configuration failure makes on `master` and makes
+again here, and its `HelperEnd` carries `status: None` rather than a
+fabricated zero. It is the only site that asks for it.
+
+Measured on the head before this arm was restored, where the
+descriptor-configuration failure had been routed through the
+status-collecting shape: under a policy refusing a status-bearing
+`wait4` with `EPERM` the launch returned its error and left the guard
+**unreaped**, and under one killing it the process died of `SIGSYS`,
+shell exit `159`. `a_guard_whose_descriptors_cannot_be_configured_reports_its_end`
+drives both policies through the fixture's `wait-with-status-refused`
+and `wait-with-status-killed` answers.
+
+## `mod termination` › `fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int, wait: EndingWait) -> HelperEnd {`
 
 The teardown of a guard the launch gives up on before it is
 established: the READY failure, and the descriptor-configuration
@@ -1589,8 +1634,11 @@ failure just before it, which discarded its own `kill` and `waitpid`
 and said nothing of them until row `PR125-CLOSE-DISCARDED-KILL-RESULT`
 was taken up. Moved out of `spawn_guard`'s body so the identity arm and
 the base's arm sit side by side. The base's arm is the code that was
-inline: one `kill`, one `waitpid` with a status pointer, their answers
-kept for the message. The identity arm is `end_helper_through_identity`.
+inline: one `kill`, then the one `waitpid` the calling site has always
+made, their answers kept for the message. The identity arm is
+`end_helper_through_identity`, which signals and waits through the
+descriptor and so has no status pointer for a policy to see; `wait` does
+not reach it.
 
 ## `fn spawn_guard` › `let how = if wait == ReadyWait::Ready {`
 
