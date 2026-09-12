@@ -36,8 +36,9 @@
 #       the directory, holding findings no gate, lane rule or ledger reads.
 #       The prefix is matched case-sensitively and with its trailing slash, so
 #       reviews/FINDINGS.md, the closed ledger that differs from the moved
-#       directory only in case, never matches. AND THE LISTING MUST SUCCEED:
-#       where `git ls-files` cannot answer, this check reports a failure and
+#       directory only in case, never matches. AND THE LISTING MUST BOTH
+#       SUCCEED AND BE READ TO ITS END: where `git ls-files` cannot answer, or
+#       where its answer is not consumed whole, this check reports a failure and
 #       never a pass, because an index that was not read is an UNCHECKED prefix
 #       and not an empty one.
 #
@@ -71,7 +72,10 @@
 #            occurrence marked the path for all of them);
 #   round 4: MUT-CONTRIBUTING-DELETED (a required document treated as optional);
 #   round 6: MUT-C5-PRODUCER-FAILS-OPEN (a guard whose own listing command
-#            could fail unnoticed, so the check it never ran read as a pass).
+#            could fail unnoticed, so the check it never ran read as a pass);
+#   round 7: MUT-C5-CONSUMER-FAILS-OPEN (the producer's status checked and its
+#            output never proved read, so a listing the loop failed to read was
+#            indistinguishable from a clean one).
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 
@@ -270,7 +274,9 @@ fi
 # never matched. The message says what to do, because whoever reads it is in
 # the middle of a rebase.
 #
-# THE LISTING'S STATUS IS CHECKED BEFORE ITS OUTPUT IS BELIEVED.
+# THE LISTING'S STATUS IS CHECKED BEFORE ITS OUTPUT IS BELIEVED, AND THE
+# LISTING IS THEN PROVED TO HAVE BEEN READ TO ITS END.
+#
 # MUT-C5-PRODUCER-FAILS-OPEN: this loop read `done < <(git ls-files -z)`, and
 # BASH DISCARDS A PROCESS SUBSTITUTION'S EXIT STATUS -- what the loop reports is
 # the loop's own status and the producer's belongs to nobody. `git ls-files -z`
@@ -284,7 +290,28 @@ fi
 # written to a FILE, where the status belongs to the command that wrote it, and
 # a producer failure is an `error` and not a pass -- the rule
 # .github/scripts/changed-in-range.sh states at its own added-findings loop for
-# the same reason. The regression test is at the foot of this file.
+# the same reason.
+#
+# MUT-C5-CONSUMER-FAILS-OPEN: and that status check is only HALF THE PIPE.
+# CHECKING A PRODUCER'S STATUS DOES NOT ESTABLISH THAT ITS OUTPUT WAS CONSUMED:
+# it answers "did the command succeed", and says nothing about whether what it
+# wrote was read. `while ... done < "$tracked_paths"` TREATS A FAILED READ AS
+# END OF FILE -- bash's read builtin reports EIO exactly as it reports EOF -- so
+# the loop stopped, old_ledger_paths stayed empty, the `if` below was skipped
+# again, and an UNREAD listing was indistinguishable from a clean one. A review
+# lens injected read(2) EIO for this file alone (an LD_PRELOAD shim keyed on the
+# temporary directory, the reviewed tree never edited): the gate printed
+# `read error: Input/output error`, then `documentation consistency fixtures:
+# PASS`, and exited 0. The FILE the producer fix introduced is what made that
+# injection possible -- the process substitution it replaced had no intermediate
+# file to fault -- so this hole arrived with that fix and not before it.
+#
+# THE REPAIR IS A COMPLETENESS CHECK AND NOT A THIRD STATUS CHECK. `-z`
+# terminates every record with a NUL, so the number of records the producer
+# wrote is a fact about the file: it is counted from the file BEFORE the loop
+# runs, in its own status-checked command, and the loop must reach it. A SHORT
+# READ IS AN `error` HERE AND NEVER AN EMPTY RESULT. Both regression tests are
+# at the foot of this file.
 old_ledger_paths=''
 tracked_paths="$(mktemp)"
 trap 'rm -f -- "$tracked_paths"' EXIT
@@ -293,10 +320,33 @@ git ls-files -z > "$tracked_paths" || ls_files_status=$?
 if (( ls_files_status != 0 )); then
   error "C5 could not read this head's tracked paths: git ls-files -z exited $ls_files_status, so the old finding-ledger prefix is UNCHECKED; that is a failure and not a pass"
 else
+  # One NUL per record is what the producer wrote, so this is the count the loop
+  # below has to reach. It is taken from the file BEFORE the loop reads it, and
+  # in its own right: `tr | wc` reads the whole file under `pipefail`, so a read
+  # that fails here is a failed MEASUREMENT and not a count of zero. A failed
+  # measurement is pinned to -1, a count no loop can reach, so the comparison
+  # below REFUSES on its own even if the status check that names the failure is
+  # ever dropped: the verdict fails closed structurally and the status check is
+  # there to say why.
+  count_status=0
+  records_written="$(tr -dc '\000' < "$tracked_paths" | wc -c)" || { count_status=$?; records_written=-1; }
+  # The consumer fixture's fault, injected BY ARGUMENT AND NEVER BY ENVIRONMENT
+  # and only between the count and the loop: an emptied listing is what a read
+  # that fails at its first byte looks like from where the loop stands.
+  if [[ "${1:-}" == --child-of-c5-selftest && "${2:-}" == --lose-the-listing-after-counting-it ]]; then
+    : > "$tracked_paths"
+  fi
+  records_parsed=0
   while IFS= read -r -d '' path; do
+    records_parsed=$(( records_parsed + 1 ))
     [[ "$path" == reviews/findings/* ]] || continue
     old_ledger_paths+="  $path"$'\n'
   done < "$tracked_paths"
+  if (( count_status != 0 )); then
+    error "C5 could not measure this head's tracked-path listing: counting its NUL-terminated records exited $count_status, so the old finding-ledger prefix is UNCHECKED; that is a failure and not a pass"
+  elif (( records_parsed != records_written )); then
+    error "C5 read $records_parsed of the $records_written records git ls-files -z wrote: the listing was not consumed to its end, so the old finding-ledger prefix is UNCHECKED. A short read is an error here and never an empty result"
+  fi
 fi
 if [[ -n "$old_ledger_paths" ]]; then
   error "reviews/findings/ was moved to findings/ in pull request #276 (2026-09-12) and must not come back. This head tracks these paths under the old prefix:"
@@ -304,25 +354,34 @@ if [[ -n "$old_ledger_paths" ]]; then
   error "Rebase onto master and move them under findings/ with git mv: nothing reads reviews/findings/ any more, so a finding left there is filed nowhere."
 fi
 
-# --- C5's regression test: a failing producer must go RED, never green -------
-# MUT-C5-PRODUCER-FAILS-OPEN is killed here rather than by hand, because that
-# mutation was invisible to every fixture this repository had: the gate passed.
-# The whole gate is re-run with GIT_DIR pointing at a path that cannot be a
-# directory, so `git ls-files` exits 128 without anything touching the index
-# this run is reading. With `done < <(git ls-files -z)` restored the child
-# prints `documentation consistency fixtures: PASS` and exits 0; with the status
-# checked it exits 1 naming the producer.
+# --- C5's regression tests: a listing that fails must go RED, never green ----
+# MUT-C5-PRODUCER-FAILS-OPEN and MUT-C5-CONSUMER-FAILS-OPEN are killed here
+# rather than by hand, because both mutations were invisible to every fixture
+# this repository had: the gate passed.
+#
+# THE PRODUCER CHILD re-runs the whole gate with GIT_DIR pointing at a path that
+# cannot be a directory, so `git ls-files` exits 128 without anything touching
+# the index this run is reading.
+#
+# THE CONSUMER CHILD re-runs the whole gate against THIS repository, where git
+# works and C5 would otherwise pass, and empties the listing between the count
+# and the loop -- what a read failing at its first byte looks like from the
+# loop. With the record comparison deleted that child prints `documentation
+# consistency fixtures: PASS` and exits 0; with it, it exits 1 naming the short
+# read. A truncated file is a stand-in for the observable effect of a failed
+# read(2), not for the syscall: the syscall itself was reproduced by a review
+# lens with an LD_PRELOAD shim, which is not something a gate can carry.
 #
 # WHAT IS ASSERTED IS OUTCOMES, NOT A COUNT OF THE CHILD'S OUTPUT LINES. The
-# first version of this fixture required the child to say exactly three things.
-# That pinned a property worth keeping -- C5 is the only check here that speaks
-# to git, so nothing else can fail when git does -- but it pinned it through
-# git's diagnostics as well as this gate's, and git has more to say when it is
-# asked to: under GIT_TRACE2=1 the child said NINE things rather than three
-# (measured on this box, git 2.43.0), so anyone who set that variable to
+# first version of this fixture required the producer child to say exactly three
+# things. That pinned a property worth keeping -- C5 is the only check here that
+# speaks to git, so nothing else can fail when git does -- but it pinned it
+# through git's diagnostics as well as this gate's, and git has more to say when
+# it is asked to: under GIT_TRACE2=1 the child said NINE things rather than
+# three (measured on this box, git 2.43.0), so anyone who set that variable to
 # investigate a gate got a failure caused by their own tracing -- the gate
-# exited 1 under GIT_TRACE2=1 and 0 without it, on a tree where nothing else had
-# changed. The property now rides on the error count the FAIL line reports
+# exited 1 under GIT_TRACE2=1 and 0 without it, on a tree where nothing else
+# had changed. The property now rides on the error count the FAIL line reports
 # instead -- exactly one error is C5 refusing and no other check failing --
 # which no amount of tracing, and no wording of git's own messages, can move.
 #
@@ -331,12 +390,13 @@ fi
 # red gate wants both. What is matched is the GIT_DIR value inside git's
 # message, which no check here prints; the literal `fatal:` is NOT matched,
 # because git translates that prefix where message catalogues are installed and
-# the fixture would then fail on the reader's locale -- the same class of defect
-# as the line count.
+# the fixture would then fail on the reader's locale -- the same class of
+# defect as the line count.
 #
-# THE CHILD IS TOLD NOT TO RECURSE BY ARGUMENT AND NOT BY ENVIRONMENT: a
-# variable that suppresses a test is a variable a stale export suppresses it
-# with, and nothing invokes this gate with arguments.
+# THE CHILDREN ARE TOLD WHAT TO DO BY ARGUMENT AND NOT BY ENVIRONMENT: a
+# variable that suppresses a test, or injects a fault, is a variable a stale
+# export suppresses or injects with, and nothing invokes this gate with
+# arguments.
 if [[ "${1:-}" != --child-of-c5-selftest ]]; then
   self="$script_dir/${BASH_SOURCE[0]##*/}"
   only_c5_failed='documentation consistency fixtures: FAIL (errors: 1)'
@@ -354,6 +414,17 @@ if [[ "${1:-}" != --child-of-c5-selftest ]]; then
     || error "git's own diagnostic must reach the reader of a red gate, naming the repository it could not open; the producer child said: $producer_said"
   [[ "$producer_out" == *"$only_c5_failed"* ]] \
     || error "a child run with no repository must fail C5 and no other check, because C5 is the only check here that speaks to git; the producer child said: $producer_said"
+
+  consumer_status=0
+  consumer_out="$("$BASH" "$self" --child-of-c5-selftest --lose-the-listing-after-counting-it 2>&1)" \
+    || consumer_status=$?
+  consumer_said="${consumer_out//$'\n'/ | }"
+  (( consumer_status != 0 )) \
+    || error "C5 passed with a listing it never read: the consumer child exited 0 and said: $consumer_said"
+  [[ "$consumer_out" == *'was not consumed to its end'* ]] \
+    || error "C5 must name the short read; the consumer child said: $consumer_said"
+  [[ "$consumer_out" == *"$only_c5_failed"* ]] \
+    || error "a child run whose listing went unread must fail C5 and no other check; the consumer child said: $consumer_said"
 fi
 
 if (( failed )); then
