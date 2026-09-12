@@ -1604,6 +1604,18 @@ listing_text() {
 # findings/ is a finding -- P0_ to P3_ in the name, P0 to P3 in the frontmatter -- except the
 # directory's own README.md and PROCESS.md, by exact path.
 #
+# EITHER LEDGER PREFIX. The ledger moved from reviews/findings/ to findings/ on 2026-09-12 (pull
+# request #276) and pr-policy.yml hands this the PULL REQUEST'S OWN head SHA, so a head cut before
+# the move files under the old prefix and changed-in-range.sh now names both. It named only
+# findings/ until the same change, which on such a head produced an EMPTY listing and so ran this
+# rule over nothing: measured on one repository laid out both ways, a branch filing a non-finding
+# and an out-of-range severity was exit 1 under findings/ and exit 0, `conforms`, under
+# reviews/findings/. Accepting the old prefix here is what keeps that repair from becoming a false
+# RED instead -- with the listing widened and this contract left alone, a clean pre-move pull
+# request filing one valid finding was refused for naming `a path outside findings/`. A path under
+# the old prefix at a POST-move head is refused elsewhere, by C5 of test-docs-consistency.sh, which
+# fails on any tracked path there; this rule judges what a file IS, not where the ledger has got to.
+#
 # EVERY BAD FILE IS NAMED, not the first one: a refusal that stops at one turns a fix into a queue
 # of pushes. A record this cannot read at all is a different thing and refuses at once, because a
 # listing half of which is unreadable is a set that has silently narrowed, and a narrowed set here
@@ -1622,9 +1634,10 @@ check_added_findings() {
     # else is a listing built wrongly, and judging finding names by it would refuse files that are
     # not findings at all.
     case "$path" in
-      findings/?*) ;;
-      *) fail "the added-findings listing names a path outside findings/, which is not
-  what it carries. It holds the files this pull request adds or renames under that directory:
+      findings/?*|reviews/findings/?*) ;;
+      *) fail "the added-findings listing names a path outside the finding ledger, which is not
+  what it carries. It holds the files this pull request adds or renames under findings/, or under
+  reviews/findings/ where its head predates the move:
     $path" ;;
     esac
     # THE DIRECTORY'S OWN TWO DOCUMENTS ARE NOT FINDINGS. README.md names and shapes the
@@ -1633,6 +1646,7 @@ check_added_findings() {
     # readme, another extension, or the same name one directory down is still refused.
     case "$path" in
       findings/README.md|findings/PROCESS.md) continue ;;
+      reviews/findings/README.md|reviews/findings/PROCESS.md) continue ;;
     esac
     name="${path##*/}"
     case "$name" in
@@ -1664,8 +1678,10 @@ check_added_findings() {
 ${bad%$'\n'}"
 }
 
-# check_findings_confined <listing text>: a findings/ branch changes findings/ and nothing
-# else.
+# check_findings_confined <listing text>: a findings/ branch changes the finding ledger and nothing
+# else -- findings/, or reviews/findings/ where the head predates the 2026-09-12 move, for the
+# reason check_added_findings gives above. Measured before that was added: a findings/<slug> branch
+# filing one valid finding on a pre-move head was refused, `changes paths outside findings/`.
 #
 # AN EMPTY LISTING IS A REFUSAL HERE. Everything else in this file treats "no records" as a set with
 # nothing in it, which is the right answer for a ledger that holds no finding; a pull request that
@@ -1680,7 +1696,7 @@ check_findings_confined() {
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
     case "$line" in
-      findings/?*) continue ;;
+      findings/?*|reviews/findings/?*) continue ;;
     esac
     outside="$outside  $line"$'\n'
   done <<< "$text"

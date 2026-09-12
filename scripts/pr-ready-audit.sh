@@ -306,7 +306,7 @@ frontmatter_has_id() {
   '
 }
 
-# finding_file_count ID TREEISH: how many files under findings/ in TREEISH carry `id: ID`
+# finding_file_count ID TREEISH: how many files under the finding ledger in TREEISH carry `id: ID`
 # in their YAML frontmatter. A non-zero status means the listing, or one of the files it named,
 # could not be read -- which is not a count of zero. This rule wants exactly one file, so a read
 # that quietly does not count can turn two files into one as easily as one into none.
@@ -352,7 +352,16 @@ finding_file_count() {
   local id="$1" treeish="$2" cand_file blob_file status=0 n=0 entry cand answer complete=0
   cand_file="$(mktemp)"
   blob_file="$(mktemp)"
-  git ls-tree -r -z "$treeish" -- findings/ > "$cand_file" 2>/dev/null \
+  # BOTH LEDGER PREFIXES, BECAUSE TREEISH IS THE CALLER'S REVISION AND NOT THIS CHECKOUT. The
+  # ledger moved from reviews/findings/ to findings/ on 2026-09-12 (pull request #276) and the
+  # caller passes a PULL REQUEST'S head, which can predate that: `git ls-tree` with a pathspec
+  # matching nothing EXITS 0 WITH NO OUTPUT, so the status check below has no failure to see and a
+  # pre-move head counted 0 files for an id that is filed once. Measured on one pull request with a
+  # single deferred finding, stubbed identically: READY under reviews/findings/ before the move and
+  # NOT-READY, `blockers=no-file:LEGACY-P3`, after it, both audits exiting 0 -- silently and
+  # wrongly, and on every pull request open across the move. Widening can only RAISE the count, and
+  # the bare filename is one finding's identity whichever prefix carries it.
+  git ls-tree -r -z "$treeish" -- findings/ reviews/findings/ > "$cand_file" 2>/dev/null \
     || status=$?
   if ((status != 0)); then rm -f "$cand_file" "$blob_file"; return 1; fi
   # The end-of-listing record. `ls-tree -z` writes `<mode> <type> <object><TAB><path>`, six digits
@@ -1080,7 +1089,13 @@ audit_one() {
           # An empty path is not a ledger path. `grep -v` returned a blank line as a line outside
           # the ledger and this must agree with it: the rewrite is here to stop a failed read
           # granting the exemption, not to widen who gets it.
-          [[ "$t" == findings/* || "$t" == reviews/FINDINGS.md ]] && continue
+          # Either ledger prefix, for the reason finding_file_count gives: `$reviewed..$head` is
+          # the caller's range and a head cut before 2026-09-12 carries the ledger at
+          # reviews/findings/. Unwidened, a ledger-only push on such a head read as `repairs`,
+          # which is NEEDS-ATTEST -- the conservative direction, unlike the count above, but wrong
+          # about the same tree. reviews/FINDINGS.md is the closed ledger FILE and is a separate
+          # name, differing from the moved directory only in case.
+          [[ "$t" == findings/* || "$t" == reviews/findings/* || "$t" == reviews/FINDINGS.md ]] && continue
           outside=1
           break
         done

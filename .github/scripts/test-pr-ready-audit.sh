@@ -110,6 +110,10 @@
 #                                which drops NUL and leaves nothing to read
 #   MUT-FINDING-FILE-READ-AS-MISS  a finding file the count could not read counted as a file that
 #                                does not carry the id, so two files filing one id became one
+#   MUT-FINDING-LEDGER-PREFIX-HISTORICAL  the count named only the ledger's CURRENT prefix while
+#                                its caller passes a pull request's own head, so a head cut before
+#                                the 2026-09-12 move counted 0 files for a finding filed once and
+#                                the audit answered NOT-READY, `no-file:<id>`, at exit 0
 #   MUT-REVIEW-FORGES-PROTOCOL   a review string carrying the parser's own separators wrote rows
 #                                of the parser's language, END among them, and the audit read a
 #                                finished parse from a marker instead of from a status
@@ -2016,6 +2020,36 @@ expect MUT-FINDING-FILE-COUNT "$(count_in_fixture B-OTHER)" 1          # the nam
 expect MUT-FINDING-FILE-COUNT "$(count_in_fixture C-TWICE)" 2          # two files is not one
 expect MUT-FINDING-FILE-COUNT "$(count_in_fixture D-PROSE-ONLY)" 0     # the id is not in frontmatter
 expect MUT-FINDING-FILE-COUNT "$(count_in_fixture NOT-FILED-ANYWHERE)" 0
+
+# THE LEDGER'S OLD PREFIX IS STILL COUNTED, BECAUSE THE TREEISH IS THE CALLER'S REVISION. The
+# ledger moved from reviews/findings/ to findings/ on 2026-09-12 (pull request #276) and
+# `main` passes the pull request's own head, which for every pull request open across that move
+# predates it. `git ls-tree` with a pathspec matching nothing exits 0 with no output, so the
+# status check inside the count sees no failure and a finding filed once came back as 0 files --
+# NOT-READY, `no-file:<id>`, with the audit exiting 0. These two cases fail if the compatibility
+# prefix is dropped from that pathspec: the first is the tree as a pre-move head holds it, and the
+# second is a tree carrying BOTH directories, which is a branch cut before the move that files
+# under the old prefix and merges without conflict. One file is one finding under either name.
+legacy_repo="$tmp/legacy-ledger-repo"
+mkdir -p "$legacy_repo/reviews/findings"
+git init -q "$legacy_repo"
+printf -- '---\nid: LEGACY-P3\nseverity: P3\n---\n\nBody.\n' \
+  > "$legacy_repo/reviews/findings/P3_correctness_202609010001_filed-before-the-move.md"
+git -C "$legacy_repo" add -A
+git -C "$legacy_repo" -c user.email=t@example -c user.name=t commit -qm "file a finding before the move"
+expect MUT-FINDING-LEDGER-PREFIX-HISTORICAL \
+  "$( (cd "$legacy_repo" && finding_file_count LEGACY-P3 HEAD) )" 1
+mkdir -p "$legacy_repo/findings"
+printf -- '---\nid: BOTH-PREFIXES\nseverity: P3\n---\n\nBody.\n' \
+  > "$legacy_repo/findings/P3_correctness_202609010002_filed-after-the-move.md"
+printf -- '---\nid: BOTH-PREFIXES\nseverity: P3\n---\n\nBody.\n' \
+  > "$legacy_repo/reviews/findings/P3_correctness_202609010003_filed-before-it.md"
+git -C "$legacy_repo" add -A
+git -C "$legacy_repo" -c user.email=t@example -c user.name=t commit -qm "a tree carrying both directories"
+expect MUT-FINDING-LEDGER-PREFIX-HISTORICAL \
+  "$( (cd "$legacy_repo" && finding_file_count BOTH-PREFIXES HEAD) )" 2
+expect MUT-FINDING-LEDGER-PREFIX-HISTORICAL \
+  "$( (cd "$legacy_repo" && finding_file_count LEGACY-P3 HEAD) )" 1
 # A tree it cannot read is not a tree with no files in it.
 if (cd "$findings_repo" && finding_file_count A-DEFERRABLE deadbeefdeadbeefdeadbeefdeadbeefdeadbeef) > "$tmp/tree.out" 2>&1; then
   error "MUT-FINDING-FILE-COUNT: an unreadable tree was counted, got [$(cat "$tmp/tree.out")]"

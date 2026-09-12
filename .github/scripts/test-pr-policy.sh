@@ -3480,6 +3480,126 @@ diff_crlf_bad="$(git -C "$repo_diff" rev-parse HEAD)"
 diff_says 'a CRLF-authored finding whose frontmatter severity is P4' \
   "$repo_diff" "$diff_base" "$diff_crlf_bad" findings/file-a-crlf-one 'its frontmatter severity is [P4]'
 
+# ---- THE LEDGER'S OLD PREFIX: THE HEAD IS THE CALLER'S, AND IT CAN PREDATE THE MOVE -----------
+#
+# changed-in-range.sh is handed the PULL REQUEST'S OWN head SHA -- pr-policy.yml reads it from the
+# API and never uses the queue commit's tree -- while the script itself comes from the merge
+# result. So every pull request whose head predates 2026-09-12 runs the CURRENT builder against a
+# tree that keeps the ledger at reviews/findings/, and `git diff` with a pathspec matching nothing
+# EXITS 0 WITH NO OUTPUT: the `|| exit 1` at the builder has no failure to propagate and the
+# listing comes back empty. check_added_findings is the only rule that judges what a pull request
+# FILES, so an empty listing is that rule not running.
+#
+# Measured on this fixture before the builder named both prefixes: case 1 answered 0 -- `conforms`
+# -- where the identical tree laid out the new way answers 1. That is a gate PASSING a pull request
+# it exists to stop, not a red somebody has to work around.
+#
+# Case 2 is why the builder's pathspec could not be widened on its own. With the old prefix added
+# there and check_added_findings left judging `findings/?*`, a CLEAN pre-move pull request filing
+# one valid finding was refused for naming `a path outside findings/` -- a false red on every pull
+# request open across the move. The listing and the rule that reads it moved together.
+#
+# Case 4 is the rename direction, and it is the one a two-pathspec edit is supposed to blow up on:
+# `-M` pairs a delete with an add only where BOTH ends are in the diff, so naming the old prefix is
+# what makes the move itself detectable as a rename rather than as hundreds of additions. Measured
+# across the real move, 61ec7587 to 38283eae: `-- findings/` alone reports 340 entries all `A`;
+# `-- findings/ reviews/findings/` reports the same 340 as 7 `A` and 333 `R`. The loop takes the
+# NEW path of an `R`, so the recorded set is the same either way -- which is what this case pins.
+added_findings_of() {  # added_findings_of <dir> <target> <head>: the listing itself, one record a line
+  local dir="$1" target="$2" head="$3" out
+  out="$(mktemp -d "$fixture_dir/changed-XXXXXX")"
+  if ! ( cd "$dir" && "$BASH" "$changed_script" "$target" "$head" "$out" ) >/dev/null 2>&1; then
+    echo 'THE LISTINGS COULD NOT BE BUILT'
+    return 0
+  fi
+  cat "$out/added-findings"
+}
+
+repo_legacy="$fixture_dir/repo-ledger-before-the-move"
+new_repo "$repo_legacy"
+mkdir -p "$repo_legacy/reviews/findings" "$repo_legacy/src"
+echo seed > "$repo_legacy/seed.txt"
+echo 'fn main() {}' > "$repo_legacy/src/engine.rs"
+finding_body P3 > "$repo_legacy/reviews/findings/P3_correctness_202609010001_filed-before-the-move.md"
+git -C "$repo_legacy" add -A && git -C "$repo_legacy" commit -q -m base
+legacy_base="$(git -C "$repo_legacy" rev-parse HEAD)"
+
+legacy_branch() {  # legacy_branch <name>: a branch off the pre-move base, checked out
+  git -C "$repo_legacy" checkout -q -B "$1" "$legacy_base"
+}
+
+# 1. Something that is not a finding, and a finding whose frontmatter severity is out of range,
+#    filed under the OLD prefix. Both must be named, exactly as they are under the new one.
+legacy_branch legacy-files-a-non-finding
+finding_body P2 > "$repo_legacy/reviews/findings/NOT-A-FINDING-EITHER.md"
+finding_body P4 > "$repo_legacy/reviews/findings/P2_correctness_202609120002_out-of-range.md"
+git -C "$repo_legacy" add -A && git -C "$repo_legacy" commit -q -m 'file into the old ledger'
+legacy_bad="$(git -C "$repo_legacy" rev-parse HEAD)"
+diff_case 'a pre-move head filing something that is not a finding' \
+  "$repo_legacy" "$legacy_base" "$legacy_bad" findings/file-into-the-old-ledger 1
+diff_says 'a pre-move head filing something that is not a finding' \
+  "$repo_legacy" "$legacy_base" "$legacy_bad" findings/file-into-the-old-ledger \
+  'reviews/findings/NOT-A-FINDING-EITHER.md'
+diff_says 'a pre-move head whose frontmatter severity is out of range' \
+  "$repo_legacy" "$legacy_base" "$legacy_bad" findings/file-into-the-old-ledger \
+  'its frontmatter severity is [P4]'
+
+# 2. THE CONTROL, and the one a widened pathspec alone turns red: a clean pull request filing one
+#    valid finding under the old prefix conforms, on both branch prefixes.
+legacy_branch legacy-files-a-valid-finding
+finding_body P3 > "$repo_legacy/reviews/findings/P3_liveness_202609120003_a-valid-finding.md"
+git -C "$repo_legacy" add -A && git -C "$repo_legacy" commit -q -m 'file a valid finding'
+legacy_good="$(git -C "$repo_legacy" rev-parse HEAD)"
+diff_case 'a pre-move head filing one valid finding, on findings/' \
+  "$repo_legacy" "$legacy_base" "$legacy_good" findings/file-a-valid-one 0
+diff_case 'a pre-move head filing one valid finding, on fix-P3/' \
+  "$repo_legacy" "$legacy_base" "$legacy_good" fix-P3/liveness_a-valid-finding 0
+# and the record was BUILT, not merely unobjectionable: an empty listing would answer 0 here too,
+# which is exactly how the defect read as a pass.
+legacy_records="$(added_findings_of "$repo_legacy" "$legacy_base" "$legacy_good")"
+if [[ "$legacy_records" != $'P3\treviews/findings/P3_liveness_202609120003_a-valid-finding.md' ]]; then
+  echo "a pre-move head's added-findings must name the file it filed; got:" >&2
+  printf '%s\n' "$legacy_records" >&2
+  exit 1
+fi
+
+# 3. A findings/ branch is still confined, and the old prefix is inside the ledger for that rule
+#    too: measured before it was, this exact case was refused, `changes paths outside findings/`.
+legacy_branch legacy-touches-code
+finding_body P3 > "$repo_legacy/reviews/findings/P3_liveness_202609120004_beside-a-code-change.md"
+echo 'fn main() { let _ = 1; }' > "$repo_legacy/src/engine.rs"
+git -C "$repo_legacy" add -A && git -C "$repo_legacy" commit -q -m 'file a finding and touch code'
+legacy_code="$(git -C "$repo_legacy" rev-parse HEAD)"
+diff_case 'a pre-move findings/ branch that also touches code' \
+  "$repo_legacy" "$legacy_base" "$legacy_code" findings/touching-code 1
+diff_says 'a pre-move findings/ branch that also touches code' \
+  "$repo_legacy" "$legacy_base" "$legacy_code" findings/touching-code 'src/engine.rs'
+
+# 4. THE MOVE ITSELF, base to head: every finding comes back as a RENAME whose new path is under
+#    findings/, and the listing names the new paths and no old one. A pathspec naming only the new
+#    prefix reports the same files as ADDITIONS -- the same set, differently labelled -- so this
+#    case pins that widening the pathspec did not multiply the records.
+legacy_branch legacy-moves-the-ledger
+git -C "$repo_legacy" mv reviews/findings findings
+finding_body P3 > "$repo_legacy/findings/P3_liveness_202609120005_filed-with-the-move.md"
+git -C "$repo_legacy" add -A && git -C "$repo_legacy" commit -q -m 'move the ledger and file one more'
+legacy_moved="$(git -C "$repo_legacy" rev-parse HEAD)"
+diff_case 'the move itself, on a prefix that admits it' \
+  "$repo_legacy" "$legacy_base" "$legacy_moved" findings/move-the-ledger 0
+moved_records="$(added_findings_of "$repo_legacy" "$legacy_base" "$legacy_moved")"
+moved_count="$(printf '%s\n' "$moved_records" | grep -c . || true)"
+if [[ "$moved_count" != 2 ]]; then
+  echo "the move must report the finding it carried and the one it filed, and nothing more; got $moved_count:" >&2
+  printf '%s\n' "$moved_records" >&2
+  exit 1
+fi
+if grep -q 'reviews/findings/' <<< "$moved_records"; then
+  echo 'a rename must be recorded at its NEW path; the listing named the old one:' >&2
+  printf '%s\n' "$moved_records" >&2
+  exit 1
+fi
+git -C "$repo_legacy" checkout -q "$legacy_base"
+
 echo 'diff-rule fixtures passed'
 
 # ---- the shape rule: the unsafe call must be impossible to WRITE, not just absent -------------

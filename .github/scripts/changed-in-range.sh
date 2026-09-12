@@ -145,10 +145,38 @@ severity_of() {
 # command that wrote the file, where it is a status; through `< <(git ...)` it belongs to nobody,
 # and a diff that failed would read as a pull request that adds nothing. Reading from a file also
 # keeps the loop in THIS shell, so the duplicate set below survives it.
+#
+# BOTH LEDGER PREFIXES ARE NAMED, BECAUSE `$head` IS THE CALLER'S REVISION AND NOT THIS CHECKOUT.
+# The ledger moved from reviews/findings/ to findings/ on 2026-09-12 (pull request #276), and
+# pr-policy.yml passes the PULL REQUEST'S OWN head SHA -- read from the API, never the queue
+# commit -- to a copy of this script taken from the merge result. So every pull request whose head
+# predates the move runs THIS file against a tree laid out the old way, and a pathspec naming only
+# findings/ matched nothing there. `git diff` with a pathspec that matches nothing SUCCEEDS WITH
+# EMPTY OUTPUT, so the `|| exit 1` above has no failure to propagate and the caller reads a pull
+# request that ADDS NO FINDING.
+#
+# THAT IS A FALSE GREEN AND NOT A FALSE RED. Measured on a two-commit repository laid out both
+# ways, identical but for the prefix: a branch filing `scratch-notes.md` and a P2_-named finding
+# whose frontmatter severity is `P4` gave 2 records and `validate-pr-branch.sh` exit 1 under
+# findings/, and 0 records and exit 0 -- `conforms` -- under reviews/findings/. check_added_findings
+# is the only rule that reads what a pull request FILES, so an empty listing is that rule not
+# running at all.
+#
+# RENAME DETECTION IS WHY BOTH PREFIXES ARE ONE PATHSPEC AND NOT TWO RUNS. `-M` pairs a delete with
+# an add only where BOTH ends are in the diff, so naming the old prefix is what lets the move itself
+# be seen as the rename it is. Measured across the move, 61ec7587 to 38283eae: `-- findings/` alone
+# reports 340 entries, ALL of them `A`, because the old ends are filtered out before pairing;
+# `-- findings/ reviews/findings/` reports the same 340 entries as 7 `A` and 333 `R`. The count does
+# not grow -- the loop below takes the NEW path of an `R`, which is the findings/ path either way --
+# so widening the pathspec adds no record here and removes none.
+#
+# The consumer was widened with it: check_added_findings and check_findings_confined in
+# validate-pr-branch.sh accept a path under either prefix, because a record naming the old one is
+# the point of this change and that function refused it as a listing built wrongly.
 seen=$'\n'
 : > "$out/added-findings"
 while read -r merge_base; do
-  git diff --name-status -M --diff-filter=AR -z "$merge_base" "$head" -- findings/ \
+  git diff --name-status -M --diff-filter=AR -z "$merge_base" "$head" -- findings/ reviews/findings/ \
     > "$out/added-status" || exit 1
   status=''
   expect_old=0
