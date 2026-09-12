@@ -105,7 +105,8 @@ written per PR: the agent doing the work merges once the bar is met, and the bod
 merge was made under standing delegation and by which agent. The exception is a PR that edits
 `.github/workflows/` or `.github/scripts/`. The trust boundary rests on the owner reading any
 change to the gates, so that one is the owner's to merge unless the owner delegates it in writing
-for that PR.
+for that PR. A delegation written for a class of PRs — every P1 fix, say — does not reach it: it was
+written before the PR existed, so it cannot be the owner's read of that PR's diff.
 
 ## Where things are
 

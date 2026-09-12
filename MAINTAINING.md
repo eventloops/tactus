@@ -84,9 +84,16 @@ source, documentation, workflows, release machinery and this file.
    edits `.github/workflows/` or `.github/scripts/`.** The trust boundary rests on the owner
    reading any change to the gates, and the per-pull-request delegation was the occasion of that
    read, so a gate-touching pull request stays the owner's to merge — or carries a delegation the
-   owner wrote for it, the written form kept for exactly this case and disclosed in the body as it
-   always was. Which class a pull request is in is read off the paths its diff changes, not off its
-   branch prefix, and reading it is the delegate's duty: no check enforces the carve-out today.
+   owner wrote for that pull request, the written form kept for exactly this case and disclosed in
+   the body as it always was. **A delegation written for a class of pull requests is not that
+   delegation.** One covering, say, every P1 fix is written before the pull requests it covers
+   exist, so it cannot be the occasion of a read of any of their diffs: it satisfies the standing
+   form and not the carve-out. The cost of saying so is real and is named here rather than
+   discovered — a fix whose whole value is putting a guard into a gate goes back to the owner — and
+   an owner who does not want that cost writes a class delegation that says it reaches gate-touching
+   pull requests, which is a decision to stop reading them and should be taken as one. Which side of
+   the carve-out a pull request falls on is read off the paths its diff changes, not off its branch
+   prefix, and reading them is the delegate's duty: no check enforces the carve-out today.
    Never push to `master` directly. Delete the branch.
 
 ### Serious P1
@@ -381,12 +388,13 @@ written for one pull request was the occasion of the owner's read; a standing on
 occasion, and green checks cannot stand in for it — the opening sentences above are the reason, and
 they are why this clause and not the checks is the boundary. So the standing form stops at the
 gates: a pull request editing `.github/workflows/` or `.github/scripts/` is the owner's to merge,
-or carries a written delegation for that pull request, and either way the owner has read the diff
-that changed them. Step 7 states the rule. What the change does move is the classification —
-whether a diff touches the gates is the delegate's call first, no check enforces it, and the merge
-commit's own diff is the record after the fact. The delegate also merges on the owner's credential
-rather than on one of its own, so the trusted same-repository writer is still the owner and still
-one.
+or carries a delegation the owner wrote for that pull request — not one written for a class of pull
+requests, which cannot have been the occasion of a read of a diff that did not yet exist. Either
+way the owner has read the diff that changed them. Step 7 states the rule and its cost. What the
+change does move is the classification — whether a diff touches the gates is the delegate's call
+first, no check enforces it, and the merge commit's own diff is the record after the fact. The
+delegate also merges on the owner's credential rather than on one of its own, so the trusted
+same-repository writer is still the owner and still one.
 
 No automated process merges or mints a merge-gating check: there is no machine review check, no
 App, and no token that can attest. A delegate pressing merge is not that process — it is the

@@ -611,8 +611,12 @@ records that it merged under standing delegation and which agent merged it. **A 
 `.github/workflows/` or `.github/scripts/` is outside the standing form** — a fix that adds gate
 coverage is exactly that shape — and stays the owner's to merge unless the owner delegates it in
 writing for that pull request, because the trust boundary rests on the owner reading any change to
-the gates. Never push to `master` directly. Delete the batch branch and every member
-fix branch after the merge — a fix branch left behind still reads as a live claim on its module.
+the gates. The standing delegation does not reach it, and neither does a class delegation covering
+every P1 fix: that one is written before the pull request exists, so it cannot be the owner's read
+of its diff. A batch of that shape goes back to the owner until a class delegation says in terms
+that it reaches gate-touching pull requests. Never push to `master` directly. Delete the batch
+branch and every member fix branch after the merge — a fix branch left behind still reads as a
+live claim on its module.
 
 **Which is why every fix commit carries its finding in a trailer.** The branches are deleted; the
 trailer is what survives them, and it is how a landed commit is attributed to the finding it closed:
