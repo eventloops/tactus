@@ -100,8 +100,12 @@ everything else is fixed or logged as a tech-debt ledger row; merge commit once 
 must carry the six sections and the exact canonical ledger header; run `validate-pr-body.sh`
 against it locally.
 
-Merging is the owner's act unless the owner has delegated it in writing for that PR; say so in the
-body when it has been.
+Merging is the owner's act, and since 2026-09-12 the delegation of it is standing rather than
+written per PR: the agent doing the work merges once the bar is met, and the body records that the
+merge was made under standing delegation and by which agent. The exception is a PR that edits
+`.github/workflows/` or `.github/scripts/`. The trust boundary rests on the owner reading any
+change to the gates, so that one is the owner's to merge unless the owner delegates it in writing
+for that PR.
 
 ## Where things are
 

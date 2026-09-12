@@ -605,8 +605,13 @@ times.
 **A branch behind `master` is not hand-updated to merge.** The queue rebuilds it. Update only when
 the change genuinely needs something `master` gained.
 
-Merging is the owner's act unless delegated in writing for that pull request, and the delegation is
-disclosed in the body. Never push to `master` directly. Delete the batch branch and every member
+Merging is the owner's act under a standing delegation (2026-09-12) rather than one written per
+pull request: a batch that has met the bar above is merged by the agent doing the work, and the body
+records that it merged under standing delegation and which agent merged it. **A batch that edits
+`.github/workflows/` or `.github/scripts/` is outside the standing form** — a fix that adds gate
+coverage is exactly that shape — and stays the owner's to merge unless the owner delegates it in
+writing for that pull request, because the trust boundary rests on the owner reading any change to
+the gates. Never push to `master` directly. Delete the batch branch and every member
 fix branch after the merge — a fix branch left behind still reads as a live claim on its module.
 
 **Which is why every fix commit carries its finding in a trailer.** The branches are deleted; the

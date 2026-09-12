@@ -74,9 +74,20 @@ source, documentation, workflows, release machinery and this file.
    owner's merge commit on a head whose own contexts are green, as before. Enqueueing, or that
    merge, is the owner's attestation that the evidence is real and the
    merged head is accounted for: reviewed directly, or separated from the reviewed SHA only by the
-   deltas step 5 allows. The owner may delegate the merge, in writing, to the agent doing the work
-   on a pull request that has reached this state; the delegation is disclosed in the body. Never
-   push to `master` directly. Delete the branch.
+   deltas step 5 allows. **The owner's delegation of that act is standing, not written per pull
+   request** (2026-09-12): the agent doing the work on a pull request that has reached this state
+   enqueues it without asking, as the owner's act rather than as its own, and the body records that
+   the merge was made under standing delegation and by which agent. What must be true before the
+   merge is untouched — this step's own preconditions, step 4's review on the green head and step
+   5's triage bind exactly as they did; what has gone is the occasion on which the owner
+   authorised, one pull request at a time. **The standing form does not reach a pull request that
+   edits `.github/workflows/` or `.github/scripts/`.** The trust boundary rests on the owner
+   reading any change to the gates, and the per-pull-request delegation was the occasion of that
+   read, so a gate-touching pull request stays the owner's to merge — or carries a delegation the
+   owner wrote for it, the written form kept for exactly this case and disclosed in the body as it
+   always was. Which class a pull request is in is read off the paths its diff changes, not off its
+   branch prefix, and reading it is the delegate's duty: no check enforces the carve-out today.
+   Never push to `master` directly. Delete the branch.
 
 ### Serious P1
 
@@ -361,11 +372,28 @@ fixed whatever its label, as step 5 says.
 **Trust boundary.** There is one trusted same-repository writer: the owner. A pull request can
 edit `ci.yml`, `pr-policy.yml` and the validators they run and still turn both contexts green, so
 the checks catch honest mistakes and are not the security boundary. The boundary is that only the
-owner merges — or an agent the owner has delegated to for that pull request — after an independent
-review recorded per step 4, and that the diff the owner reads includes any change to the gates. No
-automated process merges or mints a merge-gating check: there is no machine review check, no App,
-and no token that can attest. A return of automated attestation needs a signer distinct from the
-owner's token, structurally validated verdicts, and a reviewer that holds no attesting credential.
+owner merges — or an agent the owner has delegated to, which since 2026-09-12 is a standing
+delegation rather than one written per pull request — after an independent review recorded per step
+4, and that the diff the owner reads includes any change to the gates.
+
+**The second half of that is what the standing delegation had to be built around.** A delegation
+written for one pull request was the occasion of the owner's read; a standing one removes the
+occasion, and green checks cannot stand in for it — the opening sentences above are the reason, and
+they are why this clause and not the checks is the boundary. So the standing form stops at the
+gates: a pull request editing `.github/workflows/` or `.github/scripts/` is the owner's to merge,
+or carries a written delegation for that pull request, and either way the owner has read the diff
+that changed them. Step 7 states the rule. What the change does move is the classification —
+whether a diff touches the gates is the delegate's call first, no check enforces it, and the merge
+commit's own diff is the record after the fact. The delegate also merges on the owner's credential
+rather than on one of its own, so the trusted same-repository writer is still the owner and still
+one.
+
+No automated process merges or mints a merge-gating check: there is no machine review check, no
+App, and no token that can attest. A delegate pressing merge is not that process — it is the
+owner's act performed by an agent the owner named, disclosed in the body, resting on the same
+independent review; what this sentence forbids is a machine minting a gating check that stands in
+for that review. A return of automated attestation needs a signer distinct from the owner's token,
+structurally validated verdicts, and a reviewer that holds no attesting credential.
 
 Keep workflow approval for **all** external contributors, and keep release immutability enabled;
 bootstrap and audit both through the API:
