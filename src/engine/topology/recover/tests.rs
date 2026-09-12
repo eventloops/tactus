@@ -9488,22 +9488,35 @@ fn an_over_limit_repair_spends_nothing_until_its_answer_activates_it() {
     let kinds_before = durable_kinds(&fixture);
 
     let driven = drive(&fixture, &DriveSeams::default(), 2);
-    for (index, progress) in driven.progress.iter().enumerate() {
-        assert!(
-            matches!(progress, Ok(Progress::Blocked { questions: 1 })),
-            "step {index}: an over-limit repair is `AwaitingInput` and the run hard-blocks on \
-             its one question with nothing to spend on: {progress:?}"
-        );
-    }
+    assert!(
+        matches!(
+            driven.progress.first(),
+            Some(Ok(Progress::Finished {
+                outcome: RunOutcome::Parked,
+                closed: 0,
+                ..
+            }))
+        ),
+        "an over-limit repair is `AwaitingInput`; the hard block asks its one question, nobody \
+         answers, and the loop falls through to run-end closure, which ends the run parked with \
+         nothing to spend on: {:?}",
+        driven.progress
+    );
+    assert!(
+        matches!(driven.progress.get(1), Some(Err(error)) if error.to_string().contains("already finished as `parked`")),
+        "a step after the end is refused at the checkpoint, before any append: {:?}",
+        driven.progress
+    );
     assert_eq!(
         durable_kinds(&fixture),
         {
             let mut expected = kinds_before;
             expected.push("run_resumed".to_owned());
+            expected.push("run_finished".to_owned());
             expected
         },
-        "beyond the resume's own `run_resumed`, nothing was appended while the question stood: \
-         no dispatch, no attempt, no spend"
+        "beyond the resume's own `run_resumed` and the parked end, nothing was appended while \
+         the question stood: no dispatch, no attempt, no spend"
     );
     assert!(
         driven.runs.is_empty(),
@@ -12180,9 +12193,12 @@ fn an_answer_published_into_the_run_directory_is_ingested_by_the_next_incarnatio
     assert!(
         matches!(
             blocked.progress.first(),
-            Some(Ok(Progress::Blocked { questions: 1 }))
+            Some(Ok(Progress::Finished {
+                outcome: RunOutcome::Parked,
+                ..
+            }))
         ),
-        "with no answer file the run hard-blocks: {:?}",
+        "with no answer file the hard block finds nobody and the run ends parked: {:?}",
         blocked.progress
     );
 
