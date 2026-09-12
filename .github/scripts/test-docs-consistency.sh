@@ -7,7 +7,10 @@
 #   C1  CLAUDE.md and CONTRIBUTING.md exist. Every repository path either names
 #       in backticks exists at this head, or EACH occurrence is qualified within
 #       its own window -- three lines before to four after, CLAMPED TO THE
-#       OCCURRENCE'S OWN PARAGRAPH -- by one of the marker phrases below.
+#       OCCURRENCE'S OWN PARAGRAPH -- by one of the marker phrases below. A
+#       paragraph ends at a line holding nothing but whitespace, the carriage
+#       return included, so the line-ending convention a document is checked out
+#       with never decides where its paragraphs end.
 #       Qualification is syntactic within that paragraph: the gate checks that a
 #       phrase is present in it, not what the phrase refers to, so a qualifier
 #       still excuses every missing citation written beside it. What it can no
@@ -81,7 +84,11 @@
 #            indistinguishable from a clean one);
 #   round 8: MUT-C1-QUALIFIER-CROSSES-A-PARAGRAPH (a fixed line window reached
 #            past a blank line, so a qualifier excused a citation in a
-#            neighbouring paragraph -- this file's own repair silenced C1).
+#            neighbouring paragraph -- this file's own repair silenced C1);
+#   round 9: MUT-C1-CRLF-DISSOLVES-A-PARAGRAPH (blankness was a field count, so
+#            a document checked out with CRLF endings held no blank line at all,
+#            round 8's clamp was inert, and the same qualifier excused the same
+#            citation again -- one repair, silenced by a second route).
 set -euo pipefail
 export PATH="/usr/bin:/bin:$PATH"
 
@@ -161,11 +168,35 @@ excused() {
   from=$(( line_no > 3 ? line_no - 3 : 1 ))
   to=$(( line_no + 4 ))
   # The paragraph the occurrence sits in: the line after the nearest blank line
-  # above it, to the line before the nearest blank line below it. A line of
-  # nothing but whitespace is blank -- `NF` is 0 for it -- which is what a reader
-  # sees too. A document with no blank line above or below is one paragraph.
-  para_from=$(awk -v n="$line_no" 'NR < n && !NF { last = NR } END { print last + 1 }' "$doc")
-  para_to=$(awk -v n="$line_no" 'NR > n && !NF { print NR - 1; found = 1; exit } END { if (!found) print NR }' "$doc")
+  # above it, to the line before the nearest blank line below it. A document
+  # with no blank line above or below is one paragraph.
+  #
+  # BLANK IS /^[[:space:]]*$/, IN BOTH PREDICATES, AND NOT `!NF`.
+  # MUT-C1-CRLF-DISSOLVES-A-PARAGRAPH: `!NF` asks awk how many FIELDS a line
+  # holds, and awk's default separator is blanks -- space and tab. A carriage
+  # return is neither, so on a document checked out with CRLF endings every
+  # line holds a field, NO line is blank, both predicates run off the ends of
+  # the document, and round 8's clamp below is inert: para_from is 1, para_to
+  # is the last line, and the +-3/+4 window reaches across a blank line into a
+  # neighbouring paragraph exactly as it did before -- PR276-R4-002, reachable
+  # by a second route. Measured on 8f0f203a, CLAUDE.md's src/export.rs citation
+  # changed to a path that does not exist: LF exited 1 naming it, the same
+  # document in CRLF exited 0 printing PASS.
+  #
+  # BOTH predicates carry it, not the one a report happens to hit: they are the
+  # two ends of the same paragraph, and a fix to either alone still lets the
+  # other end run to the edge of the document.
+  #
+  # `[[:space:]]` includes the carriage return, which is why the convention
+  # stops deciding where paragraphs end. It is a SUPERSET of `!NF` and not a
+  # different rule: measured over every whitespace class, no line `!NF` called
+  # blank is a field here (empty, spaces, tabs, and mixtures of them all still
+  # blank), and the only lines whose classification moves are ones a reader
+  # already sees as empty -- a lone carriage return, whitespace around one, a
+  # form feed, a vertical tab. Text is untouched, `  x` with a trailing
+  # carriage return included.
+  para_from=$(awk -v n="$line_no" 'NR < n && /^[[:space:]]*$/ { last = NR } END { print last + 1 }' "$doc")
+  para_to=$(awk -v n="$line_no" 'NR > n && /^[[:space:]]*$/ { print NR - 1; found = 1; exit } END { if (!found) print NR }' "$doc")
   if (( from < para_from )); then from=$para_from; fi
   if (( to > para_to )); then to=$para_to; fi
   sed -n "${from},${to}p" "$doc" | grep -qiE "$marker"
@@ -391,22 +422,38 @@ if [[ -n "$old_ledger_paths" ]]; then
   error "Rebase onto master and move them under findings/ with git mv: nothing reads reviews/findings/ any more, so a finding left there is filed nowhere."
 fi
 
-# --- C1's regression test: a qualifier belongs to its own paragraph ----------
-# MUT-C1-QUALIFIER-CROSSES-A-PARAGRAPH is killed here rather than by hand. It
-# was invisible to every fixture this repository had, because the only documents
-# C1 reads are CLAUDE.md and CONTRIBUTING.md and both must keep passing: the
-# weakening shows only when a citation in one of them is made to dangle, which a
-# gate cannot do to its own repository. `excused` is the whole of the decision,
-# so a fixture document pins it.
+# --- C1's regression test: a qualifier belongs to its own paragraph, and the
+# --- line-ending convention does not move the paragraph ----------------------
+# MUT-C1-QUALIFIER-CROSSES-A-PARAGRAPH and MUT-C1-CRLF-DISSOLVES-A-PARAGRAPH are
+# killed here rather than by hand. Both were invisible to every fixture this
+# repository had, because the only documents C1 reads are CLAUDE.md and
+# CONTRIBUTING.md and both must keep passing: the weakening shows only when a
+# citation in one of them is made to dangle, which a gate cannot do to its own
+# repository. `excused` is the whole of the decision, so a fixture document pins
+# it.
 #
-# WHAT WOULD STILL PASS IF THE CLAMP WERE GONE: rows 1 and 2, and only those --
-# they are the rows that need a blank line to be honoured. Rows 3 and 4 hold
-# either way and are here so the clamp cannot be "fixed" by narrowing the window
-# to the citation's own line, which would refuse a qualification that merely
-# wrapped. Row 5 is the other bound: inside one paragraph the ±3/+4 window still
-# applies, so clamping widened nothing.
+# EVERY ROW RUNS TWICE, ON THE SAME DOCUMENT IN BOTH CONVENTIONS, AND EXPECTS
+# THE SAME ANSWER EITHER WAY. Round 8's fixture was LF-only, which is how a
+# CRLF document walked past this file's own regression test without failing it.
+# What is asserted is therefore the property -- the convention a document is
+# written in does not change which lines count as blank -- as an equality across
+# the two columns, and not one more case bolted beside the last one.
+#
+# WHAT WOULD STILL PASS IF THE CLAMP WERE GONE: rows 1 and 2 in the LF column,
+# and only those -- they are the rows that need a blank line to be honoured.
+# Rows 3 and 4 hold either way and are here so the clamp cannot be "fixed" by
+# narrowing the window to the citation's own line, which would refuse a
+# qualification that merely wrapped. Row 5 is the other bound: inside one
+# paragraph the +-3/+4 window still applies, so clamping widened nothing.
+# WHAT WOULD STILL PASS IF THE BLANKNESS PREDICATES WERE A FIELD COUNT AGAIN:
+# nothing in the CRLF column, and row 6 in neither column. Row 6 is the blank
+# line that is not empty -- a separator holding whitespace AROUND a stray
+# carriage return, which `!NF` saw as a field and which a trailing-only strip
+# (`sed 's/\r$//'`) would still see as one. It is appended with printf because
+# the here-document above is quoted, and the carriage return has to be a byte.
 if [[ "${1:-}" != --child-of-c5-selftest ]]; then
   c1_doc="$(mktemp)"
+  c1_doc_crlf="$(mktemp)"
   cat > "$c1_doc" <<'C1FIXTURE'
 **`src/a-no-qualifier.rs` is cited here.** Nothing in this paragraph
 qualifies it.
@@ -428,18 +475,35 @@ Line three.
 Line four.
 Line five cites `src/e-too-far.rs`.
 C1FIXTURE
+  printf '%s\n' '' \
+    '**`src/f-stray-cr.rs` is cited here.** The separator below holds' \
+    'whitespace around a carriage return, and it still ends this paragraph.' \
+    >> "$c1_doc"
+  printf ' \r \n' >> "$c1_doc"
+  printf '%s\n' 'A neighbouring paragraph, in which the file does not exist.' >> "$c1_doc"
+  # The same document, every line ending CRLF. Stripping first keeps row 6's
+  # interior carriage return the only one that is not a line ending.
+  sed -e 's/\r$//' -e 's/$/\r/' "$c1_doc" > "$c1_doc_crlf"
   c1_case() {  # c1_case <line> <yes|no> <what>
-    local got=no
-    excused "$c1_doc" "$1" && got=yes
-    [[ "$got" == "$2" ]] \
-      || error "C1 qualification, line $1 ($3): excused=$got, and excused=$2 was expected"
+    local line_no="$1" want="$2" what="$3" convention doc got
+    for convention in LF CRLF; do
+      case "$convention" in
+        LF) doc="$c1_doc" ;;
+        *)  doc="$c1_doc_crlf" ;;
+      esac
+      got=no
+      excused "$doc" "$line_no" && got=yes
+      [[ "$got" == "$want" ]] \
+        || error "C1 qualification, $convention, line $line_no ($what): excused=$got, and excused=$want was expected"
+    done
   }
   c1_case 1  no  'a marker in the paragraph BELOW must not excuse it'
   c1_case 7  no  'a marker in the paragraph ABOVE must not excuse it'
   c1_case 10 yes 'a marker on the next line of the same paragraph excuses it'
   c1_case 13 yes 'a marker on the occurrence own line excuses it'
   c1_case 19 no  'a marker four lines above, inside one paragraph, is still out of the window'
-  rm -f "$c1_doc"
+  c1_case 21 no  'whitespace around a carriage return is a blank line, so the marker below it is in the next paragraph'
+  rm -f "$c1_doc" "$c1_doc_crlf"
 fi
 
 # --- C5's regression tests: a listing that fails must go RED, never green ----
