@@ -5,7 +5,7 @@ disposition: deferred
 category: crash-consistency
 pr: 7
 reviewed_sha: 
-location: src/workspace_manager.rs:2580, src/engine/topology/attempt/tests.rs:1333
+location: src/workspace_manager.rs:2647, src/engine/topology/attempt/tests.rs:1333
 provenance: pre_existing
 first_bad: 
 guard: the project owner — this needs a packet decision, not an implementer's repair
