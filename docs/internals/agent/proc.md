@@ -1210,12 +1210,16 @@ member of that exact group is either gone or a non-running zombie.
 
 End a guard whose supervisor setup failed after it said READY, and
 answer what ending it returned. After the descriptors are closed this
-is `end_unready_guard` with `EndingWait::AskingForNoStatus` — the same
-helper and the same arm the descriptor-configuration failure reaches,
-so the two sites that abandon a guard make one call shape between them
-rather than drifting apart. With the identity path off that arm is the
-`kill` and the `waitpid` by number this site always made, asking for no
-exit status and retried on `EINTR` as before; with the path on it is
+is `end_unready_guard` with `EndingWait::AskingForNoStatus` and
+`EndingRetry::WhileInterrupted` — the same helper and the same wait the
+descriptor-configuration failure reaches, so the two sites that abandon
+a guard make one call shape between them rather than drifting apart,
+and this site's own answer to an interrupted wait, which the
+descriptor-configuration failure does not share. With the identity path
+off that is the `kill` and the `waitpid` by number this site always
+made, asking for no exit status and made again while it answers
+`EINTR`, now up to `INTERRUPTED_WAIT_ATTEMPTS` times where the inline
+loop here had no bound; with the path on it is
 `end_helper_through_identity`. Both answers are kept and handed back as
 a `HelperEnd`, which `install` describes into each of its three failure
 messages after the monitor's own error: the one place the ending can be
@@ -1630,7 +1634,9 @@ call both sites that abandon a guard make on `master` and make again
 here — the descriptor-configuration failure and `Guard::abort_setup` —
 and its `HelperEnd` carries `status: None` rather than a fabricated
 zero. Those two are the sites that ask for it; the READY failure is the
-one that does not.
+one that does not. `EndingRetry` below is the second per-site choice,
+for the same reason and separately from this one: two sites that make
+the same wait need not answer an interrupted one the same way.
 
 Each was measured on the head where it had been routed through the
 status-collecting shape instead. Under a policy refusing a
@@ -1644,7 +1650,30 @@ drive both policies through their fixtures'
 `the_default_teardown_makes_the_waits_it_always_made` drives the fatal
 one at `abort_setup` a second time through its `status-pointer` shape.
 
-## `mod termination` › `fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int, wait: EndingWait) -> HelperEnd {`
+## `mod termination` › `enum EndingRetry {`
+
+Whether an ending makes its wait again when a signal interrupts it,
+chosen by the calling site for the same reason `EndingWait` is: these
+sites do not all wait alike, and a site that gains a retry it never had
+is making a call the host never agreed to. `Once` is the single wait
+the descriptor-configuration and READY failures have each always made;
+`WhileInterrupted` is `Guard::abort_setup`'s retry, because giving up
+on the first `EINTR` there is what would leave the killed guard
+unreaped.
+
+`WhileInterrupted` is bounded by `INTERRUPTED_WAIT_ATTEMPTS`, which
+`abort_setup`'s inline loop was not. A wait is interrupted by a signal
+that arrived while it blocked, so the retry exists for a handful of
+deliveries; a wait answered `EINTR` that many times running is being
+refused rather than interrupted, and §7 asks that a retry be bounded.
+Unbounded, the loop is a hang where a hang is worse than the leak it
+replaces: the caller receives no answer at all rather than a wait it
+can read. `an_aborted_guard_whose_waits_are_all_interrupted_reports_that_and_returns`
+drives the retry to exhaustion under a policy answering every `wait4`
+`EINTR` and asserts what the caller then receives; with the bound
+removed that driver fails on its own deadline.
+
+## `mod termination` › `fn end_unready_guard(`
 
 The teardown of a guard that never became the supervisor's, and the
 only place one is signalled and collected. Three sites reach it: the
@@ -1659,12 +1688,18 @@ kept for the message. The identity arm is `end_helper_through_identity`,
 which signals and waits through the descriptor and so has no status
 pointer for a policy to see; `wait` does not reach it.
 
-The wait is retried while it answers `EINTR`, which is the retry
-`Guard::abort_setup` made inline before it delegated here and which now
-covers all three sites: an interrupted wait has collected nothing, so
-giving up on it is what would leave the killed guard unreaped — the
-same leak the status pointer caused, by a different route. The two
-`spawn_guard` sites gain that retry; neither had it before.
+How an interrupted wait is answered is `EndingRetry`, and the calling
+site chooses it exactly as it chooses the wait. The two `spawn_guard`
+sites pass `EndingRetry::Once` — the single wait each has always made,
+whose `EINTR` is reported rather than waited on again — and
+`Guard::abort_setup` passes `EndingRetry::WhileInterrupted`, the retry
+it has always made. A round of this repair folded the retry into this
+helper for all three sites, which gave the two `spawn_guard` sites a
+retry neither ever had; with `wait4` answered `EINTR` by policy, the
+descriptor-configuration failure then never returned at all. Measured
+through `run_with_timeout_at`: `timeout 2s` exited `124` at that head
+against `0` on `master`, on one `kill` and 181,654 interrupted waits in
+a second.
 
 ## `fn spawn_guard` › `let how = if wait == ReadyWait::Ready {`
 

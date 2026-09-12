@@ -9,7 +9,10 @@
   an unused expression statement is a build error. Both paths keep the `waitpid` they always
   made: each asks for no exit status, as it did before, and says so rather than reporting one it
   did not collect — so a host policy that refuses or kills a wait carrying a status pointer sees no
-  new call from either. Measured under both such policies, on each path
+  new call from either, and neither makes its wait again where it did not before. Measured under
+  both such policies, on each path. The retry the abort path has always made when a signal
+  interrupts its wait is now bounded, so a wait that is answered `EINTR` every time ends in a
+  reported failure rather than in a loop that never returns
   (`PR125-CLOSE-DISCARDED-KILL-RESULT`).
 - A schema-4 integration verification that ends unavailable — parked for a person, or deferred by
   an infrastructure outage — now records the review passes it paid for, so a resumed run's reported
