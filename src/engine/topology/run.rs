@@ -662,6 +662,11 @@ impl TopologyRun {
     }
 
     #[must_use]
+    pub fn events(&self) -> &[TopologyEvent] {
+        &self.handle.events
+    }
+
+    #[must_use]
     #[allow(dead_code)]
     pub fn warnings(&self) -> &[String] {
         &self.warnings
