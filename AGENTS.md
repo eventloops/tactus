@@ -103,10 +103,14 @@ against it locally.
 Merging is the owner's act, and since 2026-09-12 the delegation of it is standing rather than
 written per PR: the agent doing the work merges once the bar is met, and the body records that the
 merge was made under standing delegation and by which agent. The exception is a PR that edits
-`.github/workflows/` or `.github/scripts/`. The trust boundary rests on the owner reading any
-change to the gates, so that one is the owner's to merge unless the owner delegates it in writing
-for that PR. A delegation written for a class of PRs — every P1 fix, say — does not reach it: it was
-written before the PR existed, so it cannot be the owner's read of that PR's diff.
+`.github/workflows/`, `.github/scripts/` or `scripts/` — the three directories holding code that
+runs inside a required gate, `scripts/` among them because `.github/scripts/test-pr-ready-audit.sh`
+sources `scripts/pr-ready-audit.sh`, which sources `scripts/lane.sh` and runs
+`scripts/pr-review-parse.py`, so an edit there alone can make that gate exit `0` without running a
+fixture. The trust boundary rests on the owner reading any change to the gates, so that one is the
+owner's to merge unless the owner delegates it in writing for that PR. A delegation written for a
+class of PRs — every P1 fix, say — does not reach it: it was written before the PR existed, so it
+cannot be the owner's read of that PR's diff.
 
 ## Where things are
 

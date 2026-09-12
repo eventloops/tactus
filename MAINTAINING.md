@@ -79,21 +79,29 @@ source, documentation, workflows, release machinery and this file.
    enqueues it without asking, as the owner's act rather than as its own, and the body records that
    the merge was made under standing delegation and by which agent. What must be true before the
    merge is untouched — this step's own preconditions, step 4's review on the green head and step
-   5's triage bind exactly as they did; what has gone is the occasion on which the owner
-   authorised, one pull request at a time. **The standing form does not reach a pull request that
-   edits `.github/workflows/` or `.github/scripts/`.** The trust boundary rests on the owner
-   reading any change to the gates, and the per-pull-request delegation was the occasion of that
-   read, so a gate-touching pull request stays the owner's to merge — or carries a delegation the
-   owner wrote for that pull request, the written form kept for exactly this case and disclosed in
-   the body as it always was. **A delegation written for a class of pull requests is not that
-   delegation.** One covering, say, every P1 fix is written before the pull requests it covers
-   exist, so it cannot be the occasion of a read of any of their diffs: it satisfies the standing
-   form and not the carve-out. The cost of saying so is real and is named here rather than
+   5's triage bind exactly as they did; what has gone is the occasion on which the owner authorised,
+   one pull request at a time. **The standing form does not reach a pull request that edits
+   `.github/workflows/`, `.github/scripts/` or `scripts/`.** Those three directories are where code
+   that executes inside a required gate lives — `.github/scripts/test-pr-ready-audit.sh` sources
+   `scripts/pr-ready-audit.sh`, which sources `scripts/lane.sh` and runs
+   `scripts/pr-review-parse.py`, so an edit confined to `scripts/` can make that gate skip every
+   fixture and exit `0` while the gate file itself stays byte-identical. The trust boundary rests on
+   the owner reading any change to the gates, and the per-pull-request delegation was the occasion
+   of that read, so a gate-touching pull request stays the owner's to merge — or carries a
+   delegation the owner wrote for that pull request, the written form kept for exactly this case and
+   disclosed in the body as it always was. **A delegation written for a class of pull requests is
+   not that delegation.** One covering, say, every P1 fix is written before the pull requests it
+   covers exist, so it cannot be the occasion of a read of any of their diffs: it satisfies the
+   standing form and not the carve-out. The cost of saying so is real and is named here rather than
    discovered — a fix whose whole value is putting a guard into a gate goes back to the owner — and
    an owner who does not want that cost writes a class delegation that says it reaches gate-touching
    pull requests, which is a decision to stop reading them and should be taken as one. Which side of
    the carve-out a pull request falls on is read off the paths its diff changes, not off its branch
-   prefix, and reading them is the delegate's duty: no check enforces the carve-out today.
+   prefix, and reading them is the delegate's duty: no check enforces the carve-out today. That is
+   also why the set names directories rather than the files the gates reach: a rule applied by eye
+   has to stay right the next time a gate picks up a dependency, and a file list goes stale the
+   moment one does. Naming `scripts/` whole over-includes exactly one file no gate reads,
+   `scripts/rename-tactus-to-upstroke.sh`, and that is the cheaper error.
    Never push to `master` directly. Delete the branch.
 
 ### Serious P1
@@ -387,15 +395,18 @@ step 4, and that the diff the owner reads includes any change to the gates.
 written for one pull request was the occasion of the owner's read; a standing one removes the
 occasion, and green checks cannot stand in for it — the opening sentences above say why: a pull
 request can edit the checks that judge it, which is what makes this clause and not them the
-boundary. So the standing form stops at the gates: a pull request editing `.github/workflows/` or
-`.github/scripts/` is the owner's to merge, or carries a delegation the owner wrote for that pull
-request — not one written for a class of pull requests, which cannot have been the occasion of a
-read of a diff that did not yet exist. Either way the owner has read the diff that changed the
-gates. Step 7 states the rule and its cost. What the change does move is the classification —
-whether a diff touches the gates is the delegate's call first, no check enforces it, and the merge
-commit's own diff is the record after the fact. The delegate also merges on the owner's credential
-rather than on one of its own, so the trusted same-repository writer is still the owner and still
-one.
+boundary. So the standing form stops at the gates: a pull request editing `.github/workflows/`,
+`.github/scripts/` or `scripts/` is the owner's to merge, or carries a delegation the owner wrote
+for that pull request — not one written for a class of pull requests, which cannot have been the
+occasion of a read of a diff that did not yet exist. Either way the owner has read the diff that
+changed the gates. `scripts/` is in that set because the gates execute what is in it: the audit gate
+sources `scripts/pr-ready-audit.sh` and, through it, `scripts/lane.sh`, and runs
+`scripts/pr-review-parse.py`, so a change to those files can turn a required context green on a
+defect exactly as a change to the gate file can. Step 7 states the rule, why the set names
+directories, and its cost. What the change does move is the classification — whether a diff touches
+the gates is the delegate's call first, no check enforces it, and the merge commit's own diff is the
+record after the fact. The delegate also merges on the owner's credential rather than on one of its
+own, so the trusted same-repository writer is still the owner and still one.
 
 No automated process merges or mints a merge-gating check: there is no machine review check, no
 App, and no token that can attest. A delegate pressing merge is not that process — it is the

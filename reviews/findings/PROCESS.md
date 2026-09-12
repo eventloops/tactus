@@ -605,18 +605,21 @@ times.
 **A branch behind `master` is not hand-updated to merge.** The queue rebuilds it. Update only when
 the change genuinely needs something `master` gained.
 
-Merging is the owner's act under a standing delegation (2026-09-12) rather than one written per
-pull request: a batch that has met the bar above is merged by the agent doing the work, and the body
+Merging is the owner's act under a standing delegation (2026-09-12) rather than one written per pull
+request: a batch that has met the bar above is merged by the agent doing the work, and the body
 records that it merged under standing delegation and which agent merged it. **A batch that edits
-`.github/workflows/` or `.github/scripts/` is outside the standing form** — a fix that adds gate
+`.github/workflows/`, `.github/scripts/` or `scripts/` is outside the standing form** — those are
+the three directories holding code that runs inside a required gate, and a fix that adds gate
 coverage is exactly that shape — and stays the owner's to merge unless the owner delegates it in
 writing for that pull request, because the trust boundary rests on the owner reading any change to
-the gates. The standing delegation does not reach it, and neither does a class delegation covering
-every P1 fix: that one is written before the pull request exists, so it cannot be the owner's read
-of its diff. A batch of that shape goes back to the owner until a class delegation says in terms
-that it reaches gate-touching pull requests. Never push to `master` directly. Delete the batch
-branch and every member fix branch after the merge — a fix branch left behind still reads as a
-live claim on its module.
+the gates. `scripts/` counts because the audit gate sources `scripts/pr-ready-audit.sh` and
+`scripts/lane.sh` and runs `scripts/pr-review-parse.py`: a fix that lands only there still changes
+what a required gate does. The standing delegation does not reach it, and neither does a class
+delegation covering every P1 fix: that one is written before the pull request exists, so it cannot
+be the owner's read of its diff. A batch of that shape goes back to the owner until a class
+delegation says in terms that it reaches gate-touching pull requests. Never push to `master`
+directly. Delete the batch branch and every member fix branch after the merge — a fix branch left
+behind still reads as a live claim on its module.
 
 **Which is why every fix commit carries its finding in a trailer.** The branches are deleted; the
 trailer is what survives them, and it is how a landed commit is attributed to the finding it closed:
