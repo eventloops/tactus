@@ -164,11 +164,52 @@ git merge-base --all "$target" "$head" > "$out/merge-bases" \
   || { echo "no merge base between $target and $head" >&2; exit 1; }
 
 # findings_in <commit-ish>: the bare filenames of the REGULAR FILES directly in
-# findings/ at that commit. `git ls-tree` prints `<mode> <type> <object>
-# TAB <path>`; the mode is what separates a finding from a directory carrying a
-# finding's name. Splitting on the tab keeps a path with spaces in it whole.
+# the ledger directory at that commit. `git ls-tree` prints `<mode> <type>
+# <object> TAB <path>`; the mode is what separates a finding from a directory
+# carrying a finding's name. Splitting on the tab keeps a path with spaces in it
+# whole.
+#
+# BOTH LEDGER PREFIXES ARE LISTED, BECAUSE THIS FUNCTION IS ASKED ABOUT HISTORY.
+# The ledger moved from reviews/findings/ to findings/ on 2026-09-12 (pull
+# request #276). Every commit this function is called on is a commit as it
+# stands -- the merge bases above and each commit of the ranges below -- and a
+# branch cut before that move has a merge base whose findings are ALL under the
+# old prefix. Listing findings/ alone read such a commit as an EMPTY LEDGER.
+# Measured on the range of the pull request that made the move, 61ec7587 to
+# f036ad1a: the merge-base listing came back with 0 names where the tree holds
+# 336, and a fix-P<n>/ name whose twin was filed before the move and repaired by
+# the branch CONFORMED at exit 0 where listing both prefixes refuses it at exit
+# 1, `names 2 findings`. An emptied merge-base listing is not a false red. It is
+# a false GREEN, because the twin that makes a name ambiguous is exactly what
+# lives at the base and nowhere else once the branch has done its job.
+#
+# NO STATUS CHECK COULD HAVE CAUGHT IT, which is why it is fixed here and not at
+# the call sites. `git ls-tree <commit> -- <prefix>` with a pathspec that matches
+# nothing SUCCEEDS WITH EMPTY OUTPUT: at 61ec7587, `-- findings/` exits 0 with 0
+# bytes while `-- reviews/findings/` exits 0 with 336 entries. There is no
+# failure for the `|| exit 1` at each call site to propagate, so a prefix that
+# does not exist at that commit reads as a ledger with nothing in it. The same
+# shape, in the recurrence search `findings/README.md` documents, hid every
+# finding closed before the move; the two are one defect and were fixed
+# together.
+#
+# THE BARE FILENAME IS THE IDENTITY, so a finding survives the rename: one file
+# is one name whether it is listed at reviews/findings/P2_... before the move or
+# findings/P2_... after it. Where a single commit carries both directories -- a
+# branch cut before the move that files under the old prefix, which C5 of
+# test-docs-consistency.sh refuses at a head and cannot refuse in history -- awk
+# prints a name per entry and the `sort -u` at every call site collapses it.
+#
+# THIS IS NOT TRANSITIONAL. History does not stop carrying the old prefix, so
+# both are listed for as long as a commit from before 2026-09-12 can be a merge
+# base, which is for as long as the repository keeps its history. What widening
+# a listing can do is bounded below: it can only RAISE a name's match count, so
+# no name is made to conform by it, and the acceptance it does allow -- a name
+# that matched nothing because the finding it repairs was filed under the old
+# prefix now matching that one finding -- is the false red this fixes and the
+# right answer for the reason the safe-widening paragraph gives.
 findings_in() {
-  git ls-tree "$1" -- findings/ \
+  git ls-tree "$1" -- findings/ reviews/findings/ \
     | awk -F'\t' '$1 ~ /^100[0-7][0-7][0-7] blob / {
         name = $2; sub(/.*\//, "", name); if (name != "") print name }'
 }

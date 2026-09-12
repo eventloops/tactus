@@ -67,8 +67,15 @@ A deleted finding is not lost. Three things outlive it:
 - **The pull request body's ledger table**, which lists every finding of that pull request with
   its disposition, including the ones fixed before merge. That table is validated by
   `validate-pr-body.sh` and `validate-pr-ledger-evidence.sh` and is the auditable record.
-- **Git history.** `git log --diff-filter=D -- findings/` lists every finding ever closed,
-  and `git show` recovers the file.
+- **Git history.** `git log --diff-filter=D -- findings/ reviews/findings/` lists every finding
+  ever closed, and `git show` recovers the file. **Both prefixes, always.** The ledger lived at
+  `reviews/findings/` until 2026-09-12, so a finding closed before then was deleted from the old
+  path and `-- findings/` alone cannot see it: on this history the two-prefix query names 75
+  closures and the one-prefix query names 1, and the closure of
+  `P1_correctness_202609040301_pid-identity-under-a-host-wildcard-waiter.md` at `30c8e46b` is one
+  of the 74 it loses. It loses them *silently* -- a pathspec that matches nothing exits 0 with no
+  output -- which is the same defect `findings-in-range.sh` carried at its `git ls-tree`, and the
+  two were fixed together.
 - **`reviews/FINDINGS.md`**, for everything up to 2026-09-04.
 
 The one thing this costs is a grep. Checking whether a defect has recurred used to be a search of
