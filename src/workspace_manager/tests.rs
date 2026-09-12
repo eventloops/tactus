@@ -32,9 +32,9 @@ use std::collections::BTreeSet;
 // this module's: `src/engine/topology/**` needs them too and cannot reach
 // an effect primitive of its own. See that module for why they moved.
 use super::fixture::{
-    Fixture, assert_replacement_controls_pinned, create_dir, died_by_abort, died_by_kill,
-    fan_out_directory, git, git_out, run_kill_child, scratch, without_ambient_replacement_controls,
-    write_file,
+    Fixture, assert_replacement_controls_pinned, assert_replacement_refs_are_live, create_dir,
+    died_by_abort, died_by_kill, fan_out_directory, git, git_out, run_kill_child, scratch,
+    without_ambient_replacement_controls, write_file,
 };
 
 /// `value`, which the fixture read from Git, as the [`ObjectId`] every
@@ -55,13 +55,14 @@ use crate::rundir::scratch_tree::acquire;
 // `src/workspace_manager.rs` no longer imports these and `use super::*` no
 // longer carries them. Same names, same crate paths, no new dependency.
 //
-// `OsStr` carries the `cfg` of its only user. It is named here for the same
-// reason as the rest -- the root pruned `use std::ffi::{OsStr, OsString};` to
-// `OsString` -- but its one call site is inside a `#[cfg(unix)]` test, so on
-// Windows the item is compiled out and an ungated import is an `unused_imports`
-// error under the guest's `-D warnings`. The gate is on the import rather than
-// the call site so the moved line stays byte-identical.
-#[cfg(unix)]
+// `OsStr` is named here for the same reason as the rest -- the root pruned
+// `use std::ffi::{OsStr, OsString};` to `OsString`. It carried a `#[cfg(unix)]`
+// while its only call site was inside a `#[cfg(unix)]` test: on Windows the
+// item was compiled out and an ungated import is an `unused_imports` error
+// under the guest's `-D warnings`. `hostile_replacement_environments` names it
+// on both platforms, so the gate is gone -- and it was the gate that broke the
+// three Windows legs of CI while ubuntu and macos were green, which is the one
+// thing this box cannot measure for itself.
 use std::ffi::OsStr;
 use std::sync::{Arc, Mutex};
 
@@ -5970,8 +5971,15 @@ fn a_role_process_in_a_snapshot_reads_the_judged_tree_not_a_replacement() {
 }
 
 /// Where [`the_neutraliser_defeats_every_ambient_control_it_enumerates`] tells
-/// its probe to do the work; `#[ignore]`-guarded for the reason
-/// [`QUIESCENCE_REPLACEMENT`] is.
+/// its probe to do the work, and which of the two questions to answer;
+/// `#[ignore]`-guarded for the reason [`QUIESCENCE_REPLACEMENT`] is.
+///
+/// `pinned` is the neutralised leg: the names and then the measurement. `live`
+/// is the raw leg, and it asks **only** the measurement -- a raw leg that also
+/// checked the pinned names would fail for want of the pins whatever the
+/// hostile value did, which would make it no evidence that the row is a
+/// control at all, and so no evidence that the neutralised leg above it means
+/// anything.
 const REPLACEMENT_CONTROL_PROBE: &str = "UPSTROKE_PR271_REPLACEMENT_CONTROL_PROBE";
 
 /// One hostile environment per mechanism the enumeration claims to close,
@@ -6051,16 +6059,24 @@ fn hostile_replacement_environments(root: &Path) -> Vec<(&'static str, Vec<(Stri
                 set("XDG_CONFIG_HOME", xdg.as_os_str()),
             ],
         ),
-        ("GIT_CONFIG", vec![set("GIT_CONFIG", disables.as_os_str())]),
         (
             "GIT_REPLACE_REF_BASE",
             vec![set("GIT_REPLACE_REF_BASE", OsStr::new("refs/elsewhere/"))],
         ),
     ];
-    let everything: Vec<(String, OsString)> = rows
+    let mut everything: Vec<(String, OsString)> = rows
         .iter()
         .flat_map(|(_, pairs)| pairs.iter().cloned())
         .collect();
+    // `GIT_CONFIG` is enumerated and neutralised but is not a row of its own,
+    // because it is not a control over what a Git child *reads*: measured, a
+    // probe under it still honours `refs/replace/*`, and git-config(1) says the
+    // variable has no effect on commands other than `git config`. What it
+    // captures is a fixture's own `git config` **write**, which
+    // `a_redirected_git_config_cannot_capture_a_fixtures_own_pin` measures
+    // directly. It rides in the combination so the neutralised leg still has to
+    // survive it beside everything else.
+    everything.push(set("GIT_CONFIG", disables.as_os_str()));
     let mut rows = rows;
     rows.push(("all of them at once", everything));
     rows
@@ -6080,7 +6096,10 @@ fn run_replacement_control_probe(
             "--ignored",
             "--nocapture",
         ])
-        .env(REPLACEMENT_CONTROL_PROBE, "1")
+        .env(
+            REPLACEMENT_CONTROL_PROBE,
+            if neutralised { "pinned" } else { "live" },
+        )
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     for (key, value) in hostile {
@@ -6100,8 +6119,10 @@ fn run_replacement_control_probe(
 /// be dropped from [`without_ambient_replacement_controls`] and nothing would
 /// go red until a reviewer exported it, which is exactly how rounds 1 and 2
 /// were found. Each row is run twice: neutralised, where the probe must still
-/// see `refs/replace/*` honoured, and raw, where it must not. The raw leg is
-/// what keeps the neutralised leg from being vacuous.
+/// see `refs/replace/*` honoured, and raw, where it must not. The raw leg asks
+/// the measurement alone -- see [`REPLACEMENT_CONTROL_PROBE`] -- so what it
+/// establishes is that the row really is a control on the Git running this
+/// suite, which is what keeps the neutralised leg from being vacuous.
 ///
 /// `HOME` and `XDG_CONFIG_HOME` are in the grid and in **neither** name list:
 /// they are closed by pinning `GIT_CONFIG_GLOBAL`, and their raw legs fail in
@@ -6114,7 +6135,7 @@ fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
     let rows = hostile_replacement_environments(&root);
     assert_eq!(
         rows.len(),
-        12,
+        11,
         "one row per mechanism, plus the combination"
     );
 
@@ -6134,14 +6155,84 @@ fn the_neutraliser_defeats_every_ambient_control_it_enumerates() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// `GIT_CONFIG` captures a fixture's own configuration write, and the
+/// neutralisation takes it away before the write happens (PR #271, round 3).
+///
+/// It is the one enumerated name that is not a control over what a Git child
+/// *reads* -- measured, a probe under it still honours `refs/replace/*`, and
+/// git-config(1) says the variable has no effect on commands other than `git
+/// config`. What it does is redirect that command's **write**, so
+/// [`pin_replacement_refs_in`]'s pin would succeed, land in the operator's
+/// file, and leave the repository saying nothing about the question the fixture
+/// thought it had answered. That is why it is removed rather than tolerated,
+/// and this is the measurement rather than the argument.
+#[test]
+fn a_redirected_git_config_cannot_capture_a_fixtures_own_pin() {
+    let root = scratch("git-config-redirect");
+    let repo = root.join("repo");
+    create_dir(&repo);
+    git(&repo, &["init", "-q", "-b", "main"]);
+    let elsewhere = root.join("elsewhere.cfg");
+    write_file(&elsewhere, b"");
+
+    let pin = |neutralised: bool| {
+        let mut command = Command::new("git");
+        command
+            .arg("-C")
+            .arg(&repo)
+            .args(["config", "core.useReplaceRefs", "true"])
+            .env("GIT_CONFIG", &elsewhere);
+        if neutralised {
+            without_ambient_replacement_controls(&mut command);
+        }
+        assert!(
+            command.status().expect("run git").success(),
+            "the pin itself failed, so neither leg below measures where it landed"
+        );
+        let read = git_out(
+            &repo,
+            &["config", "--local", "--get", "core.useReplaceRefs"],
+        );
+        (
+            String::from_utf8_lossy(&read.stdout).trim().to_owned(),
+            fs::read_to_string(&elsewhere).expect("the redirected file"),
+        )
+    };
+
+    let (local, redirected) = pin(false);
+    assert_eq!(
+        local, "",
+        "the repository's own config answered, so `GIT_CONFIG` did not capture \
+         the write and this test measures nothing"
+    );
+    assert!(
+        redirected.contains("useReplaceRefs"),
+        "`GIT_CONFIG` did not take the write either: {redirected}"
+    );
+
+    write_file(&elsewhere, b"");
+    let (local, redirected) = pin(true);
+    assert_eq!(
+        local, "true",
+        "the pin did not reach the repository it names with `GIT_CONFIG` removed"
+    );
+    assert_eq!(
+        redirected, "",
+        "the pin still reached the operator's file: {redirected}"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// Spawned by [`the_neutraliser_defeats_every_ambient_control_it_enumerates`].
 #[test]
 #[ignore = "subprocess helper"]
 fn replacement_control_probe_helper() {
-    if std::env::var_os(REPLACEMENT_CONTROL_PROBE).is_none() {
-        return;
+    match std::env::var_os(REPLACEMENT_CONTROL_PROBE) {
+        None => (),
+        Some(mode) if mode == *"pinned" => assert_replacement_controls_pinned("control-probe"),
+        Some(_) => assert_replacement_refs_are_live("control-probe"),
     }
-    assert_replacement_controls_pinned("control-probe");
 }
 
 /// Where [`quiescence_holds_when_the_recorded_tree_carries_a_replacement`]

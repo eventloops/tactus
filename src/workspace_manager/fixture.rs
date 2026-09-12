@@ -542,9 +542,13 @@ pub(crate) fn is_ambient_replacement_control(key: &OsStr) -> bool {
 /// this function is exercised: CI exports none of these, so without that grid
 /// a name could be dropped here and nothing would go red until a reviewer
 /// exported it, which is how rounds 1 and 2 were found. Measured against it,
-/// dropping `GIT_NO_REPLACE_OBJECTS`, `GIT_CONFIG`, `GIT_CONFIG_PARAMETERS`,
+/// dropping `GIT_NO_REPLACE_OBJECTS`, `GIT_CONFIG_PARAMETERS`,
 /// `GIT_REPLACE_REF_BASE`, the `GIT_CONFIG_COUNT` pin, the
 /// `GIT_CONFIG_GLOBAL` pin or the `GIT_CONFIG_SYSTEM` pin each turns it red.
+/// `GIT_CONFIG` is not one of that grid's rows -- it does not change what a
+/// Git child reads -- and has its own witness,
+/// `a_redirected_git_config_cannot_capture_a_fixtures_own_pin`, which goes red
+/// when it is dropped from the list here.
 pub(crate) fn without_ambient_replacement_controls(command: &mut Command) {
     for key in REPLACEMENT_CONTROLS_REMOVED {
         command.env_remove(key);
