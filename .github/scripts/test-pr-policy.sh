@@ -1787,6 +1787,190 @@ if [[ "$alone_rc" != 0 ]]; then
   exit 1
 fi
 
+# ---- A BARE REPOSITORY IN THE WAY IS NOT THE TOP OF THE WALK -----------------------------------
+#
+# `rev-parse --is-inside-work-tree` answering `false` says THAT DIRECTORY has no
+# work tree over it -- it is a bare repository, or the inside of a `.git`. Two
+# places read it as "and nothing above records the listing either", which is a
+# clause git had not said, and each gave a false green for it: a bare repository
+# can sit inside a superproject that records the whole path.
+#
+# The shape is one superproject recording `findings` at 160000, an IGNORED bare
+# repository at `findings/bare.git`, and a ledger under that. TWO ledgers are
+# built on it, because the two readings are in different functions and one
+# fixture reaches only one of them:
+#
+#   bare.git/nested   an ordinary repository, so the listing IS a work tree root,
+#                     its name in its own index is empty, and `enclosing_work_tree`
+#                     makes the ascent. That is the walk that stopped.
+#   bare.git/holder   a PLAIN DIRECTORY, so `locate_listing`'s own discovery
+#                     answers `false` FOR THE LISTING, and the `filesystem` world
+#                     was chosen before any ascent could begin.
+#
+# AND THE WITNESS THAT SAYS WHICH DEFECT THIS IS: renaming `bare.git/HEAD` away
+# stops that directory LOOKING bare, and at the previous head its presence alone
+# decided the verdict -- exit 0 with the file, exit 1 without it -- while nothing
+# about what any repository RECORDS changed. Both states must now refuse.
+repo_bare="$fixture_dir/repo-behind-a-bare-boundary"
+new_repo "$repo_bare"
+echo seed > "$repo_bare/seed.txt"
+git -C "$repo_bare" add -A && git -C "$repo_bare" commit -q -m base
+bare_base="$(git -C "$repo_bare" rev-parse HEAD)"
+new_repo "$repo_bare/findings"
+printf 'bare.git/\n' > "$repo_bare/findings/.gitignore"
+git -C "$repo_bare/findings" add -A
+git -C "$repo_bare/findings" commit -q -m 'the submodule ledger ignores the bare repository'
+git -C "$repo_bare" update-index --add --cacheinfo \
+  "160000,$(git -C "$repo_bare/findings" rev-parse HEAD),findings"
+git -C "$repo_bare" commit -q -m 'an initialised submodule at findings'
+bare_head="$(git -C "$repo_bare" rev-parse HEAD)"
+mkdir -p "$repo_bare/findings/bare.git"
+git -C "$repo_bare/findings/bare.git" init -q --bare .
+new_repo "$repo_bare/findings/bare.git/nested"
+printf 'fixture\n' \
+  > "$repo_bare/findings/bare.git/nested/P2_correctness_202609130010_behind-a-bare-boundary.md"
+git -C "$repo_bare/findings/bare.git/nested" add -A
+git -C "$repo_bare/findings/bare.git/nested" commit -q -m 'the nested repository files its finding'
+mkdir -p "$repo_bare/findings/bare.git/holder"
+printf 'fixture\n' \
+  > "$repo_bare/findings/bare.git/holder/P2_correctness_202609130011_inside-a-bare-repository.md"
+if ! git -C "$repo_bare" ls-tree "$bare_head" | grep -q $'^160000 commit [0-9a-f]*\tfindings$' \
+  || [[ -n "$(git -C "$repo_bare" status --porcelain)" ]] \
+  || [[ -n "$(git -C "$repo_bare/findings" status --porcelain)" ]] \
+  || [[ -n "$(git -C "$repo_bare/findings/bare.git/nested" status --porcelain)" ]] \
+  || [[ -n "$(git -C "$repo_bare/findings" ls-files -s -- bare.git)" ]] \
+  || [[ "$(git -C "$repo_bare/findings/bare.git" rev-parse --is-bare-repository)" != true ]] \
+  || [[ "$(git -C "$repo_bare/findings/bare.git" rev-parse --is-inside-work-tree)" != false ]]; then
+  echo 'the fixture was meant to be a bare repository, ignored, under a clean 160000 gitlink' >&2
+  exit 1
+fi
+both_apis 'a ledger behind a bare boundary is under the superproject gitlink' \
+  "$repo_bare" "$bare_base" "$bare_head" 'fix-P2/correctness_behind-a-bare-boundary' 1 \
+  "$repo_bare/findings/bare.git/nested"
+bare_nested_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-bare-boundary' \
+  "$repo_bare/findings/bare.git/nested" 2>&1)" || true
+if ! grep -q 'mode 160000' <<< "$bare_nested_out"; then
+  echo 'the refusal was meant to be the superproject gitlink, reached past the bare repository' >&2
+  printf '%s\n' "$bare_nested_out" >&2
+  exit 1
+fi
+spelling_case 'a ledger behind a bare boundary, every spelling' \
+  'fix-P2/correctness_behind-a-bare-boundary' 1 "$repo_bare/findings/bare.git/nested"
+both_apis 'a plain directory inside a bare repository is no ledger either' \
+  "$repo_bare" "$bare_base" "$bare_head" 'fix-P2/correctness_inside-a-bare-repository' 1 \
+  "$repo_bare/findings/bare.git/holder"
+spelling_case 'a plain directory inside a bare repository, every spelling' \
+  'fix-P2/correctness_inside-a-bare-repository' 1 "$repo_bare/findings/bare.git/holder"
+# AND THE ANSWER DOES NOT COME FROM `bare.git/HEAD`. Renaming it away leaves a
+# directory git no longer reads as a repository at all; the verdict must not move,
+# and at the previous head it moved from exit 0 to exit 1 on that rename alone.
+mv "$repo_bare/findings/bare.git/HEAD" "$repo_bare/findings/bare.git/HEAD.renamed"
+head_gone_rc=0
+head_gone_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-bare-boundary' \
+  "$repo_bare/findings/bare.git/nested" 2>&1)" || head_gone_rc=$?
+mv "$repo_bare/findings/bare.git/HEAD.renamed" "$repo_bare/findings/bare.git/HEAD"
+head_back_rc=0
+head_back_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-bare-boundary' \
+  "$repo_bare/findings/bare.git/nested" 2>&1)" || head_back_rc=$?
+if [[ "$head_gone_rc" != 1 ]] || [[ "$head_back_rc" != 1 ]] \
+  || ! grep -q 'mode 160000' <<< "$head_gone_out" \
+  || ! grep -q 'mode 160000' <<< "$head_back_out"; then
+  echo "whether bare.git/HEAD is there must not decide the verdict; got" \
+    "$head_gone_rc without it and $head_back_rc with it" >&2
+  exit 1
+fi
+
+# AND THE SAME BOUNDARY WITH NOTHING ABOVE IT, which is the ascent running out of
+# levels rather than finding a candidate. A bare repository nobody contains is
+# still a place where the filesystem is the whole of the evidence, and these are
+# the legitimate callers the ascent must not have turned red: a plain directory
+# inside a loose bare repository, the same spelled `.` from inside it -- which is
+# the arm that continues a relative spelling through `$PWD` -- and an ordinary
+# repository nested inside one, which keeps its own index because nothing above
+# records it.
+loose_bare="$fixture_dir/loose-bare-repository/bare.git"
+mkdir -p "$loose_bare"
+git -C "$loose_bare" init -q --bare .
+mkdir -p "$loose_bare/holder"
+printf 'fixture\n' > "$loose_bare/holder/P2_correctness_202609130012_a-loose-bare-repository.md"
+loose_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_a-loose-bare-repository' "$loose_bare/holder" \
+  >/dev/null 2>&1 || loose_rc=$?
+loose_dot_rc=0
+( cd "$loose_bare/holder" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_a-loose-bare-repository' . >/dev/null 2>&1 ) \
+  || loose_dot_rc=$?
+loose_rel_rc=0
+( cd "$loose_bare" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_a-loose-bare-repository' holder \
+    >/dev/null 2>&1 ) || loose_rel_rc=$?
+if [[ "$loose_rc" != 0 ]] || [[ "$loose_dot_rc" != 0 ]] || [[ "$loose_rel_rc" != 0 ]]; then
+  echo "a listing inside a bare repository nothing contains is the filesystem's to answer;" \
+    "got $loose_rc absolute, $loose_dot_rc as '.', $loose_rel_rc relative" >&2
+  exit 1
+fi
+new_repo "$loose_bare/nested"
+printf 'fixture\n' > "$loose_bare/nested/P2_correctness_202609130013_behind-a-loose-boundary.md"
+git -C "$loose_bare/nested" add -A
+git -C "$loose_bare/nested" commit -q -m 'its own ledger, with nothing above the bare one'
+loose_nested_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-loose-boundary' "$loose_bare/nested" \
+  >/dev/null 2>&1 || loose_nested_rc=$?
+if [[ "$loose_nested_rc" != 0 ]]; then
+  echo "a repository behind a bare boundary that nothing records keeps its own ledger;" \
+    "got $loose_nested_rc" >&2
+  exit 1
+fi
+
+# AND A REPOSITORY ABOVE THAT GIT FAILED ABOUT AND THIS CAN EXAMINE, which is the
+# third of `repository_above`'s three answers and the one no fixture reached: an
+# unreadable `.git/config` fails DISCOVERY at the superproject while
+# `rev-parse --resolve-git-dir`, which reads no config, still resolves it. The
+# ascent must refuse rather than read git's silence as nothing being recorded
+# above, and restoring the mode must give the gitlink's own verdict.
+if [[ "$(id -u)" -eq 0 ]]; then
+  echo 'note: skipping the unreadable-superproject-config case (running as root)' >&2
+else
+  repo_conf="$fixture_dir/repo-unreadable-superproject-config"
+  new_repo "$repo_conf"
+  echo seed > "$repo_conf/seed.txt"
+  git -C "$repo_conf" add -A && git -C "$repo_conf" commit -q -m base
+  new_repo "$repo_conf/findings"
+  echo fixture > "$repo_conf/findings/P2_correctness_202609130014_behind-a-shut-config.md"
+  git -C "$repo_conf/findings" add -A
+  git -C "$repo_conf/findings" commit -q -m 'the submodule ledger'
+  git -C "$repo_conf" update-index --add --cacheinfo \
+    "160000,$(git -C "$repo_conf/findings" rev-parse HEAD),findings"
+  git -C "$repo_conf" commit -q -m 'an initialised submodule at findings'
+  if ! chmod 000 "$repo_conf/.git/config" 2>/dev/null \
+    || git -C "$repo_conf" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || ! git rev-parse --resolve-git-dir "$repo_conf/.git" >/dev/null 2>&1; then
+    chmod 600 "$repo_conf/.git/config" 2>/dev/null || true
+    echo 'note: skipping the unreadable-superproject-config case (chmod had no effect)' >&2
+  else
+    conf_rc=0
+    conf_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-shut-config' \
+      "$repo_conf/findings" 2>&1)" || conf_rc=$?
+    chmod 600 "$repo_conf/.git/config"
+    if [[ "$conf_rc" != 1 ]] || ! grep -q 'there is a repository at it or above it' <<< "$conf_out" \
+      || grep -q 'conforms' <<< "$conf_out"; then
+      echo "a superproject git could not read and this could examine was meant to refuse;" \
+        "got $conf_rc" >&2
+      printf '%s\n' "$conf_out" >&2
+      exit 1
+    fi
+    conf_open_rc=0
+    conf_open_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_behind-a-shut-config' \
+      "$repo_conf/findings" 2>&1)" || conf_open_rc=$?
+    if [[ "$conf_open_rc" != 1 ]] || ! grep -q 'mode 160000' <<< "$conf_open_out"; then
+      echo "with the config readable again the gitlink was meant to decide; got $conf_open_rc" >&2
+      printf '%s\n' "$conf_open_out" >&2
+      exit 1
+    fi
+  fi
+fi
+
+
 # A SUPERPROJECT WHOSE RECORDS CANNOT BE READ IS REFUSED AND NEVER READ AS A
 # SUPERPROJECT THAT RECORDS NOTHING. `rev-parse --show-superproject-working-tree`
 # answers 0 with empty stdout AND empty stderr while the `ls-files` beneath it

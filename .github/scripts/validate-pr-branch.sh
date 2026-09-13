@@ -1115,34 +1115,52 @@ recorded_tree() {
 # where the submodule query answered empty and conformed.
 enclosing_root=''
 enclosing_work_tree() {
-  local root="$1" listing="$2" parent above=0
+  local root="$1" listing="$2" parent above
   enclosing_root=''
-  [[ "$root" != / ]] || return 0
-  parent="${root%/*}"
-  [[ -n "$parent" ]] || parent='/'
-  git_probe '0,128' -- -C "$parent" rev-parse --is-inside-work-tree
-  if (( probe_status != 0 )); then
-    repository_above "$parent" || above=$?
-    if (( above == 1 )); then
-      return 0
+  parent="$root"
+  while :; do
+    # RUNNING OUT OF LEVELS IS THE ONLY ABSENCE, and that is this test: the
+    # filesystem root contains everything and is contained by nothing.
+    [[ "$parent" != / ]] || return 0
+    parent="${parent%/*}"
+    [[ -n "$parent" ]] || parent='/'
+    git_probe '0,128' -- -C "$parent" rev-parse --is-inside-work-tree
+    if (( probe_status != 0 )); then
+      above=0
+      repository_above "$parent" || above=$?
+      if (( above == 1 )); then
+        return 0
+      fi
+      echo "branch-name-policy: git could not say whether '$parent' is inside a work" >&2
+      if (( above == 2 )); then
+        echo "  tree, and '$unexaminable_git' is there and cannot be examined, so" >&2
+      else
+        echo "  tree, and there is a repository at it or above it, so" >&2
+      fi
+      echo "  whether a repository above '$root' records '$listing' is not known." >&2
+      echo "  That is refused rather than read as nothing being recorded above it," >&2
+      echo "  which is the reading that let an unreadable index conform. '$branch'" >&2
+      echo "  was not judged." >&2
+      return 1
     fi
-    echo "branch-name-policy: git could not say whether '$parent' is inside a work" >&2
-    if (( above == 2 )); then
-      echo "  tree, and '$unexaminable_git' is there and cannot be examined, so" >&2
-    else
-      echo "  tree, and there is a repository at it or above it, so" >&2
-    fi
-    echo "  whether a repository above '$root' records '$listing' is not known." >&2
-    echo "  That is refused rather than read as nothing being recorded above it," >&2
-    echo "  which is the reading that let an unreadable index conform. '$branch'" >&2
-    echo "  was not judged." >&2
-    return 1
-  fi
-  # `false` is a repository with NO WORK TREE over the parent -- a bare one, or
-  # the inside of a `.git` -- and no index entry of it is named by a path through
-  # this work tree's root. That is an absence of a containing work tree and not a
-  # failure to look, so it ends the walk rather than refusing.
-  [[ "$probe_text" == true ]] || return 0
+    # A `false` IS A REAL ANSWER AND IT IS NOT THE END OF THE ASCENT. It says
+    # THIS PARENT has no work tree over it -- it is a bare repository, or the
+    # inside of a `.git` -- and the reading that ended the walk there added a
+    # clause git had not said: that nothing ABOVE it records the listing either.
+    # A bare repository can sit inside a superproject that does. Measured with
+    # `findings` recorded at 160000, an ignored bare repository at
+    # `findings/bare.git` and an ordinary repository holding a matching finding
+    # at `findings/bare.git/nested`: the walk stopped at the bare one, the
+    # listing conformed at exit 0, and the same commit's three tree listings
+    # refused it at exit 1 -- and renaming `bare.git/HEAD` away, which changes
+    # nothing about what any repository RECORDS, flipped the answer to the
+    # refusal. A file that merely makes a directory LOOK bare decided it.
+    #
+    # So the probe moves up a level and asks again. The half the wrong reading
+    # got right is kept whole: an absence is not a failure to look, so a `false`
+    # never becomes a refusal. It is simply not an answer about anything above.
+    [[ "$probe_text" != true ]] || break
+  done
   git_probe '0' -- -C "$parent" rev-parse --show-toplevel
   if [[ -z "$probe_text" ]]; then
     echo "branch-name-policy: git says '$parent' is inside a work tree and did not say" >&2
@@ -1216,6 +1234,7 @@ locate_listing() {
   local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
   local prefixes rests shallow deep named_root segment nameable answering walker named
   local subject subrel
+  local parent
   listing_world=''
   listing_toplevel=''
   listing_relpath=''
@@ -1243,40 +1262,68 @@ locate_listing() {
     echo "  rather than judged by the filesystem, which cannot see a recorded mode." >&2
     return 1
   fi
-  git_probe '0,128' -- -C "$anchor" rev-parse --is-inside-work-tree
-  if (( probe_status != 0 )); then
-    # git_probe is about to be called again and its answers are one set, so
-    # git's words are kept here or lost.
-    said="$probe_stderr"
-    repository_above "$anchor" || above=$?
-    if (( above == 1 )); then
+  # THE SAME ASCENT enclosing_work_tree MAKES, AND FOR THE SAME REASON, because
+  # the reading that ended that walk at a `false` ended this one there too and
+  # the second was the same false green measured a second way: with `findings`
+  # recorded at 160000, an ignored bare repository at `findings/bare.git` and a
+  # PLAIN DIRECTORY at `findings/bare.git/holder` holding a matching finding --
+  # no nested repository anywhere -- the listing conformed at exit 0 where the
+  # same commit's three tree listings refused it at exit 1. A listing inside a
+  # bare repository, or inside a `.git`, is named by no index of THAT repository;
+  # a work tree ABOVE it may name it perfectly well, and here that one records a
+  # gitlink over the whole path. So a `false` moves the question up a level
+  # rather than handing the listing to the filesystem, and only running out of
+  # levels is the absence the `filesystem` world is for.
+  while :; do
+    git_probe '0,128' -- -C "$anchor" rev-parse --is-inside-work-tree
+    if (( probe_status != 0 )); then
+      # git_probe is about to be called again and its answers are one set, so
+      # git's words are kept here or lost.
+      said="$probe_stderr"
+      above=0
+      repository_above "$anchor" || above=$?
+      if (( above == 1 )); then
+        listing_world=filesystem
+        return 0
+      fi
+      echo "branch-name-policy: git could not say what it records for '$path':" >&2
+      if [[ -n "$said" ]]; then
+        indent "$said"
+      fi
+      if (( above == 2 )); then
+        echo "  '$unexaminable_git' is there and cannot be examined, so whether this" >&2
+        echo "  listing is inside a repository is not known either. Metadata that" >&2
+        echo "  cannot be read is refused rather than read as metadata that is not" >&2
+        echo "  there, because only the second may be judged by the filesystem --" >&2
+        echo "  which cannot see a recorded mode at all." >&2
+      else
+        echo "  A listing inside a repository this cannot read is refused rather than" >&2
+        echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
+      fi
+      return 1
+    fi
+    # Stdout alone, so the answer is `true` or `false` and nothing else: a warning
+    # about some other file git could not read is on stderr and is not an answer.
+    [[ "$probe_text" != true ]] || break
+    # THE PARENT, by the same arithmetic and the same root tests the walk in
+    # `repository_above` uses: the anchor was rooted above, `/` is a top, and a
+    # strip that does not shorten the path is the top of whatever else rooted it.
+    # Running out of tops is the absence, and it is the only one. The work tree
+    # this lands on is git's own physical path while the caller's components are
+    # matched against it BY INODE further down, which is what lets the two
+    # spellings meet.
+    if [[ "$anchor" == / ]]; then
       listing_world=filesystem
       return 0
     fi
-    echo "branch-name-policy: git could not say what it records for '$path':" >&2
-    if [[ -n "$said" ]]; then
-      indent "$said"
+    parent="${anchor%/*}"
+    [[ -n "$parent" ]] || parent='/'
+    if [[ "$parent" == "$anchor" ]]; then
+      listing_world=filesystem
+      return 0
     fi
-    if (( above == 2 )); then
-      echo "  '$unexaminable_git' is there and cannot be examined, so whether this" >&2
-      echo "  listing is inside a repository is not known either. Metadata that" >&2
-      echo "  cannot be read is refused rather than read as metadata that is not" >&2
-      echo "  there, because only the second may be judged by the filesystem --" >&2
-      echo "  which cannot see a recorded mode at all." >&2
-    else
-      echo "  A listing inside a repository this cannot read is refused rather than" >&2
-      echo "  judged by the filesystem, which cannot see a recorded mode at all." >&2
-    fi
-    return 1
-  fi
-  # Stdout alone, so the answer is `true` or `false` and nothing else: a warning
-  # about some other file git could not read is on stderr and is not an answer.
-  # `false` is a repository with no work tree over this path -- a bare one, or
-  # the inside of a `.git` -- where no index entry can name the listing.
-  if [[ "$probe_text" != true ]]; then
-    listing_world=filesystem
-    return 0
-  fi
+    anchor="$parent"
+  done
   git_probe '0' -- -C "$anchor" rev-parse --show-toplevel
   top="$probe_text"
   if [[ -z "$top" ]]; then
