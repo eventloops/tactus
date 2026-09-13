@@ -41,7 +41,7 @@
 //! the way Git reads it (its gitfile grammar, its linked-worktree reader, its
 //! trace-polluted streams, with a bound on every read of a
 //! repository-controlled file), which is the parent's work and not a child
-//! classifier's: `reviews/findings/` carries a file per case for the sweep of
+//! classifier's: `findings/` carries a file per case for the sweep of
 //! `src/workspace_manager.rs`, the queue's last row of this family, and
 //! `reviews/FINDINGS.md` §51 is where they were derived.
 
@@ -508,7 +508,7 @@ enum AddState {
 /// as trustworthy as those are: `record_for` answers `None` for a `worktree
 /// list` that failed, and `git_dir_of` accepts any target text after
 /// `gitdir:`. Both are open findings for the parent's sweep in
-/// `reviews/findings/`; this function's own contribution is that the after
+/// `findings/`; this function's own contribution is that the after
 /// phase and the residue element are two arms of one reading rather than two
 /// hand-written complements.
 fn add_state(repository: &Path, worktree: &Path) -> Result<AddState, UpstrokeError> {
