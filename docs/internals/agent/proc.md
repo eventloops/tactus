@@ -852,6 +852,49 @@ the wait never saw the helper end, so every early death cost the whole
 budget, whatever the budget was. The budget bounds a helper that is
 still running and silent; a helper that has ended is seen at once.
 
+## `mod termination` › `const HELPER_END_BUDGET: Duration = Duration::from_secs(2);`
+
+How long a **bounded** ending polls for the helper it has just
+signalled, before leaving it for this process's exit to collect.
+
+Row `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` asked for "a
+short named budget" and this is it, at `HELPER_READY_BUDGET`'s two
+seconds: a helper that is going to die on a `SIGKILL` is collectable in
+microseconds, so the budget is not a latency anyone pays, and a helper
+that is not going to die does not become collectable however long the
+wait is. What it costs, when it runs out, is a child left in the
+process table until this process exits — against a caller that never
+returns, which is what the row is about: the reaper's callers hold the
+launch barrier, and under that barrier the signal monitor refuses to
+kill or stop any registered group, so every running agent outlives a
+`SIGTERM` for as long as the kernel holds the helper.
+
+The acknowledged-exit wait after CLEANUP or CANCEL is deliberately not
+bounded by this; `ReaperEnding` is where that is written down.
+
+## `mod termination` › `const HELPER_END_POLL_SLICE: Duration = Duration::from_millis(1);`
+
+The pause between the polls inside `HELPER_END_BUDGET`. It is the
+latency of the ordinary ending, not the budget: a helper that ends when
+it is signalled is collectable within one of these.
+
+## `mod termination` › `const STILL_THERE_AT_THE_BUDGET: libc::pid_t = 0;`
+
+What a bounded wait answers when its budget ran out: the zero
+`waitpid(pid, ..., WNOHANG)` itself returned, passed on rather than
+interpreted.
+
+It is named because of what it is not. A `WNOHANG` zero says *this
+number has an uncollected child and it has not exited*; it does not say
+that child is the helper, and row
+`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER` is the sequence
+where it is not — an embedding host's wildcard reap takes the helper,
+the kernel hands its number to another of that host's forks, and no
+observation the parent can make tells them apart. So nothing resolves
+this zero into `pid`, and `describe_helper_end` says "a child of that
+number" for it rather than "the helper". Through an identity the
+descriptor does name the helper, and only there do the words say so.
+
 ## `mod termination` › `const HELPER_ABORT: u8 = 0x71;`
 
 The first byte of a helper's setup-failure report, distinct from every
@@ -1030,7 +1073,14 @@ where a forked helper's startup runs long under load, it killed the
 test harness with no diagnostic (`C-004`).
 Returns what the kill and the wait answered, for the failure
 message. With the identity path off the order and the calls are
-master's; only the two results are kept rather than discarded.
+master's; only the two results are kept rather than discarded, and the
+wait after them is bounded: this is `ReaperEnding::AbandonedHelper`,
+the arm of `close_and_wait_reporting` that polls to `HELPER_END_BUDGET`
+rather than blocking, which is the one thing here that is not master's.
+Row `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` is why: a reaper
+in uninterruptible I/O with the `SIGKILL` pending never becomes
+collectable, and a caller blocked on it holds the launch barrier under
+which the signal monitor refuses to kill or stop any registered group.
 
 With the identity path on (`identity >= 0`) the end is
 `end_helper_through_identity`: one `pidfd_send_signal` and, where it
@@ -1045,19 +1095,60 @@ holding its number — and was witnessed against this arm withdrawn: the
 `kill` by number then answered `0` for the stranger and the stranger
 was found killed by signal 9.
 
-## `impl Reaper` › `fn close_and_wait_reporting(self) -> (libc::pid_t, libc::c_int, libc::c_int) {`
+## `impl Reaper` › `fn close_and_wait_reporting(`
 
 [`close_and_wait`](Self::close_and_wait), keeping what the final
-`waitpid` answered: the pid it returned or `-1`, the errno it left
-in that case, and the status it filled otherwise. The loop, the
+`waitpid` answered: the pid it returned, `0`, or `-1`, the errno it
+left in the last case, and the status it filled in the first. The
 descriptors it closes and the order are unchanged.
 
-With the identity path on the wait is `wait_through_identity` — a
-blocking `waitid(P_PIDFD, ..., WEXITED)` — made after the same three
-pipe descriptors are closed, and the identity is closed once it has
-answered. This is the wait a `CANCEL` or `CLEANUP` acknowledgement is
-followed by, so it is unbounded for the same reason master's is: the
-reaper's exit is what releases the cleanup lease the caller depends on.
+**Which wait it makes is the caller's, and the two are not
+interchangeable.** `ReaperEnding` is the argument and its two variants
+carry the reason. `AcknowledgedExit`, which `close_and_wait` passes for
+`cleanup` and `cancel`, is master's loop unchanged: a blocking
+`waitpid(pid, &mut status, 0)` made again for as long as it is
+interrupted, and with the identity path on the blocking
+`wait_through_identity`. **It is unbounded and must stay so** — the
+reaper's exit is what releases the cleanup lease the caller is about to
+act on, so a budget here would release that caller while the lease was
+still held, which is a worse defect than the one the other arm fixes.
+Row `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` carves it out in
+those words. `AbandonedHelper`, which only `abandon` passes, is
+`wait_for_an_ended_helper`.
+
+`the_acknowledged_exit_wait_after_cleanup_or_cancel_is_still_unbounded`
+holds the carve-out with two kinds of witness, because either alone can
+be satisfied by the wrong thing: `cleanup` and `cancel` are each called
+for real against a reaper that does not exit, and neither has returned
+six seconds later; and a seccomp policy fatal on any `wait4` whose
+options are not `0` lets a launch, a CLEANUP and a CANCEL complete.
+Measured against a mutation handing `close_and_wait` the bounded arm:
+`shape-cleanup` fails in 6s naming the held lease, and the `syscall`
+witness dies of `SIGSYS`.
+
+## `mod termination` › `enum ReaperEnding {`
+
+Which of `close_and_wait_reporting`'s two waits is being made, chosen by
+the calling site as `EndingWait` and `EndingRetry` are chosen, and for a
+sharper reason: these two differ in whether anything downstream depends
+on the reaper having gone.
+
+`AcknowledgedExit` is `cleanup` and `cancel`, through `close_and_wait`.
+The reaper holds the run's cleanup lease and its exit is what releases
+it, and those two callers go on to act as though it were free — so this
+wait stays unbounded, and bounding it would release them against a lease
+still held. Row `PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES`
+carves it out in exactly those terms.
+
+`AbandonedHelper` is `abandon` and nothing else. It is **not** true
+that such a reaper holds no lease: the child takes the shared hold in
+`lock_cleanup_paths` before it writes READY, which is why the failure
+message reports on those paths. What differs is that waiting cannot
+release it. `spawn_reaper` is returning an error to a launch that is
+failing, so no caller proceeds on the strength of this wait; and a
+helper that will not die does not become collectable however long the
+wait is, so the unbounded form buys a wedged parent beside the wedged
+child rather than a released lease.
 
 ## `fn spawn_reaper() -> Result<Reaper, String>` › `let exit_before_ready = std::env::var("UPSTROKE_TEST_HELPER_EXIT_BEFORE_READY")`
 
@@ -1219,7 +1310,8 @@ descriptor-configuration failure does not share. With the identity path
 off that is the `kill` and the `waitpid` by number this site always
 made, asking for no exit status and made again while it answers
 `EINTR`, now up to `INTERRUPTED_WAIT_ATTEMPTS` times where the inline
-loop here had no bound; with the path on it is
+loop here had no bound, and now with `WNOHANG` and a poll to
+`HELPER_END_BUDGET` where it blocked; with the path on it is
 `end_helper_through_identity`. Both answers are kept and handed back as
 a `HelperEnd`, which `install` describes into each of its three failure
 messages after the monitor's own error: the one place the ending can be
@@ -1254,11 +1346,18 @@ acknowledged its startup, a guard whose descriptors could not be
 configured, or a guard aborted after it said READY.
 
 This asks the kernel nothing it was not already going to be asked. The
-teardown sends one `SIGKILL` and takes one `waitpid`, exactly as it
-did before this existed and in the same order; all this does is keep
-the two answers instead of discarding them, which is what §7 asks of a
-signal whose result the caller depends on and what row
-`PR125-CLOSE-DISCARDED-KILL-RESULT` asked for. The type is `must_use`
+teardown sends one `SIGKILL` and waits by the same call in the same
+order; all this does is keep the two answers instead of discarding
+them, which is what §7 asks of a signal whose result the caller depends
+on and what row `PR125-CLOSE-DISCARDED-KILL-RESULT` asked for. (When
+that row was taken up this paragraph said "takes one `waitpid`", which
+was true of it. Its sibling row
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` has since made the
+abandoning waits a `WNOHANG` poll to `HELPER_END_BUDGET`, so the
+teardown takes the same call with the same arguments but the options,
+as many times as the budget allows. The shape a syscall policy sees is
+`wait4` with `WNOHANG`, and
+`the_default_teardown_makes_the_waits_it_always_made` pins it there.) The type is `must_use`
 for the same reason, and it reaches exactly as far as that lint does:
 an ending left as an **unused expression statement** is
 `unused_must_use`, which the Clippy leg's `-D warnings` refuses. An
@@ -1279,7 +1378,11 @@ failure in `spawn_reaper`, `Guard::abort_setup`, and the
 descriptor-configuration and READY failures in `spawn_guard` -- and
 cites this row for what they must report. All five are settled: three
 report through `HelperEnd`, and `spawn_reaper`'s parent-side
-`setpgid(pid, pid)` no longer exists to fail. The module's remaining
+`setpgid(pid, pid)` no longer exists to fail. That sibling row is
+settled too, on the four sites that still exist: `Reaper::abandon` and
+the three that reach `end_unready_guard` all take
+`wait_for_an_ended_helper`, and `close_and_wait`'s acknowledged exit is
+the carve-out the row wrote for it. The module's remaining
 discarded signals are group signals and test children, deliberately so:
 `cleanup_reaper_group` re-sends `SIGKILL` until
 `group_has_non_zombie_members` observes the group empty, `stop_groups`
@@ -1308,7 +1411,14 @@ process, and the words say so.
 
 ## `struct HelperEnd` › `waited: libc::pid_t,`
 
-The pid `waitpid` returned, or `-1`.
+The pid `waitpid` returned, `0`, or `-1`. The zero is
+`STILL_THERE_AT_THE_BUDGET`: a bounded ending's last `WNOHANG` answer
+before its budget ran out, which says *not collectable yet* and never
+*this pid*. It is passed on exactly as the call returned it and is
+never resolved into `pid` — row
+`PR125-CLOSE-PID-IDENTITY-UNDER-A-HOST-WILDCARD-WAITER` is why, and
+`ending_a_helper_that_will_not_die_helper` asserts both the zero and
+that it is not the stand-in's number.
 
 ## `struct HelperEnd` › `wait_errno: libc::c_int,`
 
@@ -1355,6 +1465,16 @@ no exit status". That is the two arms that abandon a guard — the
 descriptor-configuration failure and `Guard::abort_setup` — and the
 sentence says what was observed rather than reading a zero back as an
 exit.
+
+A fourth, which a bounded ending can reach and an unbounded one could
+not: a child **still there when the budget ran out**, which is
+"collected nothing within 2s, so a child of that number is left for
+this process's exit to collect". By number the sentence names what was
+seen rather than the helper, because a `WNOHANG` zero cannot tell the
+helper from another of a host's forks holding its number; through an
+identity the descriptor does name it and the sentence says "the
+helper". That is the only place these words differ, and
+`ending_a_helper_that_will_not_die_helper` pins both.
 
 Through the identity the same outcomes get the same sentences with
 "through the helper's identity" and "the wait through it" in them, one
@@ -1447,8 +1567,13 @@ fallback to `fork`, which started a helper by number.
 ## `mod termination` › `fn end_helper_through_identity(identity: libc::c_int) -> HelperEnd {`
 
 The whole of a teardown through the identity: `pidfd_send_signal` with
-`SIGKILL`, and where it answered `0`, `wait_through_identity`; then the
-descriptor is closed. Where the signal answered anything else no wait
+`SIGKILL`, and where it answered `0`,
+`wait_for_an_ended_helper_through_identity`; then the descriptor is
+closed. That wait is the bounded one, because every caller of this is
+ending a helper it is abandoning — the three `end_unready_guard` sites
+and `Reaper::abandon`. The acknowledged exit does not come through
+here: `close_and_wait_reporting` reaches the unbounded
+`wait_through_identity` itself. Where the signal answered anything else no wait
 is made and the `HelperEnd` says so (`waited == -1`,
 `wait_errno == 0`). `ESRCH` is the kernel saying the process the
 descriptor named has ended and been collected — by a host's wildcard
@@ -1469,7 +1594,12 @@ an unmade wait reported as `ECHILD`.
 
 `waitid(P_PIDFD, fd, &info, WEXITED)`, retried on `EINTR` as master's
 `waitpid` loop is, answering the same triple `close_and_wait_reporting`
-answers: the pid collected, or `-1` and the errno. The status word is
+answers: the pid collected, or `-1` and the errno. This is the
+**unbounded** wait, and after row
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` its one caller is
+`close_and_wait_reporting`'s acknowledged-exit arm;
+`wait_for_an_ended_helper_through_identity` is the bounded twin every
+abandoning site takes. The status word is
 rebuilt from `si_code` and `si_status` by `wait_status_of` so that
 `describe_helper_end` reads it as it reads `waitpid`'s;
 `identity_wait_status_helper` holds the two equal for a child that
@@ -1627,11 +1757,13 @@ changed shape in order to say more would be making a call the host
 never agreed to, so each site names the shape it has always made and
 reports what that shape can answer.
 
-`CollectingStatus` is `waitpid(pid, &mut status, 0)`, which the READY
-failure has made since `end_unready_guard` existed.
-`AskingForNoStatus` is `waitpid(pid, std::ptr::null_mut(), 0)`, the
-call both sites that abandon a guard make on `master` and make again
-here — the descriptor-configuration failure and `Guard::abort_setup` —
+`CollectingStatus` is `waitpid(pid, &mut status, WNOHANG)`, which the
+READY failure has made since `end_unready_guard` existed —
+with `0` for its options until row
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` made the wait a
+poll. `AskingForNoStatus` is
+`waitpid(pid, std::ptr::null_mut(), WNOHANG)`, the call both sites that
+abandon a guard make on `master` and make again here — the descriptor-configuration failure and `Guard::abort_setup` —
 and its `HelperEnd` carries `status: None` rather than a fabricated
 zero. Those two are the sites that ask for it; the READY failure is the
 one that does not. `EndingRetry` below is the second per-site choice,
@@ -1673,6 +1805,19 @@ drives the retry to exhaustion under a policy answering every `wait4`
 `EINTR` and asserts what the caller then receives; with the bound
 removed that driver fails on its own deadline.
 
+**It is not the bound on the wait, and the two were confused once.**
+This one counts `EINTR`s; a wait that is never interrupted never
+reaches it, and a helper in uninterruptible I/O with `SIGKILL` pending
+is exactly that case — a blocking `waitpid` on it yields no `EINTR` to
+count and simply never returns, so `INTERRUPTED_WAIT_ATTEMPTS` is never
+approached. `HELPER_END_BUDGET` is the bound on that axis and
+`wait_for_an_ended_helper` holds both. Measured on the head carrying
+this bound and not that one: the `abort-setup` shape of
+`ending_a_helper_that_will_not_die_helper` — which is the site with
+`WhileInterrupted` and its 1024 attempts — ran to `timeout 30s` and
+exited `124`, its waiting thread parked in the kernel's `do_wait` with
+the stand-in alive.
+
 ## `mod termination` › `fn end_unready_guard(`
 
 The teardown of a guard that never became the supervisor's, and the
@@ -1683,8 +1828,13 @@ latter two discarded their own `kill` and `waitpid` and said nothing of
 them until row `PR125-CLOSE-DISCARDED-KILL-RESULT` was taken up. Moved
 out of `spawn_guard`'s body so the identity arm and the base's arm sit
 side by side. The base's arm is the code that was inline: one `kill`,
-then the one `waitpid` the calling site has always made, their answers
-kept for the message. The identity arm is `end_helper_through_identity`,
+then the `waitpid` the calling site has always made, in the shape that
+site has always made it, their answers kept for the message. Since row
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` that wait is
+`wait_for_an_ended_helper` — the same call with `WNOHANG` added, polled
+to `HELPER_END_BUDGET` — so all three of these sites are bounded by
+bounding one function, which is the leverage moving the code out of
+`spawn_guard` bought. The identity arm is `end_helper_through_identity`,
 which signals and waits through the descriptor and so has no status
 pointer for a policy to see; `wait` does not reach it.
 
@@ -1700,6 +1850,52 @@ descriptor-configuration failure then never returned at all. Measured
 through `run_with_timeout_at`: `timeout 2s` exited `124` at that head
 against `0` on `master`, on one `kill` and 181,654 interrupted waits in
 a second.
+
+## `mod termination` › `fn wait_for_an_ended_helper(`
+
+The wait every **abandoning** ending makes on a helper's number, and
+the whole of what row
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` changed: the same
+`waitpid` at the same place with the same status pointer, asked with
+`WNOHANG` and polled every `HELPER_END_POLL_SLICE` until the helper is
+collectable or `HELPER_END_BUDGET` runs out. Four sites take it —
+`Reaper::abandon` and the three that reach `end_unready_guard` — so
+`EndingWait` and `EndingRetry` still come from the calling site and are
+passed straight through.
+
+**Two bounds on two axes, and the second is why the first was not
+enough.** `EndingRetry`'s `INTERRUPTED_WAIT_ATTEMPTS` bounds a wait
+that keeps being *interrupted*: each attempt answers `EINTR` and the
+count ends it. The helper this row is about is in uninterruptible I/O
+with the `SIGKILL` pending, and a blocking `waitpid` on it yields no
+`EINTR` at all — the count is never approached because the loop never
+goes round. `HELPER_END_BUDGET` is the deadline that holds that axis,
+and it is checked on the interrupted path too, so whichever axis
+misbehaves the function returns.
+
+Only what the calls returned is reported. A `WNOHANG` zero is handed
+back as `STILL_THERE_AT_THE_BUDGET` and is never resolved into `pid`;
+the status is `None` beside it, because a wait that collected nothing
+filled none.
+
+## `mod termination` › `fn wait_for_an_ended_helper_through_identity(`
+
+The same budget and the same poll, asked of `waitid(P_PIDFD, ..., WEXITED
+| WNOHANG)` rather than of a number, for the Linux identity path. A
+descriptor cannot name a process that is not the helper, so this arm has
+none of the pid question — and exactly the same liveness one, because
+`waitid` without `WNOHANG` blocks for as long as the helper takes to
+die. "Nothing yet" is `waitid` answering `0` with the `si_pid` the
+caller zeroed still zero, which is the form POSIX documents for a
+`WNOHANG` that collected nothing.
+
+`ending_a_helper_that_will_not_die_helper`'s `identity` shape drives it
+against a stand-in whose signal is answered successfully and delivered
+to nothing, and was witnessed against the `WNOHANG` removed: `timeout
+30s`, exit `124`. Its descriptor comes from `pidfd_open` rather than
+`clone3`, because `end_helper_through_identity` routes on the
+descriptor alone and needs neither the syscall nor the opt-in switch to
+be reached.
 
 ## `fn spawn_guard` › `let how = if wait == ReadyWait::Ready {`
 
