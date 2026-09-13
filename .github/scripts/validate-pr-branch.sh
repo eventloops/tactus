@@ -437,20 +437,29 @@
 #   directory goes from enumerating nothing to enumerating its target, which is a
 #   different answer and not a repair.
 #
-#   TWO OTHER SITES IN THIS FILE STILL READ A NATIVE WINDOWS ABSOLUTE PATH AS A
-#   RELATIVE ONE and are deliberately NOT repaired with it, because they are not
-#   the same rewrite: `repository_above` makes its walk absolute with
-#   `${PWD%/}/$dir` so the walk has a top to stop at, and `locate_listing` builds
-#   its component chain from `${PWD}/$path` so the chain holds the components the
-#   caller named plus the ones the shell is standing in. Skipping either for a
-#   drive designator would truncate a POSIX walk over a directory legitimately
-#   named `C:`, and the walk has no drive-root terminator, so both need a
-#   platform test this file does not have. Measured the same way on the same
-#   guest, both are FALSE REDS and neither is a false green: a loose directory
-#   holding two findings refused as `'/c/C:/…' is there and cannot be examined`,
-#   and a tracked `findings/` refused as "no part of the path as it was written
-#   names that root", where the `/c/…` spelling of each answered exit 1 `names 2
-#   findings`.
+#   TWO OTHER SITES READ A NATIVE WINDOWS ABSOLUTE PATH AS A RELATIVE ONE, AND ONE
+#   OF THEM IS NOW REPAIRED. `repository_above` joined `${PWD%/}/$dir` onto
+#   anything not beginning with `/` so its walk had a top to stop at; the ascent
+#   then made GIT hand it a native parent, and the false red stopped needing a
+#   native spelling from the caller to reach it at all. The join has moved to
+#   `locate_listing`, which roots the caller's anchor once against the anchored set
+#   above, and the walk has a root test that is not `/` -- see that function's own
+#   paragraphs. Measured on the same guest: a clean standalone repository, one
+#   committed finding at its root, spelled `.`, exit 1 `git could not say whether
+#   'C:/Users/…' is inside a work tree` before and exit 0 `conforms` after; and a
+#   LOOSE directory holding two findings, in no repository at all, exit 1 `git
+#   could not say what it records for 'C:/…'` before and exit 1 `names 2 findings`
+#   -- the real verdict -- after, for `C:/…`, `C:\…` and `\\localhost\C$\…` alike.
+#
+#   THE SITE THAT IS NOT REPAIRED is `locate_listing`'s COMPONENT CHAIN, built from
+#   `${PWD}/$path` so it holds the components the caller named plus the ones the
+#   shell is standing in. Rooting that chain natively is not the same one-line
+#   decision: its prefix arithmetic is `/`-rooted throughout and a drive root would
+#   need a terminator in the chain walk as well as in this test, and skipping the
+#   join for a drive designator would truncate a POSIX chain over a directory
+#   legitimately named `C:`. Measured on the same guest it is a FALSE RED and not a
+#   false green: a repository's own root spelled `C:/…` refuses as "no part of the
+#   path as it was written names that root", where `/c/…` and `.` both answer.
 #
 # Three helpers were not a chokepoint while each had its own way to bytes, so
 # there is ONE CAPTURE PRIMITIVE and they are its callers. `git_probe` is the
@@ -1000,11 +1009,35 @@ gitdir_pointer() {
 #
 # A GIT_DIR or GIT_WORK_TREE in the environment points git at an index this walk
 # cannot reach, so it counts as a repository in play and the answer is yes.
+#
+# THE PATH MUST ARRIVE ROOTED AND THIS NO LONGER ROOTS IT, because the join it
+# used to make was `${PWD%/}/$dir` for anything not beginning with `/` -- true of
+# every path a POSIX caller writes, and FALSE of the native `C:/…` that
+# `rev-parse --show-toplevel` answers with on Windows. The ascent then handed this
+# such a parent and the join made `/c/…/repo/C:/…`, which names nothing, so the
+# walk reported a `.git` it could not examine and the run refused: a CLEAN
+# STANDALONE REPOSITORY, one committed finding at its root, spelled `.`, went from
+# `conforms` to exit 1 -- and nothing the caller wrote was native. Measured in Git
+# Bash on Windows Server 2025, bash 5.2.37, git 2.50.1.windows.1: exit 1 `git
+# could not say whether 'C:/Users/…' is inside a work tree` at the previous head,
+# exit 0 `conforms` with the join gone.
+#
+# Sanitising what a CALLER passes in does not reach what GIT hands back, so the
+# join moved to the one caller that knows how its path was spelled rather than
+# being taught a second spelling here. `locate_listing` roots the caller's anchor
+# once, against the same anchored set list_dir tests, and `enclosing_work_tree`
+# walks what `--show-toplevel` answered. Both are rooted before they arrive.
+#
+# THE WALK THEN NEEDS A ROOT IT CAN RECOGNISE that is not `/`: stripping a
+# component off `C:` leaves `C:`, so the `== /` test never fires and the loop
+# would not end. A strip that does not shorten the path IS the root of whatever
+# rooted it, and that is the second test below. Measured by driving this function
+# alone with `C:/y` under a stubbed `git_probe`: it returns 1, and with that test
+# removed it does not return at all.
 repository_above() {
-  local dir="$1" gitdir pointer
+  local dir="$1" gitdir pointer parent
   [[ -z "${GIT_DIR:-}" && -z "${GIT_WORK_TREE:-}" ]] || return 0
-  # The path AS IT WAS WRITTEN, made absolute with `$PWD` so the walk has a top
-  # to stop at. It is NOT resolved through `cd -P`: that costs a subshell, and
+  # The path is NOT resolved through `cd -P`: that costs a subshell, and
   # `/proc/self` -- a listing the fixtures use precisely because every read of it
   # fails -- resolves there to the SUBSHELL'S pid, a directory that is gone
   # before the next command runs, which turned a readable listing into "git could
@@ -1015,10 +1048,6 @@ repository_above() {
   # TARGET and not above the link itself is not -- and cannot matter: no index in
   # it can hold an entry named by this path, so locate_listing refuses that path
   # whether or not this walk found the repository.
-  case "$dir" in
-    /*) ;;
-    *) dir="${PWD%/}/$dir" ;;
-  esac
   while :; do
     git_probe '0,128' -- rev-parse --resolve-git-dir "$dir/.git"
     if (( probe_status == 0 )); then
@@ -1065,8 +1094,14 @@ repository_above() {
     if [[ "$dir" == / ]]; then
       return 1
     fi
-    dir="${dir%/*}"
-    [[ -n "$dir" ]] || dir=/
+    parent="${dir%/*}"
+    [[ -n "$parent" ]] || parent='/'
+    # A DRIVE OR SHARE ROOT IS A ROOT TOO, and this is what says so without
+    # naming a platform: a path with no separator left to strip is at the top of
+    # whatever rooted it, and one more turn of the loop would ask about the same
+    # directory for ever.
+    [[ "$parent" != "$dir" ]] || return 1
+    dir="$parent"
   done
 }
 
@@ -1265,10 +1300,29 @@ locate_listing() {
   listing_toplevel=''
   listing_relpath=''
   # An ANCHOR to ask git from: the deepest ancestor of the listing this can
-  # enter, HANDED ON AS THE CALLER SPELLED IT. Entering is a test and nothing
-  # else -- git chdirs for itself and resolves its own physical path -- so no
-  # resolved path is carried between commands, which is what `/proc/self` breaks.
+  # enter. Entering is a test and nothing else -- git chdirs for itself and
+  # resolves its own physical path -- so no resolved path is carried between
+  # commands, which is what `/proc/self` breaks.
+  #
+  # IT IS ROOTED ONCE, HERE, AND AGAINST THE SAME ANCHORED SET `list_dir` TESTS.
+  # The ascent below and `repository_above` both need a path with a top to stop
+  # at, and both used to be handed the caller's own spelling and join `$PWD` onto
+  # anything not beginning with `/` -- which is every path a POSIX caller writes,
+  # and NOT the native `C:/…` a Windows caller may write or git may answer with.
+  # One join, in the one place that knows how the path was spelled, and the
+  # anchored set is the same three arms: a separator, a backslash, a drive
+  # designator. A POSIX directory legitimately named `C:` is the cost -- its
+  # chain stops at `C:` instead of continuing through `$PWD` -- and that is the
+  # ascent not reaching as far as it could, never an answer taken from the wrong
+  # repository, because the walk that stops early reports NO repository above and
+  # the listing keeps its own index, which is what it had before any ascent
+  # existed.
   anchor="$path"
+  case "$anchor" in
+    /* | '\'* | [A-Za-z]:*) ;;
+    .) anchor="${PWD:-.}" ;;
+    *) anchor="${PWD:-.}/$anchor" ;;
+  esac
   while :; do
     if ( CDPATH= cd -P -- "$anchor" ) 2>/dev/null; then
       entered=1
