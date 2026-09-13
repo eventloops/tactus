@@ -196,6 +196,30 @@
 #                                accounted for by the structure scan, nothing but whitespace after
 #                                the block, no `VERDICT:` line outside it, and the form taken from
 #                                the comment's marker rather than from whichever parser answers
+#   MUT-BLOCK-CONTENT-NOT-MATERIAL  the CONTENT of a block the verdict was not read from was
+#                                treated as inert by both the fence accounting and the candidate
+#                                count, which looked only OUTSIDE the blocks the structure scan
+#                                found. Accounting for every fence run says each one WAS consumed
+#                                as a fence and nothing about WHICH block it went into: CommonMark
+#                                suppresses a fence inside a raw-HTML block and this scan does not,
+#                                so `<!--`, a ```text line and `-->` opened a block a reader never
+#                                sees, it swallowed the real blocking verdict as its content, every
+#                                run stayed accounted for, and a clean `PASS` appended after it was
+#                                the only candidate left -- READY, exit 0, no blocker, out of a
+#                                comment a CommonMark parse sees one CHANGES_REQUIRED verdict in.
+#                                The same blind spot read from the other end left a `text`-fenced
+#                                `role_understanding` object out of the count, so the count reached
+#                                ZERO and zero was a road to the prose parser and its
+#                                `VERDICT: PASS`. `<div>`, `<pre>` and any complete tag on a line
+#                                of its own start HTML blocks too, so the class is the divergence
+#                                and not the tag: a `json` fence line or a bare verdict opener
+#                                inside a block the verdict was not read from is material
+#   MUT-STRAY-TOKEN-ENCODED      the stray severity scan ran over RAW TEXT while the severity only
+#                                exists after JSON decoding, so `"severity":"P\u0031"` -- the
+#                                spelling every witness in this family uses -- carried no `P1` for
+#                                it to find, and the one check standing between an object outside
+#                                the verdict block and READY found nothing. Both spellings are
+#                                read now, and a doubled backslash is still not an escape
 #   MUT-JSON-REPEATED-NAME-CHOSEN  the verdict object was decoded with unrestricted
 #                                `json.loads`, which KEEPS THE LAST OCCURRENCE of a repeated
 #                                name: a `findings` array carrying a P1 followed by a second
@@ -1607,6 +1631,194 @@ expect MUT-JSON-REPEATED-NAME-CHOSEN \
      | grep -vcF 'object_pairs_hook=one_reading' || true)" 0
 expect MUT-JSON-REPEATED-NAME-CHOSEN \
   "$(grep -cE 'json\.loads\(.*object_pairs_hook=one_reading' scripts/pr-review-parse.py || true)" 1
+
+
+# --- what a block SWALLOWS is material, and so is a severity only a decoder can read ------------
+# TWO FINDINGS, ONE BLIND SPOT, WHICH IS WHY THEY ARE ONE SECTION. `unresolved_material` accounted
+# for every fence run OUTSIDE the blocks the structure scan found, and `verdict_candidates` looked
+# for the bare form's object opener in exactly the same place -- so the CONTENT of a block neither
+# of them read the verdict from was inert to both, and a verdict sitting in it was invisible twice.
+#
+# It is not inert. CommonMark suppresses a fence inside a raw-HTML block and this scan does not
+# (https://spec.commonmark.org/0.31.2/#html-blocks), so `<!--`, a ```text line and `-->` open a
+# block HERE that a reader of the comment never sees, and that block SWALLOWS the real verdict as
+# its content. Every fence run stays accounted for -- each one WAS consumed as a fence, just into
+# the wrong block, and accounting for runs says nothing about which block each went into -- the
+# swallowed object is not a candidate, and a clean `PASS` appended after it is the only candidate
+# left. Measured on this file's own stub with the head replaced by a real commit:
+# READY, exit 0, verdict=PASS, zero findings, no blocker at all, out of a comment `markdown-it-py`
+# 3.0.0 parses to exactly one fenced verdict -- CHANGES_REQUIRED, carrying a P1.
+#
+# The same blind spot counted from the other end is the second finding: a `text`-fenced
+# `role_understanding` object is not a candidate either, so the count reaches ZERO -- and zero was a
+# road to the prose parser, which read the `VERDICT: PASS` line written underneath it. One repair
+# closes both, because a block the verdict was not read FROM is now accounted for on the same terms
+# as the material outside one: a line of its content shaped like the opening fence of a `json`
+# block, and the bare form's object opener, are material and there is no result.
+#
+# AND THE UNCLOSED `<!--` IS A SPELLING, NOT THE CLASS. `<div>` (HTML block type 6, ended by a blank
+# line), `<pre>` (type 1, ended by its closing tag) and any complete tag on a line of its own start
+# HTML blocks too. Each is a case below, with the swallowing fence spelled six ways, because a rule
+# that closed the one tag the finding named would be the recogniser made cleverer again.
+swallow_blocking() {  # swallow_blocking: the blocking object every case below hides
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}' \
+    "$revived_head" "$revived_base"
+}
+swallow_pass() {  # swallow_pass: the candidate a swallow leaves standing as the only one
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"PASS","findings":[]}' \
+    "$revived_head" "$revived_base"
+}
+# The reported shape: an unclosed `<!--`, whose hidden ```text fence runs through the real verdict.
+{ printf 'Reviewed head: %s\n\n<!--\n```text\n-->\n\n```json\n' "$revived_head"
+  swallow_blocking; printf '\n```\n\n<!--\n\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-html-comment.md"
+# `<div>`, whose HTML block ends at the blank line, so the fence above it swallows what follows.
+{ printf 'Reviewed head: %s\n\n<div>\n```text\n\n```json\n' "$revived_head"
+  swallow_blocking; printf '\n```\n\n<div>\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-div.md"
+# `<pre>`, whose HTML block ends at `</pre>`.
+{ printf 'Reviewed head: %s\n\n<pre>\n```text\n</pre>\n\n```json\n' "$revived_head"
+  swallow_blocking; printf '\n```\n\n<pre>\n\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-pre.md"
+# A tilde fence swallows the same way, and the swallowing block may name no language at all.
+{ printf 'Reviewed head: %s\n\n<!--\n~~~text\n-->\n\n```json\n' "$revived_head"
+  swallow_blocking; printf '\n~~~\n\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-tilde.md"
+{ printf 'Reviewed head: %s\n\n<!--\n```\n-->\n\n```json\n' "$revived_head"
+  swallow_blocking; printf '\n```\n\n<!--\n\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-plain.md"
+# The swallowed fence's info string is read the way every other one here is read: CommonMark's
+# first word, folded -- so `JSON` is the same shape and an indent of up to three spaces is a fence.
+{ printf 'Reviewed head: %s\n\n<!--\n```text\n-->\n\n```JSON\n' "$revived_head"
+  swallow_blocking; printf '\n```\n\n<!--\n\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-uppercase.md"
+{ printf 'Reviewed head: %s\n\n<!--\n```text\n-->\n\n   ```json\n   ' "$revived_head"
+  swallow_blocking; printf '\n   ```\n\n<!--\n\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-indented.md"
+# CRLF endings are the same comment: GitHub stores what the reviewer posted, and the fence the
+# reader saw closed the block.
+sed 's/$/\r/' "$tmp/swallow-html-comment.md" > "$tmp/swallow-crlf.md"
+# The older bare form has no fence to hide, so what is swallowed is its object opener.
+{ printf 'Reviewed head: %s\n\n<!--\n```text\n-->\n\n' "$revived_head"
+  printf '{"role_understanding":"x","verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031"}]}'
+  printf '\n```\n\n```json\n'; swallow_pass; printf '\n```\n'
+} > "$tmp/swallow-bare-object.md"
+# THE SECOND FINDING, whose candidate count reached zero and whose comment went to the prose parser.
+{ printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n```text\n' "$revived_head"
+  printf '{"role_understanding":"x","reviewed_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P\\u0031","failing_test":"a_test_that_fails"}]}' \
+    "$revived_head"
+  printf '\n```\n\nVERDICT: PASS\n'
+} > "$tmp/swallow-prose-object.md"
+# and the swallow reached through the prose form as well, which is the same comment claiming both.
+{ printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n<!--\n```text\n-->\n\n```json\n' \
+    "$revived_head"
+  swallow_blocking; printf '\n```\n\nVERDICT: PASS\n'
+} > "$tmp/swallow-prose-swallowed.md"
+for shape in html-comment div pre tilde plain uppercase indented crlf bare-object prose-object \
+             prose-swallowed; do
+  got="$(review_rows "$tmp/swallow-$shape.md")"
+  [[ "$got" == 0\|* ]] \
+    && error "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]: a comment whose verdict was swallowed parsed, got [$got]"
+  [[ "$got" == *PASS* ]] \
+    && error "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]: the hidden PASS was taken as the verdict, got [$got]"
+  # and nothing was written where a caller ignoring the status would read it
+  expect "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape] payload" \
+    "$(parse_nul review "$tmp/swallow-$shape.md")" '1|'
+  # AND IT REFUSED FOR THE REASON THIS CASE IS ABOUT: a parse that fails here because some other
+  # rule of the parser moved is not a witness to anything.
+  contains "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]" "$(parse_why "$tmp/swallow-$shape.md")" \
+    "could not account for as a block"
+  # Through main, because the parser refusing is only half of it: READY, with no blocker at all,
+  # is what the audit did with every one of these.
+  got="$(STUB_REVIEW_BODY="$tmp/swallow-$shape.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+  contains "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]" "$got" "review-parse-failed"
+  contains "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]" "$got" "NOT-READY"
+  [[ "$got" == *"verdict=PASS"* ]] \
+    && error "MUT-BLOCK-CONTENT-NOT-MATERIAL [$shape]: the audit read PASS out of it"
+done
+# The diagnostic names WHICH of the two shapes it found, so each finding's own witness is pinned to
+# its own rule rather than to whichever of them fires first.
+contains MUT-BLOCK-CONTENT-NOT-MATERIAL "$(parse_why "$tmp/swallow-html-comment.md")" \
+  '```json inside the block'
+contains MUT-BLOCK-CONTENT-NOT-MATERIAL "$(parse_why "$tmp/swallow-prose-object.md")" \
+  'a verdict object inside the block'
+# THE CONTROLS, so no case above can pass on a fixture this parser refuses anyway. The same
+# blocking object as an ordinary fenced block is read, recorded and blocking; the same prose
+# comment with its finding written the prose form's own way is read, recorded and blocking.
+{ printf 'Reviewed head: %s\n\n```json\n' "$revived_head"; swallow_blocking; printf '\n```\n'; } \
+  > "$tmp/swallow-control-json.md"
+expect MUT-BLOCK-CONTENT-NOT-MATERIAL "$(review_rows "$tmp/swallow-control-json.md")" \
+  "0|json/$revived_head/CHANGES_REQUIRED/$revived_base/-;P1:CRITICAL:0"
+got="$(STUB_REVIEW_BODY="$tmp/swallow-control-json.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-BLOCK-CONTENT-NOT-MATERIAL "$got" "open-P1:CRITICAL"
+[[ "$got" == *review-parse-failed* ]] \
+  && error "MUT-BLOCK-CONTENT-NOT-MATERIAL: the control review was refused, got [$got]"
+printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n1. **P1 - a thing that blocks.** Detail.\n\nVERDICT: PASS\n' \
+  "$revived_head" > "$tmp/swallow-control-prose.md"
+expect MUT-BLOCK-CONTENT-NOT-MATERIAL "$(review_rows "$tmp/swallow-control-prose.md")" \
+  "0|prose/$revived_head/PASS/-/-;P1:-:0"
+# AND THE RULE IS NOT "A FENCE INSIDE A BLOCK", which would refuse a review for quoting one. A
+# longer fence around a shorter one is how a `text` block shows a fenced block, and only a line
+# shaped like the opening fence of a `json` block is material -- `json` being the one shape a
+# verdict is ever read from. This comment carries a nested fence and parses as the prose review it
+# is, so the cases above are about what the swallowed block HELD and not about nesting.
+{ printf '<!-- upstroke-frontier-review pr=232 head=%s -->\n\n' "$revived_head"
+  printf '````text\nan example of a block:\n```text\nnot a verdict\n```\n````\n\nVERDICT: PASS\n'
+} > "$tmp/nested-text-fence.md"
+expect MUT-BLOCK-CONTENT-NOT-MATERIAL "$(review_rows "$tmp/nested-text-fence.md")" \
+  "0|prose/$revived_head/PASS/-/-"
+
+# --- the severity the stray scan could not read -------------------------------------------------
+# MUT-STRAY-TOKEN-ENCODED. `stray_summary` exists to catch a blocking severity written where the
+# findings are not, and it ran over RAW TEXT while the severity only exists after JSON decoding:
+# `"severity":"P1"` is `P1` to `json.loads`, to GitHub's renderer and to the person reading
+# the comment, and carries no `P1` at all for a regex over the characters. Every witness in this
+# family spells it that way, which is exactly why -- the truncation revival, the indented fence,
+# the repeated name, and both of the findings this section is about. The scan now reads both
+# spellings, what the comment writes and what a decoder reads.
+#
+# The case that needs it is the residue of the section above: a `text`-fenced object whose first
+# key is NOT `role_understanding` and whose content holds no `json` fence line is material to
+# neither new rule, so the stray scan is the whole of what is left standing between it and READY.
+{ printf 'Reviewed head: %s\n\n```text\n' "$revived_head"; swallow_blocking
+  printf '\n```\n\n```json\n'; swallow_pass; printf '\n```\n'; } > "$tmp/stray-escaped.md"
+expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-escaped.md")" \
+  "0|json/$revived_head/PASS/$revived_base/P1"
+got="$(STUB_REVIEW_BODY="$tmp/stray-escaped.md" STUB_COMMENTS_STATUS=0 run_stub 999)"
+contains MUT-STRAY-TOKEN-ENCODED "$got" "manual:P1-outside-the-verdict-object"
+[[ "$got" == *READY\ * && "$got" != *NOT-READY* && "$got" != *MANUAL* ]] \
+  && error "MUT-STRAY-TOKEN-ENCODED: an escaped severity outside the verdict object reached READY: [$got]"
+# The control writes the same severity literally and must give the SAME field, so the case above is
+# about the spelling and not about where the object sits.
+{ printf 'Reviewed head: %s\n\n```text\n' "$revived_head"
+  printf '{"reviewed_sha":"%s","base_sha":"%s","verdict":"CHANGES_REQUIRED","findings":[{"id":"CRITICAL","severity":"P1"}]}' \
+    "$revived_head" "$revived_base"
+  printf '\n```\n\n```json\n'; swallow_pass; printf '\n```\n'; } > "$tmp/stray-literal.md"
+expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-literal.md")" \
+  "0|json/$revived_head/PASS/$revived_base/P1"
+# MUST is read the same way, and so is a severity written with both characters escaped.
+{ printf 'Reviewed head: %s\n\n' "$revived_head"
+  printf 'The object said "\\u004dUST" and "\\u00503" and nothing else.\n\n'
+  printf '```json\n'; swallow_pass; printf '\n```\n'; } > "$tmp/stray-encoded-must.md"
+expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-encoded-must.md")" \
+  "0|json/$revived_head/PASS/$revived_base/MUST/P3"
+# AND A DOUBLED BACKSLASH IS NOT AN ESCAPE, which is the other direction this can be wrong in: a
+# scan that resolved `\uXXXX` wherever it appeared would read `\\u0031` -- a backslash followed by
+# `u0031` -- as a token, and send a clean review to a person for a `P1` nobody wrote.
+{ printf 'Reviewed head: %s\n\n' "$revived_head"
+  printf '%s\n\n' 'The literal text `\\u0031` is a backslash and then u0031.'
+  printf '```json\n'; swallow_pass; printf '\n```\n'; } > "$tmp/stray-doubled.md"
+expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-doubled.md")" \
+  "0|json/$revived_head/PASS/$revived_base/-"
+# An escape this cannot resolve is left as it was written rather than dropped, so nothing hides in
+# the gap: neither of these carries a token, and neither raises.
+{ printf 'Reviewed head: %s\n\n' "$revived_head"
+  printf 'Not escapes: "\\uZZZZ", "\\q", "\\ud835\\udfcf", a trailing backslash \\\n\n'
+  printf '```json\n'; swallow_pass; printf '\n```\n'; } > "$tmp/stray-unresolvable.md"
+expect MUT-STRAY-TOKEN-ENCODED "$(review_rows "$tmp/stray-unresolvable.md")" \
+  "0|json/$revived_head/PASS/$revived_base/-"
+expect MUT-STRAY-TOKEN-ENCODED "$(parse_nul review "$tmp/stray-unresolvable.md")" \
+  "0|review|json|$revived_head|PASS|$revived_base|-|0|"
 
 # --- the frontier form: prose ------------------------------------------------------------------
 cat > "$tmp/prose.md" <<'EOF'
