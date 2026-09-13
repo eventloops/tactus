@@ -14,13 +14,14 @@ pub struct CensusBounds {
     pub sequences: u32,
     pub defers: u32,
     pub questions: u32,
+    pub review_passes: u32,
     pub resumes: u32,
     pub max_trace: usize,
     pub max_states: usize,
 }
 
 impl CensusBounds {
-    pub const fn dimensions(&self) -> [(&'static str, u32); 8] {
+    pub const fn dimensions(&self) -> [(&'static str, u32); 9] {
         [
             ("originals", self.originals),
             ("repairs", self.repairs),
@@ -29,6 +30,7 @@ impl CensusBounds {
             ("sequences", self.sequences),
             ("defers", self.defers),
             ("questions", self.questions),
+            ("review_passes", self.review_passes),
             ("resumes", self.resumes),
         ]
     }
@@ -44,8 +46,9 @@ impl Default for CensusBounds {
             sequences: 4,
             defers: 2,
             questions: 2,
+            review_passes: 1,
             resumes: 2,
-            max_trace: 12,
+            max_trace: 48,
             max_states: 20_000,
         }
     }
@@ -77,6 +80,7 @@ pub enum TransitionOutcome {
 pub struct CensusTransition {
     pub from: usize,
     pub label: String,
+    pub kind: &'static str,
     pub outcome: TransitionOutcome,
 }
 
@@ -123,9 +127,19 @@ impl Census {
 
         while let Some(id) = frontier.pop_front() {
             if states[id].trace.len() >= bounds.max_trace {
+                // The trace ceiling stops expansion here; if anything legal
+                // was left to explore, the census says so, the way it says
+                // so at the state ceiling.
+                if classes(&states[id].fold)
+                    .iter()
+                    .any(|candidate| states[id].fold.plan_transition(&candidate.event).is_ok())
+                {
+                    truncated = true;
+                }
                 continue;
             }
             for candidate in classes(&states[id].fold) {
+                let kind = candidate.event.body.kind();
                 let outcome = match states[id].fold.plan_transition(&candidate.event) {
                     Err(error) => TransitionOutcome::Refused {
                         reason: error.to_string(),
@@ -142,6 +156,7 @@ impl Census {
                                     transitions.push(CensusTransition {
                                         from: id,
                                         label: candidate.label,
+                                        kind,
                                         outcome: TransitionOutcome::Truncated,
                                     });
                                     continue;
@@ -165,6 +180,7 @@ impl Census {
                 transitions.push(CensusTransition {
                     from: id,
                     label: candidate.label,
+                    kind,
                     outcome,
                 });
             }
@@ -201,8 +217,12 @@ impl Census {
     }
 
     pub fn has_legal_transition(&self, id: usize) -> bool {
-        self.outgoing(id)
-            .any(|transition| matches!(transition.outcome, TransitionOutcome::Accepted { .. }))
+        self.outgoing(id).any(|transition| {
+            matches!(
+                transition.outcome,
+                TransitionOutcome::Accepted { .. } | TransitionOutcome::Truncated
+            )
+        })
     }
 
     pub fn accepted_labels(&self) -> BTreeSet<&str> {
@@ -314,6 +334,39 @@ mod tests {
     const RUN_ID: &str = "01CENSUS000000000000000009";
     const ALEPH: TaskKey = TaskKey(0);
     const BET: TaskKey = TaskKey(1);
+    const GIMEL: TaskKey = TaskKey(2);
+
+    /// The plan shapes the packet's bounds name. Three originals admit a
+    /// chain, a fan-out and, as the diamond's join, a task after two
+    /// independent ones; a four-node diamond needs a fourth original.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum PlanShape {
+        Chain,
+        FanOut,
+        Join,
+    }
+
+    impl PlanShape {
+        fn deps(self) -> [&'static [&'static str]; 3] {
+            match self {
+                Self::Chain => [&[], &["aleph"], &["bet"]],
+                Self::FanOut => [&[], &["aleph"], &["aleph"]],
+                Self::Join => [&[], &[], &["aleph", "bet"]],
+            }
+        }
+
+        fn name(self) -> &'static str {
+            match self {
+                Self::Chain => "chain",
+                Self::FanOut => "fan-out",
+                Self::Join => "join",
+            }
+        }
+    }
+
+    /// The shape the shared census explores: aleph first, then bet and
+    /// gimel interleaving under it.
+    const MAIN_SHAPE: PlanShape = PlanShape::FanOut;
 
     fn sha(label: &str) -> CommitSha {
         let mut value = format!("{label:-<40}");
@@ -328,10 +381,10 @@ mod tests {
     fn task_of(id: &str, deps: &[&str], hint: &str) -> Task {
         Task {
             id: TaskId::from(id),
-            kind: if id == "aleph" {
-                TaskKind::Refactor
-            } else {
-                TaskKind::Test
+            kind: match id {
+                "aleph" => TaskKind::Refactor,
+                "gimel" => TaskKind::Docs,
+                _ => TaskKind::Test,
             },
             title: format!("  {id} — Ünicode title  "),
             body: format!("{id} body"),
@@ -349,15 +402,17 @@ mod tests {
         }
     }
 
-    fn plan() -> Plan {
+    fn plan_for(shape: PlanShape) -> Plan {
+        let [aleph, bet, gimel] = shape.deps();
         Plan {
             source: PlanSource {
                 adapter: "markdown".to_owned(),
                 hash: "census-frozen-hash".to_owned(),
             },
             tasks: vec![
-                task_of("aleph", &[], "src/aleph/"),
-                task_of("bet", &[], "src/bet/"),
+                task_of("aleph", aleph, "src/aleph/"),
+                task_of("bet", bet, "src/bet/"),
+                task_of("gimel", gimel, "src/gimel/"),
             ],
             artifacts: vec![Artifact {
                 id: ArtifactId::from("aleph-out"),
@@ -367,10 +422,10 @@ mod tests {
     }
 
     fn chain(task: &str) -> ChainSummary {
-        let tiers = if task == "aleph" {
-            vec![Tier::Mid, Tier::Frontier]
-        } else {
-            vec![Tier::Small]
+        let tiers = match task {
+            "aleph" => vec![Tier::Mid, Tier::Frontier],
+            "gimel" => vec![Tier::Small, Tier::Mid],
+            _ => vec![Tier::Small],
         };
         ChainSummary {
             task: task.to_owned(),
@@ -402,8 +457,12 @@ mod tests {
     }
 
     fn inputs() -> FrozenInputs {
+        inputs_for(MAIN_SHAPE)
+    }
+
+    fn inputs_for(shape: PlanShape) -> FrozenInputs {
         FrozenInputs {
-            plan: plan(),
+            plan: plan_for(shape),
             normalized_plan_digest: NORMALIZED_DIGEST.to_owned(),
         }
     }
@@ -414,6 +473,8 @@ mod tests {
             "aleph-Mid-agent".to_owned(),
             "bet-Small-agent".to_owned(),
             "aleph-Frontier-agent".to_owned(),
+            "gimel-Small-agent".to_owned(),
+            "gimel-Mid-agent".to_owned(),
         ]
     }
 
@@ -463,9 +524,9 @@ mod tests {
             registry_digest: String::new(),
             path_policy: path_policy(),
             limits: TopologyLimits {
-                max_parallel: 3,
+                max_parallel: 1,
                 max_defers: 2,
-                max_merge_repairs: 1,
+                max_merge_repairs: 3,
             },
             gates: vec!["fmt".to_owned()],
             gates_from_config: false,
@@ -476,7 +537,7 @@ mod tests {
                 shell: ShellKind::Bash,
             }],
             interaction_mode: "never".to_owned(),
-            chains: vec![chain("aleph"), chain("bet")],
+            chains: vec![chain("aleph"), chain("bet"), chain("gimel")],
             effort_policy: ResolvedEffortPolicy {
                 small: Effort::Low,
                 mid: Effort::High,
@@ -489,15 +550,19 @@ mod tests {
                 pass_timeout_secs: Some(97),
                 primary: Some(PassBinding::new("aleph-Mid-agent", "aleph-Mid-model")),
                 alternative: None,
-                second_opinion: vec![None, None],
+                second_opinion: vec![None, None, None],
             },
         }
     }
 
     fn run_started() -> RunStarted4 {
+        run_started_for(MAIN_SHAPE)
+    }
+
+    fn run_started_for(shape: PlanShape) -> RunStarted4 {
         let started = run_started_unauthenticated();
         let digest = TaskRegistry::originals_with_agents(
-            &plan(),
+            &plan_for(shape),
             &started.registry_record(),
             &started.probed_agents,
         )
@@ -517,9 +582,13 @@ mod tests {
     }
 
     fn started() -> TopologyFold {
-        let mut fold = TopologyFold::new(inputs());
+        started_for(MAIN_SHAPE)
+    }
+
+    fn started_for(shape: PlanShape) -> TopologyFold {
+        let mut fold = TopologyFold::new(inputs_for(shape));
         let event = ev(TopologyEventBody::RunStarted {
-            data: Box::new(run_started()),
+            data: Box::new(run_started_for(shape)),
         });
         let delta = fold
             .plan_transition(&event)
@@ -528,14 +597,27 @@ mod tests {
         fold
     }
 
+    /// An original's region; a repair's is its lineage root's, and a key
+    /// beyond the three originals is a repair of aleph unless the fold says
+    /// otherwise (`region_of`).
     fn region(key: TaskKey) -> PathSet {
         PathSet::Prefixes {
-            paths: vec![GitPath::from(if key == ALEPH {
-                "src/aleph"
-            } else {
-                "src/bet"
+            paths: vec![GitPath::from(match key {
+                ALEPH => "src/aleph",
+                BET => "src/bet",
+                GIMEL => "src/gimel",
+                _ => "src/aleph",
             })],
         }
+    }
+
+    fn region_of(fold: &TopologyFold, key: TaskKey) -> PathSet {
+        let root = fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .and_then(|entry| entry.lineage)
+            .map_or(key, |lineage| lineage.root);
+        region(root)
     }
 
     fn overlap_region() -> PathSet {
@@ -545,14 +627,31 @@ mod tests {
     }
 
     fn label(key: TaskKey) -> &'static str {
-        if key == ALEPH { "aleph" } else { "bet" }
+        match key {
+            ALEPH => "aleph",
+            BET => "bet",
+            GIMEL => "gimel",
+            TaskKey(3) => "r3",
+            TaskKey(4) => "r4",
+            _ => "r5",
+        }
     }
 
     fn binding(fold: &TopologyFold, key: TaskKey, rung: usize) -> RungBinding {
+        binding_of(fold, key, rung).expect("the task's ladder has this rung")
+    }
+
+    /// The rung's binding, or `None` for a ladder without rungs — a merge
+    /// repair whose root's rungs all lie below the repair floor, which the
+    /// registry admits only through a human binding.
+    fn binding_of(fold: &TopologyFold, key: TaskKey, rung: usize) -> Option<RungBinding> {
         let registry = fold.registry().expect("started");
         let entry = registry.get(key).expect("a registered task");
-        let frozen = &entry.ladder.rungs[rung];
-        RungBinding::from_frozen(frozen, entry.ladder.effort.implementation_for(frozen.tier))
+        let frozen = entry.ladder.rungs.get(rung)?;
+        Some(RungBinding::from_frozen(
+            frozen,
+            entry.ladder.effort.implementation_for(frozen.tier),
+        ))
     }
 
     fn attempt_record(attempt: u32) -> AttemptRecord {
@@ -777,10 +876,22 @@ mod tests {
                 verification_source: source.clone(),
                 verification: match &source {
                     VerificationSource::CandidatePrepared { .. } => None,
+                    // A verified publication records its one review pass:
+                    // the bounds' `review_passes`.
                     VerificationSource::Verification { .. } => Some(VerificationRecord {
                         verdict: VerificationVerdict::Passed,
                         gates_passed: true,
-                        reviews: Vec::new(),
+                        reviews: vec![crate::events::ReviewRecord {
+                            pass: "primary".to_owned(),
+                            agent: "aleph-Mid-agent".to_owned(),
+                            model: "aleph-Mid-model".to_owned(),
+                            adapter: None,
+                            preflight_cli_version: None,
+                            effort: None,
+                            pool: None,
+                            cost_usd: Some(0.1),
+                            outcome: crate::events::ReviewPassOutcome::Passed,
+                        }],
                         detail: "census verification".to_owned(),
                     }),
                 },
@@ -827,23 +938,166 @@ mod tests {
         })
     }
 
-    fn classes(fold: &TopologyFold) -> Vec<Candidate> {
-        let mut out = Vec::new();
-        let sequence = fold.transaction().map_or(0, |t| t.sequence.0);
+    /// A rejection of `key`'s candidate at `sequence`, registering the repair
+    /// the production repair module derives — or nothing when the fold is
+    /// not in a state the derivation accepts (a failed ancestor, a full
+    /// registry), which is the generator's own bound on repairs.
+    fn rejection_of(
+        fold: &TopologyFold,
+        key: TaskKey,
+        generation: u32,
+        sequence: u32,
+        code_rejected: bool,
+    ) -> Option<TopologyEvent> {
+        let disposition = if code_rejected {
+            crate::topology::events::RejectionDisposition::CodeRejected {
+                verification: VerificationRecord {
+                    verdict: VerificationVerdict::Rejected,
+                    gates_passed: true,
+                    reviews: Vec::new(),
+                    detail: "census code rejection".to_owned(),
+                },
+            }
+        } else {
+            crate::topology::events::RejectionDisposition::Conflict {
+                paths: region_of(fold, key),
+            }
+        };
+        let rejected = crate::engine::topology::repair::merge_rejected(
+            fold,
+            &CensusIds,
+            &candidate_of(key, generation),
+            sha("moved-head"),
+            SequenceId(sequence),
+            disposition,
+            region_of(fold, key),
+        )
+        .ok()?;
+        Some(ev(TopologyEventBody::MergeRejected {
+            data: Box::new(rejected),
+        }))
+    }
 
-        for key in [ALEPH, BET] {
+    /// A question a task raises on its own (`question_raised`), one per key.
+    fn raised_question(key: TaskKey) -> TopologyEvent {
+        ev(TopologyEventBody::QuestionRaised {
+            data: crate::topology::events::QuestionRaised4 {
+                question: crate::topology::events::FrozenQuestion {
+                    id: QuestionId::from(format!("q-raised-{}", label(key)).as_str()),
+                    key,
+                    kind: QuestionKind::Clarify,
+                    context: "  a question the task raised  ".to_owned(),
+                    options: vec!["go on".to_owned(), "stop".to_owned()],
+                },
+            },
+        })
+    }
+
+    fn answer(
+        key: TaskKey,
+        question: &QuestionId,
+        answer: crate::topology::events::Answer4,
+    ) -> TopologyEvent {
+        ev(TopologyEventBody::QuestionAnswered {
+            data: crate::topology::events::QuestionAnswered4 {
+                key,
+                question: question.clone(),
+                answer,
+                via: "census".to_owned(),
+            },
+        })
+    }
+
+    fn run_resumed(runner: RunnerPolicy) -> TopologyEvent {
+        ev(TopologyEventBody::RunResumed {
+            data: Box::new(crate::topology::events::RunResumed4 {
+                incarnation: IncarnationId("01J8ZQKB2M7NC5PQR0TVWXYZ99".to_owned()),
+                runner,
+                probed_agents: probed_agents(),
+                upstroke_version: "0.2.0-census".to_owned(),
+            }),
+        })
+    }
+
+    /// Every event class the packet's `event_payload_classes` names, offered
+    /// at every state for every task the fold registers — originals and the
+    /// repairs rejections registered — within the bounds: two generations,
+    /// two attempts, a parked settlement or a verification park only while
+    /// fewer than the bound's questions are open, a resume only while the
+    /// epoch is below the bound's resumes. Refusals are offers too: every
+    /// arm of `plan_transition` executes on something.
+    fn classes(fold: &TopologyFold) -> Vec<Candidate> {
+        let bounds = CensusBounds::default();
+        let mut out = Vec::new();
+        let sequence = fold.transaction().map_or_else(
+            || fold.next_sequence().map_or(0, |next| next.0),
+            |transaction| transaction.sequence.0,
+        );
+        let open_questions = fold.open_questions().map_or(0, BTreeMap::len);
+        let may_ask = open_questions < usize::try_from(bounds.questions).unwrap_or(usize::MAX);
+        // The sequences bound: an integration opened at the next sequence
+        // beyond it is not offered; an open one is driven to its end.
+        let may_integrate = fold.transaction().is_some() || sequence < bounds.sequences;
+        let epoch = fold.epoch().map_or(0, |epoch| epoch.0);
+        let entries: Vec<crate::topology::registry::TaskEntry> = fold
+            .registry()
+            .map(|registry| registry.entries().to_vec())
+            .unwrap_or_default();
+        // The repairs bound: a rejection or a spawn registers a repair, and
+        // the fold registers as many as a run asks for.
+        let repairs = entries
+            .iter()
+            .filter(|entry| entry.origin == crate::topology::registry::Origin::MergeRepair)
+            .count();
+        let may_repair = repairs < usize::try_from(bounds.repairs).unwrap_or(usize::MAX);
+
+        out.push(Candidate::new("run_started", run_started_event()));
+
+        for entry in &entries {
+            let key = entry.key;
             let name = label(key);
-            for generation in 0..2 {
-                out.push(Candidate::new(
-                    format!("task_dispatched/{name}/g{generation}"),
-                    dispatch(key, generation),
-                ));
-                for attempt in 1..=2 {
+            let has_rungs = binding_of(fold, key, 0).is_some();
+            for generation in 0..bounds.generations_per_task {
+                // A dispatch is offered where the sequential run admits one:
+                // the task ready (its dependencies merged) and the pipeline
+                // reservable, which at `max_parallel = 1` is one open
+                // generation at a time. The fold trusts its emitter here — it
+                // refuses a dispatch of a task that is not Pending and
+                // nothing else — so without the run's own rule the census
+                // would explore interleavings no sequential run performs.
+                let dispatchable = fold.ready(key) && fold.pipeline_reservable();
+                let dispatch_event = match entry.lineage {
+                    Some(lineage) => ev(TopologyEventBody::TaskDispatched {
+                        data: TaskDispatched {
+                            key,
+                            generation: GenerationId(generation),
+                            base_sha: sha("base"),
+                            worktree_path: format!("/tmp/census/{name}"),
+                            lease: LeaseGrant::InheritedLineage { root: lineage.root },
+                            source_candidate: Some(candidate_of(lineage.parent, 0)),
+                        },
+                    }),
+                    None => dispatch(key, generation),
+                };
+                if dispatchable {
+                    out.push(Candidate::new(
+                        format!("task_dispatched/{name}/g{generation}"),
+                        dispatch_event,
+                    ));
+                }
+                for attempt in 1..=bounds.attempts_per_generation {
+                    if !has_rungs {
+                        break;
+                    }
                     out.push(Candidate::new(
                         format!("attempt_started/{name}/g{generation}/a{attempt}"),
                         attempt_started(fold, key, generation, attempt),
                     ));
-                    for (tag, transition, lease) in [
+                    out.push(Candidate::new(
+                        format!("attempt_started/resumed/{name}/g{generation}/a{attempt}"),
+                        resumed_attempt(fold, key, generation, attempt),
+                    ));
+                    let mut settlements = vec![
                         (
                             "succeeded",
                             SettlementTransition::Succeeded,
@@ -873,12 +1127,16 @@ mod tests {
                         (
                             "deferred",
                             SettlementTransition::Deferred {
-                                defers: 1,
+                                // The record carries the count the fold
+                                // expects next, so a second deferral is one.
+                                defers: fold.task(key).map_or(1, |task| task.defers + 1),
                                 reason: "census outage".to_owned(),
                             },
                             LeaseDisposition::PredictedReleased,
                         ),
-                        (
+                    ];
+                    if may_ask {
+                        settlements.push((
                             "parked",
                             SettlementTransition::Parked {
                                 question: crate::topology::events::FrozenQuestion {
@@ -890,41 +1148,96 @@ mod tests {
                                 },
                             },
                             LeaseDisposition::PredictedReleased,
-                        ),
-                    ] {
+                        ));
+                    }
+                    for (tag, transition, lease) in settlements {
                         out.push(Candidate::new(
                             format!("attempt_finished/{tag}/{name}/g{generation}/a{attempt}"),
                             settle(key, generation, attempt, transition, lease),
                         ));
                     }
                     out.push(Candidate::new(
+                        format!("attempt_finished/retained/{name}/g{generation}/a{attempt}"),
+                        retained_settlement(key, generation, attempt),
+                    ));
+                    out.push(Candidate::new(
+                        format!("attempt_interrupted/{name}/g{generation}/a{attempt}"),
+                        ev(TopologyEventBody::AttemptInterrupted {
+                            data: crate::topology::events::AttemptInterrupted4 {
+                                key,
+                                generation: GenerationId(generation),
+                                attempt: AttemptNumber(attempt),
+                                lease: LeaseDisposition::PredictedReleased,
+                                detail: "the census killed the worker".to_owned(),
+                            },
+                        }),
+                    ));
+                    out.push(Candidate::new(
                         format!("candidate_prepared/{name}/g{generation}/a{attempt}"),
-                        candidate_prepared(key, generation, attempt),
+                        candidate_prepared_over(key, generation, attempt, region_of(fold, key)),
                     ));
                 }
                 out.push(Candidate::new(
                     format!("task_candidate_created/{name}/g{generation}"),
                     candidate_created(key, generation),
                 ));
-                out.push(Candidate::new(
-                    format!("generation_closed/{name}/g{generation}"),
-                    ev(TopologyEventBody::GenerationClosed {
-                        data: GenerationClosed {
-                            key,
-                            generation: GenerationId(generation),
-                            reason: GenerationCloseReason::RunEnding {
-                                outcome: RunOutcome::Complete,
-                            },
-                            lease: LeaseDisposition::PredictedReleased,
+                // The close reasons, each offered for the class it is about:
+                // run-ending for any open generation, a missing worktree for
+                // one no attempt has started in, a discarded session for a
+                // retained one. Every reason at every generation multiplies
+                // the closed states by three for no new arm.
+                let class = fold.task(key).and_then(|task| {
+                    task.generations
+                        .iter()
+                        .find(|held| held.id.0 == generation)
+                        .map(|held| held.class.clone())
+                });
+                // The run-ending close is the closure's, appended where the
+                // run is ending; offered elsewhere it closes every open
+                // generation at every state for no arm the closure does not
+                // already execute.
+                let ending = fold.run_is_ending()
+                    || matches!(fold.derived_outcome(), DerivedOutcome::Ending(_));
+                let mut reasons = Vec::new();
+                if ending {
+                    reasons.push((
+                        "run-ending",
+                        GenerationCloseReason::RunEnding {
+                            outcome: RunOutcome::Complete,
                         },
-                    }),
-                ));
+                    ));
+                }
+                if matches!(class, Some(GenerationClass::OpenNoAttempt)) {
+                    reasons.push(("worktree-missing", GenerationCloseReason::WorktreeMissing));
+                }
+                if matches!(class, Some(GenerationClass::RetainedIdle { .. })) {
+                    reasons.push((
+                        "discards-retained-session",
+                        GenerationCloseReason::ResumeDiscardsRetainedSession,
+                    ));
+                }
+                for (tag, reason) in reasons {
+                    out.push(Candidate::new(
+                        format!("generation_closed/{tag}/{name}/g{generation}"),
+                        ev(TopologyEventBody::GenerationClosed {
+                            data: GenerationClosed {
+                                key,
+                                generation: GenerationId(generation),
+                                reason,
+                                lease: LeaseDisposition::PredictedReleased,
+                            },
+                        }),
+                    ));
+                }
 
                 let candidate = candidate_of(key, generation);
                 let source = VerificationSource::CandidatePrepared {
                     key,
                     generation: GenerationId(generation),
                 };
+                if !may_integrate {
+                    continue;
+                }
                 out.push(Candidate::new(
                     format!("merge_prepared/fast/match/{name}/g{generation}"),
                     merge_prepared(
@@ -994,7 +1307,17 @@ mod tests {
                             verification: Some(VerificationRecord {
                                 verdict: VerificationVerdict::Passed,
                                 gates_passed: true,
-                                reviews: Vec::new(),
+                                reviews: vec![crate::events::ReviewRecord {
+                                    pass: "primary".to_owned(),
+                                    agent: "aleph-Mid-agent".to_owned(),
+                                    model: "aleph-Mid-model".to_owned(),
+                                    adapter: None,
+                                    preflight_cli_version: None,
+                                    effort: None,
+                                    pool: None,
+                                    cost_usd: Some(0.1),
+                                    outcome: crate::events::ReviewPassOutcome::Passed,
+                                }],
                                 detail: "census verification".to_owned(),
                             }),
                             satisfies: vec![key],
@@ -1086,6 +1409,128 @@ mod tests {
                     format!("task_merged/{name}/g{generation}"),
                     task_merged(fold, sequence, key, generation),
                 ));
+                // A rejection is of a queued candidate with no transaction
+                // open, or of the candidate an open verification is about,
+                // and the fold refuses any other; the derivation is the
+                // costly part of an offer, so it is made where the fold can
+                // accept it.
+                let rejectable = match fold.transaction() {
+                    None => fold.task_state(key) == Some(TaskState::AwaitingMerge),
+                    Some(transaction) => {
+                        transaction.candidate.key == key
+                            && transaction.candidate.generation.0 == generation
+                    }
+                };
+                for (tag, code_rejected) in [("conflict", false), ("code-rejected", true)] {
+                    if !may_repair || !rejectable {
+                        break;
+                    }
+                    if let Some(rejection) =
+                        rejection_of(fold, key, generation, sequence, code_rejected)
+                    {
+                        out.push(Candidate::new(
+                            format!("merge_rejected/{tag}/{name}/g{generation}"),
+                            rejection,
+                        ));
+                    }
+                }
+                // The same spawn a person could make by hand, offered where
+                // a person would: over merged work, once, before anything
+                // else is dispatched. The fold registers a spawn at almost
+                // any state, and a spawn at every state copies the space per
+                // repair.
+                let spawnable = may_repair
+                    && generation == 0
+                    && repairs == 0
+                    && fold.transaction().is_none()
+                    && fold.task_state(key) == Some(TaskState::Merged)
+                    && entries.iter().all(|other| {
+                        other.key == key
+                            || fold
+                                .task(other.key)
+                                .is_some_and(|task| task.generations.is_empty())
+                    });
+                if spawnable {
+                    if let Some(TopologyEvent {
+                        body: TopologyEventBody::MergeRejected { data },
+                        ..
+                    }) = rejection_of(fold, key, generation, sequence, true)
+                    {
+                        out.push(Candidate::new(
+                            format!("task_spawned/{name}/g{generation}"),
+                            ev(TopologyEventBody::TaskSpawned {
+                                data: Box::new(crate::topology::events::TaskSpawned {
+                                    spawn: data.repair.clone(),
+                                }),
+                            }),
+                        ));
+                    }
+                }
+            }
+            // One task raises questions of its own; a raised question for
+            // every task would multiply every other state by the eight
+            // combinations of three, and the questions bound is reached
+            // through the parks the settlements and verifications record.
+            // The fold parks a lineage's task only with nothing of the
+            // lineage in flight or under integration; a candidate awaiting
+            // its merge is where a task raises one on its own.
+            let awaiting = fold.task_state(key) == Some(TaskState::AwaitingMerge)
+                && fold.transaction().is_none();
+            if may_ask && key == ALEPH && awaiting {
+                out.push(Candidate::new(
+                    format!("question_raised/{name}"),
+                    raised_question(key),
+                ));
+            }
+        }
+
+        for defers in 1..=bounds.defers {
+            out.push(Candidate::new(
+                format!("merge_verification_unavailable/deferred/d{defers}"),
+                verification_deferred_by_outage(sequence, defers),
+            ));
+        }
+        if may_ask {
+            out.push(Candidate::new(
+                "merge_verification_unavailable/parked",
+                verification_parked(sequence, ALEPH, "q-verification-park"),
+            ));
+        }
+        out.push(Candidate::new(
+            "merge_verification_interrupted",
+            ev(TopologyEventBody::MergeVerificationInterrupted {
+                data: crate::topology::events::MergeVerificationInterrupted {
+                    sequence: SequenceId(sequence),
+                    detail: "the census killed the verifier".to_owned(),
+                },
+            }),
+        ));
+        if let Some(questions) = fold.open_questions() {
+            for (id, open) in questions {
+                let key = open.question.key;
+                out.push(Candidate::new(
+                    format!("question_answered/answered/{id}"),
+                    answer(
+                        key,
+                        id,
+                        crate::topology::events::Answer4::Answered {
+                            option_index: 0,
+                            binding_override: None,
+                        },
+                    ),
+                ));
+                for halts in [false, true] {
+                    out.push(Candidate::new(
+                        format!("question_answered/declined/halts-{halts}/{id}"),
+                        answer(
+                            key,
+                            id,
+                            crate::topology::events::Answer4::Declined {
+                                decline_halts_run: halts,
+                            },
+                        ),
+                    ));
+                }
             }
         }
 
@@ -1098,18 +1543,24 @@ mod tests {
                 },
             }),
         ));
-        out.push(Candidate::new(
-            "budget_exceeded",
-            ev(TopologyEventBody::BudgetExceeded {
-                data: BudgetExceeded4 {
-                    epoch: fold.epoch().unwrap_or(crate::topology::events::Epoch(0)),
-                    budget: BudgetKind::Run,
-                    limit_usd: 12.5,
-                    spent_usd: 12.75,
-                    key: Some(ALEPH),
-                },
-            }),
-        ));
+        // The ceiling is consulted where the loop selects — with no
+        // generation open and the run not over — and that is where the
+        // sequential loop appends `budget_exceeded`; offered in flight it
+        // doubles every attempt state for the same arm.
+        if fold.pipeline_reservable() && fold.finished().is_none() {
+            out.push(Candidate::new(
+                "budget_exceeded",
+                ev(TopologyEventBody::BudgetExceeded {
+                    data: BudgetExceeded4 {
+                        epoch: fold.epoch().unwrap_or(crate::topology::events::Epoch(0)),
+                        budget: BudgetKind::Run,
+                        limit_usd: 12.5,
+                        spent_usd: 12.75,
+                        key: Some(ALEPH),
+                    },
+                }),
+            ));
+        }
         for outcome in [
             RunOutcome::Complete,
             RunOutcome::Parked,
@@ -1121,15 +1572,246 @@ mod tests {
                 run_finished(fold, outcome),
             ));
         }
+        // A resume is offered where a run resumes: after a Parked or
+        // budget-stopped end (the reopening resume) and over a retained
+        // session (the resume that retries or discards it). Accepted
+        // mid-run at every state it would copy the whole space once per
+        // epoch; the classification of every mid-run state as a resume
+        // action is the classifier tests' claim, over the same states.
+        let resumes_here = matches!(
+            fold.finished(),
+            Some(RunOutcome::Parked | RunOutcome::BudgetExceeded)
+        ) || entries.iter().any(|entry| {
+            fold.task(entry.key).is_some_and(|task| {
+                task.generations.iter().any(|generation| {
+                    matches!(generation.class, GenerationClass::RetainedIdle { .. })
+                })
+            })
+        });
+        if epoch < bounds.resumes && resumes_here {
+            out.push(Candidate::new(
+                "run_resumed/identical",
+                run_resumed(run_started_unauthenticated().runner),
+            ));
+        }
+        let mut moved = run_started_unauthenticated().runner;
+        moved.kind = RunnerKind::Host;
+        out.push(Candidate::new(
+            "run_resumed/moved-runner",
+            run_resumed(moved),
+        ));
+        out.push(Candidate::new(
+            "capacity_snapshot",
+            ev(TopologyEventBody::CapacitySnapshot {
+                data: crate::events::CapacitySnapshot {
+                    strategy: "census".to_owned(),
+                    pools: Vec::new(),
+                },
+            }),
+        ));
+        out.push(Candidate::new(
+            "pool_exhausted",
+            ev(TopologyEventBody::PoolExhausted {
+                data: crate::events::PoolExhausted {
+                    pool: "census-pool".to_owned(),
+                    agent: "aleph-Mid-agent".to_owned(),
+                    reset_at: None,
+                    detail: "the census pool is exhausted".to_owned(),
+                },
+            }),
+        ));
+        out.push(Candidate::new(
+            "design_defect",
+            ev(TopologyEventBody::DesignDefect {
+                data: crate::events::DesignDefect {
+                    question: QuestionId::from("q-census-defect"),
+                    context: "a census defect".to_owned(),
+                    answer: "noted".to_owned(),
+                },
+            }),
+        ));
         out
     }
 
     fn run_started_event() -> TopologyEvent {
+        run_started_event_for(MAIN_SHAPE)
+    }
+
+    fn run_started_event_for(shape: PlanShape) -> TopologyEvent {
         ev(TopologyEventBody::RunStarted {
-            data: Box::new(run_started()),
+            data: Box::new(run_started_for(shape)),
         })
     }
 
+    /// The classes of the integration path alone: what the deep census
+    /// explores from a seed where two originals are merged, so that four
+    /// sequences and two repairs are a few steps away rather than forty.
+    fn integration_path_classes(fold: &TopologyFold) -> Vec<Candidate> {
+        classes(fold)
+            .into_iter()
+            .filter(|candidate| {
+                [
+                    "task_dispatched/",
+                    "attempt_started/",
+                    "candidate_prepared/",
+                    "task_candidate_created/",
+                    "merge_prepared/fast/match/",
+                    "task_merged/",
+                    "merge_rejected/conflict/",
+                    "run_finished/",
+                ]
+                .iter()
+                .any(|prefix| candidate.label.starts_with(prefix))
+                    && !candidate.label.starts_with("attempt_started/resumed/")
+            })
+            .collect()
+    }
+
+    /// A prefix with aleph and bet merged (sequences 0 and 1) and gimel's
+    /// candidate created, applied event by event.
+    fn two_merged_prefix() -> (TopologyFold, Vec<TopologyEvent>) {
+        let mut fold = started();
+        let mut trace = vec![run_started_event()];
+        let apply =
+            |fold: &mut TopologyFold, trace: &mut Vec<TopologyEvent>, event: TopologyEvent| {
+                let delta = fold
+                    .plan_transition(&event)
+                    .unwrap_or_else(|error| panic!("the deep seed applies: {error}"));
+                fold.apply_delta(delta);
+                trace.push(event);
+            };
+        for (key, sequence) in [(ALEPH, 0), (BET, 1)] {
+            let events = vec![
+                dispatch(key, 0),
+                attempt_started(&fold, key, 0, 1),
+                candidate_prepared(key, 0, 1),
+                candidate_created(key, 0),
+            ];
+            for event in events {
+                apply(&mut fold, &mut trace, event);
+            }
+            let prepared = merge_prepared(
+                sequence,
+                key,
+                0,
+                PreparedDisposition::Fast,
+                sha("base"),
+                candidate_of(key, 0).commit_sha,
+                None,
+                VerificationSource::CandidatePrepared {
+                    key,
+                    generation: GenerationId(0),
+                },
+            );
+            apply(&mut fold, &mut trace, prepared);
+            let merged = task_merged(&fold, sequence, key, 0);
+            apply(&mut fold, &mut trace, merged);
+        }
+        for event in [
+            dispatch(GIMEL, 0),
+            attempt_started(&fold, GIMEL, 0, 1),
+            candidate_prepared(GIMEL, 0, 1),
+            candidate_created(GIMEL, 0),
+        ] {
+            apply(&mut fold, &mut trace, event);
+        }
+        (fold, trace)
+    }
+
+    /// The deep census: from [`two_merged_prefix`], the integration path
+    /// alone — gimel's candidate rejected and repaired, the repair rejected
+    /// and repaired again — explored to closure, where the fourth sequence
+    /// and the second repair are.
+    fn deep_census() -> &'static Census {
+        static DEEP: OnceLock<Census> = OnceLock::new();
+        DEEP.get_or_init(|| {
+            let (fold, trace) = two_merged_prefix();
+            Census::explore(
+                fold,
+                trace,
+                CensusBounds {
+                    max_states: 5_000,
+                    ..CensusBounds::default()
+                },
+                integration_path_classes,
+            )
+        })
+    }
+
+    /// What each census reached in every declared dimension, from its states
+    /// and traces: the largest value any state holds.
+    fn reached_dimensions(censuses: &[&Census]) -> BTreeMap<&'static str, u32> {
+        let mut reached: BTreeMap<&'static str, u32> = CensusBounds::default()
+            .dimensions()
+            .iter()
+            .map(|(name, _)| (*name, 0))
+            .collect();
+        let mut note = |name: &'static str, value: u32| {
+            let held = reached.entry(name).or_insert(0);
+            *held = (*held).max(value);
+        };
+        for census in censuses {
+            for state in census.states() {
+                let fold = &state.fold;
+                if let Some(registry) = fold.registry() {
+                    let originals = registry
+                        .entries()
+                        .iter()
+                        .filter(|entry| entry.origin == crate::topology::registry::Origin::Original)
+                        .count();
+                    let repairs = registry.entries().len() - originals;
+                    note("originals", u32::try_from(originals).unwrap_or(u32::MAX));
+                    note("repairs", u32::try_from(repairs).unwrap_or(u32::MAX));
+                    for entry in registry.entries() {
+                        if let Some(task) = fold.task(entry.key) {
+                            note(
+                                "generations_per_task",
+                                u32::try_from(task.generations.len()).unwrap_or(u32::MAX),
+                            );
+                            note("defers", task.defers);
+                            for generation in &task.generations {
+                                note("attempts_per_generation", generation.attempts);
+                            }
+                        }
+                    }
+                }
+                note(
+                    "sequences",
+                    fold.next_sequence().map_or(0, |sequence| sequence.0),
+                );
+                if let Some(queue) = fold.queue() {
+                    for entry in queue.entries() {
+                        note("defers", entry.defers);
+                    }
+                }
+                note(
+                    "questions",
+                    u32::try_from(fold.open_questions().map_or(0, BTreeMap::len))
+                        .unwrap_or(u32::MAX),
+                );
+                note("resumes", fold.epoch().map_or(0, |epoch| epoch.0));
+                for event in &state.trace {
+                    if let TopologyEventBody::MergePrepared { data } = &event.body {
+                        if let Some(verification) = &data.verification {
+                            note(
+                                "review_passes",
+                                u32::try_from(verification.reviews.len()).unwrap_or(u32::MAX),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        reached
+    }
+
+    /// The shared census: the fan-out plan under the packet's bounds, explored
+    /// breadth-first to `CensusBounds::default().max_states` states. The
+    /// bounded space is larger than that ceiling by orders of magnitude, so
+    /// the census stops there and says so (`truncated`); every assertion over
+    /// it is over the explored set, and the bounds the breadth-first prefix
+    /// cannot reach — four integration sequences, two repairs — are reached by
+    /// [`deep_census`].
     fn census() -> &'static Census {
         static CENSUS: OnceLock<Census> = OnceLock::new();
         CENSUS.get_or_init(|| {
@@ -1142,8 +1824,15 @@ mod tests {
         })
     }
 
+    /// Every key the fold registers: the originals and the repairs.
+    fn every_key(fold: &TopologyFold) -> Vec<TaskKey> {
+        fold.registry()
+            .map(|registry| registry.entries().iter().map(|entry| entry.key).collect())
+            .unwrap_or_default()
+    }
+
     fn common(fold: &TopologyFold) -> bool {
-        let no_open_generation = [ALEPH, BET].iter().all(|key| {
+        let no_open_generation = every_key(fold).iter().all(|key| {
             fold.task(*key).is_none_or(|task| {
                 task.generations
                     .iter()
@@ -1154,7 +1843,7 @@ mod tests {
     }
 
     fn backoff_pending(fold: &TopologyFold) -> bool {
-        let deferred_task = [ALEPH, BET]
+        let deferred_task = every_key(fold)
             .iter()
             .any(|key| fold.task_state(*key) == Some(TaskState::Deferred));
         let deferred_candidate = fold.queue().is_some_and(|queue| {
@@ -1171,12 +1860,24 @@ mod tests {
             .is_some_and(|questions| !questions.is_empty())
     }
 
+    /// Whether `key` can never run: one of its dependencies, transitively,
+    /// has failed, so the task stays Pending and the run completes around it.
+    fn blocked(fold: &TopologyFold, key: TaskKey) -> bool {
+        fold.registry()
+            .and_then(|registry| registry.get(key))
+            .is_some_and(|entry| {
+                entry.deps.iter().any(|dep| {
+                    fold.task_state(*dep) == Some(TaskState::Failed) || blocked(fold, *dep)
+                })
+            })
+    }
+
     fn complete_shape(fold: &TopologyFold) -> bool {
-        let every_task_terminal = [ALEPH, BET].iter().all(|key| {
+        let every_task_terminal = every_key(fold).iter().all(|key| {
             matches!(
                 fold.task_state(*key),
                 Some(TaskState::Merged | TaskState::Failed)
-            )
+            ) || (fold.task_state(*key) == Some(TaskState::Pending) && blocked(fold, *key))
         });
         let queue_empty = fold.queue().is_none_or(|queue| queue.is_empty());
         let no_lease = fold
@@ -1279,21 +1980,30 @@ mod tests {
                     state.id
                 );
             }
+            let kinds: Vec<&str> = state.trace.iter().map(|event| event.body.kind()).collect();
             match &state.outcome {
                 DerivedOutcome::Ending(RunOutcome::Parked) => {
-                    assert!(questions_open(fold), "state {}", state.id);
-                    assert!(!backoff_pending(fold), "state {}", state.id);
-                    assert!(common, "state {}", state.id);
+                    assert!(
+                        questions_open(fold),
+                        "state {}: parked with no question open: {kinds:?}",
+                        state.id
+                    );
+                    assert!(!backoff_pending(fold), "state {}: {kinds:?}", state.id);
+                    assert!(common, "state {}: {kinds:?}", state.id);
                 }
                 DerivedOutcome::Ending(RunOutcome::Complete) => {
-                    assert!(!questions_open(fold), "state {}", state.id);
-                    assert!(complete_shape(fold), "state {}", state.id);
+                    assert!(
+                        !questions_open(fold),
+                        "state {}: complete with a question open: {kinds:?}",
+                        state.id
+                    );
+                    assert!(complete_shape(fold), "state {}: {kinds:?}", state.id);
                 }
                 DerivedOutcome::Ending(RunOutcome::Halted) => {
-                    assert!(halting, "state {}", state.id);
+                    assert!(halting, "state {}: {kinds:?}", state.id);
                 }
                 DerivedOutcome::Ending(RunOutcome::BudgetExceeded) => {
-                    assert!(budget && !halting, "state {}", state.id);
+                    assert!(budget && !halting, "state {}: {kinds:?}", state.id);
                 }
                 DerivedOutcome::NotEnding | DerivedOutcome::FoldError => {}
             }
@@ -1316,7 +2026,7 @@ mod tests {
                     state.id
                 );
             }
-            let admissible_work = [ALEPH, BET].iter().any(|key| {
+            let admissible_work = every_key(fold).iter().any(|key| {
                 fold.task(*key).is_some_and(|task| {
                     task.generations
                         .iter()
@@ -1378,7 +2088,10 @@ mod tests {
                 let recorded: BTreeSet<String> = census
                     .outgoing(state.id)
                     .filter(|transition| {
-                        matches!(transition.outcome, TransitionOutcome::Accepted { .. })
+                        matches!(
+                            transition.outcome,
+                            TransitionOutcome::Accepted { .. } | TransitionOutcome::Truncated
+                        )
                     })
                     .map(|transition| transition.label.clone())
                     .collect();
@@ -1457,27 +2170,24 @@ mod tests {
             "every deferred state sat at the trace ceiling, so the recorded table was never \
              cross-checked against the fold"
         );
-        assert!(
-            at_ceiling > 0,
-            "no deferred state sat at the trace ceiling, so the unextended states this assertion \
-             now covers are hypothetical"
-        );
-        assert!(
-            ceiling_wakes > 0 && ceiling_closes > 0,
-            "the ceiling holds {ceiling_wakes} waking and {ceiling_closes} closing deferred \
-             states; both arms of the condition are owed one"
+        assert_eq!(
+            (at_ceiling, ceiling_wakes, ceiling_closes),
+            (0, 0, 0),
+            "the shared census stops at its state ceiling long before its trace ceiling; the \
+             trace ceiling's own behaviour is `a_census_that_hits_its_ceiling_says_so`'s"
         );
 
         assert!(
-            census
-                .states()
-                .iter()
-                .all(|state| state.fold.queue().is_none_or(|queue| queue
-                    .entries()
-                    .iter()
-                    .all(|entry| { !entry.verification_deferred }))),
-            "this fixture reached a verification-deferred candidate after all, and the assertion \
-             above no longer needs its companion"
+            census.states().iter().any(|state| {
+                state.fold.queue().is_some_and(|queue| {
+                    queue
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.verification_deferred)
+                })
+            }),
+            "the generator's verification deferrals reach a verification-deferred candidate in \
+             the shared census; its way out is asserted above like every other deferred state's"
         );
     }
 
@@ -1503,8 +2213,8 @@ mod tests {
     #[test]
     fn a_verification_deferred_candidate_is_a_deferred_state_with_a_way_out() {
         let census = Census::explore(
-            started(),
-            vec![run_started_event()],
+            started_for(PlanShape::Join),
+            vec![run_started_event_for(PlanShape::Join)],
             CensusBounds::default(),
             deferral_classes,
         );
@@ -1606,37 +2316,47 @@ mod tests {
     #[test]
     fn no_offer_is_unmapped_and_every_class_is_offered_everywhere() {
         let census = census();
-        let per_state = classes(&started()).len();
-        assert!(per_state > 60, "{per_state} classes is a thin census");
-        let extendable = census
+        let at_root = classes(&started()).len();
+        assert!(at_root > 100, "{at_root} classes is a thin census");
+        let offered: usize = census
             .states()
             .iter()
             .filter(|state| state.trace.len() < census.bounds().max_trace)
-            .count();
+            .map(|state| classes(&state.fold).len())
+            .sum();
         assert_eq!(
             census.transitions().len(),
-            extendable * per_state,
-            "an offer produced neither an acceptance nor a refusal"
+            offered,
+            "an offer produced neither an acceptance, a refusal nor a truncation"
         );
+        let mut truncated = 0usize;
         for transition in census.transitions() {
             match &transition.outcome {
                 TransitionOutcome::Accepted { to } => assert!(*to < census.states().len()),
                 TransitionOutcome::Refused { reason } => {
                     assert!(!reason.is_empty(), "{}", transition.label);
                 }
-                TransitionOutcome::Truncated => {
-                    panic!("the census truncated at {}", transition.label)
-                }
+                TransitionOutcome::Truncated => truncated += 1,
             }
         }
         assert!(!census.accepted_labels().is_empty());
         assert!(!census.refused_labels().is_empty());
+        assert_eq!(
+            census.truncated(),
+            truncated > 0,
+            "a truncated offer is what the census reports as its truncation, and nothing else is"
+        );
         assert!(
-            !census.truncated(),
-            "the census hit its state ceiling; every assertion over it is about a subset"
+            census.truncated(),
+            "the bounded space is larger than the state ceiling; a census that closed under it \
+             would mean the generator lost its classes"
+        );
+        assert_eq!(
+            census.states().len(),
+            census.bounds().max_states,
+            "the census explored exactly to its state ceiling"
         );
     }
-
     #[test]
     fn replaying_every_explored_trace_reaches_the_state_it_was_explored_at() {
         let census = census();
@@ -1716,7 +2436,7 @@ mod tests {
     }
 
     #[test]
-    fn the_skeleton_states_the_bounds_it_ran_under_and_the_ones_it_did_not() {
+    fn the_census_runs_at_the_packets_bounds_and_says_where_it_stopped() {
         let bounds = CensusBounds::default();
         assert_eq!(bounds.originals, 3);
         assert_eq!(bounds.repairs, 2);
@@ -1724,33 +2444,52 @@ mod tests {
         assert_eq!(bounds.attempts_per_generation, 2);
         assert_eq!(bounds.sequences, 4);
         assert_eq!(bounds.defers, 2);
+        assert_eq!(bounds.questions, 2);
+        assert_eq!(bounds.review_passes, 1);
+        assert_eq!(bounds.resumes, 2);
+        assert_eq!(bounds.max_states, 20_000);
 
         let census = census();
         let registry = started().registry().expect("started").len();
-        assert_eq!(registry, 2, "the fixture plan is two originals");
-        assert!(
-            u32::try_from(registry).unwrap_or(u32::MAX) < bounds.originals,
-            "the skeleton runs below the design's bound and says so"
+        assert_eq!(
+            registry, 3,
+            "the fixture plan is the bound's three originals"
+        );
+        assert_eq!(MAIN_SHAPE, PlanShape::FanOut);
+        assert_eq!(
+            started().registry().expect("started").entries()[2].deps,
+            vec![ALEPH],
+            "gimel fans out from aleph"
         );
         assert!(
-            !census
-                .transitions()
+            census
+                .accepted_labels()
                 .iter()
-                .any(|transition| transition.label.starts_with("task_spawned/")),
-            "the skeleton offers no repair spawn"
+                .any(|label| label.starts_with("merge_rejected/")),
+            "the census registers repairs through rejections"
         );
-        for state in census.states() {
-            assert!(
+        assert!(
+            census
+                .accepted_labels()
+                .iter()
+                .any(|label| label.starts_with("task_dispatched/r3")),
+            "and dispatches one"
+        );
+        assert!(
+            census.states().iter().any(|state| {
                 state
                     .fold
                     .leases()
-                    .is_none_or(|leases| leases.lineages().is_empty()),
-                "state {} holds a lineage lease the skeleton cannot have made",
-                state.id
-            );
-        }
+                    .is_some_and(|leases| !leases.lineages().is_empty())
+            }),
+            "a lineage lease is held somewhere in the explored set"
+        );
+        assert!(
+            census.truncated() && census.states().len() == bounds.max_states,
+            "the space under these bounds does not close under the state ceiling, and the \
+             census says so rather than reading as complete"
+        );
     }
-
     #[test]
     fn the_fixture_varies_every_field_a_relation_reads() {
         let started = run_started();
@@ -1799,22 +2538,47 @@ mod tests {
         let stopped = Census::explore(started(), vec![run_started_event()], tight, classes);
         assert!(stopped.truncated());
         assert!(stopped.states().len() <= 3);
-        assert!(!census().truncated());
+        assert!(
+            census().truncated(),
+            "the shared census stops at its state ceiling"
+        );
 
         let shallow = CensusBounds {
             max_trace: 2,
             ..CensusBounds::default()
         };
         let shallow = Census::explore(started(), vec![run_started_event()], shallow, classes);
-        assert!(!shallow.truncated());
+        assert!(
+            shallow.truncated(),
+            "the trace ceiling stopped states with legal continuations, and the census says so"
+        );
         assert!(shallow.states().len() > 1);
         assert_eq!(
             shallow.transitions().len(),
             classes(&started()).len(),
             "only the root was extended"
         );
-    }
+        for state in shallow.states().iter().skip(1) {
+            assert_eq!(state.trace.len(), 2);
+            assert_eq!(
+                shallow.outgoing(state.id).count(),
+                0,
+                "state {} sits at the trace ceiling and was extended anyway",
+                state.id
+            );
+        }
 
+        let closed = Census::explore(
+            started(),
+            vec![run_started_event()],
+            CensusBounds::default(),
+            dispatch_once_then_dead,
+        );
+        assert!(
+            !closed.truncated(),
+            "a space that closes under both ceilings is not reported truncated"
+        );
+    }
     #[test]
     fn a_transaction_class_is_reachable_and_blocks_the_run_from_ending() {
         let census = census();
@@ -1946,6 +2710,14 @@ mod tests {
                     (Err(error), TransitionOutcome::Refused { reason }) => {
                         assert_eq!(*reason, error.to_string(), "state {}", state.id);
                     }
+                    (Ok(_), TransitionOutcome::Truncated) => {
+                        any_accepted = true;
+                        assert!(
+                            census.truncated(),
+                            "state {}: a truncated offer in a census that does not say so",
+                            state.id
+                        );
+                    }
                     (Ok(delta), TransitionOutcome::Accepted { to }) => {
                         any_accepted = true;
                         let mut next = state.fold.clone();
@@ -2007,7 +2779,10 @@ mod tests {
         let seeded = Census::explore(ended.fold.clone(), ended.trace.clone(), bounds, classes);
         assert_eq!(seeded.states().len(), 1, "nothing was extended");
         assert!(seeded.transitions().is_empty());
-        assert!(!seeded.truncated());
+        assert!(
+            !seeded.truncated(),
+            "a completed run has no legal continuation for the zero trace ceiling to stop"
+        );
         assert_eq!(
             seeded.states()[0].outcome,
             DerivedOutcome::Ending(RunOutcome::Complete),
@@ -2575,9 +3350,11 @@ mod tests {
 
     #[test]
     fn an_overlapping_region_is_explored_and_changes_a_transition_answer() {
+        // The join shape: aleph and bet independent, so region A leaves bet
+        // dispatchable while aleph is parked and region AB does not.
         let census = Census::explore(
-            started(),
-            vec![run_started_event()],
+            started_for(PlanShape::Join),
+            vec![run_started_event_for(PlanShape::Join)],
             CensusBounds::default(),
             overlap_classes,
         );
@@ -2641,112 +3418,161 @@ mod tests {
         assert_ne!(region(BET), overlap_region());
     }
 
-    fn generated_by_the_classes() -> (BTreeSet<u32>, BTreeSet<u32>, BTreeSet<String>) {
-        let mut generations = BTreeSet::new();
-        let mut attempts = BTreeSet::new();
-        let mut questions = BTreeSet::new();
-        for candidate in classes(&started()) {
-            match &candidate.event.body {
-                TopologyEventBody::TaskDispatched { data } => {
-                    generations.insert(data.generation.0);
-                }
-                TopologyEventBody::AttemptStarted { data } => {
-                    generations.insert(data.generation.0);
-                    attempts.insert(data.attempt.0);
-                }
-                TopologyEventBody::AttemptFinished { data } => {
-                    generations.insert(data.generation.0);
-                    attempts.insert(data.attempt.0);
-                    if let AttemptSettlement::Closed {
-                        transition: SettlementTransition::Parked { question },
-                        ..
-                    } = &data.settlement
-                    {
-                        questions.insert(question.id.to_string());
-                    }
-                }
-                TopologyEventBody::CandidatePrepared { data } => {
-                    generations.insert(data.generation.0);
-                    attempts.insert(data.attempt.attempt);
-                }
-                TopologyEventBody::GenerationClosed { data } => {
-                    generations.insert(data.generation.0);
-                }
-                _ => {}
+    /// The arms of the production dispatch, read from the source of
+    /// `check_started_run` (`src/topology/fold/start.rs`): every
+    /// `TopologyEventBody::Variant` the match names, mapped to its wire kind
+    /// through the `kind()` table in `src/topology/events.rs`.
+    fn production_arms() -> BTreeSet<&'static str> {
+        let start = include_str!("fold/start.rs");
+        let body = start
+            .split("fn check_started_run(")
+            .nth(1)
+            .expect("the production dispatch is defined there");
+        let dispatch = body
+            .split("let derived = match &event.body {")
+            .nth(1)
+            .expect("the dispatch matches on the event body");
+        let arms: BTreeSet<&str> = dispatch
+            .split("TopologyEventBody::")
+            .skip(1)
+            .map(|rest| {
+                rest.split(|ch: char| !ch.is_ascii_alphanumeric())
+                    .next()
+                    .expect("a variant name")
+            })
+            .collect();
+        let events = include_str!("events.rs");
+        let table = events
+            .split("pub fn kind(&self) -> &'static str {")
+            .nth(1)
+            .and_then(|rest| rest.split_once("\n    }\n"))
+            .map(|(body, _)| body)
+            .expect("the kind table");
+        let kinds: BTreeMap<&str, &str> = table
+            .split("Self::")
+            .skip(1)
+            .filter_map(|rest| {
+                let variant = rest.split(|ch: char| !ch.is_ascii_alphanumeric()).next()?;
+                let kind = rest.split('"').nth(1)?;
+                Some((variant, kind))
+            })
+            .collect();
+        arms.iter()
+            .map(|variant| {
+                *kinds
+                    .get(variant)
+                    .unwrap_or_else(|| panic!("`{variant}` has no kind in the wire table"))
+            })
+            .collect()
+    }
+
+    /// `coverage_assertions[0]`: every `plan_transition` arm executed at
+    /// least once — the arms enumerated from the production source, the
+    /// executions from the census's transitions, whose kinds the explorer
+    /// records as it offers. Both ways: an arm no offer reached fails, and
+    /// an offered kind the dispatch has no arm for fails.
+    #[test]
+    fn every_plan_transition_arm_is_executed_by_the_census() {
+        let arms = production_arms();
+        assert_eq!(arms.len(), 24, "{arms:?}");
+        let census = census();
+        let executed: BTreeSet<&'static str> = census
+            .transitions()
+            .iter()
+            .map(|transition| transition.kind)
+            .collect();
+        let accepted: BTreeSet<&'static str> = census
+            .transitions()
+            .iter()
+            .filter(|transition| {
+                matches!(
+                    transition.outcome,
+                    TransitionOutcome::Accepted { .. } | TransitionOutcome::Truncated
+                )
+            })
+            .map(|transition| transition.kind)
+            .collect();
+        assert_eq!(
+            executed, arms,
+            "the arms the census executed and the arms the dispatch has"
+        );
+        let mut never_accepted: Vec<&str> = arms.difference(&accepted).copied().collect();
+        never_accepted.sort_unstable();
+        assert_eq!(
+            never_accepted,
+            vec!["run_started"],
+            "every arm but the started run's refusal is executed by an acceptance too"
+        );
+    }
+
+    /// The packet's plan shapes: the chain and the join, explored under the
+    /// same generator to a smaller ceiling, reach every outcome, never the
+    /// fold's error arm, and say where they stopped; the fan-out is the
+    /// shared census.
+    #[test]
+    fn every_plan_shape_is_explored() {
+        for shape in [PlanShape::Chain, PlanShape::Join] {
+            let census = Census::explore(
+                started_for(shape),
+                vec![run_started_event_for(shape)],
+                CensusBounds {
+                    max_states: 3_000,
+                    ..CensusBounds::default()
+                },
+                classes,
+            );
+            assert!(
+                census.truncated(),
+                "{}: stops at its state ceiling",
+                shape.name()
+            );
+            let audit = census.totality_audit();
+            assert!(audit.fold_errors.is_empty(), "{}", shape.name());
+            let reached: BTreeSet<String> = census
+                .states()
+                .iter()
+                .filter_map(|state| match &state.outcome {
+                    DerivedOutcome::Ending(outcome) => Some(format!("{outcome:?}")),
+                    _ => None,
+                })
+                .collect();
+            for outcome in ["Complete", "Halted", "BudgetExceeded", "Parked"] {
+                assert!(
+                    reached.contains(outcome),
+                    "{}: {outcome} unreached: {reached:?}",
+                    shape.name()
+                );
+            }
+            let deps: Vec<Vec<TaskKey>> = started_for(shape)
+                .registry()
+                .expect("started")
+                .entries()
+                .iter()
+                .map(|entry| entry.deps.clone())
+                .collect();
+            let expected: Vec<Vec<TaskKey>> = match shape {
+                PlanShape::Chain => vec![vec![], vec![ALEPH], vec![BET]],
+                PlanShape::FanOut => vec![vec![], vec![ALEPH], vec![ALEPH]],
+                PlanShape::Join => vec![vec![], vec![], vec![ALEPH, BET]],
+            };
+            assert_eq!(deps, expected, "{}", shape.name());
+            for state in census.states() {
+                assert_eq!(
+                    classify(&state.fold),
+                    classify(
+                        &TopologyFold::replay(inputs_for(shape), &state.trace).expect("replays")
+                    ),
+                    "{}: state {} classifies differently live and on replay",
+                    shape.name(),
+                    state.id
+                );
             }
         }
-        (generations, attempts, questions)
     }
 
     #[test]
-    fn every_declared_dimension_reports_what_the_fixture_generated() {
+    fn every_declared_dimension_is_reached_at_its_bound() {
         let bounds = CensusBounds::default();
-        let census = census();
-        let (generations, attempts, question_ids) = generated_by_the_classes();
-
-        let open_questions = census
-            .states()
-            .iter()
-            .filter_map(|state| state.fold.open_questions().map(BTreeMap::len))
-            .max()
-            .unwrap_or(0);
-        let mut sequences = BTreeSet::new();
-        let mut defers = 0;
-        for state in census.states() {
-            if let Some(transaction) = state.fold.transaction() {
-                sequences.insert(transaction.sequence.0);
-            }
-            if let Some(queue) = state.fold.queue() {
-                for entry in queue.entries() {
-                    defers = defers.max(entry.defers);
-                }
-            }
-        }
-        let originals = u32::try_from(started().registry().expect("started").len()).unwrap_or(0);
-        let repairs = u32::try_from(
-            census
-                .transitions()
-                .iter()
-                .filter(|transition| transition.label.starts_with("task_spawned/"))
-                .count(),
-        )
-        .unwrap_or(0);
-        let resumes = u32::try_from(
-            census
-                .transitions()
-                .iter()
-                .filter(|transition| transition.label.starts_with("run_resumed"))
-                .count(),
-        )
-        .unwrap_or(0);
-
-        let generated: BTreeMap<&str, u32> = [
-            ("originals", originals),
-            ("repairs", repairs),
-            (
-                "generations_per_task",
-                u32::try_from(generations.len()).unwrap_or(0),
-            ),
-            (
-                "attempts_per_generation",
-                attempts.iter().copied().max().unwrap_or(0),
-            ),
-            ("sequences", u32::try_from(sequences.len()).unwrap_or(0)),
-            ("defers", defers),
-            ("questions", u32::try_from(open_questions).unwrap_or(0)),
-            ("resumes", resumes),
-        ]
-        .into_iter()
-        .collect();
-
-        assert_eq!(
-            bounds
-                .dimensions()
-                .iter()
-                .map(|(name, _)| *name)
-                .collect::<BTreeSet<_>>(),
-            generated.keys().copied().collect::<BTreeSet<_>>()
-        );
         let rendered = format!("{bounds:#?}");
         let fields: BTreeSet<&str> = rendered
             .lines()
@@ -2764,52 +3590,53 @@ mod tests {
             "a bound the struct declares and `dimensions()` does not"
         );
 
-        let at_maximum = [
-            "attempts_per_generation",
-            "generations_per_task",
-            "questions",
-        ];
-        let below_maximum = ["originals", "repairs", "sequences", "defers", "resumes"];
-        assert_eq!(
-            at_maximum.len() + below_maximum.len(),
-            bounds.dimensions().len(),
-            "a declared dimension is in neither list"
-        );
+        let shared = reached_dimensions(&[census()]);
+        let deep = reached_dimensions(&[deep_census()]);
+        let together = reached_dimensions(&[census(), deep_census()]);
         for (name, declared) in bounds.dimensions() {
-            let made = generated[name];
             assert!(
-                made <= declared,
-                "{name}: the fixture generated {made} and the census declares {declared}"
+                together[name] <= declared,
+                "{name}: the censuses reached {} beyond the declared {declared}",
+                together[name]
             );
-            if at_maximum.contains(&name) {
-                assert_eq!(
-                    made, declared,
-                    "{name}: declared {declared} and generated {made}; a boundary this skeleton \
-                     did not generate is not evidence it explored"
-                );
-            } else {
-                assert!(
-                    below_maximum.contains(&name),
-                    "{name} is classified twice or not at all"
-                );
-                assert!(
-                    made < declared,
-                    "{name}: generated {made} of {declared}, so it belongs in the other list"
-                );
-            }
+            assert_eq!(
+                together[name], declared,
+                "{name}: declared {declared} and reached {} (shared census {}, deep census {}); a \
+                 boundary the censuses did not reach is not evidence they explored it",
+                together[name], shared[name], deep[name]
+            );
         }
-
-        assert_eq!(attempts, BTreeSet::from([1, 2]));
-        assert!(!attempts.contains(&(bounds.attempts_per_generation + 1)));
-        assert_eq!(generations, BTreeSet::from([0, 1]));
-        assert!(!generations.contains(&bounds.generations_per_task));
-        assert!(
-            open_questions <= usize::try_from(bounds.questions).unwrap_or(usize::MAX),
-            "{open_questions} questions were open at once"
+        for name in [
+            "originals",
+            "generations_per_task",
+            "attempts_per_generation",
+            "defers",
+            "questions",
+            "review_passes",
+            "resumes",
+        ] {
+            assert_eq!(
+                shared[name],
+                bounds
+                    .dimensions()
+                    .iter()
+                    .find(|(held, _)| *held == name)
+                    .map(|(_, bound)| *bound)
+                    .expect("declared"),
+                "{name}: the shared census reaches this bound on its own"
+            );
+        }
+        assert_eq!(
+            deep["sequences"], 4,
+            "the deep census consumes four sequences"
         );
-        assert_eq!(question_ids.len(), 4);
+        assert_eq!(deep["repairs"], 2, "and registers two repairs");
+        assert!(
+            !deep_census().truncated(),
+            "the deep census closes under its ceilings: {} states",
+            deep_census().states().len()
+        );
     }
-
     fn merge_prepared_of(label: &str) -> MergePrepared {
         let candidate = classes(&started())
             .into_iter()
@@ -3083,11 +3910,11 @@ mod tests {
             FaultRow::TRetained,
             FaultRow::TRetry,
         ] {
-            assert_eq!(
-                reached.get(&row).copied().unwrap_or(0),
-                0,
-                "{}: the two-original fixture offers no repair spawn and retains no session; \
-                 the seeded explorations reach these rows",
+            assert!(
+                reached.get(&row).copied().unwrap_or(0) > 0,
+                "{}: no explored state of the shared census is this row's durable prefix; the \
+                 rejections, retained settlements and resumed attempts the generator offers \
+                 reach it without a seed",
                 reachability::row_name(row)
             );
         }
@@ -3123,7 +3950,7 @@ mod tests {
         let rejection = conflict_rejection(&fold);
         trace.push(rejection.clone());
         let rejected = replayed(&trace);
-        let repair = TaskKey(2);
+        let repair = TaskKey(3);
         assert_eq!(rejected.task_state(ALEPH), Some(TaskState::AwaitingRepair));
         assert_eq!(rejected.task_state(repair), Some(TaskState::Pending));
         assert!(
@@ -3205,7 +4032,9 @@ mod tests {
                 out
             },
         );
-        assert!(!seeded.truncated());
+        // One step deep by construction, so the trace ceiling stops legal
+        // continuations and the census says so; the state ceiling is not hit.
+        assert!(seeded.truncated() && seeded.states().len() < 500);
         let mut reject = 0;
         let mut repair_dispatch = 0;
         for state in seeded.states() {
@@ -3337,7 +4166,9 @@ mod tests {
                 out
             },
         );
-        assert!(!seeded.truncated());
+        // One step deep by construction, so the trace ceiling stops legal
+        // continuations and the census says so; the state ceiling is not hit.
+        assert!(seeded.truncated() && seeded.states().len() < 500);
         let (mut retained_states, mut retry_states) = (0, 0);
         for state in seeded.states() {
             let action = classify(&state.fold);
@@ -3517,8 +4348,11 @@ mod tests {
         let summary = reachability::summarize(census, true);
         assert_eq!(summary.states, census.states().len());
         assert_eq!(summary.transitions, census.transitions().len());
-        assert_eq!(summary.accepted + summary.refused, summary.transitions);
-        assert!(!summary.truncated);
+        assert!(summary.accepted + summary.refused <= summary.transitions);
+        assert!(
+            summary.truncated,
+            "the summary says the census stopped at its state ceiling"
+        );
         assert_eq!(summary.fault_rows.len(), 21);
         for row in FaultRow::ALL {
             let name = reachability::row_name(*row);
@@ -3535,7 +4369,9 @@ mod tests {
         assert!(summary.fault_rows["T-FINALIZE"].reachable_states > 0);
         assert_eq!(summary.outcomes.len(), 5, "{:?}", summary.outcomes.keys());
         assert!(summary.actions.len() >= 4, "{:?}", summary.actions.keys());
-        assert_eq!(summary.bounds["max_trace"], 12);
+        assert_eq!(summary.bounds["max_trace"], 48);
+        assert_eq!(summary.bounds["max_states"], 20_000);
+        assert_eq!(summary.bounds["review_passes"], 1);
         let json = serde_json::to_string_pretty(&summary).expect("serializes");
         assert!(json.contains("\"T-RESUME\"") && json.contains("finalize then refuse"));
         if let Ok(path) = std::env::var("UPSTROKE_CENSUS_SUMMARY") {

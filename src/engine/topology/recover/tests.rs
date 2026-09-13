@@ -11924,6 +11924,35 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
     assert_eq!(fold.task_state(repair), Some(TaskState::Merged));
     assert!(driven.invocations_balance);
     assert_eq!(driven.entitlements_held, 0);
+    {
+        // INV-13: the projection names the repair's origin and its whole lineage.
+        let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
+        let report =
+            crate::engine::topology::report::TopologyReport::derive(RUN_ID, &fold, &events)
+                .expect("derives");
+        let projected = report
+            .tasks
+            .iter()
+            .find(|task| task.key == repair.0)
+            .expect("the repair is projected");
+        assert_eq!(projected.origin, "merge_repair");
+        assert_eq!(
+            projected.lineage,
+            Some(crate::engine::topology::report::TaskLineage {
+                root: ALPHA.0,
+                parent: ALPHA.0,
+                index: 1,
+            })
+        );
+        assert_eq!(projected.lineage_root, Some(ALPHA.0));
+        let original = report
+            .tasks
+            .iter()
+            .find(|task| task.key == ALPHA.0)
+            .expect("the original is projected");
+        assert_eq!(original.origin, "original");
+        assert!(original.lineage.is_none());
+    }
     let (again, _handle) = resume_as(
         &fixture,
         "01KZTCCCCCCCCCCCCCCCCCCCCC",
@@ -13784,6 +13813,134 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
     assert!(handle.fold.budget_stop().is_none());
 }
 
+/// T-FINISH's closure prefix with a fault inside it: the retained
+/// generation's `generation_closed` is durable and the scrub that follows
+/// it is refused at `Worktree.Remove`'s before phase, so the command ends
+/// between the close and the `run_finished`. The next resume finds one
+/// close for that generation, reclaims its worktree and intent, keeps every
+/// candidates ref, clears the epoch's budget stop, and the loop meets the
+/// ceiling again in the new epoch.
+#[test]
+fn a_fault_between_the_closure_close_and_its_scrub_is_reclaimed_by_the_next_resume() {
+    use crate::engine::topology::select::Ceiling;
+    use crate::topology::fold::GenerationClass;
+
+    let fixture = Fixture::healthy("closure-prefix-fault");
+    let shared = harness();
+    let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::erroring();
+    let manager = fixture.manager();
+    let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
+    let worktree = manager.slot_path(&slot);
+    let refs_before = candidates_refs_of(&fixture);
+    let mut armed = ArmedFinalization::answering(
+        &shared,
+        (
+            EffectSiteId::Worktree(WorktreeSite::Remove),
+            HookPhase::Before,
+        ),
+        Injection::Error,
+    );
+    let error = with_live_run_hooked(
+        &fixture,
+        &mut armed,
+        Ceiling {
+            run_usd: Some(0.2),
+            task_usd: None,
+        },
+        &adapters,
+        |run, seams, hooks| {
+            let first = run.step(seams, hooks).expect("the first attempt settles");
+            assert!(matches!(first, Progress::Settled { .. }), "{first:?}");
+            assert!(
+                matches!(
+                    run.fold()
+                        .task(ALPHA)
+                        .and_then(|task| task.generations.first())
+                        .map(|generation| &generation.class),
+                    Some(GenerationClass::RetainedIdle { .. })
+                ),
+                "the session is retained"
+            );
+            let second = run
+                .step(seams, hooks)
+                .expect("the ceiling refuses the retry");
+            assert!(matches!(second, Progress::BudgetExceeded), "{second:?}");
+            run.step(seams, hooks)
+                .expect_err("the scrub after the close is refused, and the command ends")
+        },
+    );
+    assert!(
+        message(&error).contains("Worktree.Remove") || message(&error).contains("injected"),
+        "{}",
+        message(&error)
+    );
+    let log = TopologyFold::parse_log(&fixture.log_bytes()).expect("the log parses");
+    let closed = closed_generations(&log);
+    assert_eq!(
+        closed.len(),
+        1,
+        "one close for the retained generation: {closed:?}"
+    );
+    assert_eq!((closed[0].key, closed[0].generation), (ALPHA, GEN));
+    assert!(
+        finished_events(&log).is_empty(),
+        "the fault stopped closure before `run_finished`"
+    );
+    assert!(
+        worktree.exists() && manager.intents().expect("intents").contains(&slot),
+        "the fault came before the removal: the worktree and intent stand"
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|event| matches!(event.body, TopologyEventBody::BudgetExceeded { .. }))
+            .count(),
+        1
+    );
+
+    let (recovered, handle) =
+        resume_with_real_refs(&fixture, &harness()).expect("the interrupted closure resumes");
+    assert!(
+        !worktree.exists() && !manager.intents().expect("intents").contains(&slot),
+        "the resume reclaims the closed generation's worktree and intent"
+    );
+    assert_eq!(
+        candidates_refs_of(&fixture),
+        refs_before,
+        "every candidates ref is kept"
+    );
+    assert!(
+        recovered.resumed.budget_stop_cleared,
+        "the epoch's stop is cleared"
+    );
+    assert!(handle.fold.budget_stop().is_none() && handle.fold.finished().is_none());
+    assert_eq!(
+        closed_generations(&TopologyFold::parse_log(&fixture.log_bytes()).expect("parses")).len(),
+        1,
+        "the resume closes nothing again"
+    );
+    let seams = DriveSeams {
+        run_ceiling_usd: Some(0.2),
+        ..DriveSeams::default()
+    };
+    let runner = driven_runner(&seams);
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let driven = drive_handle(&fixture, handle, &seams, 1, &runner, &mut hooks);
+    assert!(
+        matches!(driven.progress.first(), Some(Ok(Progress::BudgetExceeded))),
+        "the ceiling is met again in the new epoch: {:?}",
+        driven.progress
+    );
+    let log = TopologyFold::parse_log(&fixture.log_bytes()).expect("the log parses");
+    let epochs: Vec<u32> = log
+        .iter()
+        .filter_map(|event| match &event.body {
+            TopologyEventBody::BudgetExceeded { data } => Some(data.epoch.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(epochs, vec![0, 1], "a budget stop per epoch");
+}
+
 /// `run_finished_budget_exceeded_refused_after_halting_drain_settlement`
 /// (T-FINISH): a halting settlement recorded after `budget_exceeded` makes
 /// the derived outcome Halted; `run_finished(BudgetExceeded)` is refused and
@@ -14384,6 +14541,98 @@ struct ArmedFinalization {
     inner: HarnessTopologyHooks,
     effects: ArmedSite,
     rundir: ArmedSite,
+}
+
+/// The harness bundle with one timeline across the Event and effect
+/// families, so a test can read which of an append and an effect came
+/// first.
+struct OrderedHooks {
+    inner: HarnessTopologyHooks,
+    effects: OrderedEffects,
+    events: OrderedEvents,
+}
+
+type SharedTimeline = Arc<Mutex<Vec<(EffectSiteId, HookPhase)>>>;
+
+struct OrderedEffects {
+    inner: crate::workspace_manager::HarnessEffects,
+    timeline: SharedTimeline,
+}
+
+struct OrderedEvents {
+    inner: crate::events::log::HarnessEventHooks,
+    timeline: SharedTimeline,
+}
+
+impl OrderedHooks {
+    fn new(harness: &Arc<Mutex<HookHarness>>) -> Self {
+        let timeline: SharedTimeline = Arc::new(Mutex::new(Vec::new()));
+        Self {
+            inner: HarnessTopologyHooks::new(Arc::clone(harness)),
+            effects: OrderedEffects {
+                inner: crate::workspace_manager::HarnessEffects::new(Arc::clone(harness)),
+                timeline: Arc::clone(&timeline),
+            },
+            events: OrderedEvents {
+                inner: crate::events::log::HarnessEventHooks::new(Arc::clone(harness)),
+                timeline,
+            },
+        }
+    }
+
+    fn timeline(&self) -> SharedTimeline {
+        Arc::clone(&self.effects.timeline)
+    }
+}
+
+impl crate::workspace_manager::EffectHooks for OrderedEffects {
+    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
+        self.timeline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((site, phase));
+        self.inner.phase(site, phase)
+    }
+
+    fn refusal_cause(&self) -> Option<String> {
+        self.inner.refusal_cause()
+    }
+}
+
+impl crate::events::log::EventHooks for OrderedEvents {
+    fn phase(&mut self, site: EventSite, phase: HookPhase) {
+        self.timeline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((EffectSiteId::Event(site), phase));
+        self.inner.phase(site, phase);
+    }
+
+    fn point(&mut self, site: EventSite, point: SubEffectPoint, mode: InjectionMode) -> Injection {
+        self.inner.point(site, point, mode)
+    }
+}
+
+impl TopologyHooks for OrderedHooks {
+    fn effects(&mut self) -> &mut dyn crate::workspace_manager::EffectHooks {
+        &mut self.effects
+    }
+
+    fn rundir(&mut self) -> &mut dyn rundir::RunDirHooks {
+        self.inner.rundir()
+    }
+
+    fn events(&mut self) -> &mut dyn crate::events::log::EventHooks {
+        &mut self.events
+    }
+
+    fn container(&mut self) -> &mut dyn crate::runner::container::ContainerHooks {
+        self.inner.container()
+    }
+
+    fn spawn(&mut self) -> &mut dyn crate::agent::proc::SpawnHooks {
+        self.inner.spawn()
+    }
 }
 
 struct ArmedSite {
@@ -15478,6 +15727,57 @@ fn finalized_report_names_runner_identity() {
     assert_eq!(status.runner, report.runner);
     assert_eq!(status.outcome, Some(RunOutcome::Halted));
     assert!(warnings.is_empty(), "{warnings:?}");
+
+    // INV-13's projections name each task's origin and lineage: two originals here.
+    assert_eq!(report.tasks.len(), 2);
+    for task in &report.tasks {
+        assert_eq!(task.origin, "original", "task {}", task.key);
+        assert!(task.lineage.is_none(), "task {}", task.key);
+        assert!(task.lineage_root.is_none(), "task {}", task.key);
+    }
+
+    // A stored report is fresh only when its digest is the digest of its own
+    // content and its outcome and runner are this report's. A file carrying
+    // the current digest over another image reference, or another outcome,
+    // is stale: the next resume regenerates it and says so; an untouched file
+    // is left alone.
+    let report_path = fixture.public().join("report.json");
+    let tampered = |mutate: &dyn Fn(&mut crate::engine::topology::report::TopologyReport)| {
+        let mut stored = report_of(fixture);
+        mutate(&mut stored);
+        assert_eq!(stored.digest, report.digest, "the tamper keeps the digest");
+        crate::workspace_manager::fixture::write_file(
+            &report_path,
+            &serde_json::to_vec_pretty(&stored).expect("serializes"),
+        );
+        assert!(
+            !report.is_fresh_against(&std::fs::read(&report_path).expect("reads")),
+            "the tampered file reads as fresh"
+        );
+        let (result, _) = resume(fixture, &harness(), &given);
+        let text = message(&result.expect_err("a finalized run refuses"));
+        assert!(text.contains("regenerated"), "{text}");
+        assert_eq!(
+            report_of(fixture),
+            report,
+            "the regenerated report is the derived one"
+        );
+    };
+    tampered(&|stored| {
+        stored
+            .runner
+            .image
+            .as_mut()
+            .expect("the fixture records an image")
+            .reference = "ghcr.io/example/another-runner:9".to_owned();
+    });
+    tampered(&|stored| {
+        stored.outcome = Some(RunOutcome::Complete);
+    });
+    assert!(report.is_fresh_against(&std::fs::read(&report_path).expect("reads")));
+    let (result, _) = resume(fixture, &harness(), &given);
+    let text = message(&result.expect_err("a finalized run refuses"));
+    assert!(text.contains("already current"), "{text}");
 }
 
 // ---------------------------------------------------------------------------
@@ -16565,13 +16865,43 @@ fn a_closed_settlement_scrubs_the_generations_worktree_and_intent() {
     let manager = fixture.manager();
     let slot = crate::engine::topology::dispatch::task_slot(ALPHA, GEN);
     let worktree = manager.slot_path(&slot);
-    with_live_run(
+    let mut ordered = OrderedHooks::new(&harness);
+    let timeline = ordered.timeline();
+    with_live_run_hooked(
         &fixture,
-        &harness,
+        &mut ordered,
         Ceiling::unlimited(),
         &adapters,
         |run, seams, hooks| {
+            let from = timeline
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .len();
             let first = run.step(seams, hooks).expect("the outage defers alpha");
+            // The order, observed: the settlement's append is durable
+            // (`Event.Append` after) before the scrub's first effect
+            // (`Worktree.Remove` before) is consulted.
+            let seen = timeline.lock().unwrap_or_else(PoisonError::into_inner);
+            let step = &seen[from..];
+            let appended = step
+                .iter()
+                .rposition(|(site, phase)| {
+                    *site == EffectSiteId::Event(EventSite::Append) && *phase == HookPhase::After
+                })
+                .expect("the settlement was appended");
+            let scrubbed = step
+                .iter()
+                .position(|(site, phase)| {
+                    *site == EffectSiteId::Worktree(WorktreeSite::Remove)
+                        && *phase == HookPhase::Before
+                })
+                .expect("the slot was scrubbed");
+            assert!(
+                appended < scrubbed,
+                "the scrub follows the durable close: append after at {appended}, remove \
+                 before at {scrubbed}: {step:?}"
+            );
+            drop(seen);
             assert!(
                 matches!(
                     first,

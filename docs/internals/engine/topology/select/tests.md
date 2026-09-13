@@ -240,8 +240,9 @@ it — after which the run is ending.
 
 ## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {` › `let mut fold = started();`
 
-(2) An eligible integration is refused before the
-`merge_verification_started` that would start one.
+(2) An eligible integration crosses the checkpoint carrying the candidate
+the queue chose — since PR8 moved integration across; the ceiling is
+checked before it, so a breach records the stop instead.
 
 ## `fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {` › `let mut spend = Spend::new();`
 
@@ -264,8 +265,10 @@ the checkpoint unchanged.
 ## `fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {`
 
 **Which of `Step`'s variants cross the checkpoint, counted rather than
-asserted in prose.** Seven cross and two do not since PR9 moved
-`RepairDispatch` across; the history below is why the count is a test.
+asserted in prose.** Eight cross and three do not since PR10 added
+`Closure` to the crossing side and `NotStarted` and `Finished` to the
+refused one beside `Poisoned`; the history below is why the count is a
+test.
 
 `Admitted`'s doc said "[`Step`] has seven variants and this has five.
 The two that are missing…" for as long as `Step` had **eight** and three

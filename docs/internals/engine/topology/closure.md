@@ -74,5 +74,7 @@ R5): the fold checks the outcome and `halted_at`, and the counts are a projectio
 
 Why a fold is not ending, for an operator: the unclosable shapes first, then every open or
 retained generation, every deferred task, every verification-deferred candidate, and
-structurally admissible work. The last line, "of a state this module cannot name", is what the
-totality census asserts is never reached.
+structurally admissible work. The last line, "of a state this module cannot name", is the
+`DerivedOutcome::FoldError` arm's; the totality census asserts that arm is never reached in the
+fold's derivation over every explored state (`the_derived_outcome_is_total_over_every_explored_state`),
+and says nothing about this function's text.

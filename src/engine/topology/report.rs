@@ -48,6 +48,8 @@ pub struct TopologyReport {
 pub struct TaskProjection {
     pub key: u32,
     pub display_id: String,
+    pub origin: String,
+    pub lineage: Option<TaskLineage>,
     pub lineage_root: Option<u32>,
     pub state: String,
     pub rung: u32,
@@ -55,6 +57,14 @@ pub struct TaskProjection {
     pub defers: u32,
     pub binding_override: Option<BindingOverride>,
     pub generations: Vec<GenerationProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TaskLineage {
+    pub root: u32,
+    pub parent: u32,
+    pub index: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,6 +232,16 @@ impl TopologyReport {
             tasks.push(TaskProjection {
                 key: key.0,
                 display_id: entry.display_id.as_str().to_owned(),
+                origin: match entry.origin {
+                    crate::topology::registry::Origin::Original => "original",
+                    crate::topology::registry::Origin::MergeRepair => "merge_repair",
+                }
+                .to_owned(),
+                lineage: entry.lineage.as_ref().map(|lineage| TaskLineage {
+                    root: lineage.root.0,
+                    parent: lineage.parent.0,
+                    index: lineage.index,
+                }),
                 lineage_root: entry.lineage.as_ref().map(|lineage| lineage.root.0),
                 state: state_name(task.state).to_owned(),
                 rung: task.rung,
@@ -360,9 +380,17 @@ impl TopologyReport {
 
     #[must_use]
     pub fn is_fresh_against(&self, existing: &[u8]) -> bool {
-        serde_json::from_slice::<Self>(existing)
-            .ok()
-            .is_some_and(|existing| existing.digest == self.digest)
+        let Ok(existing) = serde_json::from_slice::<Self>(existing) else {
+            return false;
+        };
+        // The stored digest has to be the digest of the stored content, and
+        // the content the recorded outcome and runner: a file carrying this
+        // report's digest over other bytes, or another outcome or runner
+        // under a matching digest, is stale and is regenerated.
+        existing.digest == self.digest
+            && existing.compute_digest().ok().as_deref() == Some(self.digest.as_str())
+            && existing.outcome == self.outcome
+            && existing.runner == self.runner
     }
 
     #[must_use]

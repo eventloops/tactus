@@ -4,8 +4,8 @@ severity: P3
 disposition: deferred
 category: correctness
 pr: 3
-reviewed_sha:
-location: 
+reviewed_sha: 7dfbf8b0cb1203671300a097ca9be1c8107732a3
+location: src/topology/effects.rs:338
 provenance: undetermined
 first_bad:
 guard: the change that gives any site a second observable order (`EffectSiteId::observable_orders` returns one or none by construction; re-measured at PR10)
