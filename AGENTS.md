@@ -128,7 +128,7 @@ compiler every leg runs and the runner every compiled test harness is handed to;
 **Second limb: this rule itself.** Amending the delegation rule, or the review and triage required
 before a merge, changes no gate, so the first limb clears it — and the amended rule can then license
 the gate change the first limb exists to stop. An amendment to these paragraphs in `CLAUDE.md` and
-`AGENTS.md`, to `MAINTAINING.md` step 7 or its trust boundary, or to `reviews/findings/PROCESS.md`
+`AGENTS.md`, to `MAINTAINING.md` step 7 or its trust boundary, or to `findings/PROCESS.md`
 is the owner's, or carries a delegation written for that PR. It is a separate clause, not another
 path on the list above.
 
@@ -147,7 +147,8 @@ the owner's read of that PR's diff. `MAINTAINING.md` step 7 governs.
 | `CONTRIBUTING.md` | Contributor rules and CLA |
 | `docs/internals/` | Internal module notes, one file per module mirroring `src/`. A module with notes carries a single `Extended notes:` pointer in its header and no other prose (§13), held both ways by `test-internals-notes.sh`. `docs/` is also the GitHub Pages source for upstroke.rs, so anything added there is published |
 | `.github/scripts/` | The 6 `test-*.sh` gates and the `validate-*` helpers they exercise |
-| `reviews/` | `reviews/findings/`, the standing finding ledger, one file per finding; `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections; historical review records moved to the private lab repository on 2026-09-04 |
+| `findings/` | The standing finding ledger, one file per open finding, moved here from under `reviews/` on 2026-09-12; `findings/README.md` names and shapes a finding, `findings/PROCESS.md` is how the ledger is worked |
+| `reviews/` | `reviews/FINDINGS.md`, the same ledger up to 2026-09-04, closed to new sections, and the dated review records still on master; historical review records moved to the private lab repository on 2026-09-04 |
 | `effects/` | The effect-governance allowlists the `src/effects/tests.rs` census enforces |
 
 `src/` is one crate: `plan/` (ingestion), `agent/` (the Claude Code, Copilot and Codex adapters,
@@ -184,3 +185,9 @@ one unset value. CI is unaffected.
 **`src/export.rs` pins sentences in the docs.** Its tests `include_str!` `README.md`,
 `MAINTAINING.md`, `design/15_design_event_log_resume_run_layout.md` and
 `design/25_design_export_decisions_schema.md`; a rewording there fails the suite.
+
+**`reviews/findings/` must not exist.** The finding ledger moved to `findings/` on 2026-09-12 (PR
+#276), and git tracks files, not directories: a branch cut before the move that adds a finding under
+the old prefix merges with no conflict and recreates the directory, holding findings nothing reads.
+`test-docs-consistency.sh` (C5) fails on any tracked path under the old prefix; the remedy is to
+rebase onto `master` and `git mv` the file under `findings/`.

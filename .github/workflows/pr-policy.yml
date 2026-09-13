@@ -96,9 +96,9 @@ jobs:
           { cat "$RUNNER_TEMP/pr-body"; printf '\n'; } | bash .github/scripts/validate-pr-ledger-evidence.sh "$head"
 
       # The branch vocabulary, and the two rules about the pull request's own
-      # diff: a findings/ branch is confined to reviews/findings/, and every file
+      # diff: a findings/ branch is confined to findings/, and every file
       # the pull request adds or renames there is a finding with a severity in
-      # P0-P3. A fix-P*/ name resolves against reviews/findings/
+      # P0-P3. A fix-P*/ name resolves against findings/
       # anywhere in the PULL REQUEST, not at its two ends. Repairing a finding
       # deletes its file, so a pull request that has done its job carries none
       # at the branch point; a pull request that files the finding it repairs
@@ -118,7 +118,7 @@ jobs:
       # That is the right DEFAULT and not a guarantee about the head. The merge
       # base moves too, as soon as master absorbs a commit this branch also
       # contains, and the verdict can change with no push to the branch. It is
-      # correct that it can: the name is resolved against reviews/findings/ AS
+      # correct that it can: the name is resolved against findings/ AS
       # IT STANDS WHEN THIS STEP RUNS, and whether a description names one
       # finding or two is a property of the ledger that other pull requests
       # legitimately change. This step runs again on every synchronize and on
@@ -128,7 +128,7 @@ jobs:
       # listed. So a finding the target filed after the branch point is in none
       # of the three on the entry either: replayed on a queue merge whose target
       # had added two same-description findings, this step conformed at exit 0
-      # while the queue commit's own reviews/findings/ named 2 findings at exit
+      # while the queue commit's own findings/ named 2 findings at exit
       # 1. THE VERDICT IS NOT A VERDICT ON THE LEDGER THE MERGE LANDS ON, and no
       # re-run makes it one. What it says is the narrow thing: the name resolved
       # to exactly one filed finding in the three listings this step built, at
@@ -156,7 +156,7 @@ jobs:
           # convention rather than a requirement: a file handed in as a listing
           # is a list of names the caller wrote and is read wherever it lives,
           # tracked or not. It is the DIRECTORY form -- a working tree's
-          # reviews/findings/, which this workflow never passes -- that is
+          # findings/, which this workflow never passes -- that is
           # answered out of git's records instead of out of the checkout.
           bash .github/scripts/findings-in-range.sh \
             "$TARGET_SHA" "$head_sha" "$RUNNER_TEMP/findings"
@@ -164,7 +164,7 @@ jobs:
           # reason: the validator may run no command and open no file outside its audited helpers,
           # so `git diff` and every blob read happen here. changed-paths is what makes a findings/
           # branch's low-effort review safe -- it is refused if it touches anything outside
-          # reviews/findings/ -- and added-findings is every file the pull request adds or renames
+          # findings/ -- and added-findings is every file the pull request adds or renames
           # under that directory, with the severity its frontmatter records, so a finding nothing
           # can act on cannot be filed.
           bash .github/scripts/changed-in-range.sh \

@@ -986,7 +986,7 @@ that renames a temporary file "moves this test", which that shape cannot deliver
   fenced blocks of §1.2 and §11.1 are declared formatted extracts.
 
 Every finding above is a row of the pull request's ledger, bound to `2b048a67` and the line the
-lens cited; the two open ones have files under `reviews/findings/`.
+lens cited; the two open ones have files under `findings/`.
 
 ### 12.7 Gates and final evidence
 
@@ -1001,7 +1001,7 @@ value shown is in the file (`PR258-QUOTATIONS-NOT-LITERAL`):
 
 ```
 HEAD=2b048a672a51ff681d19ec7bcc369c07e252b6cd
-STATUS= M docs/internals/engine/topology/attempt/tests.md |  M docs/internals/engine/topology/dispatch/tests.md |  M reviews/2026-09-09-g4-fix-temporary-object-fanout-record.md |  M src/engine/topology/attempt/tests.rs |  M src/engine/topology/dispatch/tests.rs |  M src/workspace_manager.rs |  M src/workspace_manager/fixture.rs |  M src/workspace_manager/tests.rs | ?? reviews/findings/P2_correctness_202609092355_the-widened-predicate-reads-sibling-tasks-in-flight-writes.md | ?? reviews/findings/P2_portability_202609092356_the-casefold-guard-runs-on-two-of-three-legs.md |
+STATUS= M docs/internals/engine/topology/attempt/tests.md |  M docs/internals/engine/topology/dispatch/tests.md |  M reviews/2026-09-09-g4-fix-temporary-object-fanout-record.md |  M src/engine/topology/attempt/tests.rs |  M src/engine/topology/dispatch/tests.rs |  M src/workspace_manager.rs |  M src/workspace_manager/fixture.rs |  M src/workspace_manager/tests.rs | ?? findings/P2_correctness_202609092355_the-widened-predicate-reads-sibling-tasks-in-flight-writes.md | ?? findings/P2_portability_202609092356_the-casefold-guard-runs-on-two-of-three-legs.md |
 sha256=db3af8242dc8a6b30085f1b8151e0ecd21d49d9a3d88af243396c8c5ce9334d5  src/workspace_manager.rs
 sha256=df2d7fcff49181367622c60efeec30e965aaca04c1ed356bfc464ff0172ed0ce  src/workspace_manager/tests.rs
 sha256=5e7bdc4188634045f9fa34307099cf8420ed331eb1b60c775e36f1d45d8247ff  src/workspace_manager/fixture.rs

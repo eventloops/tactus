@@ -1296,7 +1296,7 @@ impl LockSite {
 /// disagrees.
 ///
 /// One durable object under two inventory names is the owner's standing
-/// finding `PR3-REPORT-DOUBLE-NAME` (`reviews/findings/`, history in
+/// finding `PR3-REPORT-DOUBLE-NAME` (`findings/`, history in
 /// `reviews/FINDINGS.md` §2): ST-07 will demand two hook executions for one
 /// write. It is not this module's to resolve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
