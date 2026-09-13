@@ -950,7 +950,7 @@ pub fn run_recovery_order(
         hooks,
     )?;
 
-    finalize_if_finished(&censused, seams.manager, hooks)?;
+    let censused = finalize_if_finished(censused, seams.manager, hooks)?;
     steps.push(RecoveryStep::B);
 
     let rebuilt = RunnerRebuilt::rebuild(censused, seams.today, Some(seams.runtime))?;
@@ -1046,33 +1046,44 @@ pub fn run_recovery_order(
 }
 
 pub fn finalize_if_finished(
-    censused: &ResumeCensused,
+    censused: ResumeCensused,
     manager: &WorkspaceManager,
     hooks: &mut dyn TopologyHooks,
-) -> Result<(), UpstrokeError> {
-    let barrier = censused.barrier();
-    let Some(outcome) = barrier.fold().finished() else {
-        return Ok(());
+) -> Result<ResumeCensused, UpstrokeError> {
+    let Some(outcome) = censused.barrier().fold().finished().cloned() else {
+        return Ok(censused);
     };
     match outcome {
         RunOutcome::Complete | RunOutcome::Halted => {
-            let root = barrier.records().locks().root();
-            let finalized = super::finalize::finalize(
-                &super::finalize::Finalize {
-                    manager,
-                    public: root.public_dir(),
-                    run_id: root.run_id(),
-                    fold: barrier.fold(),
-                    events: barrier.events(),
-                },
-                hooks,
-            )?;
+            let finalized = {
+                let barrier = censused.barrier();
+                let root = barrier.records().locks().root();
+                super::finalize::finalize(
+                    &super::finalize::Finalize {
+                        manager,
+                        public: root.public_dir(),
+                        run_id: root.run_id(),
+                        fold: barrier.fold(),
+                        events: barrier.events(),
+                    },
+                    hooks,
+                )?
+            };
+            // Finalization is the last effect of a finished run, and the run
+            // lock's release is its last site: released here through the
+            // hooked funnel (`Lock.Release`), so a fault at either phase of it
+            // is a cell of the finalization matrix, and not left to the
+            // guard's drop, which no hook sees. The worktree lease goes with
+            // it.
+            let (_log, _fold, records) = censused.into_barrier().into_log_fold_and_records();
+            let (run_lock, _worktree_lock, root) = records.into_locks().into_guards();
+            run_lock.release(hooks.rundir());
             Err(super::finalize::refuse_continuation(
                 root.run_id(),
                 &finalized,
             ))
         }
-        RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(()),
+        RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(censused),
     }
 }
 

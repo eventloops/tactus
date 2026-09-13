@@ -14327,6 +14327,7 @@ struct ArmedFinalization {
 struct ArmedSite {
     harness: Arc<Mutex<HookHarness>>,
     at: (EffectSiteId, HookPhase),
+    injection: Injection,
     nth: usize,
     seen: usize,
 }
@@ -14342,7 +14343,7 @@ impl ArmedSite {
         }
         self.seen += 1;
         if self.seen == self.nth {
-            Injection::Error
+            self.injection
         } else {
             Injection::Proceed
         }
@@ -14351,9 +14352,20 @@ impl ArmedSite {
 
 impl ArmedFinalization {
     fn new(harness: &Arc<Mutex<HookHarness>>, at: (EffectSiteId, HookPhase)) -> Self {
+        Self::answering(harness, at, Injection::Error)
+    }
+
+    /// Armed to answer `injection` — an error return, or the kill the
+    /// finalization kill child dies by — the first time `at` is consulted.
+    fn answering(
+        harness: &Arc<Mutex<HookHarness>>,
+        at: (EffectSiteId, HookPhase),
+        injection: Injection,
+    ) -> Self {
         let armed = || ArmedSite {
             harness: Arc::clone(harness),
             at,
+            injection,
             nth: 1,
             seen: 0,
         };
@@ -14493,101 +14505,195 @@ fn assert_finalized(planted: &FinishedPlanting, outcome: &RunOutcome, tag: &str)
 
 /// Every finalization site and phase a fault can land on, in the order the
 /// steps run. `Ref.DeleteCandidatesRef` is Complete's alone.
-fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectSiteId, HookPhase)> {
-    use crate::topology::effects::SnapshotSite;
-    let mut sites = vec![
-        (
-            EffectSiteId::RunDir(RunDirSite::WriteReport),
-            HookPhase::Before,
-        ),
-        (
-            EffectSiteId::RunDir(RunDirSite::WriteReport),
-            HookPhase::After,
-        ),
-        (
-            EffectSiteId::Worktree(WorktreeSite::Remove),
-            HookPhase::Before,
-        ),
-        (
-            EffectSiteId::Worktree(WorktreeSite::Remove),
-            HookPhase::After,
-        ),
-        (
-            EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
-            HookPhase::Before,
-        ),
-        (
-            EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
-            HookPhase::After,
-        ),
-        (
-            EffectSiteId::Snapshot(SnapshotSite::Remove),
-            HookPhase::Before,
-        ),
-        (
-            EffectSiteId::Snapshot(SnapshotSite::Remove),
-            HookPhase::After,
-        ),
-        (
-            EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
-            HookPhase::After,
-        ),
-        (
-            EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
-            HookPhase::Before,
-        ),
-        (
-            EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
-            HookPhase::After,
-        ),
-        (
-            EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
-            HookPhase::After,
-        ),
-        (
-            EffectSiteId::Ref(RefSite::DeletePreparedPin),
-            HookPhase::Before,
-        ),
-        (
-            EffectSiteId::Ref(RefSite::DeletePreparedPin),
-            HookPhase::After,
-        ),
-        (
-            EffectSiteId::Ref(RefSite::DeleteCandidatePin),
-            HookPhase::Before,
-        ),
-        (
-            EffectSiteId::Ref(RefSite::DeleteCandidatePin),
-            HookPhase::After,
-        ),
+/// One durable effect of terminal finalization, in the order
+/// `CleanupStep::ORDER` performs them: the site whose funnel performs it, and
+/// how the planted residue shows it done.
+struct FinalizationEffect {
+    site: EffectSiteId,
+    label: &'static str,
+    done: fn(&FinishedPlanting) -> bool,
+}
+
+/// What finalization does to a run planted with every kind of residue, in
+/// order: the report, then every cleanup step's effects site by site, then
+/// the run lock's release. `Lock.Release` is last and its "done" is the lock
+/// being free, which the guard's drop also achieves: the fault at it is
+/// survivable, so a resume faulted there still reaches the refusal.
+fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
+    use crate::topology::effects::{LockSite, SnapshotSite};
+    fn has_slot(
+        planted: &FinishedPlanting,
+        is: fn(&crate::workspace_manager::Slot) -> bool,
+    ) -> bool {
+        planted
+            .fixture
+            .manager()
+            .intents()
+            .expect("intents")
+            .iter()
+            .any(is)
+    }
+    fn ref_present(planted: &FinishedPlanting, refname: &str) -> bool {
+        ref_target(&planted.fixture, refname).is_some()
+    }
+    let mut effects = vec![
+        FinalizationEffect {
+            site: EffectSiteId::RunDir(RunDirSite::WriteReport),
+            label: "report written",
+            done: |planted| planted.fixture.public().join("report.json").is_file(),
+        },
+        FinalizationEffect {
+            site: EffectSiteId::Worktree(WorktreeSite::Remove),
+            label: "beta's worktree removed",
+            done: |planted| !planted.beta_worktree.exists(),
+        },
+        FinalizationEffect {
+            site: EffectSiteId::Worktree(WorktreeSite::RemoveIntent),
+            label: "beta's intent removed",
+            done: |planted| {
+                !has_slot(planted, |slot| {
+                    matches!(slot, crate::workspace_manager::Slot::Task { .. })
+                })
+            },
+        },
+        FinalizationEffect {
+            site: EffectSiteId::Snapshot(SnapshotSite::Remove),
+            label: "the snapshot removed",
+            done: |planted| planted.snapshot.as_ref().is_some_and(|path| !path.exists()),
+        },
+        FinalizationEffect {
+            site: EffectSiteId::Snapshot(SnapshotSite::RemoveIntent),
+            label: "the snapshot's intent removed",
+            done: |planted| {
+                !has_slot(planted, |slot| {
+                    matches!(slot, crate::workspace_manager::Slot::Snapshot { .. })
+                })
+            },
+        },
+        FinalizationEffect {
+            site: EffectSiteId::Worktree(WorktreeSite::RemoveStaging),
+            label: "the staging worktree removed",
+            done: |planted| planted.staging.as_ref().is_some_and(|path| !path.exists()),
+        },
+        FinalizationEffect {
+            site: EffectSiteId::Worktree(WorktreeSite::RemoveStagingIntent),
+            label: "the staging intent removed",
+            done: |planted| {
+                !has_slot(planted, |slot| {
+                    matches!(slot, crate::workspace_manager::Slot::Staging { .. })
+                })
+            },
+        },
+        FinalizationEffect {
+            site: EffectSiteId::Ref(RefSite::DeletePreparedPin),
+            label: "the prepared pin deleted",
+            done: |planted| {
+                planted
+                    .proposal_pin
+                    .as_ref()
+                    .is_some_and(|pin| !ref_present(planted, pin.as_str()))
+            },
+        },
+        FinalizationEffect {
+            site: EffectSiteId::Ref(RefSite::DeleteCandidatePin),
+            label: "the candidate-prepared pin deleted",
+            done: |planted| !ref_present(planted, planted.prepared_pin.as_str()),
+        },
     ];
     if *outcome == RunOutcome::Complete {
-        sites.push((
-            EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
-            HookPhase::Before,
-        ));
-        sites.push((
-            EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
-            HookPhase::After,
-        ));
+        effects.push(FinalizationEffect {
+            site: EffectSiteId::Ref(RefSite::DeleteCandidatesRef),
+            label: "the candidates ref deleted",
+            done: |planted| candidates_refs_of(&planted.fixture).is_empty(),
+        });
     }
-    sites.push((
-        EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
-        HookPhase::Before,
-    ));
-    sites.push((
-        EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
-        HookPhase::After,
-    ));
-    sites
+    effects.push(FinalizationEffect {
+        site: EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
+        label: "the execution root removed",
+        done: |planted| !planted.fixture.manager().execution_root().exists(),
+    });
+    effects.push(FinalizationEffect {
+        site: EffectSiteId::Lock(LockSite::Release),
+        label: "the run lock released",
+        done: |planted| !rundir::is_running(&planted.fixture.public()),
+    });
+    effects
+}
+
+/// Every cell of the finalization matrix: both hook phases of every effect's
+/// site, in effect order.
+fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectSiteId, HookPhase)> {
+    finalization_effects(outcome)
+        .iter()
+        .flat_map(|effect| {
+            [
+                (effect.site, HookPhase::Before),
+                (effect.site, HookPhase::After),
+            ]
+        })
+        .collect()
+}
+
+/// What a fault at `cell` leaves: every effect before the faulted site is
+/// done, the faulted site's own effect is done only when the fault came
+/// after it, and nothing later is. The lock's release is read from the
+/// harness rather than the file — the faulted resume's guard drops and
+/// frees the file whatever happened, so the file cannot tell a release
+/// through the funnel from a drop; the funnel's after phase can. A fault
+/// at the release itself is absorbed (`RunLock::release` discards the
+/// funnel's error), so it leaves every earlier effect done.
+#[track_caller]
+fn assert_finalization_order(
+    planted: &FinishedPlanting,
+    faulted_harness: &Arc<Mutex<HookHarness>>,
+    outcome: &RunOutcome,
+    cell: (EffectSiteId, HookPhase),
+    tag: &str,
+) {
+    use crate::topology::effects::LockSite;
+    let effects = finalization_effects(outcome);
+    let faulted = effects
+        .iter()
+        .position(|effect| effect.site == cell.0)
+        .expect("the cell names an effect of this outcome");
+    let release = EffectSiteId::Lock(LockSite::Release);
+    let survivable = cell.0 == release;
+    for (index, effect) in effects.iter().enumerate() {
+        let expected = (survivable && effect.site != release)
+            || index < faulted
+            || (index == faulted && cell.1 == HookPhase::After);
+        let done = if effect.site == release {
+            faulted_harness
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .observed(release, HookPhase::After)
+        } else {
+            (effect.done)(planted)
+        };
+        assert_eq!(
+            done,
+            expected,
+            "{tag}: after the fault, `{}` ({}) should {}be done — the cleanup order is \
+             `CleanupStep::ORDER` and the fault stops it where it fires",
+            effect.site,
+            effect.label,
+            if expected { "" } else { "not " }
+        );
+    }
+    assert!(
+        !rundir::is_running(&planted.fixture.public()),
+        "{tag}: the faulted resume's guard released the run lock file"
+    );
 }
 
 /// `kill_after_report_before_each_cleanup_step` (T-FINALIZE): a fault at
 /// every finalization site, before and after the effect, for Complete and
-/// for Halted. The faulted resume ends there with the log untouched; the next
-/// resume finalizes the rest and refuses; a third finds nothing to do.
+/// for Halted — 24 and 22 cells. The faulted resume ends there with the log
+/// untouched and exactly the effects before the fault done; the next resume
+/// finalizes the rest and refuses; a third finds nothing to do.
 #[test]
 fn kill_after_report_before_each_cleanup_step() {
+    use crate::topology::effects::LockSite;
     for outcome in [RunOutcome::Halted, RunOutcome::Complete] {
         let mut cells = 0;
         for (site, phase) in finalization_sites(&outcome) {
@@ -14609,13 +14715,10 @@ fn kill_after_report_before_each_cleanup_step() {
             cells += 1;
             let fixture = &planted.fixture;
             assert!(
-                planted.snapshot.as_ref().is_some_and(|path| path.exists())
-                    && planted.staging.as_ref().is_some_and(|path| path.exists())
-                    && planted.proposal_pin.as_ref().is_some_and(|pin| ref_target(
-                        fixture,
-                        pin.as_str()
-                    )
-                    .is_some()),
+                finalization_effects(&outcome)
+                    .iter()
+                    .filter(|effect| effect.site != EffectSiteId::Lock(LockSite::Release))
+                    .all(|effect| !(effect.done)(&planted)),
                 "{tag}: the residue each step prunes is there to be pruned"
             );
             let before = fixture.log_bytes();
@@ -14627,10 +14730,18 @@ fn kill_after_report_before_each_cleanup_step() {
             let mut armed = ArmedFinalization::new(&faulted, (site, phase));
             let (result, _) = resume_with(fixture, &mut armed, &given);
             let error = message(&result.expect_err("the fault ends the command"));
-            assert!(
-                !error.contains("already finished"),
-                "{tag}: the faulted resume did not reach the refusal: {error}"
-            );
+            let survivable = site == EffectSiteId::Lock(LockSite::Release);
+            if survivable {
+                assert!(
+                    error.contains("already finished as") && error.contains("finalized"),
+                    "{tag}: the release's fault is absorbed and the resume refuses: {error}"
+                );
+            } else {
+                assert!(
+                    !error.contains("already finished"),
+                    "{tag}: the faulted resume did not reach the refusal: {error}"
+                );
+            }
             assert!(
                 faulted
                     .lock()
@@ -14639,18 +14750,23 @@ fn kill_after_report_before_each_cleanup_step() {
                 "{tag}: the armed site was reached, or the fault proved nothing"
             );
             assert_eq!(fixture.log_bytes(), before, "{tag}: nothing appended");
-
             assert!(
                 wait_for_cleanup_hold_release(&fixture.public()),
                 "{tag}: the run's cleanup lease is still held"
             );
+            assert_finalization_order(&planted, &faulted, &outcome, (site, phase), &tag);
+
             let second = harness();
             let (result, _) = resume(fixture, &second, &given);
             let text = message(&result.expect_err("the next resume finalizes then refuses"));
-            assert!(
-                text.contains("already finished as") && text.contains("finalized"),
-                "{tag}: {text}"
-            );
+            if survivable {
+                assert!(text.contains("already current"), "{tag}: {text}");
+            } else {
+                assert!(
+                    text.contains("already finished as") && text.contains("finalized"),
+                    "{tag}: {text}"
+                );
+            }
             assert_finalized(&planted, &outcome, &tag);
             assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
 
@@ -14677,9 +14793,167 @@ fn kill_after_report_before_each_cleanup_step() {
                     "{tag}: a converged finalization runs `{site}` again"
                 );
             }
+            assert!(
+                seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+                "{tag}: a converged finalization still releases the run lock through the funnel"
+            );
         }
-        assert!(cells >= 18, "{outcome:?}: {cells} cells");
+        assert_eq!(
+            cells,
+            if outcome == RunOutcome::Complete {
+                24
+            } else {
+                22
+            },
+            "{outcome:?}: both phases of every effect's site"
+        );
     }
+}
+
+const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finalization_kill_child";
+
+/// The child of `a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`:
+/// resumes the run its parent planted at its end and dies by abort at
+/// `Worktree.RemoveExecutionRoot`'s after phase — inside finalization, after
+/// the last cleanup step's effect and before the guards drop.
+#[test]
+#[ignore = "spawned as a subprocess by the finalization kill test"]
+fn finalization_kill_child() {
+    let repo_root = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_REPO").expect("the parent names the repository"),
+    );
+    let git_dir = PathBuf::from(
+        std::env::var("UPSTROKE_TEST_KILL_GITDIR").expect("the parent names the git dir"),
+    );
+    let repo_key = RepoKey::v1(&std::fs::canonicalize(&git_dir).expect("the git dir exists"));
+    let harness = harness();
+    let mut hooks = ArmedFinalization::answering(
+        &harness,
+        (
+            EffectSiteId::Worktree(WorktreeSite::RemoveExecutionRoot),
+            HookPhase::After,
+        ),
+        Injection::Kill,
+    );
+    let runtime = runtime_holding_the_record();
+    let liveness = FakeOwnerLiveness::new();
+    let view = DisposableDirView::new(ContainerTrace::default());
+    let certifies = AlwaysCertifies;
+    let incarnation = IncarnationId(RESUMER.to_owned());
+    let today = container_selection();
+    let refs = RecordingRefs::with_log(
+        &rundir::public_dir(&repo_root, RUN_ID).join(rundir::EVENT_LOG),
+        RefShape::Direct,
+        None,
+    );
+    let mut warnings = Vec::new();
+    let root = RootDerived::derive_with(&repo_root, RUN_ID, None, TOPOLOGY_SCHEMA)
+        .expect("(a0) derives in the child");
+    let manager = crate::workspace_manager::WorkspaceManager::derive(
+        &repo_root,
+        root.private_root(),
+        RUN_ID,
+        RESUMER,
+    )
+    .expect("the child's repository and private root are real directories");
+    let outcome = run_recovery_order(
+        root,
+        &ResumeSeams {
+            repo_root: &repo_root,
+            worktree_git_dir: &git_dir,
+            repo_key: &repo_key,
+            incarnation: &incarnation,
+            inputs: FrozenInputs {
+                plan: plan_with(true),
+                normalized_plan_digest: "sha256:aaaa".to_owned(),
+            },
+            today: &today,
+            runtime: &runtime,
+            liveness: &liveness,
+            view: &view,
+            preflight: &certifies,
+            refs: &refs,
+            manager: &manager,
+            clock: &Frozen,
+        },
+        &mut hooks,
+        &mut warnings,
+    );
+    panic!(
+        "the kill inside finalization did not take this process: {:?}",
+        outcome.map(|(recovered, _)| recovered)
+    );
+}
+
+/// T-FINALIZE with a real process death inside finalization: the child
+/// resumes a Complete run planted at its end, performs the report and every
+/// cleanup step, and is killed right after the execution root is removed —
+/// before the run lock is released and the guards drop. The log is untouched
+/// by the death, the lock is free once the child is gone, and the next
+/// resume finds the report current, nothing left to prune, releases the lock
+/// through the funnel and refuses.
+#[test]
+fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume() {
+    use crate::topology::effects::LockSite;
+    use crate::workspace_manager::fixture::{died_by_abort, run_kill_child};
+
+    let planted = plant_finished_run_with(
+        "finalize-kill-inside",
+        RunOutcome::Complete,
+        AlphaEnd::Published,
+        FinishedResidue {
+            snapshot: true,
+            staging: true,
+            prepared_pin: true,
+        },
+    );
+    let fixture = &planted.fixture;
+    let before = fixture.log_bytes();
+    let status = run_kill_child(
+        FINALIZATION_KILL_CHILD,
+        &[
+            ("UPSTROKE_TEST_KILL_REPO", fixture.repo_root.as_os_str()),
+            ("UPSTROKE_TEST_KILL_GITDIR", fixture.git_dir.as_os_str()),
+        ],
+    );
+    assert!(
+        died_by_abort(&status),
+        "the child did not die by the kill inside finalization: {status:?}"
+    );
+    assert_eq!(fixture.log_bytes(), before, "the death appended nothing");
+    let effects = finalization_effects(&RunOutcome::Complete);
+    for effect in &effects {
+        assert!(
+            (effect.done)(&planted),
+            "`{}` ({}) was done before the kill, or the kill landed earlier than armed",
+            effect.site,
+            effect.label
+        );
+    }
+    assert!(
+        !rundir::is_running(&fixture.public()),
+        "the run lock went with the dead process"
+    );
+
+    let runtime = runtime_holding_the_record();
+    let certifies = AlwaysCertifies;
+    let given = Given::healthy(fixture, &runtime, &certifies);
+    let next = harness();
+    let (result, _) = resume(fixture, &next, &given);
+    let text = message(&result.expect_err("the next resume finalizes what is left and refuses"));
+    assert!(text.contains("already current"), "{text}");
+    assert_finalized(&planted, &RunOutcome::Complete, "after the kill");
+    assert_eq!(fixture.log_bytes(), before, "still nothing appended");
+    let seen = next.lock().unwrap_or_else(PoisonError::into_inner);
+    assert!(
+        seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::Before)
+            && seen.observed(EffectSiteId::Lock(LockSite::Release), HookPhase::After),
+        "the converging resume released the run lock through the funnel"
+    );
+    assert!(
+        !fixture.manager().execution_root().exists(),
+        "the root the child removed stays removed"
+    );
 }
 
 fn outcome_short(outcome: &RunOutcome) -> &'static str {
