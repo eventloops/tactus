@@ -314,7 +314,8 @@ fn every_declared_unobservable_coordinate_has_its_reason_in_the_code() {
     let source = |path: &str| {
         blank_comments_and_strings(
             &std::fs::read_to_string(repo_root().join(path))
-                .unwrap_or_else(|error| panic!("`{path}` reads: {error}")),
+                .unwrap_or_else(|error| panic!("`{path}` reads: {error}"))
+                .replace("\r\n", "\n"),
         )
     };
     let declared = declared_unobservable();

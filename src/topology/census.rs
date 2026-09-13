@@ -3393,7 +3393,10 @@ mod tests {
         let table = events
             .split("pub fn kind(&self) -> &'static str {")
             .nth(1)
-            .and_then(|rest| rest.split_once("\n    }\n"))
+            .and_then(|rest| {
+                rest.split_once("\n    }\n")
+                    .or_else(|| rest.split_once("\r\n    }\r\n"))
+            })
             .map(|(body, _)| body)
             .expect("the kind table");
         let kinds: BTreeMap<&str, &str> = table
