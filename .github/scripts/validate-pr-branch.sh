@@ -387,6 +387,45 @@
 #   position. An absolute path begins with `/`, which starts no token of it, so
 #   only a relative one is prefixed.
 #
+#   AND THE ROUND AFTER THAT, IN THE SAME `case`: A PREFIX IS A REWRITE, AND A
+#   REWRITE HAS TO ASK WHICH INPUTS IT IS REWRITING THAT IT DID NOT MEAN TO. `./`
+#   is a valid thing to prepend only to a path that is ACTUALLY RELATIVE, and the
+#   arm that prefixed everything failing `/*` prefixed a native Windows absolute
+#   path too: `C:/…` begins with a drive designator and not a separator, so
+#   `./C:/…` is no path at all. Measured in Git Bash on Windows Server 2025 --
+#   bash 5.2.37, git 2.50.1.windows.1, GNU findutils 4.10.0 -- on a directory
+#   inside a real `.git`, which is one of the shapes where discovery answers
+#   `false` and the filesystem is the whole of the evidence: `find C:/…
+#   -mindepth 1 -maxdepth 1 -print0` is exit 0 and enumerates both names, and
+#   `find ./C:/… …` is exit 1 `No such file or directory`. Whole-validator, same
+#   listing, four spellings: `C:/…` and `C:\…` were REFUSED as "a directory whose
+#   entries could not be listed" while `/c/…` and the relative name answered exit
+#   1 `names 2 findings`. So the arm is the set of spellings that are already
+#   ANCHORED -- a leading `/`, and a drive designator -- which is closed PER
+#   PLATFORM where find's token set is open PER IMPLEMENTATION. Leaving a drive
+#   designator unprefixed is safe on POSIX too, where `C:/x` is an ordinary
+#   relative path: the prefix exists only to stop find reading a path as an
+#   expression, and no token of that grammar begins with a letter. That also
+#   means POSIX CANNOT WITNESS THIS HALF -- `./C:/x` names the same directory
+#   there -- so the fixture asserts only that the unprefixed spelling still
+#   answers alike written relative and written absolute, and the Windows run is
+#   the witness.
+#
+#   TWO OTHER SITES IN THIS FILE STILL READ A NATIVE WINDOWS ABSOLUTE PATH AS A
+#   RELATIVE ONE and are deliberately NOT repaired with it, because they are not
+#   the same rewrite: `repository_above` makes its walk absolute with
+#   `${PWD%/}/$dir` so the walk has a top to stop at, and `locate_listing` builds
+#   its component chain from `${PWD}/$path` so the chain holds the components the
+#   caller named plus the ones the shell is standing in. Skipping either for a
+#   drive designator would truncate a POSIX walk over a directory legitimately
+#   named `C:`, and the walk has no drive-root terminator, so both need a
+#   platform test this file does not have. Measured the same way on the same
+#   guest, both are FALSE REDS and neither is a false green: a loose directory
+#   holding two findings refused as `'/c/C:/…' is there and cannot be examined`,
+#   and a tracked `findings/` refused as "no part of the path as it was written
+#   names that root", where the `/c/…` spelling of each answered exit 1 `names 2
+#   findings`.
+#
 # Three helpers were not a chokepoint while each had its own way to bytes, so
 # there is ONE CAPTURE PRIMITIVE and they are its callers. `git_probe` is the
 # only place this file runs git, `read_file` the only place it opens a file for
@@ -766,9 +805,10 @@ list_dir() {
   local dir="$1" record
   dir_entries=()
   # EVERY RELATIVE STARTING PATH IS PREFIXED WITH `./`, SO A PATH IS ALWAYS A PATH:
-  # `find` reads a directory named `!` as its negation operator, as above.
+  # `find` reads a directory named `!` as its negation operator -- and ONLY a
+  # relative one, because `./C:/…` is no path at all. Both halves are above.
   case "$dir" in
-    /*) ;;
+    /* | [A-Za-z]:*) ;;
     *) dir="./$dir" ;;
   esac
   capture "$probe_dir/dir.out" "$probe_dir/dir.err" none -- \

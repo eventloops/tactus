@@ -3216,10 +3216,29 @@ token_case() {  # token_case <name> <relative too: yes|no>
     exit 1
   fi
 }
-for token_name in '!' '(' ')' ',' '-o' '-a' '-not' '-name' '-H' 'ordinary'; do
+for token_name in '!' '(' ')' ',' '-o' '-a' '-not' '-name' '-H' 'ordinary' 'C:'; do
   token_case "$token_name" yes
 done
 token_case '-' no
+
+# `C:` IS IN THAT LIST FOR THE OTHER HALF OF THE RULE, AND IT WITNESSES ONLY THE
+# POSIX HALF. The prefix is for paths that are ACTUALLY RELATIVE, and on a native
+# Windows shell `C:/…` is absolute and fails the `/` arm, so prefixing it builds
+# `./C:/…`, which is no path at all. Measured in Git Bash on Windows Server 2025
+# (bash 5.2.37, git 2.50.1.windows.1, findutils 4.10.0), on a directory inside a
+# real `.git` -- where discovery answers `false` and the filesystem is the whole
+# of the evidence: `find C:/… -mindepth 1 -maxdepth 1 -print0` exit 0 and
+# enumerates, `find ./C:/… …` exit 1 `No such file or directory`, and the
+# validator itself refused the listing as "a directory whose entries could not be
+# listed" where the same directory spelled `/c/…` answered `names 2 findings`.
+#
+# NONE OF THAT CAN FAIL ON POSIX, where `C:/x` is an ordinary relative path and
+# `./C:/x` names the same directory, so THIS CASE IS NOT A RED WITNESS FOR THE
+# WINDOWS REPAIR and nothing in this file is: the Windows run is the witness and
+# the pull request body carries it. What this case does assert is the half that
+# CAN regress here -- that a listing whose name begins with a drive designator,
+# which the arm now leaves unprefixed, still answers the same written relative
+# and written absolute.
 
 # ---- the cost of answering from the records, asserted rather than described -------------------
 #
