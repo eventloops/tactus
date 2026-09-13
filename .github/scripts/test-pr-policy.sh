@@ -1970,6 +1970,32 @@ else
   fi
 fi
 
+# AND A DIRECTORY WHOSE NAME BEGINS WITH A BACKSLASH, which is the POSIX half of
+# the anchored set `list_dir` tests. On Windows a leading backslash is
+# `\\server\share\…` or the drive-relative `\Windows\…` and must not be
+# `./`-prefixed; on POSIX it is an ordinary relative name, so what this can assert
+# is that leaving it unprefixed still enumerates it -- written relative and
+# written absolute, which must agree. The Windows half cannot be witnessed here
+# and is measured on a guest; the same is true of the drive designator beside it.
+back_parent="$fixture_dir/backslash-listing"
+mkdir -p "$back_parent/\\weird"
+echo one > "$back_parent/\\weird/P2_correctness_202609130001_shared-name.md"
+echo two > "$back_parent/\\weird/P2_correctness_202609130002_shared-name.md"
+back_abs_rc=0
+back_abs_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' \
+  "$back_parent/\\weird" 2>&1)" || back_abs_rc=$?
+back_rel_rc=0
+back_rel_out="$( cd "$back_parent" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_shared-name' '\weird' 2>&1 )" \
+  || back_rel_rc=$?
+if [[ "$back_abs_rc" != 1 ]] || [[ "$back_rel_rc" != 1 ]] \
+  || ! grep -q 'names 2 findings' <<< "$back_abs_out" \
+  || ! grep -q 'names 2 findings' <<< "$back_rel_out"; then
+  echo "a directory whose name begins with a backslash must enumerate written either way;" \
+    "got $back_abs_rc absolute and $back_rel_rc relative" >&2
+  printf '%s\n' "$back_abs_out" "$back_rel_out" >&2
+  exit 1
+fi
 
 # A SUPERPROJECT WHOSE RECORDS CANNOT BE READ IS REFUSED AND NEVER READ AS A
 # SUPERPROJECT THAT RECORDS NOTHING. `rev-parse --show-superproject-working-tree`

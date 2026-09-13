@@ -411,6 +411,32 @@
 #   answers alike written relative and written absolute, and the Windows run is
 #   the witness.
 #
+#   AND THE ROUND AFTER THAT: THE ANCHORED SET WAS NAMED FROM ONE SPELLING AND
+#   NOT FROM THE CLASS. `C:/…` was added and `\\server\share\…` and the
+#   drive-relative `\Windows\…` were left in the prefixed arm, so the repair
+#   closed the spelling it was shown and not the set the sentence above claims to
+#   describe. A BACKSLASH now anchors too, which is both of those at once, and the
+#   three arms are every spelling Windows roots a path with: `/…` and `/c/…`,
+#   `C:\…` and `C:/…`, `\\server\share\…` and `\Windows\…`. Safe on POSIX by
+#   the same argument as the drive designator -- no token of find's grammar begins
+#   with a backslash either, and a POSIX directory named `\Windows` enumerates
+#   from its bare relative spelling: measured on findutils 4.9.0, exit 0 naming
+#   `\Windows/inside`.
+#
+#   ABSOLUTISING THE STARTING PATH INSTEAD WOULD NOT CLOSE THIS CLASS, and it was
+#   asked. The bang finding offered it and its evidence is right that an absolute
+#   path cannot parse as an expression -- but `${PWD%/}/$dir` has to decide WHICH
+#   paths are relative for exactly the same reason `./$dir` does, and its failure
+#   on the ones it gets wrong is identical: `/c/repo/C:/x` names nothing where
+#   `./C:/x` names nothing. It would move this decision from one that needs no
+#   platform test to one that does, because "is already anchored" is closed per
+#   platform while "no find token begins with this" is closed per grammar. The
+#   one construction that needs no classification at all -- appending `/.`, so the
+#   string can be no exact token -- does not close it either: measured on the same
+#   findutils, `-name/.` is exit 1 `unknown predicate`, and a SYMLINK to a
+#   directory goes from enumerating nothing to enumerating its target, which is a
+#   different answer and not a repair.
+#
 #   TWO OTHER SITES IN THIS FILE STILL READ A NATIVE WINDOWS ABSOLUTE PATH AS A
 #   RELATIVE ONE and are deliberately NOT repaired with it, because they are not
 #   the same rewrite: `repository_above` makes its walk absolute with
@@ -806,9 +832,9 @@ list_dir() {
   dir_entries=()
   # EVERY RELATIVE STARTING PATH IS PREFIXED WITH `./`, SO A PATH IS ALWAYS A PATH:
   # `find` reads a directory named `!` as its negation operator -- and ONLY a
-  # relative one, because `./C:/…` is no path at all. Both halves are above.
+  # relative one: a prefix on an ANCHORED spelling is no path at all. Both above.
   case "$dir" in
-    /* | [A-Za-z]:*) ;;
+    /* | '\'* | [A-Za-z]:*) ;;
     *) dir="./$dir" ;;
   esac
   capture "$probe_dir/dir.out" "$probe_dir/dir.err" none -- \
