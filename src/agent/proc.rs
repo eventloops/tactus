@@ -3565,8 +3565,8 @@ mod termination {
     /// the same reason `EndingWait` is: these sites do not all wait alike.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     enum EndingRetry {
-        /// Make the wait once and report what it answered, interrupted or not.
-        /// This is what the descriptor-configuration failure and the readiness
+        /// Report the first interrupted wait rather than making it again. This
+        /// is what the descriptor-configuration failure and the readiness
         /// failure have each always done.
         Once,
         /// Make the wait again while it is interrupted, up to
@@ -3582,9 +3582,16 @@ mod termination {
     /// of deliveries, not for a stream of them; a wait that is refused this many
     /// times running is being refused, not interrupted, and the caller is told
     /// so rather than waiting for an answer that is not coming.
+    ///
+    /// It counts **interruptions and not calls**, which is why `Once` is a `1`
+    /// here and not a cap on how many times `wait_for_an_ended_helper` asks:
+    /// that function polls with `WNOHANG` and asks again for as long as the
+    /// answer is *not yet*, at every site. `HELPER_END_BUDGET` is the bound on
+    /// that axis.
     const INTERRUPTED_WAIT_ATTEMPTS: u32 = 1024;
 
     impl EndingRetry {
+        /// How many interrupted waits a site tolerates before it reports one.
         fn attempts(self) -> u32 {
             match self {
                 EndingRetry::Once => 1,

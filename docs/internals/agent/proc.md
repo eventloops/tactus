@@ -1787,8 +1787,9 @@ one at `abort_setup` a second time through its `status-pointer` shape.
 Whether an ending makes its wait again when a signal interrupts it,
 chosen by the calling site for the same reason `EndingWait` is: these
 sites do not all wait alike, and a site that gains a retry it never had
-is making a call the host never agreed to. `Once` is the single wait
-the descriptor-configuration and READY failures have each always made;
+is making a call the host never agreed to. `Once` reports the first
+interrupted wait, which is what the descriptor-configuration and READY
+failures have each always done;
 `WhileInterrupted` is `Guard::abort_setup`'s retry, because giving up
 on the first `EINTR` there is what would leave the killed guard
 unreaped.
@@ -1806,7 +1807,9 @@ drives the retry to exhaustion under a policy answering every `wait4`
 removed that driver fails on its own deadline.
 
 **It is not the bound on the wait, and the two were confused once.**
-This one counts `EINTR`s; a wait that is never interrupted never
+This one counts `EINTR`s and not calls — `Once` is one interruption
+tolerated, not one `wait4`, because since the wait became a `WNOHANG`
+poll every site asks again for as long as the answer is *not yet*; a wait that is never interrupted never
 reaches it, and a helper in uninterruptible I/O with `SIGKILL` pending
 is exactly that case — a blocking `waitpid` on it yields no `EINTR` to
 count and simply never returns, so `INTERRUPTED_WAIT_ATTEMPTS` is never
