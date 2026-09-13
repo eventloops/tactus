@@ -2655,6 +2655,59 @@ else
   fi
 fi
 
+# ---- a starting path is a PATH and never an EXPRESSION -----------------------------------------
+#
+# `list_dir` handed a RELATIVE path straight to `find`, whose operands are a
+# starting-point list followed by an EXPRESSION and which tells the two apart by
+# SPELLING. A directory named `!` was read as the negation operator: `find !
+# -mindepth 1 -maxdepth 1 -print0` is exit 0 AND NO OUTPUT, so the enumeration was
+# empty, an empty enumeration read as "this directory names no finding", and an
+# ambiguous name conformed at exit 0 -- where the SAME directory named by its
+# absolute path refused it at exit 1.
+#
+# EVERY RELATIVE PATH IS PREFIXED, and the fixture is a set of names rather than
+# the one that was filed, because the hostile set belongs to the implementation
+# and not to us. Measured on findutils 4.9.0: `(` is exit 1 `invalid expression`,
+# a false red on a real listing; `-H` is exit 0 having enumerated the CURRENT
+# directory, because it is an option and the starting-point list was then empty;
+# and `)` and `,` are accepted as paths in leading position, which the next find
+# need not do. Each name is asserted BOTH WAYS -- written relative and written
+# absolute -- so what is checked is one listing giving one answer, not a table of
+# exit codes that could all be wrong together.
+#
+# `-` IS ASSERTED ABSOLUTE ONLY, and deliberately. Bash's `cd` reads a bare `-`
+# as `$OLDPWD` even after `--`, so the anchor probe in locate_listing answers
+# about a different directory for that one spelling; that is a mechanism of its
+# own and not this one, and a fixture that quietly depended on OLDPWD would be
+# asserting something else.
+token_dir="$fixture_dir/find-token-names"
+mkdir -p "$token_dir"
+printf 'P2_correctness_202609100001_token-named-listing.md\n' > "$token_dir/twin-a.txt"
+token_case() {  # token_case <name> <relative too: yes|no>
+  local name="$1" relative="$2" rel_rc=0 abs_rc=0 rel_out='' abs_out=''
+  mkdir -p -- "$token_dir/$name"
+  echo fixture > "$token_dir/$name/P2_correctness_202609100002_token-named-listing.md"
+  abs_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_token-named-listing' \
+    "$token_dir/twin-a.txt" "$token_dir/$name" 2>&1)" || abs_rc=$?
+  if [[ "$abs_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$abs_out"; then
+    echo "a listing named [$name] written absolute answered $abs_rc, and an ambiguous name must refuse" >&2
+    printf '%s\n' "$abs_out" >&2
+    exit 1
+  fi
+  [[ "$relative" == yes ]] || return 0
+  rel_out="$( cd "$token_dir" && "$BASH" "$branch_validator" \
+    'fix-P2/correctness_token-named-listing' twin-a.txt "$name" 2>&1 )" || rel_rc=$?
+  if [[ "$rel_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$rel_out"; then
+    echo "a listing named [$name] written relative answered $rel_rc, and the same listing written absolute refused" >&2
+    printf '%s\n' "$rel_out" >&2
+    exit 1
+  fi
+}
+for token_name in '!' '(' ')' ',' '-o' '-a' '-not' '-name' '-H' 'ordinary'; do
+  token_case "$token_name" yes
+done
+token_case '-' no
+
 # ---- the cost of answering from the records, asserted rather than described -------------------
 #
 # An UNTRACKED finding file inside a tracked findings/ no longer counts:

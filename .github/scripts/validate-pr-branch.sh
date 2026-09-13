@@ -346,6 +346,26 @@
 #   read_file set for it, lost a `.git` file's gitdir pointer, and put the listing
 #   back on the filesystem.
 #
+#   And the round after that, IN `list_dir`: A VALUE HANDED TO A TOOL WITH AN
+#   ARGUMENT GRAMMAR OF ITS OWN. A RELATIVE starting path went straight to
+#   `find`, whose operands are a starting-point list followed by an EXPRESSION
+#   and which tells the two apart by SPELLING. Measured on findutils 4.9.0, each
+#   on a directory a caller named: `find ! -mindepth 1 -maxdepth 1 -print0` is
+#   exit 0 AND NO OUTPUT, so
+#   an empty enumeration read as "this directory names no finding" and an
+#   ambiguous name that the SAME listing refuses at exit 1 by its absolute
+#   spelling conformed at exit 0; `find ( -mindepth 1 …` is exit 1, `invalid
+#   expression`, a false red on a real listing; and `find -H -mindepth 1 …` is
+#   exit 0 having enumerated the CURRENT directory, because `-H` is an option and
+#   the starting-point list was then empty. `--` saves none of them -- find's
+#   expression grammar begins before the operand list and no separator moves it,
+#   and `find -- ! -mindepth 1 -maxdepth 1 -print0` is exit 0 with no output too.
+#   So the rule is by CONSTRUCTION and not a list of hostile spellings: that list
+#   belongs to the implementation and not to us, and `)` and `,` are tokens of the
+#   same grammar that findutils 4.9.0 happens to accept as paths in leading
+#   position. An absolute path begins with `/`, which starts no token of it, so
+#   only a relative one is prefixed.
+#
 # Three helpers were not a chokepoint while each had its own way to bytes, so
 # there is ONE CAPTURE PRIMITIVE and they are its callers. `git_probe` is the
 # only place this file runs git, `read_file` the only place it opens a file for
@@ -720,9 +740,11 @@ dir_entries=()
 list_dir() {
   local dir="$1" record
   dir_entries=()
-  # A leading dash is part of a name and not a set of options.
+  # EVERY RELATIVE STARTING PATH IS PREFIXED WITH `./`, SO A PATH IS ALWAYS A PATH:
+  # `find` reads a directory named `!` as its negation operator, as above.
   case "$dir" in
-    -*) dir="./$dir" ;;
+    /*) ;;
+    *) dir="./$dir" ;;
   esac
   capture "$probe_dir/dir.out" "$probe_dir/dir.err" none -- \
     find "$dir" -mindepth 1 -maxdepth 1 -print0 || return 1
