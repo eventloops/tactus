@@ -5,8 +5,8 @@ use std::fmt::Write as _;
 
 use super::RunStatus;
 use crate::events::{
-    AttemptRecord, AttemptTransition, Event, EventBody, LadderEscalated, LadderRetry,
-    ReviewPassOutcome, RunOutcome, TaskDeferred, TaskFailed,
+    AttemptParking, AttemptRecord, AttemptTransition, Event, EventBody, LadderEscalated,
+    LadderRetry, ReviewPassOutcome, RunOutcome, TaskDeferred, TaskFailed,
 };
 use crate::ir::Answer;
 use crate::util::terminal::{TerminalLines, one_line};
@@ -101,16 +101,13 @@ pub(super) fn describe(event: &Event) -> String {
             parking,
             transition,
             ..
-        } => {
-            let mut line = format!("{task}: attempt {attempt} {}", attempt_outcome(data));
-            if let Some(transition) = transition.as_deref() {
-                let _ = write!(line, "; {}", describe_transition(transition));
-            }
-            if let Some(parking) = parking.as_deref() {
-                let _ = write!(line, "; parked on question {}", parking.question.id);
-            }
-            line
-        }
+        } => describe_attempt_finished(
+            task,
+            *attempt,
+            data,
+            parking.as_deref(),
+            transition.as_deref(),
+        ),
         EventBody::AttemptInterrupted { task, attempt, .. } => format!(
             "{task}: attempt {attempt} was cut off mid-flight; its spend is unknown and the \
              rung's allowance is intact"
@@ -221,6 +218,23 @@ pub(super) fn describe(event: &Event) -> String {
     one_line(format!("{at}{zone}  {body}"))
 }
 
+fn describe_attempt_finished(
+    task: &str,
+    attempt: u32,
+    record: &AttemptRecord,
+    parking: Option<&AttemptParking>,
+    transition: Option<&AttemptTransition>,
+) -> String {
+    let mut line = format!("{task}: attempt {attempt} {}", attempt_outcome(record));
+    if let Some(transition) = transition {
+        let _ = write!(line, "; {}", describe_transition(transition));
+    }
+    if let Some(parking) = parking {
+        let _ = write!(line, "; parked on question {}", parking.question.id);
+    }
+    line
+}
+
 fn attempt_outcome(record: &AttemptRecord) -> String {
     let verdict = record.reviews.iter().find_map(|pass| match pass.outcome {
         ReviewPassOutcome::Passed => None,
@@ -243,10 +257,10 @@ fn attempt_outcome(record: &AttemptRecord) -> String {
 
 fn describe_transition(transition: &AttemptTransition) -> String {
     match transition {
-        AttemptTransition::Retry(data) => describe_retry(data),
-        AttemptTransition::Escalate(data) => describe_escalation(data),
-        AttemptTransition::Defer(data) => describe_deferral(data),
-        AttemptTransition::Fail(data) => describe_task_failure(data),
+        AttemptTransition::Retry(retry) => describe_retry(retry),
+        AttemptTransition::Escalate(escalation) => describe_escalation(escalation),
+        AttemptTransition::Defer(deferral) => describe_deferral(deferral),
+        AttemptTransition::Fail(failed) => describe_task_failure(failed),
     }
 }
 

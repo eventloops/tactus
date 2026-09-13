@@ -100,19 +100,10 @@ Recorded so that someone reading the run tomorrow can see that
 work was thrown away; a follower reading it today deserves the
 same.
 
-## `EventBody::AttemptFinished {`
-
-The outcome, then each decision the settlement carries, in the
-order the engine made them. Each half of the settlement renders on
-its own, so no pairing of transition and parking is a shape this
-arm has to know about: a parked escalation reads "escalating past
-…; parked on question …", and a pairing no writer produces today
-still prints both facts rather than dropping one.
-
 ## `EventBody::LadderRetry { task, data, .. } => format!("{task}: {}", describe_retry(data)),`
 
-The legacy standalone forms of the decisions above, spelt by the
-same helpers so the two wire shapes cannot drift apart.
+The legacy standalone forms of the decisions a settlement carries, spelt by
+the same helpers so the two wire shapes cannot drift apart.
 
 ## `EventBody::DeferWaitElapsed { data } => {`
 
@@ -146,6 +137,20 @@ name the task it halted at, which is what the operator acts on.
 The two fields are read together: a halt names its task or
 says the record did not, and a task named on a run that did not
 halt is shown as the oddity it is rather than as a halt.
+
+## `fn describe_attempt_finished(`
+
+The line for one finished attempt: the outcome, then each decision the
+settlement carries, in the order the engine made them. Each half of the
+settlement renders on its own, so no pairing of transition and parking is a
+shape this helper has to know about: a parked escalation reads "escalating
+past …; parked on question …", and a pairing no writer produces today still
+prints both facts rather than dropping one.
+
+Split out of the `describe` arm so the arm is one line of dispatch, and each
+payload is bound to a name that says which of the event's fields it holds —
+`record` for the settled attempt, then `transition` and `parking` — rather
+than to the arm's own `data`.
 
 ## `fn attempt_outcome(record: &AttemptRecord) -> String {`
 
