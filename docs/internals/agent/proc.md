@@ -900,9 +900,10 @@ teardown's wait has collected the helper. Every teardown site tests
 `identity >= 0` and takes the identity arm or the base's code, never a
 mixture: a helper is ended by its name or by its number, and the number
 is never used where the name exists. The same field on `Guard` is the
-same thing; on the platforms where it is never read it carries
-`expect(dead_code)`, because there the guard is only ever ended by
-number.
+same thing, and is read on every unix target: `abort_setup` hands it to
+`end_unready_guard`, whose non-Linux arm discards it there rather than
+leaving the field unread here. It carried `expect(dead_code)` off Linux
+until it did.
 
 ## `struct Guard` › `identity: libc::c_int,`
 
@@ -1205,21 +1206,40 @@ The stopped anchor pins the PGID until it becomes our unreaped
 zombie. Only release the reaper-owned run-cleanup lease once every
 member of that exact group is either gone or a non-running zombie.
 
-## `impl Guard` › `fn abort_setup(self) {`
+## `impl Guard` › `fn abort_setup(self) -> HelperEnd {`
 
-End a guard whose supervisor setup failed after it said READY. With the
-identity path off this is master's `kill` and `waitpid` with a null
-status pointer, retried on `EINTR`, exactly as it was; with the path on
-it is `end_helper_through_identity`, whose answers are discarded here
-as the base discards its own (row
-`PR125-CLOSE-DISCARDED-KILL-RESULT` names that at every site, and this
-change does not take it up). `default_wait_shapes_helper`'s
-`status-pointer` shape holds the default's arguments: a policy that
-kills a `wait4` carrying a status pointer is installed after the guard
-is launched and before this is called, and the fixture must exit `0`.
-It was witnessed against a status pointer put back into this wait, the
-shape a previous round of this repair introduced and a reviewer
-executed: `SIGSYS`, shell status 159.
+End a guard whose supervisor setup failed after it said READY, and
+answer what ending it returned. After the descriptors are closed this
+is `end_unready_guard` with `EndingWait::AskingForNoStatus` and
+`EndingRetry::WhileInterrupted` — the same helper and the same wait the
+descriptor-configuration failure reaches, so the two sites that abandon
+a guard make one call shape between them rather than drifting apart,
+and this site's own answer to an interrupted wait, which the
+descriptor-configuration failure does not share. With the identity path
+off that is the `kill` and the `waitpid` by number this site always
+made, asking for no exit status and made again while it answers
+`EINTR`, now up to `INTERRUPTED_WAIT_ATTEMPTS` times where the inline
+loop here had no bound; with the path on it is
+`end_helper_through_identity`. Both answers are kept and handed back as
+a `HelperEnd`, which `install` describes into each of its three failure
+messages after the monitor's own error: the one place the ending can be
+read, since the guard is private to this module. Until row
+`PR125-CLOSE-DISCARDED-KILL-RESULT` was taken up the answers were
+discarded here and the monitor's failure said nothing about the guard.
+
+**Reporting the ending needed no status pointer.** A round of this
+repair gave this wait one so that "collected it" could say how, and
+that changed what the site asks the kernel: measured on production code
+with thread creation refused `EAGAIN` so `install` reaches this
+function, a policy refusing a status-bearing `wait4` with `EPERM` left
+the killed guard **unreaped** and one killing that call ended the
+process with `SIGSYS`, shell exit `159`; both exit `0` with the null
+pointer restored and `status: None` reported. `default_wait_shapes_helper`'s
+`status-pointer` shape pins that, and `guard_abort_end_helper` holds
+the ending itself across a delivered `kill`, one refused `EPERM`, one
+answered `ESRCH`, both status-pointer policies and the identity arm —
+each reported as the calls answered, and each followed by a look for a
+leftover child that the fixture does not collect itself.
 
 ## `impl Guard` › `fn stop_parent(self) -> Option<bool> {`
 
@@ -1229,15 +1249,46 @@ continue/termination cancelled the stop before it was issued.
 
 ## `mod termination` › `struct HelperEnd {`
 
-What ending a helper that never acknowledged its startup actually
-returned.
+What ending a helper actually returned: a helper that never
+acknowledged its startup, a guard whose descriptors could not be
+configured, or a guard aborted after it said READY.
 
 This asks the kernel nothing it was not already going to be asked. The
 teardown sends one `SIGKILL` and takes one `waitpid`, exactly as it
 did before this existed and in the same order; all this does is keep
 the two answers instead of discarding them, which is what §7 asks of a
 signal whose result the caller depends on and what row
-`PR125-CLOSE-DISCARDED-KILL-RESULT` asks for.
+`PR125-CLOSE-DISCARDED-KILL-RESULT` asked for. The type is `must_use`
+for the same reason, and it reaches exactly as far as that lint does:
+an ending left as an **unused expression statement** is
+`unused_must_use`, which the Clippy leg's `-D warnings` refuses. An
+explicit discard is not one, and passes — measured, a fixture holding
+`let _ = guard.abort_setup();` runs `cargo clippy --all-targets
+--all-features -- -D warnings` to exit `0`, removing only the
+`let _ =` gives exit `101`, and the compiler's own help there is "use
+`let _ = ...` to ignore the resulting value". So the attribute catches
+the ending nobody wrote a use for, which is the shape the row's five
+sites had; a reader who means to throw one away still has to say so in
+the source, where review can see it.
+
+**The row's scope is the end of a helper, which is five sites and not
+every `kill` in the module.** Its sibling row
+`PR125-CLOSE-UNBOUNDED-KILL-AND-WAIT-AT-FIVE-SITES` names them in its
+own words -- `Reaper::abandon` through `close_and_wait`, the `setpgid`
+failure in `spawn_reaper`, `Guard::abort_setup`, and the
+descriptor-configuration and READY failures in `spawn_guard` -- and
+cites this row for what they must report. All five are settled: three
+report through `HelperEnd`, and `spawn_reaper`'s parent-side
+`setpgid(pid, pid)` no longer exists to fail. The module's remaining
+discarded signals are group signals and test children, deliberately so:
+`cleanup_reaper_group` re-sends `SIGKILL` until
+`group_has_non_zombie_members` observes the group empty, `stop_groups`
+polls `groups_are_quiescent` after its `SIGSTOP`, and `monitor`'s
+`SIGKILL` is followed on the next statement by `SIG_DFL` and `raise`,
+so no caller is left with an action it could take. The two places where
+that reasoning does not hold are filed rather than left implied:
+`REFUSED-SIGCONT-LEAVES-A-MIRRORED-GROUP-STOPPED` and
+`REFUSED-KILL-UNBOUNDS-THE-BOUNDED-DOCKER-REAP`.
 
 **Nothing here is a claim about which process the number named.** A
 pid cannot be tied to the helper that was forked with it while an
@@ -1263,9 +1314,16 @@ The pid `waitpid` returned, or `-1`.
 
 The errno `waitpid` left when it returned `-1`.
 
-## `struct HelperEnd` › `status: libc::c_int,`
+## `struct HelperEnd` › `status: Option<libc::c_int>,`
 
-The status `waitpid` filled when it returned a pid.
+The status `waitpid` filled when it returned a pid, and `None` when
+there is no status to report: the wait collected nothing, or it asked
+for none. The two are not the same observation and a zero cannot stand
+for either, so the absence is a value rather than a default. Two arms
+produce `None` beside a collected pid today, and they are the two that
+abandon a guard: the descriptor-configuration failure and
+`Guard::abort_setup`, which share `EndingWait::AskingForNoStatus`.
+`EndingWait` below is why.
 
 ## `struct HelperEnd` › `through_identity: bool,`
 
@@ -1290,6 +1348,13 @@ exit status then names, or by being gone from the process table
 altogether. A helper that exits before READY does so through one of
 its own `_exit(1)` paths, so a status is the difference between "it
 failed setting itself up" and "it was still working when we gave up".
+
+A third outcome the words now separate: a child that **was** collected
+by a wait that asked for no status, which is "collected it, asking for
+no exit status". That is the two arms that abandon a guard — the
+descriptor-configuration failure and `Guard::abort_setup` — and the
+sentence says what was observed rather than reading a zero back as an
+exit.
 
 Through the identity the same outcomes get the same sentences with
 "through the helper's identity" and "the wait through it" in them, one
@@ -1552,13 +1617,89 @@ flood of unexpected bytes after the deadline ends at the first read
 against a zero remainder (row
 `PR125-CLOSE-FLOODED-CANCEL-UNBOUNDED-BY-THE-FINAL-LOOK`).
 
-## `mod termination` › `fn end_unready_guard(pid: libc::pid_t, identity: libc::c_int) -> HelperEnd {`
+## `mod termination` › `enum EndingWait {`
 
-The READY-failure teardown of the guard, moved out of `spawn_guard`'s
-body so the identity arm and the base's arm sit side by side. The
-base's arm is the code that was inline: one `kill`, one `waitpid` with
-a status pointer, their answers kept for the message. The identity arm
-is `end_helper_through_identity`.
+Which `waitpid` an ending makes, chosen by the calling site and never by
+`end_unready_guard` itself. It exists because the two arms are not interchangeable to a
+host: a syscall policy sees `wait4`'s status-pointer argument and may
+permit one shape while refusing or killing the other. A site that
+changed shape in order to say more would be making a call the host
+never agreed to, so each site names the shape it has always made and
+reports what that shape can answer.
+
+`CollectingStatus` is `waitpid(pid, &mut status, 0)`, which the READY
+failure has made since `end_unready_guard` existed.
+`AskingForNoStatus` is `waitpid(pid, std::ptr::null_mut(), 0)`, the
+call both sites that abandon a guard make on `master` and make again
+here — the descriptor-configuration failure and `Guard::abort_setup` —
+and its `HelperEnd` carries `status: None` rather than a fabricated
+zero. Those two are the sites that ask for it; the READY failure is the
+one that does not. `EndingRetry` below is the second per-site choice,
+for the same reason and separately from this one: two sites that make
+the same wait need not answer an interrupted one the same way.
+
+Each was measured on the head where it had been routed through the
+status-collecting shape instead. Under a policy refusing a
+status-bearing `wait4` with `EPERM` the launch returned its error and
+left the guard **unreaped**; under one killing that call the process
+died of `SIGSYS`, shell exit `159`. Both exit `0` with this arm in
+place. `a_guard_whose_descriptors_cannot_be_configured_reports_its_end`
+and `the_end_of_an_aborted_guard_is_what_its_kill_and_its_wait_answered`
+drive both policies through their fixtures'
+`wait-with-status-refused` and `wait-with-status-killed` answers, and
+`the_default_teardown_makes_the_waits_it_always_made` drives the fatal
+one at `abort_setup` a second time through its `status-pointer` shape.
+
+## `mod termination` › `enum EndingRetry {`
+
+Whether an ending makes its wait again when a signal interrupts it,
+chosen by the calling site for the same reason `EndingWait` is: these
+sites do not all wait alike, and a site that gains a retry it never had
+is making a call the host never agreed to. `Once` is the single wait
+the descriptor-configuration and READY failures have each always made;
+`WhileInterrupted` is `Guard::abort_setup`'s retry, because giving up
+on the first `EINTR` there is what would leave the killed guard
+unreaped.
+
+`WhileInterrupted` is bounded by `INTERRUPTED_WAIT_ATTEMPTS`, which
+`abort_setup`'s inline loop was not. A wait is interrupted by a signal
+that arrived while it blocked, so the retry exists for a handful of
+deliveries; a wait answered `EINTR` that many times running is being
+refused rather than interrupted, and §7 asks that a retry be bounded.
+Unbounded, the loop is a hang where a hang is worse than the leak it
+replaces: the caller receives no answer at all rather than a wait it
+can read. `an_aborted_guard_whose_waits_are_all_interrupted_reports_that_and_returns`
+drives the retry to exhaustion under a policy answering every `wait4`
+`EINTR` and asserts what the caller then receives; with the bound
+removed that driver fails on its own deadline.
+
+## `mod termination` › `fn end_unready_guard(`
+
+The teardown of a guard that never became the supervisor's, and the
+only place one is signalled and collected. Three sites reach it: the
+READY failure, the descriptor-configuration failure just before it, and
+`Guard::abort_setup` after the monitor thread fails to start. The
+latter two discarded their own `kill` and `waitpid` and said nothing of
+them until row `PR125-CLOSE-DISCARDED-KILL-RESULT` was taken up. Moved
+out of `spawn_guard`'s body so the identity arm and the base's arm sit
+side by side. The base's arm is the code that was inline: one `kill`,
+then the one `waitpid` the calling site has always made, their answers
+kept for the message. The identity arm is `end_helper_through_identity`,
+which signals and waits through the descriptor and so has no status
+pointer for a policy to see; `wait` does not reach it.
+
+How an interrupted wait is answered is `EndingRetry`, and the calling
+site chooses it exactly as it chooses the wait. The two `spawn_guard`
+sites pass `EndingRetry::Once` — the single wait each has always made,
+whose `EINTR` is reported rather than waited on again — and
+`Guard::abort_setup` passes `EndingRetry::WhileInterrupted`, the retry
+it has always made. A round of this repair folded the retry into this
+helper for all three sites, which gave the two `spawn_guard` sites a
+retry neither ever had; with `wait4` answered `EINTR` by policy, the
+descriptor-configuration failure then never returned at all. Measured
+through `run_with_timeout_at`: `timeout 2s` exited `124` at that head
+against `0` on `master`, on one `kill` and 181,654 interrupted waits in
+a second.
 
 ## `fn spawn_guard` › `let how = if wait == ReadyWait::Ready {`
 
