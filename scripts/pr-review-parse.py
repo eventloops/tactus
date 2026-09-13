@@ -84,6 +84,13 @@ refusal:
   * every run of three or more backticks or tildes in the comment was consumed by the structure
     scan as a fence of a block that scan found. One that was not means the comment's block
     structure is NOT what this program thinks it is, and there is no result;
+  * and no block the verdict was not read from holds a `json` fence line or a bare verdict
+    opener. Accounting for every run says each one was consumed as a fence; it says nothing about
+    WHICH block it was consumed into, and CommonMark suppresses a fence inside a raw-HTML block
+    where this scan does not -- so a hidden `` ```text `` line swallowed a real blocking verdict
+    as its content, left every run accounted for, and let a `PASS` appended after it stand as the
+    only candidate. What such a block holds is material, on the same terms as what lies outside
+    one;
   * nothing but whitespace follows the block the verdict is read from, and no `VERDICT:` line
     stands outside it. Not "nothing this program recognises as a block" -- nothing;
   * no object the verdict is read from names anything twice, AT ANY DEPTH. `json.loads` keeps
@@ -166,6 +173,20 @@ CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # safe direction for a stray-token scan is to find MORE of them, because each one is a blocker.
 STRAY_TOKEN = re.compile(r"\b(?:P[0-3]|MUST)\b", re.ASCII)
 
+# AND THE SPELLING A DECODER READS, NOT ONLY THE ONE THE COMMENT WRITES. `"severity":"P\u0031"` is
+# `P1` to `json.loads`, to GitHub's renderer and to the person reading the comment, and it is
+# nothing at all to a regex run over the characters the comment spells it with. Every witness in
+# this family carried its blocking severity past this scan that way -- the truncation revival, the
+# indented fence, the repeated name, the HTML comment and the fenced object all spell it `P\u0031`
+# -- because the scan that exists to catch a severity outside the verdict object could not read the
+# only spelling those witnesses use. `\uXXXX` and JSON's two-character escapes are resolved below;
+# a doubled backslash is consumed as the one character it is, so `\\u0031` is not read as an escape
+# it is not. Each `\uXXXX` is resolved on its own, which is enough for every spelling of an ASCII
+# token, and `P0`-`P3` and `MUST` are ASCII.
+JSON_ESCAPE = re.compile(r"\\u([0-9a-fA-F]{4})|\\(.)", re.S)
+SIMPLE_ESCAPE = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f",
+                 "n": "\n", "r": "\r", "t": "\t"}
+
 # A finding carrying any of these blocks in every lane (MAINTAINING step 5): the deferring
 # implementor's ledger row asserts there is no witness, and a witness the review recorded
 # contradicts it.
@@ -228,6 +249,20 @@ FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,})[ \t\r]*\Z")
 # `\{\"role_understanding` missed `{ "role_understanding` and let an earlier PASS stand as the
 # verdict.
 FENCE_RUN = re.compile(r"`{3,}|~{3,}")
+# AND A LINE OF A BLOCK'S CONTENT THAT WOULD OPEN ONE, asked the same way. A fence run this scan
+# consumed AS A FENCE is accounted for by `FENCE_RUN` above whether or not it opened the block the
+# reader sees -- which is the hole `unresolved_material` was blind to, because accounting for every
+# run says nothing about which block each one belongs to. CommonMark suppresses a fence inside a
+# raw-HTML block -- an unclosed `<!--`, a `<div>`, a `<pre>`, any complete tag on a line of its own
+# (https://spec.commonmark.org/0.31.2/#html-blocks) -- and this scan does not, so a fence opened
+# inside one swallows the real verdict as its content and leaves every run accounted for. What such
+# a block's content holds is therefore material too, and a line of it SHAPED LIKE THE OPENING FENCE
+# of a `json` block is the material that matters: that is the one shape the verdict is ever read
+# from, so a block whose content carries one is a block this program cannot be sure it is reading
+# past. The info string is read the way `names_json` reads every other one; a line this matches and
+# CommonMark would not -- a backtick fence whose info string holds a backtick -- is a refusal rather
+# than a reading, which is the direction every rule in this file is wrong in when it is wrong.
+CONTENT_FENCE_OPEN = re.compile(r"^ {0,3}(?:`{3,}|~{3,})([^\n]*)$", re.M)
 
 # The prose form, read exactly as the shell read it. `[^ \t\n\r\f\v]` is POSIX `[^[:space:]]` in
 # the `C` locale, which is what the greps were given.
@@ -299,13 +334,43 @@ def present(value):
     return value not in (None, False, "", [], {}) and str(value).strip() != ""
 
 
+def decoded_spelling(text):
+    """TEXT with JSON's string escapes resolved, so an encoded token is a token to the scan above.
+
+    THE SCAN READS THE SEVERITY THE PARSER READS. `"severity":"P\\u0031"` decodes to `P1` -- for
+    `json.loads`, for GitHub's renderer and for the person reading the comment -- and carries no
+    `P1` at all for a regex over the characters the comment spells it with. That one gap is what
+    every witness in this family used to get a blocking severity past `stray_summary`: the severity
+    only exists after JSON decoding, and the scan ran over raw text.
+
+    Resolved the way a JSON decoder resolves them, and in one left-to-right pass, so a doubled
+    backslash is consumed as the one character it is: `\\\\u0031` is a backslash followed by
+    `u0031` and is NOT an escape, which a pass that resolved `\\uXXXX` anywhere would read as one.
+    An escape this cannot resolve -- `\\uZZZZ` is not four hex digits, and `\\q` is not an escape
+    JSON has -- is left exactly as it was written rather than dropped: a token must not be able to
+    hide in the gap between what this understands and what it discards.
+    """
+    def resolved(match):
+        point, simple = match.group(1), match.group(2)
+        if point is not None:
+            return chr(int(point, 16))
+        return SIMPLE_ESCAPE.get(simple, match.group(0))
+    return JSON_ESCAPE.sub(resolved, text)
+
+
 def stray_summary(outside):
     """The severity and MUST tokens found outside the findings, as one field, or None.
 
     Sorted and joined exactly as `sort -u | tr '\\n' '/'` joined them: both orders are by code
     point, because `sort` ran under `LC_ALL=C` too.
+
+    BOTH SPELLINGS ARE SCANNED -- what the comment writes and what a decoder reads -- and the two
+    are not the same text. Reading both is the safe direction for this scan, the same direction
+    `re.ASCII` is chosen for above: every token it finds is a blocker that sends the review to a
+    person, so one found in both spellings costs nothing and one found in neither is the defect.
     """
-    tokens = sorted(set(STRAY_TOKEN.findall(outside)))
+    tokens = sorted(set(STRAY_TOKEN.findall(outside))
+                    | set(STRAY_TOKEN.findall(decoded_spelling(outside))))
     return "/".join(tokens) if tokens else None
 
 
@@ -480,15 +545,46 @@ def unresolved_material(text, blocks):
     because a ``` inside one would otherwise be read as a fence of the comment's own, but it is
     never the verdict -- the workflow writes backticks -- so a comment carrying one is a comment
     whose verdict this program cannot be sure it is reading.
+
+    AND WHAT SUCH A BLOCK HOLDS IS MATERIAL, WHICH IS WHERE ACCOUNTING FOR EVERY RUN WAS NOT
+    ENOUGH -- the hole `HTML-COMMENT-FENCE-SWALLOWS-VERDICT` and
+    `PROSE-CANDIDATE-ZERO-PERMITS-PROSE` both came through. Accounting for every run says each one
+    WAS consumed as a fence; it says nothing about WHICH BLOCK it was consumed into. CommonMark
+    suppresses a fence inside a raw-HTML block and this scan does not, so `<!--`, a `` ```text ``
+    line, `-->`, and then the real verdict, is a `text` block that SWALLOWS that verdict as its
+    content -- every run accounted for, the swallowed object invisible to the candidate count, and a
+    clean `PASS` appended after it the only candidate left. Measured: the audit reports READY, out
+    of a comment a CommonMark parse sees exactly one fenced verdict in, and that one says
+    CHANGES_REQUIRED with a P1. An unclosed `<!--` is not the only way; `<div>`, `<pre>` and any
+    complete tag on a line of its own start HTML blocks too, so the shape is not a list of tags and
+    is not answered by learning one more of them.
+
+    So a block this program did not read the verdict FROM is not inert. Two things inside one are
+    material, and they are the two shapes a verdict is ever read from anywhere else in this file:
+    a line SHAPED LIKE THE OPENING FENCE of a `json` block, and the older bare form's OBJECT OPENER
+    -- which is the whole of the second finding, whose `text`-fenced `role_understanding` object
+    left the candidate count at zero and sent a self-contradictory comment to the prose parser. A
+    comment whose `text` block holds either has no result -- which is the same sentence as the one
+    above it, asked of the inside of a block rather than of the outside of one.
     """
     stale = []
     for start, end in spans_outside(text, blocks):
         for run in FENCE_RUN.finditer(text, start, end):
             stale.append("%s at line %d" % (run.group(0)[:8], text.count("\n", 0, run.start()) + 1))
     for one in blocks:
+        if one.fence == "`" and names_json(one.info):
+            # The verdict's own shape. What is inside THIS is read by `json.loads`, which is a
+            # whole-document check no fence run can pass: a line-initial run inside a valid JSON
+            # object would have to be inside a string, and a JSON string holds no newline.
+            continue
+        at = text.count("\n", 0, one.outer) + 1
+        for run in CONTENT_FENCE_OPEN.finditer(one.content):
+            if names_json(run.group(1)):
+                stale.append("%s inside the block at line %d" % (run.group(0).strip()[:16], at))
+        if BARE_OBJECT_OPEN.search(one.content) is not None:
+            stale.append("a verdict object inside the block at line %d" % at)
         if one.fence != "`" and names_json(one.info):
-            stale.append("%s%s at line %d"
-                         % (one.fence * 3, one.info[:16], text.count("\n", 0, one.outer) + 1))
+            stale.append("%s%s at line %d" % (one.fence * 3, one.info[:16], at))
     return stale
 
 
@@ -687,8 +783,11 @@ def review_result(args):
     comment's marker rather than by which parser gets an answer. Every branch that cannot be
     resolved ends in a refusal, and none of them ends in the other parser:
 
-      * fence material this program could not read as a block -> no result. The structure is not
-        what it thinks it is, so nothing built on that structure can be trusted;
+      * material this program could not account for as a block -> no result. A fence run outside
+        every block it found, and -- because accounting for every run says nothing about which
+        block each one went into -- a `json` fence line or a bare verdict opener INSIDE a block it
+        did not read the verdict from. The structure is not what it thinks it is, so nothing built
+        on that structure can be trusted;
       * the prose form's marker AND a verdict block -> no result. The comment claims to be both
         forms, and they do not agree about the same review;
       * the prose form's marker and nothing else -> the prose parser, which is the form the comment
@@ -705,7 +804,7 @@ def review_result(args):
     stale = unresolved_material(text, blocks)
     if stale:
         raise Unparsed(
-            "the review carries fence material this parse could not read as a block: [%s]"
+            "the review carries material this parse could not account for as a block: [%s]"
             % stale[0]
         )
     candidates = verdict_candidates(text, blocks)
