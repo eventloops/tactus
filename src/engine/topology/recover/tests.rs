@@ -8239,6 +8239,39 @@ fn driven_runner(seams: &DriveSeams) -> DrivenRunner {
     }
 }
 
+/// Append `bodies` through the production emitter on a handle the caller
+/// already resumed — the live epoch — so the state a closure test plants is
+/// what the loop closes against, with no `run_resumed` between the planting
+/// and the loop to clear a budget stop or wake a deferred task.
+fn plant_live(
+    fixture: &Fixture,
+    handle: &mut RunHandle,
+    bodies: Vec<TopologyEventBody>,
+    hooks: &mut dyn TopologyHooks,
+) {
+    use crate::engine::topology::emit::{EmitState, RunIdentity, emit};
+    use crate::engine::topology::identity::Reservations;
+    let identity = RunIdentity {
+        run_id: RUN_ID.to_owned(),
+        inputs: fixture.inputs(),
+        committed_first_line_sha256: Some(handle.committed_first_line_sha256.clone()),
+    };
+    let mut reservations = Reservations::new();
+    let mut warnings = Vec::new();
+    for body in bodies {
+        let kind = body.kind().to_owned();
+        let mut state = EmitState {
+            fold: &mut handle.fold,
+            log: &mut handle.log,
+            events: &mut handle.events,
+            reservations: &mut reservations,
+            warnings: &mut warnings,
+        };
+        emit(&identity, &mut state, &Frozen, body, hooks)
+            .unwrap_or_else(|error| panic!("`{kind}` is appended in the live epoch: {error:?}"));
+    }
+}
+
 fn drive_as(
     fixture: &Fixture,
     incarnation: &str,
@@ -13593,11 +13626,17 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
     use crate::engine::topology::select::Ceiling;
     use crate::topology::events::DerivedOutcome;
 
-    // Halted: alpha deferred, beta's halting failure.
+    // Halted: alpha deferred, beta's halting failure — both planted in the
+    // live epoch, after the resume, so the closure meets alpha Deferred with
+    // its backoff pending rather than the Pending task `run_resumed` wakes.
     let fixture = Fixture::two_tasks("closure-halted-deferred");
-    append_events(
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let (_, mut handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("the started run resumes");
+    plant_live(
         &fixture,
-        &[
+        &mut handle,
+        vec![
             dispatched(),
             attempt_started_in(&fixture, 1),
             attempt_finished(
@@ -13627,20 +13666,29 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
                 ),
             ),
         ],
+        &mut hooks,
     );
-    let fold = replayed(&fixture);
-    assert_eq!(fold.task_state(ALPHA), Some(TaskState::Deferred));
-    assert_eq!(fold.halted_at(), Some(BETA));
-    assert_eq!(
-        fold.derived_outcome(),
-        DerivedOutcome::Ending(RunOutcome::Halted),
-        "a halting settlement yields Halted whatever is deferred"
-    );
-    accepts_end(&fold, RunOutcome::Halted, Some(BETA));
-    refuses_end(&fold, RunOutcome::Parked, None);
-    refuses_end(&fold, RunOutcome::Complete, None);
-    refuses_end(&fold, RunOutcome::BudgetExceeded, None);
-    let driven = drive(&fixture, &DriveSeams::default(), 2);
+    {
+        let fold = &handle.fold;
+        assert_eq!(fold.task_state(ALPHA), Some(TaskState::Deferred));
+        assert!(
+            fold.backoff_pending(),
+            "the deferral is pending in the live epoch: nothing woke it"
+        );
+        assert_eq!(fold.halted_at(), Some(BETA));
+        assert_eq!(
+            fold.derived_outcome(),
+            DerivedOutcome::Ending(RunOutcome::Halted),
+            "a halting settlement yields Halted whatever is deferred"
+        );
+        accepts_end(fold, RunOutcome::Halted, Some(BETA));
+        refuses_end(fold, RunOutcome::Parked, None);
+        refuses_end(fold, RunOutcome::Complete, None);
+        refuses_end(fold, RunOutcome::BudgetExceeded, None);
+    }
+    let seams = DriveSeams::default();
+    let runner = driven_runner(&seams);
+    let driven = drive_handle(&fixture, handle, &seams, 2, &runner, &mut hooks);
     assert!(
         matches!(
             driven.progress.first(),
@@ -13650,7 +13698,7 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
                 ..
             }))
         ),
-        "the resume reopens the epoch and the loop's first selection is the halted closure: {:?}",
+        "the loop's first selection, with alpha still deferred, is the halted closure: {:?}",
         driven.progress
     );
     assert!(
@@ -13663,6 +13711,11 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
     assert_eq!(
         (ends[0].outcome.clone(), ends[0].halted_at),
         (RunOutcome::Halted, Some(BETA))
+    );
+    assert_eq!(
+        replayed(&fixture).task_state(ALPHA),
+        Some(TaskState::Deferred),
+        "the deferral is void with the halted run, not woken by it"
     );
 
     // BudgetExceeded: alpha deferred by an outage in this epoch, the ceiling refusing beta's
@@ -13741,28 +13794,35 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
 fn run_finished_budget_exceeded_refused_after_halting_drain_settlement() {
     use crate::topology::events::DerivedOutcome;
 
-    let fixture = Fixture::build(
-        "closure-halting-drain",
-        Damage {
-            extra: vec![
-                dispatched(),
-                attempt_started(1),
-                budget_exceeded(0),
-                attempt_finished(
-                    1,
-                    AttemptSettlement::Closed {
-                        transition: SettlementTransition::Failed {
-                            halts_run: true,
-                            reason: "the drained settlement halts".to_owned(),
-                        },
-                        lease: LeaseDisposition::PredictedReleased,
+    let fixture = Fixture::healthy("closure-halting-drain");
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let (_, mut handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
+        .expect("the started run resumes");
+    let epoch = handle.fold.epoch().expect("the resume opened an epoch").0;
+    // Planted in the live epoch: the budget stop and the halting settlement
+    // after it are what the closure meets, not a budget stop a resume between
+    // the planting and the loop would have cleared.
+    plant_live(
+        &fixture,
+        &mut handle,
+        vec![
+            dispatched(),
+            attempt_started(1),
+            budget_exceeded(epoch),
+            attempt_finished(
+                1,
+                AttemptSettlement::Closed {
+                    transition: SettlementTransition::Failed {
+                        halts_run: true,
+                        reason: "the drained settlement halts".to_owned(),
                     },
-                ),
-            ],
-            ..Damage::default()
-        },
+                    lease: LeaseDisposition::PredictedReleased,
+                },
+            ),
+        ],
+        &mut hooks,
     );
-    let fold = replayed(&fixture);
+    let fold = handle.fold.clone();
     assert!(fold.budget_stop().is_some() && fold.halted_at() == Some(ALPHA));
     assert_eq!(
         fold.derived_outcome(),
@@ -13773,7 +13833,9 @@ fn run_finished_budget_exceeded_refused_after_halting_drain_settlement() {
     assert!(text.contains("budget") && text.contains("halted"), "{text}");
     accepts_end(&fold, RunOutcome::Halted, Some(ALPHA));
 
-    let driven = drive(&fixture, &DriveSeams::default(), 1);
+    let seams = DriveSeams::default();
+    let runner = driven_runner(&seams);
+    let driven = drive_handle(&fixture, handle, &seams, 1, &runner, &mut hooks);
     assert!(
         matches!(
             driven.progress.first(),
