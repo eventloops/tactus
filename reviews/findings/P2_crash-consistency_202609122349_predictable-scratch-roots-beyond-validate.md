@@ -25,20 +25,27 @@ Two patterns, each stated as the command that produced it, both run over `git ls
 statement — the source line plus continuation lines up to the terminating `;` — names
 `std::process::id()` and does not name `ulid`.
 
-| | `origin/master` at `71d44285` | after the `src/validate.rs` repair |
+| | `origin/master` at `71d44285` | after the `src/validate.rs` repair, at `fc4c140f` |
 |---|---|---|
 | A: pid-derived temp paths, no ULID | **66** sites in **30** files | **55** sites in **30** files |
-| A2: of those, created as a directory within six lines — a scratch *root* | **57** sites in **25** files | **46** sites in **25** files |
+| A2: of those, created as a directory within six lines — a scratch *root* | **57** sites in **25** files | **45** sites in **24** files |
 
 **Positive control for the pattern**, because a count nobody has checked against a known-present
 case is not evidence: run against `origin/master`, A reports **12** for `src/validate.rs`, which is
 exactly the number `PR104` recorded there.
 
-Run against the repaired tree it still reports **1** for that file, and that one is a **false
+Run against the repaired tree, A still reports **1** for that file, and that one is a **false
 positive worth stating**, because it is the clearest illustration of what these patterns can and
 cannot see: it is the regression test's stand-in for another process's directory, and its tag
 carries a fresh ULID assigned one statement earlier, which a line-and-continuation pattern cannot
-read. The path is unique and guarded. So the honest residue is **45 roots across 24 files**, not 46.
+read. The path is unique, and it is taken with an exclusive `create_dir` that refuses an occupied
+name — the guarantee is the refusal, not the name.
+
+A2 reports **0** for that file, and the agreement with the honest residue is luck rather than a
+smarter pattern: the stand-in's acquisition is a call to `ForeignRoot::acquire`, so no `create_dir`
+token falls inside A2's six-line window even though a directory is created there. A pattern that
+reads call sites rather than tokens would count it again. So the residue is **45 roots across 24
+files** by A2's count and by the honest one, for two different reasons.
 
 A pid is not a unique key. It repeats across containers and after wraparound, which is why
 `PR7-SCRATCH-FIXTURE-LEAK` records a Windows suite failing on a "fresh" fixture that was not fresh,

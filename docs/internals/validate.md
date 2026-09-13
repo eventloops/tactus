@@ -206,13 +206,65 @@ it produces is `render::report`.
 
 ## `struct ForeignRoot(PathBuf);`
 
-One test — [`a_scratch_root_is_unpredictable_and_leaves_a_strangers_directory_alone`]
-— has to stand a directory at a name it chooses rather than at an
-unpredictable one, because the name it needs is the exact name the old
-helper computed. `scratch_tree::acquire` cannot produce that name by
-construction, which is the whole point of it, so this is the one guard in
-this region that reclaims a caller-chosen path. Everything else here goes
-through [`scratch_root`].
+One test — [`a_scratch_root_is_distinct_per_call_and_leaves_a_strangers_directory_alone`]
+— has to stand a directory at a name it chooses rather than at one
+`scratch_tree::acquire` chose, because the name it needs is the exact name
+the old helper computed. `acquire` cannot produce that name by construction,
+which is the whole point of it, so this is the one guard in this region that
+reclaims a caller-chosen path. Everything else here goes through
+[`scratch_root`].
+
+A caller-chosen path is also the whole of the hazard, which is why the only
+way to obtain this type is the fallible constructor below.
+
+## `fn acquire(root: &Path) -> io::Result<Self> {`
+
+**Claim the directory first; arm the destructor second.** `fs::create_dir`
+runs before `Self` exists, and the `?` is what holds that order: a refused
+acquisition constructs no `ForeignRoot`, so there is nothing to drop and
+nothing is deleted. Reversing the two lines is not a smaller version of the
+same bug, it is a different one — a destructor armed on a path the fixture
+never obtained — so the ordering is the fix and the call is secondary.
+
+The first shape of this fixture had both halves wrong, and the consequence
+was the very defect this region was repaired to remove:
+
+- the guard was built from the path *before* the directory was made, so a
+  recursive delete was armed over a path the fixture had not obtained; and
+- the directory was made with `create_dir_all`, which succeeds on a name
+  that is already a directory and creates missing parents besides.
+
+Two review lenses reproduced it independently at `bc251106`, by different
+routes, and both reproductions are in pull request #278's body as
+`PR278-STANDIN-GUARD-ARMED-BEFORE-ACQUISITION`:
+
+- **A directory occupant.** Stop the process before its first `ulid()` call,
+  compute 5,000 candidate names from its pid, nonce 0 and a five-second
+  millisecond window, plant a foreign file in each, resume. The run exited
+  **0** having deleted one of them.
+- **A symlink occupant.** Plant a symlink at the same name, pointing at a
+  directory holding a file called `foreign-sentinel`. `create_dir_all`
+  accepted it — `is_dir` follows a link — and the fixture then wrote through
+  the link: the target's file was **overwritten**, again at exit **0**.
+  Writing through an occupant's link is worse than deleting a directory the
+  fixture did not own, because the target is chosen by whoever planted the
+  link and need not be anywhere near `TMPDIR`.
+
+`fs::create_dir` closes both, and it closes the symlink one *without*
+following the link. It is `mkdir(2)`, which fails with `EEXIST` when the
+final component already exists — including when that component is a symbolic
+link, dangling or not, and without resolving it. So this is not a
+stat-then-act check with a window between the look and the leap: there is no
+look, and the refusal is the same call that would have created the
+directory. `create_dir` is also non-recursive, so a missing `TMPDIR` is
+refused and named rather than silently created and left behind.
+
+[`a_stand_in_root_is_acquired_exclusively_and_a_refusal_deletes_nothing`]
+witnesses the ordering, the occupied directory, both symlink shapes and the
+missing parent. Its symlink half is `#[cfg(unix)]` and was measured on
+Linux; this note makes no claim about how Windows resolves a reparse point
+in `CreateDirectoryW`. The occupied-directory and missing-parent halves are
+not conditional and are what the Windows leg runs.
 
 ## `impl Drop for ForeignRoot {`
 
@@ -262,18 +314,39 @@ length and tests it; what this file adds is a call to it.
 Each of the three properties matters here for a reason this region learned
 the hard way:
 
-*Unpredictable.* Every root in this region used to be
+*Unique, and that is a different word from unguessable.* Every root in this
+region used to be
 `env::temp_dir().join(format!("upstroke-validate-<tag>-{}", process::id()))`.
 A pid is not a unique key — it repeats across containers and after
 wraparound, and one host here runs several suites at once. The same class of
 bug is recorded for the fixed container pre-clean key in
-`src/runner/container/fake.rs`.
+`src/runner/container/fake.rs`. A ULID fixes *that*: two processes, or two
+calls in one process, do not land on one name by accident.
+
+It does not make the name a secret, and nothing in this region may be
+written as though it does. `crate::ulid` digests a millisecond, a process id
+and a per-process counter that starts at zero — three inputs a reader can
+know — and `docs/internals/ulid.md` says so at its module section: "These
+deterministic names are not secrets or proof of ownership. Filesystem
+callers must reserve new roots exclusively."
+`design/15_design_event_log_resume_run_layout.md` is the design authority and
+says it of the id itself: "It does not promise unpredictable or
+collision-free names; exclusive allocation supplies the fresh-run ownership
+check." Anyone who can read this process's pid can compute every name it is
+about to use; a review lens did exactly that, planted the next one, and
+watched [`scratch_root`] refuse it as `Occupied` at exit 101. **That refusal
+is the guarantee, not the arithmetic of the name.**
 
 *Claimed.* `create_dir` refuses a name that exists where `create_dir_all`
 adopts it. Nothing here adopts a directory, so nothing here has any reason to
 pre-clean one — and the `let _ = fs::remove_dir_all(&dir);` that used to open
 this helper, deleting whatever a previous run or another process had left at
 a predictable path and discarding the error, is gone.
+
+So the two properties this region actually rests on are **uniqueness**, which
+keeps honest collisions from happening, and **exclusive acquisition**, which
+decides what happens when one does anyway. Secrecy is not among them and
+never was.
 
 *Reclaimed.* `standards/12_standards_tests.md` asks for the first and the
 third in as many words: "unique temporary directories with RAII cleanup".
@@ -286,7 +359,32 @@ third in as many words: "unique temporary directories with RAII cleanup".
 fixture still owns — and still reclaims — the pools file it wrote, which
 `root` does not contain.
 
-## `fn a_scratch_root_is_unpredictable_and_leaves_a_strangers_directory_alone() {`
+## `fn a_stand_in_root_is_acquired_exclusively_and_a_refusal_deletes_nothing() {`
+
+The trap in the remedy, made executable. Changing `create_dir_all` to
+`create_dir` and stopping there leaves the destructor armed on the failing
+path, which is a different bug rather than a smaller one, and no assertion
+about the happy path can see it. So this test never reaches a successful
+acquisition at all: every arm refuses, and then asserts that the refusal
+took nothing with it.
+
+Four refusals, each with its own mutation witness in pull request #278's
+body:
+
+- an **occupied directory** holding another holder's file — refused
+  `AlreadyExists`, and the file is still there afterwards, which is what
+  fails if the guard is built before the directory;
+- a **symlink to a directory** whose target holds a `foreign-sentinel` —
+  refused, the target's bytes unchanged, the link still a link;
+- a **dangling symlink** — refused too, *and its target still does not
+  exist*, which is how the test distinguishes refusing the link from
+  resolving it and acting on the other end;
+- a **missing parent** — refused `NotFound`, and the parent is not created.
+
+The two symlink arms are `#[cfg(unix)]`. The other two are not, so the
+Windows leg runs them.
+
+## `fn a_scratch_root_is_distinct_per_call_and_leaves_a_strangers_directory_alone() {`
 
 The measured harm, inverted. The reviewer who recorded
 `PR104-VALIDATE-SCRATCH-DIRECTORIES-PREDICTABLE-AND-UNRECLAIMED` pre-created
@@ -295,12 +393,16 @@ region, and watched it pass having deleted the sentinel. So this test stands
 a stranger at exactly the name the pid-derived helper would have chosen for
 the tag it is given, and asserts the file is still there afterwards.
 
-The tag itself carries a fresh ULID, so the stand-in's own name is no more
-predictable than anything else this region creates. That is not incidental
-tidiness: a fixture that occupied a genuinely predictable path, and then
-removed it, would be committing the defect it exists to disprove.
+The tag carries a fresh ULID so that the stand-in does not collide with
+another run of this test — not because that makes it unguessable, which it
+does not. What keeps the stand-in honest is that it is obtained through
+[`ForeignRoot::acquire`], which refuses an occupied name: if somebody else
+holds the path this test computed, the test fails naming it and destroys
+nothing. An earlier version of this test took the path with `create_dir_all`
+instead and deleted whatever was there, which is the defect it exists to
+disprove, committed inside the disproof.
 
-The other two assertions are what stops that one from being satisfied
+The other two assertions are what stops the first from being satisfied
 cheaply: two calls with one tag in one process must not share a root, which
 is the property a pid alone cannot give; and the root must be gone once its
 guard drops.

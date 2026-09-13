@@ -276,9 +276,18 @@ mod tests {
     use super::*;
     use crate::rundir::scratch_tree::{ScratchTree, acquire};
     use std::env;
+    use std::io;
     use std::ops::{Deref, DerefMut};
 
+    #[derive(Debug)]
     struct ForeignRoot(PathBuf);
+
+    impl ForeignRoot {
+        fn acquire(root: &Path) -> io::Result<Self> {
+            fs::create_dir(root)?;
+            Ok(Self(root.to_path_buf()))
+        }
+    }
 
     impl Drop for ForeignRoot {
         fn drop(&mut self) {
@@ -344,13 +353,109 @@ mod tests {
     }
 
     #[test]
-    fn a_scratch_root_is_unpredictable_and_leaves_a_strangers_directory_alone() {
+    fn a_stand_in_root_is_acquired_exclusively_and_a_refusal_deletes_nothing() {
+        let parent = scratch_root("standin");
+
+        let occupied = parent.path().join("another-holders-root");
+        fs::create_dir(&occupied).expect("the other holder's root");
+        let held = occupied.join("another-holders-file");
+        fs::write(&held, "not this fixture's work").expect("the other holder's file");
+
+        let refusal = ForeignRoot::acquire(&occupied)
+            .expect_err("an occupied name must be refused rather than adopted");
+        assert_eq!(
+            refusal.kind(),
+            io::ErrorKind::AlreadyExists,
+            "acquiring the occupied {}: {refusal:?}",
+            occupied.display()
+        );
+        assert!(
+            held.is_file(),
+            "the refused acquisition deleted {}",
+            held.display()
+        );
+
+        #[cfg(unix)]
+        {
+            let target = parent.path().join("another-holders-target");
+            fs::create_dir(&target).expect("the other holder's target directory");
+            let through_the_link = target.join("foreign-sentinel");
+            fs::write(&through_the_link, "the target's own work").expect("the target's file");
+            let link = parent.path().join("another-holders-link");
+            std::os::unix::fs::symlink(&target, &link).expect("the other holder's symlink");
+
+            let refusal = ForeignRoot::acquire(&link)
+                .expect_err("a symlink occupant must be refused rather than followed");
+            assert_eq!(
+                refusal.kind(),
+                io::ErrorKind::AlreadyExists,
+                "acquiring the symlinked {}: {refusal:?}",
+                link.display()
+            );
+            assert_eq!(
+                fs::read_to_string(&through_the_link).expect("the target's file"),
+                "the target's own work",
+                "the refused acquisition wrote through {}",
+                link.display()
+            );
+            assert!(
+                link.is_symlink(),
+                "{} stopped being a symlink",
+                link.display()
+            );
+
+            let never_created = parent.path().join("a-target-that-does-not-exist");
+            let dangling = parent.path().join("another-holders-dangling-link");
+            std::os::unix::fs::symlink(&never_created, &dangling)
+                .expect("the other holder's dangling symlink");
+
+            let refusal =
+                ForeignRoot::acquire(&dangling).expect_err("a dangling symlink is an occupant too");
+            assert_eq!(
+                refusal.kind(),
+                io::ErrorKind::AlreadyExists,
+                "acquiring the dangling {}: {refusal:?}",
+                dangling.display()
+            );
+            assert!(
+                !never_created.exists(),
+                "the refused acquisition resolved {} and created {}",
+                dangling.display(),
+                never_created.display()
+            );
+            assert!(
+                dangling.is_symlink(),
+                "{} stopped being a symlink",
+                dangling.display()
+            );
+        }
+
+        let absent_parent = parent.path().join("no-such-parent");
+        let under_absent_parent = absent_parent.join("root");
+        let refusal = ForeignRoot::acquire(&under_absent_parent)
+            .expect_err("a missing parent must be refused rather than created");
+        assert_eq!(
+            refusal.kind(),
+            io::ErrorKind::NotFound,
+            "acquiring {} under a missing parent: {refusal:?}",
+            under_absent_parent.display()
+        );
+        assert!(
+            !absent_parent.exists(),
+            "the refused acquisition created {}",
+            absent_parent.display()
+        );
+    }
+
+    #[test]
+    fn a_scratch_root_is_distinct_per_call_and_leaves_a_strangers_directory_alone() {
         let tag = format!("foreignsentinel-{}", crate::ulid::ulid());
 
-        let stranger = ForeignRoot(
-            env::temp_dir().join(format!("upstroke-validate-{tag}-{}", std::process::id())),
-        );
-        fs::create_dir_all(&stranger.0).expect("another process's scratch root");
+        let stranger_root =
+            env::temp_dir().join(format!("upstroke-validate-{tag}-{}", std::process::id()));
+        let stranger = ForeignRoot::acquire(&stranger_root).unwrap_or_else(|source| {
+            panic!("stand a stranger at {}: {source}", stranger_root.display())
+        });
         let sentinel = stranger.0.join("foreign-sentinel");
         fs::write(&sentinel, "another process's work").expect("the stranger's file");
 
