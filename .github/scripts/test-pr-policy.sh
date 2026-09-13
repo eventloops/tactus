@@ -1637,6 +1637,156 @@ if [[ "$beside_rc" != 0 ]]; then
   exit 1
 fi
 
+# THE QUESTION EVERY CANDIDATE IS ASKED IS FIXED AT THE LISTING ROOT, AND ONLY
+# THE CANDIDATE ADVANCES. The ascent carried the WALKER as the subject, so the
+# question mutated as the walk rose: it set out asking who records the listing
+# and ended up asking who records wherever it had got to. THREE ORDINARY
+# REPOSITORIES AND NO GITLINK ANYWHERE is what that costs. `outer` tracks
+# `project/seed.txt` and nothing else below `project`; `outer/project` is a
+# repository of its own that ignores `nested/`; `outer/project/nested` is a
+# repository whose ledger is at its own root. Nothing records `project/nested`
+# -- but `records_path outer project` answers YES on an ANCESTOR MATCH, because
+# `project/seed.txt` is under `project`, so the walker-subject ascent made
+# `outer` the authority and the nested repository's ledger vanished with it:
+# the same base listing beside that directory conformed at exit 0 where it
+# refused at exit 1 `names 2 findings` beside a generated head listing of the
+# same commit. `records_path outer project/nested` answers NO, and that is the
+# question the loop asks now.
+#
+# AGREEMENT IS ASSERTED BETWEEN EQUIVALENT CANDIDATE SETS AND NOT BETWEEN ALL
+# THREE INPUT FORMS. The base listing plus the head listing and the base listing
+# plus the same ledger DIRECTORY denote one set -- the twin at the boundary and
+# the finding at the head -- and must answer alike. The directory ALONE denotes
+# only what the checkout holds, which is one finding and not two, so exit 0
+# there is the right answer and not a disagreement; asserting all three alike
+# would be asserting something false.
+repo_unrec="$fixture_dir/repo-unrecorded-nested-ledger"
+new_repo "$repo_unrec"
+mkdir -p "$repo_unrec/project"
+printf 'outer tracks a sibling\n' > "$repo_unrec/project/seed.txt"
+printf 'project/.gitignore\nproject/nested/\n' > "$repo_unrec/.gitignore"
+git -C "$repo_unrec" add -A
+git -C "$repo_unrec" commit -q -m 'only a sibling file below project'
+new_repo "$repo_unrec/project"
+printf 'nested/\n' > "$repo_unrec/project/.gitignore"
+git -C "$repo_unrec/project" add -A
+git -C "$repo_unrec/project" commit -q -m 'the middle repository ignores nested'
+new_repo "$repo_unrec/project/nested"
+printf 'fixture\n' > "$repo_unrec/project/nested/P2_correctness_202609130002_unrecorded-nested-ledger.md"
+git -C "$repo_unrec/project/nested" add -A
+git -C "$repo_unrec/project/nested" commit -q -m 'the nested repository files its finding'
+for unrec_repo in "$repo_unrec" "$repo_unrec/project" "$repo_unrec/project/nested"; do
+  if [[ -n "$(git -C "$unrec_repo" status --porcelain)" ]] \
+    || git -C "$unrec_repo" ls-files -s | grep -q '^160000 '; then
+    echo "the fixture was meant to be three clean repositories with no gitlink: $unrec_repo" >&2
+    exit 1
+  fi
+done
+if [[ -n "$(git -C "$repo_unrec" ls-files -s -- project/nested)" ]] \
+  || [[ -n "$(git -C "$repo_unrec/project" ls-files -s -- nested)" ]] \
+  || [[ -z "$(git -C "$repo_unrec" ls-files -s -- project)" ]]; then
+  echo 'the fixture was meant to record a sibling under project and nothing at project/nested' >&2
+  exit 1
+fi
+printf 'P2_correctness_202609130001_unrecorded-nested-ledger.md\n' > "$repo_unrec/base.txt"
+git -C "$repo_unrec/project/nested" ls-tree --name-only HEAD > "$repo_unrec/head.txt"
+unrec_trees_rc=0
+unrec_trees_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_unrecorded-nested-ledger' \
+  "$repo_unrec/base.txt" "$repo_unrec/head.txt" 2>&1)" || unrec_trees_rc=$?
+unrec_mixed_rc=0
+unrec_mixed_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_unrecorded-nested-ledger' \
+  "$repo_unrec/base.txt" "$repo_unrec/project/nested" 2>&1)" || unrec_mixed_rc=$?
+if [[ "$unrec_trees_rc" != 1 ]] || ! grep -q 'names 2 findings' <<< "$unrec_trees_out" \
+  || [[ "$unrec_mixed_rc" != "$unrec_trees_rc" ]] || ! grep -q 'names 2 findings' <<< "$unrec_mixed_out"; then
+  echo "an unrecorded nested repository keeps its own ledger: the generated head listing answered" >&2
+  echo "  $unrec_trees_rc and the same ledger directory $unrec_mixed_rc" >&2
+  printf '%s\n' "$unrec_mixed_out" >&2
+  exit 1
+fi
+unrec_dir_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_unrecorded-nested-ledger' \
+  "$repo_unrec/project/nested" >/dev/null 2>&1 || unrec_dir_rc=$?
+if [[ "$unrec_dir_rc" != 0 ]]; then
+  echo "that ledger alone holds one finding of that description; got $unrec_dir_rc" >&2
+  exit 1
+fi
+spelling_case 'an unrecorded nested ledger, every spelling' \
+  'fix-P2/correctness_unrecorded-nested-ledger' 0 "$repo_unrec/project/nested"
+
+# AND ITS PAIR, WHERE THE ANCESTOR RECORDS THE LISTING ROOT ITSELF AND AUTHORITY
+# REALLY DOES MOVE OUT. The two fixtures differ in ONE thing -- whether `outer`'s
+# tracked file is UNDER the listing root or BESIDE it -- and they must answer
+# differently, which is what makes the question above a question and not a
+# formality. Here `outer` records `project/nested/tracked.txt`, so `project/nested`
+# is a directory of OUTER'S ledger and what the repository somebody nested there
+# holds is not this repository's record of that path: the listing names no
+# finding, though a finding-shaped file is committed at the nested root.
+#
+# THIS ONE IS A GUARD AND NOT A RED WITNESS for the subject-fixed question: the
+# walker-subject ascent reached `outer` here too, by the ANCESTOR match on
+# `project`, and answered the same. It witnesses the half of `records_path` the
+# new multi-component subject relies on -- that entries UNDER a path count as
+# that path being recorded -- which the single-component subject never exercised.
+repo_records_root="$fixture_dir/repo-outer-records-the-nested-root"
+mkdir -p "$repo_records_root/project/nested"
+new_repo "$repo_records_root"
+printf 'outer tracks a file UNDER the nested root\n' > "$repo_records_root/project/nested/tracked.txt"
+printf 'project/.gitignore\nproject/nested/P2_*\n' > "$repo_records_root/.gitignore"
+git -C "$repo_records_root" add -A
+git -C "$repo_records_root" commit -q -m 'outer tracks a file under project/nested'
+new_repo "$repo_records_root/project"
+printf 'nested/\n' > "$repo_records_root/project/.gitignore"
+git -C "$repo_records_root/project" add -A
+git -C "$repo_records_root/project" commit -q -m 'the middle repository ignores nested'
+new_repo "$repo_records_root/project/nested"
+printf 'fixture\n' > "$repo_records_root/project/nested/P2_correctness_202609130006_outer-records-the-root.md"
+git -C "$repo_records_root/project/nested" add -A
+git -C "$repo_records_root/project/nested" commit -q -m 'the nested repository files a finding of its own'
+for rec_repo in "$repo_records_root" "$repo_records_root/project" "$repo_records_root/project/nested"; do
+  if [[ -n "$(git -C "$rec_repo" status --porcelain)" ]] \
+    || git -C "$rec_repo" ls-files -s | grep -q '^160000 '; then
+    echo "the fixture was meant to be three clean repositories with no gitlink: $rec_repo" >&2
+    exit 1
+  fi
+done
+if [[ -z "$(git -C "$repo_records_root" ls-files -s -- project/nested)" ]] \
+  || [[ -n "$(git -C "$repo_records_root/project" ls-files -s -- nested)" ]] \
+  || [[ ! -f "$repo_records_root/project/nested/P2_correctness_202609130006_outer-records-the-root.md" ]]; then
+  echo 'the fixture was meant to record entries UNDER project/nested and nothing at nested' >&2
+  exit 1
+fi
+rec_rc=0
+rec_out="$("$BASH" "$branch_validator" 'fix-P2/correctness_outer-records-the-root' \
+  "$repo_records_root/project/nested" 2>&1)" || rec_rc=$?
+if [[ "$rec_rc" != 1 ]] || ! grep -q 'names no finding' <<< "$rec_out"; then
+  echo "a nested root the repository above RECORDS is judged by that repository; got $rec_rc" >&2
+  printf '%s\n' "$rec_out" >&2
+  exit 1
+fi
+spelling_case 'a nested root the outer repository records, every spelling' \
+  'fix-P2/correctness_outer-records-the-root' 1 "$repo_records_root/project/nested"
+
+# AND A WORK TREE WITH NO REPOSITORY ABOVE IT AT ALL, which is the branch of the
+# ascent that finds no candidate on its FIRST step rather than on a later one.
+# It is the shape every ordinary checkout has and the one a mutation that made
+# the ascent unconditional would break, so it is asserted rather than assumed.
+repo_alone="$fixture_dir/repo-with-nothing-above-it"
+new_repo "$repo_alone"
+printf 'fixture\n' > "$repo_alone/P2_correctness_202609130005_nothing-above-it.md"
+git -C "$repo_alone" add -A
+git -C "$repo_alone" commit -q -m 'a ledger at the root of a repository nothing contains'
+if git -C "$fixture_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo 'the fixture directory is itself inside a work tree, so "nothing above it" is not the shape' >&2
+  exit 1
+fi
+alone_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_nothing-above-it' "$repo_alone" >/dev/null 2>&1 \
+  || alone_rc=$?
+if [[ "$alone_rc" != 0 ]]; then
+  echo "a work tree with nothing above it answers from its own index; got $alone_rc" >&2
+  exit 1
+fi
+
 # A SUPERPROJECT WHOSE RECORDS CANNOT BE READ IS REFUSED AND NEVER READ AS A
 # SUPERPROJECT THAT RECORDS NOTHING. `rev-parse --show-superproject-working-tree`
 # answers 0 with empty stdout AND empty stderr while the `ls-files` beneath it

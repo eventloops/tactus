@@ -1174,7 +1174,8 @@ records_path() {
 
 locate_listing() {
   local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
-  local prefixes rests shallow deep named_root segment nameable answering walker named subrel
+  local prefixes rests shallow deep named_root segment nameable answering walker named
+  local subject subrel
   listing_world=''
   listing_toplevel=''
   listing_relpath=''
@@ -1366,9 +1367,10 @@ locate_listing() {
   # finding-shaped file at its own root, the listing conformed at exit 0 while
   # the same commit's three tree listings refused at exit 1 `names no finding`.
   # So `walker` is how far out the ascent has got and `answering` is the
-  # OUTERMOST work tree whose records NAME the one below it; a repository nothing
-  # above records keeps its own index, exactly as before, and the ascent above it
-  # only looks.
+  # OUTERMOST work tree whose records NAME THE LISTING ROOT -- never whatever the
+  # walk has reached, which is the drift the loop below is written against. A
+  # repository nothing above records keeps its own index, exactly as before, and
+  # the ascent above it only looks.
   #
   # WHAT IT COSTS, counted with GIT_TRACE on this tree rather than read off the
   # code: nothing at all unless the listing is a work tree's own root, because
@@ -1430,17 +1432,36 @@ locate_listing() {
     # A name the work tree's own index can hold. Only an EMPTY one asks another
     # repository, and only then is anything above this one looked at.
     [[ -z "${rests[named_root]}" ]] || break
+    # THE QUESTION IS FIXED AT THE LISTING ROOT AND ONLY THE CANDIDATE ANCESTOR
+    # ADVANCES. `subject` is what every candidate is asked about and it never
+    # moves; `walker` is only how far out the ascent has got, and asking a
+    # candidate about IT mutates the question as the walk rises -- setting out
+    # asking who records the listing and ending up asking who records wherever
+    # the walk has reached. The false green that drift cost is a fixture: an
+    # ancestor recording a SIBLING under the listing's parent answered yes for
+    # the listing, so `outer` tracking `project/seed.txt` took authority over an
+    # unrecorded repository at `outer/project/nested` and its ledger vanished.
+    # A GITLINK ANCESTOR ANSWERS THE SAME EITHER WAY and is not evidence this is
+    # right: `records_path` counts an ancestor recorded AT ITS OWN NAME as a
+    # blob above the path, so `findings` at 160000 answers yes for
+    # `findings/nested` as it did for `findings`. The sibling is the case that
+    # separates them, because an ancestor the records hold ENTRIES UNDER is a
+    # directory of that ledger's and says nothing about what is nested in it.
+    subject="$top"
     answering="$top"
     walker="$top"
     while :; do
       enclosing_work_tree "$walker" "$path" || return 1
       [[ -n "$enclosing_root" ]] || break
       named=0
-      # The path of this work tree WITHIN the one above it, and the separator is
+      # The LISTING ROOT's path within the candidate, and the separator is
       # dropped on its own rather than as part of the prefix: with `/` the root
-      # above, `${walker#"/"/}` strips nothing and an ABSOLUTE path would go to
-      # `ls-files` as a pathspec leaving the work tree.
-      subrel="${walker#"$enclosing_root"}"
+      # above, `${subject#"/"/}` strips nothing and an ABSOLUTE path would go to
+      # `ls-files` as a pathspec leaving the work tree. Every candidate is a
+      # proper ancestor of `walker` and `walker` is `subject` or an ancestor of
+      # it, so a candidate is always a proper ancestor of `subject` too and this
+      # is always a prefix strip.
+      subrel="${subject#"$enclosing_root"}"
       records_path "$enclosing_root" "${subrel#/}" || named=$?
       if (( named == 2 )); then
         echo "branch-name-policy: the repository at '$enclosing_root' contains the work" >&2
