@@ -175,7 +175,7 @@ at `6ac29984` — the *cherry-pick* sampler refusing one of eight samples on a s
 `index.lock`, `Access is denied (os error 5)`, with that run's other ten checks green and the same
 test passing on ubuntu and macOS within it — and it passed on the next head, all eleven checks
 green. Filed as `PR247-SAMPLER-REFUSED-A-LOCKED-INDEX-ON-WINDOWS` rather than called a flake; all
-three are in `reviews/findings/`. No fingerprint appeared in the fifth, sixth or seventh rounds'
+three are in `findings/`. No fingerprint appeared in the fifth, sixth or seventh rounds'
 local runs, and every local run that measured this worktree passed clean at the first attempt. The
 sightings in full are `pr8-plan.md` §5.
 
@@ -381,7 +381,7 @@ reviewer's required changes into the `merge_rejected` payload's existing `detail
 schema-4 only. No trait signature, no serialized vocabulary and no effect site moves.
 
 Two known gaps were deferred by the owner on 2026-09-07, each with a standing finding filed in
-`reviews/findings/`. `PR8-CRASH-002`: a lock file left by a coordinator
+`findings/`. `PR8-CRASH-002`: a lock file left by a coordinator
 killed inside `git update-ref`; the refusal it causes is resumable and loses nothing, and the
 operator's removal of the lock lets the next resume complete the publication; reclaiming it needs
 a `Ref.*` residue class in the frozen inventory. `PR8-R2-SPEND-REPLAY`: a paid review that parks

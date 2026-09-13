@@ -21,10 +21,17 @@ readme = "README.md"
 keywords = ["ai", "agents", "orchestration", "automation", "cli"]
 categories = ["command-line-utilities", "development-tools"]
 # Exclude working records, automation, and the Pages entry point and domain.
+# The finding ledger needs BOTH of its homes named: it moved to findings/ on
+# 2026-09-12 and until then was covered only incidentally, by living under
+# reviews/. That move carried it out from under an umbrella entry and into the
+# package -- 340 files, 876,384 bytes of internal working records -- with no
+# line to rewrite and no occurrence of the old path for a gate or a grep to
+# catch, which is why neither found it.
 # Module notes under docs/internals stay in the crate with the source they
 # document. Parser fixtures stay because the tests read them.
 exclude = [
     "reviews/",
+    "findings/",
     ".github/",
     ".upstroke/",
     ".testagent/",

@@ -45,8 +45,8 @@ source, documentation, workflows, release machinery and this file.
 
    **Every open finding gets its own file, and the file is deleted when it is resolved.** One file
    per finding, never one per pull request and never one per review pass: a pass that returns six
-   findings produces six files. Severity leads the filename so `reviews/findings/` sorts worst
-   first and an `ls` is the outstanding work; name and shape them as `reviews/findings/README.md`
+   findings produces six files. Severity leads the filename so `findings/` sorts worst
+   first and an `ls` is the outstanding work; name and shape them as `findings/README.md`
    states. A finding fixed before merge needs no file at all — the body's ledger row is its
    permanent record, and that row is required whatever the disposition. `reviews/FINDINGS.md` is
    the same ledger up to 2026-09-04, closed to new sections; its section numbers are cited from
@@ -55,7 +55,7 @@ source, documentation, workflows, release machinery and this file.
    A repair-only push after a pass that found no serious P1 needs no second pass: the owner reads
    `git diff <reviewed> <head>`, confirms it contains those repairs and nothing else — never a
    workflow, gate script or validator edit — and says so in the body. A push confined to
-   the finding ledger (`reviews/findings/`, or `reviews/FINDINGS.md`), or a conflict-free merge of `master` that leaves `git diff master...HEAD`
+   the finding ledger (`findings/`, or `reviews/FINDINGS.md`), or a conflict-free merge of `master` that leaves `git diff master...HEAD`
    byte-identical with CI green on the merged head and no gate edited by the pull request, keeps
    the review as well; record both SHAs, and for the merge-in both base SHAs and the diff hash
    before and after. Anything wider is a new change and is reviewed again. A panel-reviewed
@@ -142,7 +142,7 @@ source, documentation, workflows, release machinery and this file.
    with no owner ever reading a gate diff. **So an amendment to those words is the owner's, or
    carries a delegation the owner wrote for that pull request**, whatever the first limb says of its
    paths. The sites are this step, the trust boundary under Repository rules, `CLAUDE.md`,
-   `AGENTS.md` and `reviews/findings/PROCESS.md`, and the requirement covers step 4's review and
+   `AGENTS.md` and `findings/PROCESS.md`, and the requirement covers step 4's review and
    step 5's triage — the preconditions the standing form was built on top of. **This is not another
    entry on the list above.** That list is paths whose contents change what a check *does*; this is
    text that defines the delegate's own authority. They are different kinds of thing, and folding
@@ -228,7 +228,7 @@ those rounds invented, and record what it was for as a finding carrying its prop
 
 Neither signal is a licence to abandon a real defect. A relevant serious P1 is fixed and
 re-reviewed under step 5 whatever the signals say, and what a narrowing drops is preserved where
-step 5 puts any open finding: one file each under `reviews/findings/`, saying what the change that
+step 5 puts any open finding: one file each under `findings/`, saying what the change that
 takes it up should do. A pull request that does not merge carries nothing into the tree by itself,
 so those files land through a change of their own. What a signal costs is a paragraph. A loop
 neither signal catches is still a loop, so these are a floor and not a detector.
@@ -303,18 +303,20 @@ read this file, so changing the contract is a change to this file and to the gat
 Every head branch is in the vocabulary `.github/scripts/validate-pr-branch.sh` enforces, checked by
 `upstroke-pr-policy` on each pull request and each queue entry. `feature/`, `refactor/`, `docs/`,
 `standards/`, `ci/`, `gate/` and `findings/` take a lower-case name whose words are joined by single
-hyphens; `findings/` is for a pull request that touches `reviews/findings/` and nothing else, and
+hyphens; `findings/` is for a pull request that touches `findings/` and nothing else, and
 **that limit is checked against the diff**: the changed paths between the merge base and the head
-are handed to the validator, and a `findings/` branch carrying a path outside `reviews/findings/` is
+are handed to the validator, and a `findings/` branch carrying a path outside `findings/` is
 refused with the paths named. It is what makes that prefix's low-effort review safe, and an empty
 changed-path listing is refused there too — a pull request that changes nothing files nothing.
-**A file any pull request adds or renames under `reviews/findings/` is a finding**: its name starts
-`P0_`–`P3_` and its frontmatter `severity:` is one of P0–P3, or the pull request is refused. Only
-what the diff **adds or renames** is checked, so a name already on `master` never turns another pull
+**A file any pull request adds or renames under `findings/` is a finding**: its name starts
+`P0_`–`P3_` and its frontmatter `severity:` is one of P0–P3, or the pull request is refused. The
+directory's own `findings/README.md` and `findings/PROCESS.md` are the one exemption, by exact
+path: they are not findings, and a move of the whole directory adds or renames both. Only what
+the diff **adds or renames** is checked, so a name already on `master` never turns another pull
 request red. `.github/scripts/changed-in-range.sh` builds both listings, because nothing below the
 validator's audited region may run a command or open a file.
 `fix-P<n>/` takes `<category>_<description>` and must name exactly one finding filed under
-`reviews/findings/`, for `n` in 0–3. `bulk-fix-P<n>/` takes a hyphenated name and carries a batch of
+`findings/`, for `n` in 0–3. `bulk-fix-P<n>/` takes a hyphenated name and carries a batch of
 them, for `n` in 2–3; P0 and P1 are never batched. The two are separate prefixes so that each one's
 rule is exact: a single-finding branch resolves to its file and a batch names none. The finding is
 looked for **anywhere in the pull request** and not at its two ends: the **merge-base** tree, the
@@ -332,7 +334,7 @@ answers is whether the name resolves to exactly one filed finding in the listing
 
 **A check that cannot see its input refuses; it never decides that it saw nothing.** The listings
 the check is handed are the merge-base tree, the head tree and the pull request's own commits, and a
-maintainer running it by hand may hand it a working tree's `reviews/findings/` directory instead.
+maintainer running it by hand may hand it a working tree's `findings/` directory instead.
 Whichever form, an input that cannot be read — an unreadable file, a stream that fails part-way, a
 directory that cannot be listed, an index or a repository git cannot read — is a **refusal** and
 never an empty set, because a candidate set that silently narrows turns an ambiguous name into an
@@ -365,26 +367,27 @@ path git records anything at, under or above — not `-d`, not `-e`, not `-L`, n
 the bytes of a file the checkout materialised. That is what makes the two ways in one code path from
 the index down, so the equivalence below holds by construction: a committed symlink named like a
 finding is a `120000 blob` to both; a sparse checkout's excluded finding is an index entry and a tree
-entry; a `reviews` the checkout renamed and replaced with a link is still the directory the index
+entry; a `findings` the checkout renamed and replaced with a link is still the directory the index
 records; and a link materialised under `core.symlinks=false` — git's own setting, and what it uses
 wherever a link cannot be made — is never read as a listing, which is how one was made to invent a
 finding nobody had filed. A listing path is reduced to its components before it is judged, so
-`reviews/findings`, `reviews/findings/`, `reviews/findings/.`, `reviews//findings` and
-`reviews/./findings` are one listing and answer alike, and the path the index is asked about is built
+`findings`, `findings/`, `findings/.`, `<repo>//findings` and
+`<repo>/./findings` are one listing and answer alike, and the path the index is asked about is built
 from **those** components and never from where the filesystem takes them; a `..` after a named
 component is refused rather than guessed at. The work tree's root is matched against those components
 by inode, so a link above the repository costs nothing — but the path **through** that root is
-matched by recorded mode, because an inode comparison cannot see one: `reviews` committed as a link
-to the work tree's own root is `-ef` that root, and taking it as one named the listing `findings` and
-answered it out of the root's own directory, past the `120000` the index records. The filesystem is the whole of the evidence in one
+matched by recorded mode, because an inode comparison cannot see one: a directory committed as a link
+to the work tree's own root is `-ef` that root, and taking it as one named the listing by its last
+component alone and answered it out of the root's own directory of that name, past the `120000` the
+index records. The filesystem is the whole of the evidence in one
 place only: a listing with no repository over it, which is how the validator is run against a scratch
 directory, and a path inside a work tree that git records nothing at, under **or above** — an
 ordinary untracked scratch directory, and the temporary files a caller builds the three listings in.
 
 **The property is that the two ways in agree**: for one commit, the three tree listings and the
-working tree's `reviews/findings/` give the same answer, and the fixture suite checks that as a
+working tree's `findings/` give the same answer, and the fixture suite checks that as a
 property over repositories and branch names rather than case by case. It costs one thing and gains
-another, both deliberate. An **untracked** finding file inside a tracked `reviews/findings/` no
+another, both deliberate. An **untracked** finding file inside a tracked `findings/` no
 longer counts for the directory form — the ledger is what is committed, a merge gate decides about
 commits and never about a work tree, and the answer for a finding an author has written and not yet
 added is `git add`. And where git records a **directory** at the listing path and the checkout holds
@@ -449,7 +452,7 @@ request's lane from its branch prefix alone, counts only the owner's review comm
 bound to that head is the enqueue itself, which names the commit), and with `--enqueue` adds
 each ready pull request to the queue in the order its arguments give, so the caller states the
 priority. A finding a lane need not fix is filed and deferred: one file per finding under
-`reviews/findings/` with a `deferred` ledger row. A witnessed defect or a `MUST` deviation is
+`findings/` with a `deferred` ledger row. A witnessed defect or a `MUST` deviation is
 fixed whatever its label, as step 5 says.
 
 **Trust boundary.** There is one trusted same-repository writer: the owner. A pull request can

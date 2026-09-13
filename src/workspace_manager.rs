@@ -2110,7 +2110,7 @@ impl WorkspaceManager {
     /// #136's rows record. **It is not a guarantee that the sampled child runs
     /// the funnel's argv**, and this comment previously said it was. It does
     /// **not** make the kill go through the process funnel either — that is
-    /// `PR5D-PROCESS-FUNNEL-TAKES-NO-SITE` in `reviews/findings/`, owned by
+    /// `PR5D-PROCESS-FUNNEL-TAKES-NO-SITE` in `findings/`, owned by
     /// PR6/PR7 with `src/runner/**` frozen — and this comment does not claim it
     /// does.
     ///

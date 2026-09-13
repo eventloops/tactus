@@ -35,7 +35,7 @@
 #   fix-P3/<category>_<desc>   fix-p3         by category: docs-contract low,  P0-P2, plus the P3
 #   bulk-fix-P3/<slug>         fix-p3           every other category max         rule below
 #
-# A `findings/` pull request touches reviews/findings/ and nothing else, which is what makes its
+# A `findings/` pull request touches findings/ and nothing else, which is what makes its
 # `low` review safe -- the limit is enforced by validate-pr-branch.sh and not here. THE REVIEW OF A
 # `findings/` BRANCH ASKS ONE QUESTION: whether any finding it files duplicates one already filed.
 # That is the review's brief rather than an effort level, so it is stated here and carried by the

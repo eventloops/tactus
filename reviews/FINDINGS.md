@@ -3,13 +3,13 @@
 Every review finding across every slice, with its disposition and whether it has recurred.
 
 > **Closed to new sections, and emptied of its open rows.** A finding recorded after 2026-09-04 is
-> its own file under `reviews/findings/`, which ends the merge conflicts this single file caused.
+> its own file under `findings/`, which ends the merge conflicts this single file caused.
 > Every row that was still open has moved there too, under the same `id`, so `ls` on that directory
 > is the whole outstanding queue and this file is the resolved history. No section is renumbered —
 > source comments and design sections cite these sections by number — and the dated narrative and
 > audit sections are left as their authors wrote them, so a row migrated out of §2 or out of a
 > sweep's ledger table is still described where it was first derived. See
-> `reviews/findings/README.md`.
+> `findings/README.md`.
 Accumulative and append-only. This file is **an input to every review**, not a record written
 after one.
 
@@ -116,8 +116,8 @@ a sound finding whose *fix* had a hole, caught only by a later independent pass.
 
 ## 2. Open — carried deliberately, with an owner
 
-The seventy rows here that were still open are files under `reviews/findings/` now, found by `id`
-(`grep -rl 'id: PR7-STD-CONTAINER-EXEC-UNBOUNDED' reviews/findings/`). What is left below is the
+The seventy rows here that were still open are files under `findings/` now, found by `id`
+(`grep -rl 'id: PR7-STD-CONTAINER-EXEC-UNBOUNDED' findings/`). What is left below is the
 rows this section resolved in place: repaired, struck, closed, or settled as a deviation the owner
 accepted. The heading keeps its number and its name because both are cited elsewhere.
 
@@ -5858,8 +5858,8 @@ master, which the pull request did not introduce and did not merge a fix for; ro
 `33604e6` name a defect in the closed pull request's own attempt, reachable at the pull request,
 recorded so the next attempt does not repeat it.
 
-Every one of those rows is still open, so all eleven are files under `reviews/findings/` rather
-than rows here: `grep -rl 'id: PR125-CLOSE-' reviews/findings/` lists them.
+Every one of those rows is still open, so all eleven are files under `findings/` rather
+than rows here: `grep -rl 'id: PR125-CLOSE-' findings/` lists them.
 
 ### Addendum, 2026-09-04, from PR #136: the first live catch of #134's diagnostic
 
@@ -6264,13 +6264,13 @@ findings are fixed and P3 and lower are recorded; the P3 rows marked `fixed` are
 itself repairs in the same commit, and the `deferred` rows each name the file that owns them.
 
 **Why this section is in a file marked closed.** PR #138 (`d91e84a`) replaced this layout: a
-finding recorded after 2026-09-04 is its own file under `reviews/findings/`, which ends the merge
+finding recorded after 2026-09-04 is its own file under `findings/`, which ends the merge
 conflicts this single file caused and retires the practice of sessions reserving section numbers
 from one another. §54 was written on 2026-09-04, before that landed, and pass 1 reviewed it here;
 converting twenty-six rows to the new layout mid-round would make the next pass's diff a wholesale
 move rather than the four repairs it has to check. So it is finished in place on the coordinator's
 direction, and it is the last section this file takes. **Every finding this session records from
-here on goes in `reviews/findings/`**, and the number it happens to carry — §54, the next after
+here on goes in `findings/`**, and the number it happens to carry — §54, the next after
 §52 from PR #131 and §53 from PR #109 — is an artefact of the convention it is the last user of.
 
 Four merges of `origin/master` are in this branch: `c61880f`, then `5f661fa` — one
@@ -6449,14 +6449,14 @@ what is left here is the ones it resolved.
 authors knew: §54 and §56 were written the same day, on two branches, each before #138 landed, and
 each was grandfathered by the same ruling. §56 merged after §54 did. Neither is a section anyone
 should add a successor to — the count of grandfathered sections is two, and the next finding from
-either file goes in `reviews/findings/`.
+either file goes in `findings/`.
 
 **The conversion is mechanical, and this paragraph is the recipe**, checked against
-`reviews/findings/README.md` as this branch carries it — PR #140 (`44dc06f`) restored the two
+`findings/README.md` as this branch carries it — PR #140 (`44dc06f`) restored the two
 rules `#138` lost by merging with only its first commit, and the README is authoritative, so read
 it at the head you work from rather than trusting this paragraph if the two ever disagree. A file
 is
-`reviews/findings/<severity>_<category>_<UTC timestamp>_<brief-description>.md`: **severity leads
+`findings/<severity>_<category>_<UTC timestamp>_<brief-description>.md`: **severity leads
 the name**, which is the whole point, because the directory then sorts worst-first. Every category
 in the table below is already a word from the closed vocabulary
 `.github/scripts/test-pr-policy.sh` enforces, so each transcribes without a decision. The
@@ -6466,7 +6466,7 @@ because **a fixed finding has no file** — it is deleted, and the pull-request 
 its permanent record.
 
 So the identifier is *not* in the filename: it lives in `id:`, precisely so a citation survives a
-reclassification, and a file is found by `grep -rl 'id: SWEEP-CLASSIFY-003' reviews/findings/`.
+reclassification, and a file is found by `grep -rl 'id: SWEEP-CLASSIFY-003' findings/`.
 That makes the closing point stronger rather than weaker: **nothing citing these identifiers has to
 change** — not this pull request's ledger rows, and not `src/rundir/classify.rs`, which names
 `SWEEP-CLASSIFY-003`, `-009`, `-010`, `-012` and `-013` at the code they are about. A successor

@@ -902,10 +902,10 @@ round's head `287563f0`, the first full run had one red:
 `workspace_manager::tests::sampled_git_child_kills_every_residue_classified_and_recovered` refused
 one `Worktree.Add` sample with "worktree list record 1 names a HEAD but neither a branch nor a
 detached checkout" — the standing P3 `PR172-SAMPLER-REFUSED-A-TORN-WORKTREE-LIST-RECORD`
-(`reviews/findings/`); it passed alone and the full test gate rerun passed clean. At `cdcea656`,
+(`findings/`); it passed alone and the full test gate rerun passed clean. At `cdcea656`,
 the first full run had one red in the same test with the other filed fingerprint: `recover_sample`'s
 forced removal failed `DirectoryNotEmpty` (os error 39) on `tasks/kalpha-g4` — exactly the
-standing P2 `PR136-SAMPLER-FORCED-REMOVAL-DOES-NOT-CONVERGE` (`reviews/findings/`), whose file
+standing P2 `PR136-SAMPLER-FORCED-REMOVAL-DOES-NOT-CONVERGE` (`findings/`), whose file
 records that fingerprint verbatim; the full test gate rerun at the same head passed clean (2362
 passed, 0 failed, 43 ignored), and the ten gates named above are green on that rerun. The fifth
 repair round saw neither fingerprint: its three full test runs, at

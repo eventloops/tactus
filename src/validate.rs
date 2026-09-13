@@ -274,49 +274,236 @@ impl Report {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rundir::scratch_tree::{ScratchTree, acquire};
     use std::env;
-    use std::sync::OnceLock;
+    use std::io;
+    use std::ops::{Deref, DerefMut};
 
-    fn opts(plan: &str) -> ValidateOptions {
-        let hermetic_root =
-            env::temp_dir().join(format!("upstroke-validate-hermetic-{}", std::process::id()));
-        fs::create_dir_all(&hermetic_root).expect("hermetic root");
-        ValidateOptions {
-            plan_path: PathBuf::from(plan),
-            config_path: None,
-            config_root: hermetic_root,
-            engine_limits: config::EngineLimits::Fresh,
-            pools_path: Some({
-                static PATH: OnceLock<PathBuf> = OnceLock::new();
-                PATH.get_or_init(|| {
-                    let dir = env::temp_dir()
-                        .join(format!("upstroke-validate-nopools-{}", std::process::id()));
-                    fs::create_dir_all(&dir).expect("scratch dir");
-                    let path = dir.join("pools.toml");
-                    fs::write(
-                        &path,
-                        "# no pools
-",
-                    )
-                    .expect("empty pools file");
-                    path
-                })
-                .clone()
-            }),
+    #[derive(Debug)]
+    struct ForeignRoot(PathBuf);
+
+    impl ForeignRoot {
+        fn acquire(root: &Path) -> io::Result<Self> {
+            fs::create_dir(root)?;
+            Ok(Self(root.to_path_buf()))
         }
     }
 
-    fn scratch_root(tag: &str) -> PathBuf {
-        let dir = env::temp_dir().join(format!("upstroke-validate-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("scratch root");
-        dir
+    impl Drop for ForeignRoot {
+        fn drop(&mut self) {
+            let reclaimed = fs::remove_dir_all(&self.0);
+            assert!(
+                reclaimed.is_ok() || std::thread::panicking(),
+                "the stand-in root {} was not reclaimed: {reclaimed:?}",
+                self.0.display()
+            );
+        }
     }
 
-    fn opts_in(root: &Path, plan: &str) -> ValidateOptions {
-        let mut opts = opts(plan);
-        opts.config_root = root.to_path_buf();
-        opts
+    struct Fixture {
+        opts: ValidateOptions,
+        _scratch: ScratchTree,
+    }
+
+    impl Deref for Fixture {
+        type Target = ValidateOptions;
+
+        fn deref(&self) -> &ValidateOptions {
+            &self.opts
+        }
+    }
+
+    impl DerefMut for Fixture {
+        fn deref_mut(&mut self) -> &mut ValidateOptions {
+            &mut self.opts
+        }
+    }
+
+    fn opts(plan: &str) -> Fixture {
+        let scratch = scratch_root("hermetic");
+        let config_root = scratch.path().join("config");
+        fs::create_dir(&config_root).expect("the hermetic config root");
+        let pools = scratch.path().join("pools.toml");
+        fs::write(&pools, "# no pools\n").expect("empty pools file");
+        Fixture {
+            opts: ValidateOptions {
+                plan_path: PathBuf::from(plan),
+                config_path: None,
+                config_root,
+                engine_limits: config::EngineLimits::Fresh,
+                pools_path: Some(pools),
+            },
+            _scratch: scratch,
+        }
+    }
+
+    fn scratch_root(tag: &str) -> ScratchTree {
+        acquire(&env::temp_dir(), &format!("validate-{tag}")).unwrap_or_else(|refusal| {
+            panic!(
+                "acquire the scratch root {}: {refusal:?}",
+                refusal.root().display()
+            )
+        })
+    }
+
+    fn opts_in(root: &Path, plan: &str) -> Fixture {
+        let mut fixture = opts(plan);
+        fixture.config_root = root.to_path_buf();
+        fixture
+    }
+
+    #[test]
+    fn a_stand_in_root_is_acquired_exclusively_and_a_refusal_deletes_nothing() {
+        let parent = scratch_root("standin");
+
+        let occupied = parent.path().join("another-holders-root");
+        fs::create_dir(&occupied).expect("the other holder's root");
+        let held = occupied.join("another-holders-file");
+        fs::write(&held, "not this fixture's work").expect("the other holder's file");
+
+        let refusal = ForeignRoot::acquire(&occupied)
+            .expect_err("an occupied name must be refused rather than adopted");
+        assert_eq!(
+            refusal.kind(),
+            io::ErrorKind::AlreadyExists,
+            "acquiring the occupied {}: {refusal:?}",
+            occupied.display()
+        );
+        assert!(
+            held.is_file(),
+            "the refused acquisition deleted {}",
+            held.display()
+        );
+
+        #[cfg(unix)]
+        {
+            let target = parent.path().join("another-holders-target");
+            fs::create_dir(&target).expect("the other holder's target directory");
+            let through_the_link = target.join("foreign-sentinel");
+            fs::write(&through_the_link, "the target's own work").expect("the target's file");
+            let link = parent.path().join("another-holders-link");
+            std::os::unix::fs::symlink(&target, &link).expect("the other holder's symlink");
+
+            let refusal = ForeignRoot::acquire(&link)
+                .expect_err("a symlink occupant must be refused rather than followed");
+            assert_eq!(
+                refusal.kind(),
+                io::ErrorKind::AlreadyExists,
+                "acquiring the symlinked {}: {refusal:?}",
+                link.display()
+            );
+            assert_eq!(
+                fs::read_to_string(&through_the_link).expect("the target's file"),
+                "the target's own work",
+                "the refused acquisition wrote through {}",
+                link.display()
+            );
+            assert!(
+                link.is_symlink(),
+                "{} stopped being a symlink",
+                link.display()
+            );
+
+            let never_created = parent.path().join("a-target-that-does-not-exist");
+            let dangling = parent.path().join("another-holders-dangling-link");
+            std::os::unix::fs::symlink(&never_created, &dangling)
+                .expect("the other holder's dangling symlink");
+
+            let refusal =
+                ForeignRoot::acquire(&dangling).expect_err("a dangling symlink is an occupant too");
+            assert_eq!(
+                refusal.kind(),
+                io::ErrorKind::AlreadyExists,
+                "acquiring the dangling {}: {refusal:?}",
+                dangling.display()
+            );
+            assert!(
+                !never_created.exists(),
+                "the refused acquisition resolved {} and created {}",
+                dangling.display(),
+                never_created.display()
+            );
+            assert!(
+                dangling.is_symlink(),
+                "{} stopped being a symlink",
+                dangling.display()
+            );
+        }
+
+        let absent_parent = parent.path().join("no-such-parent");
+        let under_absent_parent = absent_parent.join("root");
+        let refusal = ForeignRoot::acquire(&under_absent_parent)
+            .expect_err("a missing parent must be refused rather than created");
+        assert_eq!(
+            refusal.kind(),
+            io::ErrorKind::NotFound,
+            "acquiring {} under a missing parent: {refusal:?}",
+            under_absent_parent.display()
+        );
+        assert!(
+            !absent_parent.exists(),
+            "the refused acquisition created {}",
+            absent_parent.display()
+        );
+    }
+
+    #[test]
+    fn a_scratch_root_is_distinct_per_call_and_leaves_a_strangers_directory_alone() {
+        let tag = format!("foreignsentinel-{}", crate::ulid::ulid());
+
+        let stranger_root =
+            env::temp_dir().join(format!("upstroke-validate-{tag}-{}", std::process::id()));
+        let stranger = ForeignRoot::acquire(&stranger_root).unwrap_or_else(|source| {
+            panic!("stand a stranger at {}: {source}", stranger_root.display())
+        });
+        let sentinel = stranger.0.join("foreign-sentinel");
+        fs::write(&sentinel, "another process's work").expect("the stranger's file");
+
+        let scratch = scratch_root(&tag);
+        let second = scratch_root(&tag);
+
+        assert!(
+            sentinel.is_file(),
+            "the scratch helper deleted {}, a path it does not own",
+            sentinel.display()
+        );
+        assert_ne!(
+            scratch.path(),
+            second.path(),
+            "two calls with one tag in one process shared a scratch root"
+        );
+
+        let reclaimed = scratch.path().to_path_buf();
+        drop(scratch);
+        assert!(
+            !reclaimed.exists(),
+            "{} outlived its guard",
+            reclaimed.display()
+        );
+    }
+
+    #[test]
+    fn every_fixture_owns_its_hermetic_root_and_pools_file() {
+        let first = opts("fixtures/sample-plan.md");
+        let second = opts("fixtures/sample-plan.md");
+
+        assert_ne!(
+            first.config_root, second.config_root,
+            "two fixtures shared one hermetic config root"
+        );
+        assert_ne!(
+            first.pools_path, second.pools_path,
+            "two fixtures shared one pools file"
+        );
+
+        let root = first.config_root.clone();
+        let pools = first.pools_path.clone().expect("the fixture pools file");
+        assert!(root.is_dir(), "{} was not created", root.display());
+        assert!(pools.is_file(), "{} was not written", pools.display());
+
+        drop(first);
+        assert!(!root.exists(), "{} outlived its fixture", root.display());
+        assert!(!pools.exists(), "{} outlived its fixture", pools.display());
     }
 
     #[test]
@@ -380,7 +567,7 @@ mod tests {
         let root = scratch_root("lonecr");
         let mut rendered: Vec<(&str, String)> = Vec::new();
         for (endings, newline) in [("lf", "\n"), ("crlf", "\r\n"), ("cr", "\r")] {
-            let path = root.join(format!("plan-{endings}.md"));
+            let path = root.path().join(format!("plan-{endings}.md"));
             let raw = [
                 "Preamble",
                 "## Fix bug",
@@ -390,7 +577,7 @@ mod tests {
             ]
             .join(newline);
             fs::write(&path, &raw).expect("the plan fixture");
-            let analysis = analyze(&opts_in(&root, path.to_str().expect("utf-8 path")))
+            let analysis = analyze(&opts_in(root.path(), path.to_str().expect("utf-8 path")))
                 .unwrap_or_else(|error| panic!("{endings} {raw:?}: {error}"));
             assert!(
                 analysis.warnings.is_empty(),
@@ -493,24 +680,28 @@ mod tests {
     #[test]
     fn the_captured_set_names_every_file_an_analysis_reads() {
         let root = scratch_root("capturedset");
-        let plan = root.join("plan.md");
+        let plan = root.path().join("plan.md");
         fs::write(&plan, "## One\n<!-- upstroke: id=t1 depends= -->\n").expect("plan");
-        let mut options = opts_in(&root, plan.to_str().expect("utf-8 path"));
-        options.config_path = Some(root.join("upstroke.toml"));
+        let mut options = opts_in(root.path(), plan.to_str().expect("utf-8 path"));
+        options.config_path = Some(root.path().join("upstroke.toml"));
 
         let captured = CapturedInputs::capture(&options);
-        let mut expected = vec![plan, root.join("upstroke.toml")];
+        let mut expected = vec![plan, root.path().join("upstroke.toml")];
         expected.push(options.pools_path.clone().expect("the fixture pools file"));
-        expected.extend(GATE_DERIVATION_INPUTS.iter().map(|name| root.join(name)));
+        expected.extend(
+            GATE_DERIVATION_INPUTS
+                .iter()
+                .map(|name| root.path().join(name)),
+        );
         assert_eq!(captured.paths(), expected);
     }
 
     #[test]
     fn an_analysis_is_parsed_out_of_the_captured_plan_not_a_second_read_of_it() {
         let root = scratch_root("capturedplan");
-        let plan = root.join("plan.md");
+        let plan = root.path().join("plan.md");
         fs::write(&plan, "## One\n<!-- upstroke: id=t1 depends= -->\n").expect("captured plan");
-        let options = opts_in(&root, plan.to_str().expect("utf-8 path"));
+        let options = opts_in(root.path(), plan.to_str().expect("utf-8 path"));
         let captured = CapturedInputs::capture(&options);
 
         fs::write(
@@ -542,9 +733,9 @@ mod tests {
     #[test]
     fn a_gate_derivation_input_is_part_of_the_captured_set() {
         let root = scratch_root("capturedgates");
-        let plan = root.join("plan.md");
+        let plan = root.path().join("plan.md");
         fs::write(&plan, "## One\n<!-- upstroke: id=t1 depends= -->\n").expect("plan");
-        let options = opts_in(&root, plan.to_str().expect("utf-8 path"));
+        let options = opts_in(root.path(), plan.to_str().expect("utf-8 path"));
 
         let bare = CapturedInputs::capture(&options);
         let analysis = analyze_captured(&bare, &options).expect("analysis");
@@ -554,7 +745,8 @@ mod tests {
             analysis.gates
         );
 
-        fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("a rust repo now");
+        fs::write(root.path().join("Cargo.toml"), "[package]\nname = \"x\"\n")
+            .expect("a rust repo now");
         let shaped = CapturedInputs::capture(&options);
         assert_ne!(shaped, bare, "the capture must see the worktree change");
         let analysis = analyze_captured(&shaped, &options).expect("analysis");
@@ -600,9 +792,8 @@ mod tests {
 
     #[test]
     fn the_preview_shows_who_reviews_without_promising_a_binary_it_cannot_probe() {
-        let root = env::temp_dir().join(format!("upstroke-validate-review-{}", std::process::id()));
-        fs::create_dir_all(&root).expect("root");
-        let plan = root.join("plan.md");
+        let root = scratch_root("review");
+        let plan = root.path().join("plan.md");
         fs::write(
             &plan,
             "## Rotate the signing key\n\
@@ -610,7 +801,7 @@ mod tests {
              ## Note it down\n<!-- upstroke: id=note kind=docs depends=rotate -->\n",
         )
         .expect("plan");
-        let cfg = root.join("upstroke.toml");
+        let cfg = root.path().join("upstroke.toml");
         fs::write(
             &cfg,
             "[[routing.overrides]]\npaths = [\"src/auth/**\"]\nsecond_opinion = \
@@ -648,8 +839,7 @@ mod tests {
 
     #[test]
     fn the_preview_echoes_resolved_role_tier_pin_and_disabled_review_effort() {
-        let root = env::temp_dir().join(format!("upstroke-validate-effort-{}", std::process::id()));
-        fs::create_dir_all(&root).expect("root");
+        let root = scratch_root("effort");
         let cases = [
             (
                 "defaults",
@@ -681,7 +871,7 @@ mod tests {
         ];
 
         for (name, config, expected) in cases {
-            let cfg = root.join(format!("{name}.toml"));
+            let cfg = root.path().join(format!("{name}.toml"));
             fs::write(&cfg, config).expect("config");
             let mut o = opts("fixtures/sample-plan.md");
             o.config_path = Some(cfg);
@@ -696,9 +886,8 @@ mod tests {
 
     #[test]
     fn the_capacity_block_estimates_without_probing_and_never_reads_unknown_as_full() {
-        let dir = env::temp_dir().join(format!("upstroke-validate-pools-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("dir");
-        let pools = dir.join("pools.toml");
+        let dir = scratch_root("pools");
+        let pools = dir.path().join("pools.toml");
         fs::write(
             &pools,
             "[pools.claude-max]\nkind = \"subscription-window\"\nagent = \
@@ -736,11 +925,10 @@ mod tests {
 
     #[test]
     fn derived_gates_appear_in_the_preview() {
-        let root = env::temp_dir().join(format!("upstroke-validate-gates-{}", std::process::id()));
-        fs::create_dir_all(&root).expect("root");
-        fs::write(root.join("Cargo.toml"), "[package]\nname='x'\n").expect("marker");
+        let root = scratch_root("gates");
+        fs::write(root.path().join("Cargo.toml"), "[package]\nname='x'\n").expect("marker");
         let mut o = opts("fixtures/sample-plan.md");
-        o.config_root = root;
+        o.config_root = root.path().to_path_buf();
         let report = run(&o).expect("validates");
         let rendered = report.render();
         assert!(
@@ -791,9 +979,8 @@ mod tests {
 
     #[test]
     fn unknown_depends_fails_clearly() {
-        let dir = env::temp_dir().join(format!("upstroke-validate-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        let plan = dir.join("unknown-dep.md");
+        let dir = scratch_root("unknowndep");
+        let plan = dir.path().join("unknown-dep.md");
         fs::write(&plan, "## One\n<!-- upstroke: id=one depends=ghost -->\n").expect("write plan");
         let mut o = opts("x");
         o.plan_path = plan;
@@ -804,9 +991,8 @@ mod tests {
 
     #[test]
     fn duplicate_ids_fail() {
-        let dir = env::temp_dir().join(format!("upstroke-validate-dup-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        let plan = dir.join("dup.md");
+        let dir = scratch_root("dup");
+        let plan = dir.path().join("dup.md");
         fs::write(
             &plan,
             "## One\n<!-- upstroke: id=same -->\n\n## Two\n<!-- upstroke: id=same depends= -->\n",
@@ -828,9 +1014,8 @@ mod tests {
 
     #[test]
     fn artifact_needed_from_a_non_dependency_warns() {
-        let dir = env::temp_dir().join(format!("upstroke-wiring-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        let plan = dir.join("wiring.md");
+        let dir = scratch_root("wiring");
+        let plan = dir.path().join("wiring.md");
         fs::write(
             &plan,
             "## Design\n<!-- upstroke: id=d out=contract depends= -->\n\n\
@@ -855,9 +1040,8 @@ mod tests {
 
     #[test]
     fn unrecognized_plan_format_names_available_adapters() {
-        let dir = env::temp_dir().join(format!("upstroke-sniff-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        let plan = dir.join("plan.json");
+        let dir = scratch_root("sniff");
+        let plan = dir.path().join("plan.json");
         fs::write(&plan, "{\"tasks\": []}\n").expect("write file");
         let mut o = opts("x");
         o.plan_path = plan;
@@ -868,9 +1052,8 @@ mod tests {
     #[test]
     fn emit_json_round_trips_through_the_ir() {
         let report = run(&opts("fixtures/sample-plan.md")).expect("sample plan validates");
-        let dir = env::temp_dir().join(format!("upstroke-emit-{}", std::process::id()));
-        fs::create_dir_all(&dir).expect("scratch dir");
-        let json_path = dir.join("plan.normalized.json");
+        let dir = scratch_root("emit");
+        let json_path = dir.path().join("plan.normalized.json");
         report
             .write_normalized_json(&json_path)
             .expect("write json");

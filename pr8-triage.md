@@ -650,7 +650,7 @@ test passed on ubuntu and macOS in that run. It is a **different fingerprint** f
 branch already carries — `PR172-…-TORN-WORKTREE-LIST-RECORD` is the workspace sampler's
 `git worktree list` read and `PR136-…-DOES-NOT-CONVERGE` is `DirectoryNotEmpty`, both in a
 different sampler — so it is filed as `PR247-SAMPLER-REFUSED-A-LOCKED-INDEX-ON-WINDOWS` in
-`reviews/findings/` rather than counted against either. One red is not a rate, this token cannot
+`findings/` rather than counted against either. One red is not a rate, this token cannot
 re-run a job, and neither of the round's code changes reaches Git, a worktree or the residue
 classifier. The next head, one record commit later, is green on all eleven checks including that
 leg: one red in two runs, which the finding file records as its second observation.
@@ -839,7 +839,7 @@ verifies there before pushing.
 | 2 | Establish the layer before the repair, in the order the brief asks: does `dispatch_head` return the published head, is the worktree created at it, is the file on disk, and does the assertion read it wrongly or is it absent. Two instruments — the same test with exactly one ambient setting changed, and an experiment outside the test that puts an LF blob through `git worktree add` under each configuration. | the guest |
 | 3 | Repair the fixture, not the assertion. The recover fixture's repository pins `core.autocrlf=false` and `core.eol=lf`, the two settings `workspace_manager::fixture` already pins for the reason its comment states. The contents assertion is untouched: a SHA comparison is the shape that passed throughout the defect's life, and a comparison that normalises line endings is a bar lowered by exactly the transformation it forgives. | `engine/topology/recover/tests.rs` (`Fixture::build`), `docs/internals/engine/topology/recover/tests.md` |
 | 4 | The witness is the pair on the guest: the tree without the pin red with the CRLF bytes, the tree with it green — the test alone, then the full suite as CI runs it. The mutation of this repair is the tree without it, which is the reproduction itself. | the guest |
-| 5 | Re-file the finding at the severity a fixture defect carries, with its cause and the change, and give the body's ledger its row. | `reviews/findings/`, `pr8-body.md` |
+| 5 | Re-file the finding at the severity a fixture defect carries, with its cause and the change, and give the body's ledger its row. | `findings/`, `pr8-body.md` |
 | 6 | Make room in the body before writing to it: the ledger's rows through round six are compressed to their identity columns, their full text left in this file's §§1–9 and in `pr8-body.md`'s own history at `fc141710`. | `pr8-body.md` |
 | 7 | The ten gates on this box, which cannot see this defect, and the guest verification, both before the push. | this box, the guest |
 
@@ -914,7 +914,7 @@ Readings this round records, each a choice and not a deduction:
   defect. That is the severity every test-fidelity row on this branch carries
   (`PR8-R7-DRIVER-REF-FUNNEL`, `PR8-R4-REVIEW-ORACLE`, `PR8-R2-SAMPLER-ORACLE`), and P3 is this
   project's floor for a finding with no failure at all. The finding file moves with a `git mv`, as
-  `reviews/findings/README.md` says a reclassification does, and keeps its id.
+  `findings/README.md` says a reclassification does, and keeps its id.
 - **`portability`, not `correctness`.** The defect is a platform-shaped fixture, which is the
   category `PR5-WORKSPACE-003` (a mutation that survives on Windows only) already uses for the
   same shape.
