@@ -346,6 +346,18 @@
 #   read_file set for it, lost a `.git` file's gitdir pointer, and put the listing
 #   back on the filesystem.
 #
+#   And the round after that, IN `capture`: A STEP THAT RAN AND WAS NEVER ASKED
+#   HOW IT WENT. It writes a sentinel byte to each copy so a truncated capture
+#   can be told from a whole one, AND CHECKED NEITHER WRITE. On a listing whose own last
+#   byte is `0x01`, failing only the STDOUT sentinel -- the real builtin `printf`
+#   exiting 1, `Bad file descriptor` -- left the INPUT'S trailing byte to be
+#   mistaken for the marker the helper never wrote and stripped as if it were
+#   that marker. A filename that was never filed appeared and MATCHED: exit 0
+#   `conforms` with empty stderr, where the same listing refuses at exit 1 with
+#   the write intact. A failed write there does not merely lose bytes; it
+#   MANUFACTURES a finding. The marker's own status is now checked before
+#   anything is read back through it.
+#
 #   And the round after that, IN `list_dir`: A VALUE HANDED TO A TOOL WITH AN
 #   ARGUMENT GRAMMAR OF ITS OWN. A RELATIVE starting path went straight to
 #   `find`, whose operands are a starting-point list followed by an EXPRESSION
@@ -587,18 +599,20 @@ read_private() {
 #      before.
 #   2. The producer ran, and ITS status is `capture_status`, for the caller to
 #      enumerate rather than for this to interpret.
-#   3. Both copies read back as far as their sentinel.
-#   4. Nothing is handed back unless 1 to 3 held. `capture_records` and
+#   3. BOTH SENTINELS WERE WRITTEN. The marker is this primitive's OWN write, its
+#      status was the one nobody read, and the cost was a finding nobody filed.
+#   4. Both copies read back as far as their sentinel.
+#   5. Nothing is handed back unless 1 to 4 held. `capture_records` and
 #      `capture_tail` are the producer's stdout; `capture_err` is its stderr past
 #      the last NUL, which for the text git writes is all of it, and is QUOTED in
-#      a refusal and never parsed; `capture_error` says which of the four failed.
+#      a refusal and never parsed; `capture_error` says which of the five failed.
 capture_status=0
 capture_records=()
 capture_tail=''
 capture_err=''
 capture_error=''
 capture() {
-  local out="$1" err="$2" stdin="$3"
+  local out="$1" err="$2" stdin="$3" marked_out=0 marked_err=0
   shift 3
   [[ "${1:-}" == -- ]] || {
     echo "branch-name-policy: internal error: capture was called without --" >&2
@@ -615,11 +629,13 @@ capture() {
   { exec 4> "$err"; } 2>/dev/null \
     || { exec 3>&-; capture_error="its errors could not be captured: '$err' would not open"; return 1; }
   if [[ "$stdin" == fd9 ]]; then
-    { "$@" || capture_status=$?; printf '\001'; printf '\001' >&2; } >&3 2>&4 <&9
+    { "$@" || capture_status=$?; printf '\001' || marked_out=$?; printf '\001' >&2 || marked_err=$?; } >&3 2>&4 <&9
   else
-    { "$@" || capture_status=$?; printf '\001'; printf '\001' >&2; } >&3 2>&4 </dev/null
+    { "$@" || capture_status=$?; printf '\001' || marked_out=$?; printf '\001' >&2 || marked_err=$?; } >&3 2>&4 </dev/null
   fi
   exec 3>&- 4>&-
+  (( marked_out == 0 && marked_err == 0 )) \
+    || { capture_error='the marker that says it was captured whole could not be written'; return 1; }
   read_private "$err" \
     || { capture_error='what it printed could not be read back'; return 1; }
   capture_err="${private_tail%$'\n'}"

@@ -2576,6 +2576,92 @@ else
     "$fixture_dir/inject-twin-a.txt" "$inject_toplevel_repo/findings"
 fi
 
+# ---- the sentinel is this primitive's OWN write, and its status is a status --------------------
+#
+# `capture` appends a sentinel byte to each copy so a truncated capture can be
+# told from a whole one, AND CHECKED NEITHER WRITE. What makes that a refusal
+# rather than an inconvenience is a listing whose own last byte IS the sentinel:
+# fail only the STDOUT sentinel once the copy is written -- the real builtin
+# `printf` exiting 1, `Bad file descriptor` -- and the INPUT'S trailing byte is
+# mistaken for the marker the helper never wrote, and stripped as if it were that
+# marker. A filename that was never filed appears and MATCHES. Measured against
+# the unrepaired file: exit 0 `conforms` with empty stderr, where the same
+# listing refuses at exit 1 with the write intact. A failed write there does not
+# lose a finding, it MANUFACTURES one.
+#
+# THE INJECTION IS AN EXPORTED `printf` FUNCTION, which shadows the builtin in
+# the validator's own shell: everything else is the real builtin, and exactly one
+# sentinel write is made against a closed descriptor. ONLY the stdout one --
+# failing both is the weaker test the unrepaired file already refuses, because a
+# stderr copy with no sentinel on it fails `read_private` first. It fires ONCE,
+# after the private copy holds the listing, and the fixture asserts that it fired
+# and that the refusal is the READ one: a hook that matched nothing, or a refusal
+# for some other reason, would pass this file forever while proving nothing.
+sentinel_dir="$fixture_dir/sentinel"
+mkdir -p "$sentinel_dir"
+printf 'P2_correctness_202609100001_never-filed-at-all.md\001' > "$sentinel_dir/listing.txt"
+sentinel_fired="$sentinel_dir/fired"
+: > "$sentinel_fired"
+sentinel_probe="$fixture_dir/sentinel-probe.sh"
+cat > "$sentinel_probe" <<'SENTINEL'
+# sentinel-probe.sh <fired-marker> <trigger> <validator> <branch> <listing>...
+# The first sentinel write made once the private copy holds <trigger> -- which is
+# the STDOUT one, because capture writes stdout's marker before stderr's -- is
+# made against a closed descriptor, and every other printf is the builtin.
+export SENTINEL_FIRED="$1"
+export SENTINEL_TRIGGER="$2"
+shift 2
+printf() {
+  local d
+  if [[ $# -eq 1 && "$1" == '\001' && ! -s "$SENTINEL_FIRED" ]]; then
+    for d in "${TMPDIR:-/tmp}"/branch-name-policy.*; do
+      if [[ -r "$d/slurp" ]] \
+        && command grep -q -- "$SENTINEL_TRIGGER" "$d/slurp" 2>/dev/null; then
+        builtin printf x >> "$SENTINEL_FIRED"
+        builtin printf "$@" >&-
+        return
+      fi
+    done
+  fi
+  builtin printf "$@"
+}
+export -f printf
+rc=0
+out="$("$BASH" "$@" 2>&1)" || rc=$?
+builtin printf '%s\n' "$rc"
+builtin printf '%s\n' "$out"
+SENTINEL
+# The control first, so a refusal under injection is not the same refusal: the
+# listing names a finding that is not there, WITH ITS OWN 0x01 ON THE END, and
+# that is exit 1 `names no finding` when both markers are written.
+sentinel_control_rc=0
+sentinel_control_out="$(TMPDIR="$sentinel_dir" "$BASH" "$branch_validator" \
+  'fix-P2/correctness_never-filed-at-all' "$sentinel_dir/listing.txt" 2>&1)" || sentinel_control_rc=$?
+if [[ "$sentinel_control_rc" != 1 ]] \
+  || ! grep -q 'names no finding' <<< "$sentinel_control_out"; then
+  echo "the sentinel control was meant to refuse a name no listing holds; got $sentinel_control_rc" >&2
+  printf '%s\n' "$sentinel_control_out" >&2
+  exit 1
+fi
+sentinel_out="$(TMPDIR="$sentinel_dir" BASH="$BASH" "$BASH" "$sentinel_probe" \
+  "$sentinel_fired" 202609100001 "$branch_validator" \
+  'fix-P2/correctness_never-filed-at-all' "$sentinel_dir/listing.txt" 2>&1)"
+sentinel_rc="${sentinel_out%%$'\n'*}"
+if [[ ! -s "$sentinel_fired" ]]; then
+  echo 'the sentinel injection never fired, so this case proves nothing' >&2
+  exit 1
+fi
+if [[ "$sentinel_rc" == 0 ]]; then
+  echo 'a capture whose own sentinel write failed conformed at exit 0, on a name nobody filed' >&2
+  printf '%s\n' "$sentinel_out" >&2
+  exit 1
+fi
+if ! grep -q 'the marker that says it was captured whole could not be written' <<< "$sentinel_out"; then
+  echo 'a failed sentinel write must refuse BY NAMING THE MARKER, and this refusal did not' >&2
+  printf '%s\n' "$sentinel_out" >&2
+  exit 1
+fi
+
 # ---- a directory's NAMES and its STATUS must come from one run of one command ------------------
 #
 # `ls` was run for its status and a GLOB then supplied the names, and the two are
