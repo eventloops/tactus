@@ -950,7 +950,7 @@ pub fn run_recovery_order(
         hooks,
     )?;
 
-    refuse_if_finished(&censused)?;
+    let censused = finalize_if_finished(censused, seams.manager, hooks)?;
     steps.push(RecoveryStep::B);
 
     let rebuilt = RunnerRebuilt::rebuild(censused, seams.today, Some(seams.runtime))?;
@@ -976,6 +976,17 @@ pub fn run_recovery_order(
         invocations: &mut invocations,
         warnings,
     };
+
+    if !execution_root_present(seams.manager)? {
+        seams
+            .manager
+            .create_execution_root(context.hooks.effects())?;
+        context.warnings.push(
+            "the execution root was pruned when the run last ended and has been recreated for \
+             this resume"
+                .to_owned(),
+        );
+    }
 
     let live_pin = reclaim_stale_residue(&certified, seams.manager, &mut context)?;
 
@@ -1034,22 +1045,50 @@ pub fn run_recovery_order(
     ))
 }
 
-pub fn refuse_if_finished(censused: &ResumeCensused) -> Result<(), UpstrokeError> {
-    let Some(outcome) = censused.barrier().fold().finished() else {
-        return Ok(());
+pub fn finalize_if_finished(
+    censused: ResumeCensused,
+    manager: &WorkspaceManager,
+    hooks: &mut dyn TopologyHooks,
+) -> Result<ResumeCensused, UpstrokeError> {
+    let Some(outcome) = censused.barrier().fold().finished().cloned() else {
+        return Ok(censused);
     };
     match outcome {
-        RunOutcome::Complete | RunOutcome::Halted => Err(UpstrokeError::Refused {
-            message: format!(
-                "this run already finished as `{}`, and a finished run does not continue. \
-                 Recovery step (b) finalizes such a run and then refuses continuation; this \
-                 build performs the refusal and leaves finalization to the slice that owns \
-                 `RunDir.WriteReport`'s fault row, so nothing was written and nothing was \
-                 deleted.",
-                outcome_name(outcome)
-            ),
+        RunOutcome::Complete | RunOutcome::Halted => {
+            let finalized = {
+                let barrier = censused.barrier();
+                let root = barrier.records().locks().root();
+                super::finalize::finalize(
+                    &super::finalize::Finalize {
+                        manager,
+                        public: root.public_dir(),
+                        run_id: root.run_id(),
+                        fold: barrier.fold(),
+                        events: barrier.events(),
+                    },
+                    hooks,
+                )?
+            };
+            let (_log, _fold, records) = censused.into_barrier().into_log_fold_and_records();
+            let (run_lock, _worktree_lock, root) = records.into_locks().into_guards();
+            run_lock.release(hooks.rundir());
+            Err(super::finalize::refuse_continuation(
+                root.run_id(),
+                &finalized,
+            ))
+        }
+        RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(censused),
+    }
+}
+
+fn execution_root_present(manager: &WorkspaceManager) -> Result<bool, UpstrokeError> {
+    match std::fs::symlink_metadata(manager.execution_root()) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(UpstrokeError::Io {
+            path: manager.execution_root().to_path_buf(),
+            source,
         }),
-        RunOutcome::Parked | RunOutcome::BudgetExceeded => Ok(()),
     }
 }
 
@@ -1654,15 +1693,6 @@ fn retained_idle(fold: &TopologyFold) -> Vec<(TaskKey, GenerationId, LeaseDispos
         }
     }
     found
-}
-
-fn outcome_name(outcome: &RunOutcome) -> &'static str {
-    match outcome {
-        RunOutcome::Complete => "complete",
-        RunOutcome::Parked => "parked",
-        RunOutcome::Halted => "halted",
-        RunOutcome::BudgetExceeded => "budget_exceeded",
-    }
 }
 
 #[cfg(test)]

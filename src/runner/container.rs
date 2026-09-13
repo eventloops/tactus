@@ -21,7 +21,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::UpstrokeError;
@@ -55,7 +55,7 @@ impl ContainerHooks for NoHooks {
 
 #[derive(Debug, Clone, Default)]
 pub struct HarnessHooks {
-    harness: Arc<Mutex<HookHarness>>,
+    harness: crate::observations::Exported,
     trace: ContainerTrace,
 }
 
@@ -63,14 +63,14 @@ impl HarnessHooks {
     #[must_use]
     pub fn new(harness: Arc<Mutex<HookHarness>>) -> Self {
         Self {
-            harness,
+            harness: crate::observations::Exported::new(harness),
             trace: ContainerTrace::off(),
         }
     }
 
     #[must_use]
     pub fn harness(&self) -> &Arc<Mutex<HookHarness>> {
-        &self.harness
+        self.harness.harness()
     }
 
     #[must_use]
@@ -82,10 +82,7 @@ impl HarnessHooks {
 
 impl ContainerHooks for HarnessHooks {
     fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
-        self.harness
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .hook(site, phase)
+        self.harness.hook(site, phase)
     }
 
     fn trace(&self) -> ContainerTrace {

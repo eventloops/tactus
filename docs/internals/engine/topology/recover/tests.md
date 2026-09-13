@@ -144,6 +144,16 @@ needs a ladder deep enough to hold two failures below the rung that reads
 them, and this is that ladder. Additive so no existing fixture's chain
 moves.
 
+## `struct Damage {` › `alternative_reviewer: bool,`
+
+The review plan names an alternative reviewer, so a candidate whose
+implementer is the primary reviewer is reviewed by someone else.
+
+## `struct Damage {` › `no_automatic_repairs: bool,`
+
+`max_merge_repairs = 0`: the first rejection registers its repair with
+human admission.
+
 ## `impl Fixture` › `fn manager(&self) -> crate::workspace_manager::WorkspaceManager {`
 
 The manager recovery step (g) rebuilds worktrees through.
@@ -203,9 +213,19 @@ Without it every "no census effect followed this refusal" assertion
 below is vacuously true, and the census's own write has nothing to be
 the anchor of.
 
+## `fn build(tag: &str, damage: Damage) -> Self` › `rundir::write_plan(&public, b"{\"plan\":\"planted\"}\n", &m…`
+
+The normalized plan the creator writes at P2, through its funnel: R21
+names it among the persistent outputs, so the ledger looks for it.
+
 ## `fn build(tag: &str, damage: Damage) -> Self` › `let mut warnings = Vec::new();`
 
 The log, through the Event funnel and nothing else.
+
+## `impl Fixture {` › `fn two_tasks(tag: &str) -> Self {`
+
+A healthy two-task run: what every stale-verification fixture needs,
+since only a publication moves the integration head past the base.
 
 ## `impl Fixture` › `fn worktree_lock_file(&self) -> PathBuf {`
 
@@ -802,6 +822,15 @@ ladder decided something, and §11.4's feedback is on the record it decided
 from. `detail` is what the next attempt is told, and it is the field this
 helper exists to put in a log.
 
+## `fn plant_finished_run_with(`
+
+A run planted at its end for the ST-18 tests: alpha queued, published or
+parked, beta's one attempt failed with the halting policy the outcome
+needs, beta's closed generation still holding its worktree and intent, the
+residue asked for (a snapshot, a staging worktree, a proposal pin), and
+`run_finished` durable — what terminal finalization has to act on, with
+nothing yet done to it.
+
 ## `fn resume_finalizes_halted_then_refuses() {`
 
 ===========================================================================
@@ -822,14 +851,6 @@ slice. The name is the packet's and is kept unchanged so the row and the
 test still correspond; what it asserts is the half in range, and it asserts
 the other half's **absence** explicitly rather than leaving it unstated —
 no `report.json`, and no `RunDir.WriteReport`.
-
-## `fn resume_finalizes_halted_then_refuses()` › `attempt_finished(`
-
-`halts_run: false`: the task ends terminal and the run does
-not halt, so the derived outcome is Complete rather than
-Halted — which is what makes both arms of (b) constructible
-without any integration terminal this slice does not
-implement.
 
 ## `fn resume_rebuilds_runner_from_record_and_warns_on_config_drift() {`
 
@@ -975,14 +996,14 @@ the failure never reached this run's own directory at all — and recovery step
 (a1) gives this run's stale-marker repair to its owner, which is this
 process. So the repair was collateral damage of a different run's residue.
 
-## `fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {` › `assert!(stuck.public.exists(), "the public half was removed anyway");`
-
-The husk: retained where it was, with the locator the next census needs.
-
 ## `fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {` › `assert!(`
 
 And this run's own stale marker, which sorts after the failure, was still
 repaired by its owner.
+
+## `fn resume_completes_past_a_husk_whose_private_half_cannot_be_removed() {` › `assert!(stuck.public.exists(), "the public half was removed anyway");`
+
+The husk: retained where it was, with the locator the next census needs.
 
 ## `fn the_resume_census_reports_the_husk_it_could_not_reclaim() {`
 
@@ -1061,6 +1082,14 @@ resume" the answer to a budget stop, and a build that cleared it only in
 memory would leave the next process refusing for a stop the log still
 carries.
 
+## `fn resume_finalizes_halted_then_refuses()` › `attempt_finished(`
+
+`halts_run: false`: the task ends terminal and the run does
+not halt, so the derived outcome is Complete rather than
+Halted — which is what makes both arms of (b) constructible
+without any integration terminal this slice does not
+implement.
+
 ## `fn steps_d_and_e_reach_every_generation_not_the_first() {`
 
 **Steps (d) and (e) handle every entry, not the first one.**
@@ -1084,6 +1113,13 @@ condition a carried row would have named. It is cheaper to hold it than to
 write it down: PR11 inherits a substrate whose recovery loops are witnessed
 rather than a note saying they are not.
 
+## `const BETA: TaskKey = TaskKey(1);`
+
+---------------------------------------------------------------------------
+T-PROPOSAL (a'): the cherry-pick residue class, recovered through the
+resume — `C.proof_tests[2]` and `[T-PROPOSAL].test`.
+---------------------------------------------------------------------------
+
 ## `fn steps_d_and_e_reach_every_generation_not_the_first()` › `dispatched(),`
 
 alpha: retained and idle — step (e)'s subject.
@@ -1096,23 +1132,6 @@ beta: the same, and the second entry the loop must reach.
 
 The premise: two retained generations before the resume. Without this the
 assertion below is satisfied by a fixture that only ever had one.
-
-## `fn retry_refused_after_resume() {`
-
-A retained session belongs to the incarnation that retained it. Step (e)
-closes the generation, so after the resume there is no retry to evaluate —
-and the fold refuses one.
-
-`recovery_order` (i): "`ready_retry` is never evaluated before (h) and the
-fold refuses a stale-incarnation retry". The first clause is structural
-here: nothing in this file evaluates `ready_retry`, and the loop that does
-is behind `run_resumed`, which consumes the witness. The second is asserted
-directly, against the replayed fold.
-
-## `fn retry_refused_after_resume()` › `let refused = after`
-
-And the transition itself is refused: a forged retry into the closed
-generation does not plan.
 
 ## `fn an_interrupted_attempts_worktree_and_intent_are_reclaimed_by_recovery() {`
 
@@ -1133,6 +1152,23 @@ no worktree at all. The review's witness failed at `3bce2c6a` with
 `worktree=true, intent=true` after the second recovery. The second
 recovery's removals are not counted exactly, because it also finishes the
 promotions the interrupted first never reached (step (f)).
+
+## `fn retry_refused_after_resume() {`
+
+A retained session belongs to the incarnation that retained it. Step (e)
+closes the generation, so after the resume there is no retry to evaluate —
+and the fold refuses one.
+
+`recovery_order` (i): "`ready_retry` is never evaluated before (h) and the
+fold refuses a stale-incarnation retry". The first clause is structural
+here: nothing in this file evaluates `ready_retry`, and the loop that does
+is behind `run_resumed`, which consumes the witness. The second is asserted
+directly, against the replayed fold.
+
+## `fn retry_refused_after_resume()` › `let refused = after`
+
+And the transition itself is refused: a forged retry into the closed
+generation does not plan.
 
 ## `fn run_resumed_records_identical_runner_identity() {`
 
@@ -1420,14 +1456,6 @@ The fourth bound, "**before (d)**", is not here: it is asserted positively by
 [`kill_after_run_started_creates_integration_ref`], which reads the log at
 the instant the funnel ran.
 
-## `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()` › `{`
-
-(b): a Halted run.
-
-## `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()` › `{`
-
-(c): a shell probe that does not answer.
-
 ## (end of `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()`)
 
 **(f)'s pin-absent refusal is gone with the convergence it guarded.**
@@ -1443,6 +1471,14 @@ The refusal that still bounds (f) is the integration transaction's, and
 holds that ordering. Removed rather than rewritten around a predicate
 that cannot fire — a case asserting a refusal nothing can reach would
 pass for the wrong reason.
+
+## `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()` › `{`
+
+(b): a Halted run.
+
+## `fn the_p7_p8_step_runs_after_the_refusals_that_bound_it()` › `{`
+
+(c): a shell probe that does not answer.
 
 ## `fn recovery_kill_child() {`
 
@@ -1776,6 +1812,19 @@ would pass whichever branch the fixture happened to reach — a fixture
 that silently started reaching a different one would take the assertion
 with it.
 
+## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert_eq!(`
+
+The dispatch AND the attempt are real and durable, in that order. Both
+went through the production emitter, which is what makes them subject to
+the append-error protocol; the scaffold's emitter re-implements the
+append and runs none of it.
+
+## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert_eq!(`
+
+And the provisional reservation did not leak. O24 converts it AT the
+append; a refusal after that must not leave an entitlement held, or the
+next selection at width 1 sees a full pipeline forever.
+
 ## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert!(`
 
 **Not accepted, and the reason is the contract's.** This fixture's runner
@@ -1789,13 +1838,6 @@ It asserted `accepted` before the ladder's cheap rungs were wired, and
 passed: `judge` starts at gates, the plan configures none, and nothing
 had asked what the diff contained. A driver that accepted this would have
 pinned a candidate whose commit is its own parent.
-
-## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert_eq!(`
-
-The dispatch AND the attempt are real and durable, in that order. Both
-went through the production emitter, which is what makes them subject to
-the append-error protocol; the scaffold's emitter re-implements the
-append and runs none of it.
 
 ## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert!(`
 
@@ -1822,12 +1864,6 @@ The fixture's hint is a glob (`src/alpha/*.rs`), which is what makes this
 assertion able to fail: the fold strips it to the literal prefix
 `src/alpha`, and a driver taking hints literally would record a prefix
 that overlaps nothing. Measured — that shipped, for one commit.
-
-## `fn the_driver_takes_over_from_the_recovery_order_and_steps()` › `assert_eq!(`
-
-And the provisional reservation did not leak. O24 converts it AT the
-append; a refusal after that must not leave an entitlement held, or the
-next selection at width 1 sees a full pipeline forever.
 
 ## `fn the_driver_carries_an_accepted_attempt_through_the_candidate_sequence() {`
 
@@ -2020,16 +2056,16 @@ spent and nothing escalates" — `next_step`'s own words, and the cell that
 was wrong when the settlement derived the allowance from `Next` instead
 of from the failure.
 
-## `fn the_driver_parks_an_attempt_with_the_question_it_raised()` › `let parked = TopologyFold::parse_log(&fixture.log_bytes())`
-
-The settlement is durable and carries its question.
-
 ## `fn the_driver_parks_an_attempt_with_the_question_it_raised()` › `assert!(`
 
 **The words are the legacy authorities', not the driver's.** The context
 quotes the agent as data and names the task; the options are what
 `question_options` gives a `Clarify`. A driver that worded its own would
 pass every assertion above and fail these.
+
+## `fn the_driver_parks_an_attempt_with_the_question_it_raised()` › `let parked = TopologyFold::parse_log(&fixture.log_bytes())`
+
+The settlement is durable and carries its question.
 
 ## `fn the_driver_refuses_a_tree_a_filter_has_transformed() {`
 
@@ -2104,6 +2140,13 @@ indistinguishable, and `run.rs` passing a literal `None` left the whole
 suite green. Measured, twice: once as `R3-SEAMS-001` and once when round
 4 restored the literal.
 
+## `fn the_retaining_incarnation_retries_in_place()` › `assert!(`
+
+Balance, which says every registration was settled. It does **not** say
+the reviewers were registered — an empty ledger balances too — so R4's
+review coverage is asserted where reviewers actually run, in
+`attempt::tests`.
+
 ## `fn the_retaining_incarnation_retries_in_place()` › `let retained = TopologyFold::parse_log(&fixture.log_bytes())`
 
 The generation is retained, not closed: only a retained one is retried in
@@ -2131,13 +2174,6 @@ fixture can reach the arm". This fixture reaches it, and reached it then.
 rung; the plan hard-coded `retry: None`, so the second attempt got the
 first attempt's prompt verbatim and no reason to behave differently. A
 retry that is not informed is a rung's allowance spent to learn nothing.
-
-## `fn the_retaining_incarnation_retries_in_place()` › `assert!(`
-
-Balance, which says every registration was settled. It does **not** say
-the reviewers were registered — an empty ledger balances too — so R4's
-review coverage is asserted where reviewers actually run, in
-`attempt::tests`.
 
 ## `fn the_retaining_incarnation_retries_in_place()` › `let resumed = runner`
 
@@ -2499,6 +2535,13 @@ real one or round-tripped against it; a fixture that hand-built an
 `AttemptPlan` here would be exactly the fifth copy the `frozen_binding`
 precedent warns about.
 
+## `fn the_driver_spends_the_allowance_the_log_records()` › `assert!(`
+
+**And the human is told how many attempts actually ran.** The count in
+the question is the task's spend on this rung, not the new generation's
+attempt number — a park that said "1 attempt" after two would send an
+operator looking for a run that had barely started.
+
 ## `fn the_driver_spends_the_allowance_the_log_records()` › `let SettlementTransition::Parked { question } = transition else {`
 
 **Parked, not failed** — and that is `next_step`'s answer, not a
@@ -2506,13 +2549,6 @@ weakening of the assertion. A spent chain asks a human rather than
 failing the task: "Nothing further can move this task ... and the
 escalation chain is spent." What matters here is that the allowance was
 seen as spent at all.
-
-## `fn the_driver_spends_the_allowance_the_log_records()` › `assert!(`
-
-**And the human is told how many attempts actually ran.** The count in
-the question is the task's spend on this rung, not the new generation's
-attempt number — a park that said "1 attempt" after two would send an
-operator looking for a run that had barely started.
 
 ## `fn the_loop_continues_an_attempt_recovery_recreated() {`
 
@@ -2566,6 +2602,25 @@ question a reader would otherwise ask.
 This fixture's Mid rung is `High` and its review axis is `Medium`, so the two
 are distinguishable. A fixture where they matched would assert nothing.
 
+## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
+
+The implementer's own pool, so the two values in play are distinguishable
+and the assertion below is about which one the reviewer got.
+
+## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
+
+**And its own agent's pool**, which is the other cell of
+`a_reviewers_profile_is_accounted_for_at_both_callers` whose value the
+extraction dropped. That census checks the roll is complete and cannot
+check a value — a cell is prose. This is the value.
+
+§11.3/§13: a cross-vendor second opinion draws on a different
+subscription than the implementer, so the pool is looked up from the
+reviewer's own agent. `coordinator.rs` did it and `assembly.rs` did
+not, leaving `profile_for`'s empty string — so the capacity engine
+attributed a reviewer's spend to a pool with no name. Sol's
+independent `seams` read, round 3.
+
 ## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `use crate::engine::topology::scaffold::REVIEW_AGENT;`
 
 **The reviewer is bound to a different agent than the implementer, and it
@@ -2586,25 +2641,6 @@ the implementer's pool yields `the-implementers-pool` and fails.
 Through the scaffold's own constant rather than a literal: it is the
 agent that fixture's `alternative` binding already names, so this is the
 second agent the run actually probed and not one invented here.
-
-## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
-
-The implementer's own pool, so the two values in play are distinguishable
-and the assertion below is about which one the reviewer got.
-
-## `fn a_reviewer_runs_at_the_review_effort_not_the_implementers() {` › `assert_eq!(`
-
-**And its own agent's pool**, which is the other cell of
-`a_reviewers_profile_is_accounted_for_at_both_callers` whose value the
-extraction dropped. That census checks the roll is complete and cannot
-check a value — a cell is prose. This is the value.
-
-§11.3/§13: a cross-vendor second opinion draws on a different
-subscription than the implementer, so the pool is looked up from the
-reviewer's own agent. `coordinator.rs` did it and `assembly.rs` did
-not, leaving `profile_for`'s empty string — so the capacity engine
-attributed a reviewer's spend to a pool with no name. Sol's
-independent `seams` read, round 3.
 
 ## `fn the_loop_inherits_the_committed_digest_recovery_verified() {`
 
@@ -2715,164 +2751,6 @@ same reason the add was.
 crate and the effect denylist refuses the raw call even in a fixture,
 which is the rule working rather than getting in the way.
 
-## `struct FixedIds;`
-
-An [`IdSource`] whose question id is a constant.
-
-A park appends the id it minted, and `rematerialize_question` reads it back
-on resume rather than re-deciding it — so a test that asserts on the durable
-question needs the id to be the same bytes every run. `RealIds` gives a
-ULID, which is right in production and unpinnable here.
-
-## `fn durable_kinds(fixture: &Fixture) -> Vec<String> {`
-
-The kinds in a fixture's durable log, in order.
-
-## `struct RecordingSleeper {`
-
-A sleeper that records rather than sleeps.
-
-## `fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {`
-
-**A call census's needle is not satisfied by a longer name ending in it.**
-
-The class boundary, not the instance. S5 round 4 found that
-`every_packet_named_recovery_action_has_a_production_caller` counted
-`refuse_unexpected_refs(` as a call to `expected_refs` — but the interesting
-half is that the same needle is built for **every** entry from a name the
-packet chose, so any future clause whose function name is a suffix of another
-identifier is satisfied by that other identifier's call sites, silently and
-in the passing direction.
-
-So this asserts the needle's rule over the four shapes that decide it, and
-then over the real file the collision was found in — a unit assertion alone
-would pass against a helper that was never wired into the census.
-
-## `fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {` › `let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));`
-
-And on the file the collision was measured in, through the same region
-the census reads — a unit assertion over literals would pass against a
-helper nothing was wired into.
-
-**The two counts differ, and the difference is worth keeping.** The module
-carries four occurrences of `expected_refs(`; the region the census reads
-carries one, because three of the four sit inside `#[cfg(test)]` items
-that `production_code` blanks. The one that survives is the **definition
-line** of `refuse_unexpected_refs`, which the "calls, not definitions"
-filter does not catch: the text before the match is `pub fn refuse_un`,
-and that does not end in `fn`.
-
-The three that `production_code` blanks now sit in the sibling file
-`mod tests;` declares, so the module is two files and `whole` is read
-from both. The comparison is the one it always was: every occurrence the
-module carries, against the one the production region keeps.
-
-## `fn every_packet_named_recovery_action_has_a_production_caller() {`
-
-**Every packet-named recovery action and refusal has a production caller.**
-
-The class this slice produced more than any other, and the one census that
-closes it. Across three review rounds, ten separate things were found
-**built, correct, and never called**: `TopologyRun` itself, `settle_*`, the
-candidate sequence, `resume_open_no_attempt`, `Started`, `CandidateJournal`,
-`Spend::replay`, `complete_promotion`'s continuation, `prune_orphan_pin` and
-`refuse_unexpected_refs`.
-
-Two of those were P0/P1 liveness defects — a converged promotion that stalled
-the run forever, and a resumed run that forgot its whole spend. The rest were
-coverage gaps that would have become defects the moment a caller appeared.
-Each was found separately, by a different reviewer noticing a different
-symptom, over four rounds.
-
-**This asserts the property the packet states, rather than waiting for a
-reviewer to notice its absence.** A function that implements a
-`resume_action` or a `refusal_condition` and has no production caller is not
-an implementation of that clause — it is a plan to implement it.
-
-**What this census covers, exactly.** The eleven entries below and nothing
-else. Of the ten never-called things listed above, `Spend::replay`,
-`TopologyRun`, `Started`, `CandidateJournal`, `settle_*` and
-`complete_promotion`'s continuation are **not** among them — this would not
-have caught them, and the commit that added it said otherwise. Corrected in
-`reviews/FINDINGS.md` §19, claim (7); recorded here because the reader who
-needs it is the one adding the twelfth entry.
-
-Four ways this could pass while a clause stayed unperformed, and each is
-closed by a named thing rather than by the needle being "obviously right":
-
-* **A mention in a doc comment or a string.** The region is
-  `effects::production_code`, which blanks comments and string literals.
-* **A `#[cfg(test)]` caller in the same file.** The same region removes each
-  configured item in place.
-* **A caller in an out-of-line `tests.rs`**, where the attribute is on the
-  parent's declaration and there is nothing in the file to blank. Skipped by
-  file stem in the walk below. This was live until S5 round 4.
-* **A longer identifier ending in the entry's name.** `expected_refs(` was
-  satisfied by `refuse_unexpected_refs(`. Closed by [`crate::effects::census_domain::production_calls`],
-  whose own witness is
-  `a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it`.
-
-The fourth is the one worth stating as a class: the needle is built from a
-name **the packet chose**, so it cannot be renamed out of a collision the way
-`into_log_and_fold` was.
-
-## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `const CLAUSES: &[(&str, crate::effects::census_domain::Call, &str)] = &[`
-
-(function, how production calls it, the packet clause it performs).
-
-## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `let test_modules = crate::effects::census_domain::whole_file_test_modules(&root, &all, 13);`
-
-**The crate's own declarations, not a file-name rule.** This skipped
-by the stem `"tests"`, so it covered only the modules named
-`tests.rs`; the crate declares **more** whole-file test modules than
-that — `effects::tests::cfg::WHOLE_FILE_TEST_MODULES` lists them all,
-against the `tests.rs` entries of it the stem finds —
-and the six it missed — `scaffold`, `premove`, `fake`, `fixture`,
-`scratch_tree`, `readiness` — are the ones most likely to name what
-production names. `PR7-R5-ATT-001`.
-
-## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `if test_modules.contains(&path) {`
-
-**An out-of-line test file is test code in full, and
-`production_code` cannot tell.** The `#[cfg(test)]` is on the
-*declaration* in the parent, so the file it names carries no
-attribute of its own and nothing in it is blanked. Without
-this skip a fixture calling a packet-named function satisfies
-the clause on production's behalf, which is precisely the
-class this census exists to close.
-
-## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `assert!(`
-
-The skip is in force and it removed something. A zero here would mean the
-control was silently inert — the same failure as an empty region, one
-level up. The floor is the pinned list's length rather than a literal,
-which is why it is that list and not `test_modules.len()`: the derivation
-is what this floor exists to catch, so a floor read off its own output
-would pass on an empty answer.
-
-## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `let defined: usize = sources`
-
-**The named item exists.** The census never checked, so renaming a
-clause's definition out of the tree left it green — measured, S5
-round 4. Not pinned to exactly one definition, because
-`settle_interrupted` legitimately names three items and `form` is
-what separates them.
-
-## `struct Damage {` › `alternative_reviewer: bool,`
-
-The review plan names an alternative reviewer, so a candidate whose
-implementer is the primary reviewer is reviewed by someone else.
-
-## `struct Damage {` › `no_automatic_repairs: bool,`
-
-`max_merge_repairs = 0`: the first rejection registers its repair with
-human admission.
-
-## `impl Fixture {` › `fn two_tasks(tag: &str) -> Self {`
-
-A healthy two-task run: what every stale-verification fixture needs,
-since only a publication moves the integration head past the base.
-
 ## `struct PlantedTransaction {`
 
 --- integration-transaction recovery fixtures (PR8, step (f)) -------------
@@ -2963,6 +2841,23 @@ accept the durable result of the publication it finds.
 DESIGN §26: "`task_merged` exists but the ref disagrees — refuse; the
 log and integration branch no longer describe the same run". Neither a
 ref moved elsewhere nor a deleted one is repaired from the base.
+
+## `struct FixedIds;`
+
+An [`IdSource`] whose question id is a constant.
+
+A park appends the id it minted, and `rematerialize_question` reads it back
+on resume rather than re-deciding it — so a test that asserts on the durable
+question needs the id to be the same bytes every run. `RealIds` gives a
+ULID, which is right in production and unpinnable here.
+
+## `fn durable_kinds(fixture: &Fixture) -> Vec<String> {`
+
+The kinds in a fixture's durable log, in order.
+
+## `struct RecordingSleeper {`
+
+A sleeper that records rather than sleeps.
 
 ## `fn commit_on(`
 
@@ -3173,9 +3068,10 @@ production assembly: `FrozenPlans` over the fixture's recorded gates and
 review plan, the scaffold adapters, and a Runner that answers exit 0.
 
 
-## `struct DriveSeams {` › `gate_spawn_fails: bool,`
+## `struct DriveSeams {` › `gate_fails: Option<crate::error::ProcessFate>,`
 
-The Runner returns an error for every process instead of an output.
+The gate's process fails with this fate — never started, or gone — instead of returning
+an output.
 
 ## `struct DriveSeams {` › `input_rejected: bool,`
 
@@ -3184,6 +3080,11 @@ The review-input policy refuses the proposed tree.
 ## `struct DriveSeams {` › `review_cost_usd: Option<f64>,`
 
 What each review pass reports as its cost.
+
+## `struct DriveSeams {` › `answer: Option<crate::ir::Answer>,`
+
+What the answer source answers every question with; `None` answers
+nothing.
 
 ## `struct DriveSeams {` › `answer_delivery: AnswerDelivery,`
 
@@ -3202,11 +3103,6 @@ default — answers `poll` and refuses `resolve`, which must never be reached
 while a delivered answer is there; `Blocking` is terminal-style, `poll`
 finds nobody and `resolve` (the hard block's prompt) answers.
 
-## `struct DriveSeams {` › `answer: Option<crate::ir::Answer>,`
-
-What the answer source answers every question with; `None` answers
-nothing.
-
 ## `struct Driven {`
 
 What a driven run observed.
@@ -3219,10 +3115,6 @@ The implementer each verification plan was requested against.
 
 The model each review pass actually ran as.
 
-## `struct DrivenPlans<'a> {` › `implementers: std::cell::RefCell<Vec<PassBinding>>,`
-
-One driver owns this record; `RefCell` lets the read-only seam write it.
-
 ## `struct Driven {` › `runs: Vec<DrivenRun>,`
 
 Every process the driven runner was asked to run — gates and reviewers
@@ -3230,6 +3122,10 @@ alike — with its role, the workspace it was pointed at and that
 workspace's HEAD at spawn. The verifier oracle reads the reviewers' entries
 to prove each reviewer judged the recorded proposal in its own snapshot
 slot and never in staging (`PR8-R4-REVIEW-ORACLE`).
+
+## `struct DrivenPlans<'a> {` › `implementers: std::cell::RefCell<Vec<PassBinding>>,`
+
+One driver owns this record; `RefCell` lets the read-only seam write it.
 
 ## `impl crate::engine::topology::attempt::ReviewPasses for DrivenReviews` › `fn run(`
 
@@ -3244,10 +3140,33 @@ review of `8a5f59e8` moved that pointer into staging past every test.
 One process the driven runner ran: identity, role, workspace and the
 workspace's HEAD at spawn.
 
+## `fn checkout_of(workspace: &Path) -> BTreeMap<String, String> {`
+
+What the workspace held when the process was invoked: every tracked file and its
+content, read at the moment `DrivenRunner` stands in for the agent. The
+dependency regression asserts on this rather than on a recorded SHA, because a
+SHA assertion is the shape that would have passed for the whole life of
+`PR8-R7-DISPATCH-BASE` — the durable record and the worktree agreed with each
+other throughout, and both were wrong.
+
 ## `fn drive(fixture: &Fixture, seams: &DriveSeams, steps: usize) -> Driven {`
 
 
 Resume the fixture, then step the run's loop `steps` times under `seams`.
+
+## `fn plant_live(`
+
+Append `bodies` through the production emitter on a handle the caller
+already resumed — the live epoch — so the state a closure test plants is
+what the loop closes against, with no `run_resumed` between the planting
+and the loop to clear a budget stop or wake a deferred task.
+
+## `fn drive_observing(`
+
+`drive` with an observer called after every step with the step number and
+the run, so a test can read the live fold and the process-local ledgers
+before the run is dropped; `drive_handle` is the same loop with a no-op
+observer.
 
 ## `fn an_integration_review_is_selected_against_the_candidates_recorded_implementer() {` › `let fixture = Fixture::build(`
 
@@ -3265,17 +3184,6 @@ infrastructure failure terminates merge_verification_unavailable
 {Infrastructure, Deferred} inside the frozen allowance and Parked at it;
 `invariants[INV-23]`: a Runner that cannot run the process is a
 RunnerSpawnFailure outage. The fixture allows three deferrals.
-
-## `fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {` › `let fixture = Fixture::two_tasks("input-rejected");`
-
-R4: a review input that cannot be judged is HumanRequired, not a code
-rejection and not a publication. The review-input policy refuses the
-proposed tree before any reviewer runs.
-
-## `fn an_integration_reviews_cost_reaches_the_run_spend() {` › `let fixture = Fixture::two_tasks("integration-spend");`
-
-The ceiling is checked against `Spend`, so a review an integration ran
-must be charged there, live and on replay of the terminal's record.
 
 ## `fn a_paid_review_that_parks_is_charged_live_and_its_cost_replays() {`
 
@@ -3304,6 +3212,17 @@ Two incarnations because one cannot witness this: the live account holds
 the cost inside an incarnation whatever the log says, so any assertion
 made without crossing a resume passes with the terminal empty.
 
+## `fn an_unjudgeable_proposal_parks_the_candidate_for_a_person() {` › `let fixture = Fixture::two_tasks("input-rejected");`
+
+R4: a review input that cannot be judged is HumanRequired, not a code
+rejection and not a publication. The review-input policy refuses the
+proposed tree before any reviewer runs.
+
+## `fn an_integration_reviews_cost_reaches_the_run_spend() {` › `let fixture = Fixture::two_tasks("integration-spend");`
+
+The ceiling is checked against `Spend`, so a review an integration ran
+must be charged there, live and on replay of the terminal's record.
+
 ## `fn a_verification_park_answer_is_ingested_and_the_candidate_re_verifies() {`
 
 R13: the loop ingests an answer to a verification-park question —
@@ -3312,12 +3231,42 @@ it. The repair-admission half of PR8's version of this test, a refusal,
 became
 `a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue`.
 
-## `const BETA: TaskKey = TaskKey(1);`
+## `fn plant_rejected_repair(fixture: &Fixture) -> (crate::topology::events::MergeRejected, TaskKey) {`
 
----------------------------------------------------------------------------
-T-PROPOSAL (a'): the cherry-pick residue class, recovered through the
-resume — `C.proof_tests[2]` and `[T-PROPOSAL].test`.
----------------------------------------------------------------------------
+The one planting every repair test starts from: alpha's candidate,
+stale-verified at beta's published head and rejected by review, so the
+rejection registers alpha's first repair. Its admission is whatever the
+fixture's `max_merge_repairs` decides — `Runnable` at the default of one,
+`HumanRequired` under `no_automatic_repairs`, `HumanBinding` under
+`small_only` (the root's one Small rung leaves the repair's Mid floor
+empty).
+
+## `fn an_over_limit_repair_spends_nothing_until_its_answer_activates_it() {`
+
+An over-limit repair is `AwaitingInput`, the run hard-blocks on its one
+question, and nothing is spent or appended beyond the resume's own record
+until a person answers.
+
+## `fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue() {`
+
+The whole of a repair's life at the loop, once per answer delivery: the
+admission answer is ingested (`question_answered` before `task_dispatched`),
+the repair dispatches inside its root's lineage lease at the head current
+at its dispatch, materializes the rejected candidate (`Clean`, recorded
+before the spawn), runs to a candidate that widens the lineage, and merges
+exact-base with `satisfies` the canonical closure and the lineage lease
+released. R11's candidates ref is still there afterwards. What the worker
+saw and what was published are compared as bytes against the protected
+source's blob and the content already merged at the base — PR #249's
+refusals review (M6) showed the SHA oracles green over a corrupted checkout.
+
+## `fn a_delivered_answer_is_ingested_before_unrelated_runnable_work_dispatches() {`
+
+DESIGN §4 (6) at the loop: with beta genuinely runnable and a halting
+decline already delivered to the polled source, the decline is ingested
+first, beta never dispatches and no process runs. The test the admission
+fixtures could not be — nothing else was runnable there, so ingestion
+removed (M4) or made blocking (M5) still passed.
 
 ## `fn plant_published_beta(fixture: &Fixture) -> CommitSha {`
 
@@ -3651,6 +3600,132 @@ worktree lease, with the lock untouched and nothing appended; once it
 exits the kernel releases the lease, the lock is stale, and the next
 resume reclaims it and completes the publication.
 
+## `fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {`
+
+**A call census's needle is not satisfied by a longer name ending in it.**
+
+The class boundary, not the instance. S5 round 4 found that
+`every_packet_named_recovery_action_has_a_production_caller` counted
+`refuse_unexpected_refs(` as a call to `expected_refs` — but the interesting
+half is that the same needle is built for **every** entry from a name the
+packet chose, so any future clause whose function name is a suffix of another
+identifier is satisfied by that other identifier's call sites, silently and
+in the passing direction.
+
+So this asserts the needle's rule over the four shapes that decide it, and
+then over the real file the collision was found in — a unit assertion alone
+would pass against a helper that was never wired into the census.
+
+## `fn a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it() {` › `let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));`
+
+And on the file the collision was measured in, through the same region
+the census reads — a unit assertion over literals would pass against a
+helper nothing was wired into.
+
+**The two counts differ, and the difference is worth keeping.** The module
+carries four occurrences of `expected_refs(`; the region the census reads
+carries one, because three of the four sit inside `#[cfg(test)]` items
+that `production_code` blanks. The one that survives is the **definition
+line** of `refuse_unexpected_refs`, which the "calls, not definitions"
+filter does not catch: the text before the match is `pub fn refuse_un`,
+and that does not end in `fn`.
+
+The three that `production_code` blanks now sit in the sibling file
+`mod tests;` declares, so the module is two files and `whole` is read
+from both. The comparison is the one it always was: every occurrence the
+module carries, against the one the production region keeps.
+
+## `fn every_packet_named_recovery_action_has_a_production_caller() {`
+
+**Every packet-named recovery action and refusal has a production caller.**
+
+The class this slice produced more than any other, and the one census that
+closes it. Across three review rounds, ten separate things were found
+**built, correct, and never called**: `TopologyRun` itself, `settle_*`, the
+candidate sequence, `resume_open_no_attempt`, `Started`, `CandidateJournal`,
+`Spend::replay`, `complete_promotion`'s continuation, `prune_orphan_pin` and
+`refuse_unexpected_refs`.
+
+Two of those were P0/P1 liveness defects — a converged promotion that stalled
+the run forever, and a resumed run that forgot its whole spend. The rest were
+coverage gaps that would have become defects the moment a caller appeared.
+Each was found separately, by a different reviewer noticing a different
+symptom, over four rounds.
+
+**This asserts the property the packet states, rather than waiting for a
+reviewer to notice its absence.** A function that implements a
+`resume_action` or a `refusal_condition` and has no production caller is not
+an implementation of that clause — it is a plan to implement it.
+
+**What this census covers, exactly.** The eleven entries below and nothing
+else. Of the ten never-called things listed above, `Spend::replay`,
+`TopologyRun`, `Started`, `CandidateJournal`, `settle_*` and
+`complete_promotion`'s continuation are **not** among them — this would not
+have caught them, and the commit that added it said otherwise. Corrected in
+`reviews/FINDINGS.md` §19, claim (7); recorded here because the reader who
+needs it is the one adding the twelfth entry.
+
+Four ways this could pass while a clause stayed unperformed, and each is
+closed by a named thing rather than by the needle being "obviously right":
+
+* **A mention in a doc comment or a string.** The region is
+  `effects::production_code`, which blanks comments and string literals.
+* **A `#[cfg(test)]` caller in the same file.** The same region removes each
+  configured item in place.
+* **A caller in an out-of-line `tests.rs`**, where the attribute is on the
+  parent's declaration and there is nothing in the file to blank. Skipped by
+  file stem in the walk below. This was live until S5 round 4.
+* **A longer identifier ending in the entry's name.** `expected_refs(` was
+  satisfied by `refuse_unexpected_refs(`. Closed by [`crate::effects::census_domain::production_calls`],
+  whose own witness is
+  `a_call_census_needle_is_not_satisfied_by_a_longer_name_ending_in_it`.
+
+The fourth is the one worth stating as a class: the needle is built from a
+name **the packet chose**, so it cannot be renamed out of a collision the way
+`into_log_and_fold` was.
+
+## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `const CLAUSES: &[(&str, crate::effects::census_domain::Call, &str)] = &[`
+
+(function, how production calls it, the packet clause it performs).
+
+## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `let test_modules = crate::effects::census_domain::whole_file_test_modules(&root, &all, 13);`
+
+**The crate's own declarations, not a file-name rule.** This skipped
+by the stem `"tests"`, so it covered only the modules named
+`tests.rs`; the crate declares **more** whole-file test modules than
+that — `effects::tests::cfg::WHOLE_FILE_TEST_MODULES` lists them all,
+against the `tests.rs` entries of it the stem finds —
+and the six it missed — `scaffold`, `premove`, `fake`, `fixture`,
+`scratch_tree`, `readiness` — are the ones most likely to name what
+production names. `PR7-R5-ATT-001`.
+
+## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `if test_modules.contains(&path) {`
+
+**An out-of-line test file is test code in full, and
+`production_code` cannot tell.** The `#[cfg(test)]` is on the
+*declaration* in the parent, so the file it names carries no
+attribute of its own and nothing in it is blanked. Without
+this skip a fixture calling a packet-named function satisfies
+the clause on production's behalf, which is precisely the
+class this census exists to close.
+
+## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `assert!(`
+
+The skip is in force and it removed something. A zero here would mean the
+control was silently inert — the same failure as an empty region, one
+level up. The floor is the pinned list's length rather than a literal,
+which is why it is that list and not `test_modules.len()`: the derivation
+is what this floor exists to catch, so a floor read off its own output
+would pass on an empty answer.
+
+## `fn every_packet_named_recovery_action_has_a_production_caller() {` › `let defined: usize = sources`
+
+**The named item exists.** The census never checked, so renaming a
+clause's definition out of the tree left it green — measured, S5
+round 4. Not pinned to exactly one definition, because
+`settle_interrupted` legitimately names three items and `form` is
+what separates them.
+
 ## `struct BlockNthSnapshotAdd {`
 
 The obstruction the final cover reviewer's witness used: the second reviewer's
@@ -3698,15 +3773,6 @@ the reviewer where the invariant names one about the runner. Deferral and
 containment were right, and the `Gone` arm is the control that says this repair
 changed only the attribution of the one fate the invariant names.
 
-## `fn checkout_of(workspace: &Path) -> BTreeMap<String, String> {`
-
-What the workspace held when the process was invoked: every tracked file and its
-content, read at the moment `DrivenRunner` stands in for the agent. The
-dependency regression asserts on this rather than on a recorded SHA, because a
-SHA assertion is the shape that would have passed for the whole life of
-`PR8-R7-DISPATCH-BASE` — the durable record and the worktree agreed with each
-other throughout, and both were wrong.
-
 ## `fn a_dependent_task_is_dispatched_into_its_dependencys_merged_work() {`
 
 The regression for `PR8-R7-DISPATCH-BASE`, driven end to end: alpha queued and
@@ -3728,43 +3794,6 @@ head that has since been published is not substituted, and no second
 `task_dispatched` appears. Mutating `continue_open` to re-derive its base
 through [`super::super::integrate::dispatch_head`] fails it at the worker's
 HEAD.
-
-## `fn plant_rejected_repair(fixture: &Fixture) -> (crate::topology::events::MergeRejected, TaskKey) {`
-
-The one planting every repair test starts from: alpha's candidate,
-stale-verified at beta's published head and rejected by review, so the
-rejection registers alpha's first repair. Its admission is whatever the
-fixture's `max_merge_repairs` decides — `Runnable` at the default of one,
-`HumanRequired` under `no_automatic_repairs`, `HumanBinding` under
-`small_only` (the root's one Small rung leaves the repair's Mid floor
-empty).
-
-## `fn an_over_limit_repair_spends_nothing_until_its_answer_activates_it() {`
-
-An over-limit repair is `AwaitingInput`, the run hard-blocks on its one
-question, and nothing is spent or appended beyond the resume's own record
-until a person answers.
-
-## `fn a_repair_admission_answer_activates_the_repair_which_materializes_and_merges_through_the_queue() {`
-
-The whole of a repair's life at the loop, once per answer delivery: the
-admission answer is ingested (`question_answered` before `task_dispatched`),
-the repair dispatches inside its root's lineage lease at the head current
-at its dispatch, materializes the rejected candidate (`Clean`, recorded
-before the spawn), runs to a candidate that widens the lineage, and merges
-exact-base with `satisfies` the canonical closure and the lineage lease
-released. R11's candidates ref is still there afterwards. What the worker
-saw and what was published are compared as bytes against the protected
-source's blob and the content already merged at the base — PR #249's
-refusals review (M6) showed the SHA oracles green over a corrupted checkout.
-
-## `fn a_delivered_answer_is_ingested_before_unrelated_runnable_work_dispatches() {`
-
-DESIGN §4 (6) at the loop: with beta genuinely runnable and a halting
-decline already delivered to the polled source, the decline is ingested
-first, beta never dispatches and no process runs. The test the admission
-fixtures could not be — nothing else was runnable there, so ingestion
-removed (M4) or made blocking (M5) still passed.
 
 ## `fn a_repair_dispatch_interrupted_before_its_attempt_is_recreated_at_its_base_and_materialized_once() {`
 
@@ -3788,12 +3817,17 @@ real worktree and intent, planted before the retained prefix, are gone
 after the resume and still gone after the replacement merges and another
 resume runs — PR #249's crash review, finding 2.
 
-## `fn picking_the_last_of_two_offered_agents_binds_the_repair_to_it_rather_than_declining() {`
+## `fn a_fresh_incarnation_closes_a_retained_repair_generation_…` › `let events = TopologyFold::parse_log(&fixture.log_bytes()).…`
 
-PR #249's conformance review, finding 1, end to end: two agents offered,
-`2` typed at the production parser, and the repair runs under the second
-agent with `option_index: 1` and the catalogue's lowest model for it —
-where the last-option rule had recorded a decline and failed the lineage.
+INV-13: the projection names the repair's origin and its whole lineage.
+
+## `fn a_fresh_incarnation_closes_a_retained_repair_generation_…` › `let registered = rejection`
+
+The registry's own lineage, member for member: alpha's first repair
+is member 0 of alpha's lineage (`lineage_members` counts the repairs
+registered before it, and the root is not a member), and the
+projection carries the index the rejection registered rather than
+a count of its own.
 
 ## `fn a_rejected_candidates_ref_survives_a_budget_stop_and_the_repair_dispatches_after_the_resume() {`
 
@@ -3811,6 +3845,13 @@ exactly that binding, pinned, at rung 0. The `Blocking` arm is the one
 PR8's hard-block refusal fails: PR #249's refusals review restored that
 refusal (M11) and every test passed, because the polled path had ingested
 the answer before the block was reached.
+
+## `fn picking_the_last_of_two_offered_agents_binds_the_repair_to_it_rather_than_declining() {`
+
+PR #249's conformance review, finding 1, end to end: two agents offered,
+`2` typed at the production parser, and the repair runs under the second
+agent with `option_index: 1` and the catalogue's lowest model for it —
+where the last-option rule had recorded a decline and failed the lineage.
 
 ## `fn a_binding_answer_naming_no_frozen_option_is_refused_before_any_append() {`
 
@@ -3849,3 +3890,205 @@ ineligible (`BehindOlderLineage`), the older repair dispatches and
 publishes first, and the younger publishes onto the head it left —
 lineage order, not queue position, each publication satisfying its own
 closure and releasing its own lineage lease.
+
+## `fn with_live_run<R>(`
+
+PR10's loop-level fixture: a resumed `TopologyRun` under a ceiling of the
+test's choosing, handed to a body with its seams and hooks, the resume
+run first so an arming inside the body lands in the loop and not in
+recovery. `with_live_run_hooked` takes the caller's hooks;
+`with_live_run_hooked_runner` the caller's runner as well.
+
+## `fn run_finished_halted_and_budget_exceeded_accepted_with_de…` › `let fixture = Fixture::two_tasks("closure-halted-deferred");`
+
+Halted: alpha deferred, beta's halting failure — both planted in the
+live epoch, after the resume, so the closure meets alpha Deferred with
+its backoff pending rather than the Pending task `run_resumed` wakes.
+
+## `fn a_fault_between_the_closure_close_and_its_scrub_is_recla…`
+
+T-FINISH's closure prefix with a fault inside it: the retained
+generation's `generation_closed` is durable and the scrub that follows
+it is refused at `Worktree.Remove`'s before phase, so the command ends
+between the close and the `run_finished`. The next resume finds one
+close for that generation, reclaims its worktree and intent, keeps every
+candidates ref, clears the epoch's budget stop, and the loop meets the
+ceiling again in the new epoch.
+
+## `fn a_fault_between_the_closure_close_and_its_scrub_is_recla…` › `let log = TopologyFold::parse_log(&fixture.log_bytes()).exp…`
+
+A budget stop per epoch, each in the epoch the resumes before it
+opened: the live run above is itself a resume of the planted log, so
+the first stop is epoch 1's, and the resume that reclaimed the closure
+opened epoch 2 for the second.
+
+## `fn run_finished_budget_exceeded_refused_after_halting_drain…` › `plant_live(`
+
+Planted in the live epoch: the budget stop and the halting settlement
+after it are what the closure meets, not a budget stop a resume between
+the planting and the loop would have cleared.
+
+## `struct ArmedFinalization {`
+
+Hooks that inject an error return at one `(site, phase)` of one
+finalization, the nth time it is reached, so the T-FINALIZE matrix is
+driven at every cleanup site in turn and the next resume is shown to
+converge from each.
+
+## `struct OrderedHooks {`
+
+The harness bundle with one timeline across the Event and effect
+families, so a test can read which of an append and an effect came
+first.
+
+## `impl ArmedFinalization` › `fn answering(`
+
+Armed to answer `injection` — an error return, or the kill the
+finalization kill child dies by — the first time `at` is consulted.
+
+## `fn finalization_effects(outcome: &RunOutcome) -> Vec<Finali…`
+
+What finalization does to a run planted with every kind of residue, in
+order: the report, then every cleanup step's effects site by site, then
+the run lock's release. `Lock.Release` is last and its "done" is the lock
+being free, which the guard's drop also achieves: the fault at it is
+survivable, so a resume faulted there still reaches the refusal.
+
+## `fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectS…`
+
+Every cell of the finalization matrix: both hook phases of every effect's
+site, in effect order.
+
+## `fn assert_finalization_order(`
+
+What a fault at `cell` leaves: every effect before the faulted site is
+done, the faulted site's own effect is done only when the fault came
+after it, and nothing later is. The lock's release is read from the
+harness rather than the file — the faulted resume's guard drops and
+frees the file whatever happened, so the file cannot tell a release
+through the funnel from a drop; the funnel's after phase can. A fault
+at the release itself is absorbed (`RunLock::release` discards the
+funnel's error), so it leaves every earlier effect done.
+
+## `fn finalization_kill_child() {`
+
+The child of `a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`:
+resumes the run its parent planted at its end and dies by abort at
+`Worktree.RemoveExecutionRoot`'s after phase — inside finalization, after
+the last cleanup step's effect and before the guards drop.
+
+## `fn a_kill_inside_finalization_after_the_execution_root_is_r…`
+
+T-FINALIZE with a real process death inside finalization: the child
+resumes a Complete run planted at its end, performs the report and every
+cleanup step, and is killed right after the execution root is removed —
+before the run lock is released and the guards drop. The log is untouched
+by the death, the lock is free once the child is gone, and the next
+resume finds the report current, nothing left to prune, releases the lock
+through the funnel and refuses.
+
+## `fn finalized_report_names_runner_identity()` › `assert_eq!(report.tasks.len(), 2);`
+
+INV-13's projections name each task's origin and lineage: two originals here.
+
+## `fn finalized_report_names_runner_identity()` › `let report_path = fixture.public().join("report.json");`
+
+A stored report is fresh only when its digest is the digest of its own
+content and its outcome and runner are this report's. A file carrying
+the current digest over another image reference, or another outcome,
+is stale: the next resume regenerates it and says so; an untouched file
+is left alone.
+
+## `fn live_vs_replay(`
+
+Q1's comparison, committed at the G4 gate's request: the live incremental
+fold of a stepped run and the report derived from it, against a fresh
+replay of the bytes on disk and its report.
+
+## `fn ledger_inventory(`
+
+The physical half of the ledger, measured from the fixture: slots by
+namespace, refs and pins, the run directory and the private half (the
+normalized plan, the report, the question, answer and `.partial` files,
+the marker, the owner and commit records), the two lock files, container
+intents, the volume classification, and Git's store: the objects the
+pre-finalization observation saw referenced, checked present after, the
+whole store as that observation listed it, so R27 can ask whether any
+object at all went missing, and what `fsck` reports unreachable.
+
+## `fn projections_are_equal_between_live_and_replay_at_every_p…`
+
+`projection equivalence` over a run that defers, stops for budget, closes
+and refuses: the report derived from the live fold **at every successful
+append** — recorded by the hooks bundle's `folded` hook, which the emitter
+calls after each applied delta — equals the report derived from a replay
+of that prefix of the bytes on disk, and every durable prefix this
+process appended had such a live comparison. The whole-step comparison
+(`assert_live_equals_replay`) runs beside it, and the last loop checks the
+weaker property it always checked: a prefix replays to one report.
+
+## `fn files_under(dir: &Path) -> u32 {`
+
+Every regular file under `dir`, recursively.
+
+## `fn store_objects(repo_root: &Path) -> Vec<String> {`
+
+Every object in the repository's store, reachable or not: what R27
+holds the run end to — nothing present before it is gone after it.
+
+## `fn plant_unreachable_object(fixture: &Fixture, tag: &str) -…`
+
+Write one object nothing references into the store, so the run end has
+an already-unreachable object to leave alone: R27 says the run never
+deletes one, and a verdict that only checked the objects pruned refs
+released could not see a finalization that pruned Git's own residue.
+
+## `fn ledger_inventory(` › `cleanup_lock_file_present: public.join("cleanup.lock").exis…`
+
+`cleanup.lock` is the reaper's Unix hold file beside the run lock.
+
+## `fn wait_for_cleanup_hold_release(public: &Path) -> bool {`
+
+Wait, bounded, for the run's cleanup lease to be free. A `git` child of
+the ref funnel holds the lease while it lives, through a descriptor made
+inheritable for it, and under a parallel suite a child another test
+thread forks in that window can inherit the descriptor and hold the
+lease until it exits. The wait is bounded so a hold that never clears
+still fails the assertion that follows it; the ledger's post-drop
+observation and the finalization matrix's resumes wait through it.
+## `fn observe_live(`
+
+The live observation: the fold as the process holds it, the store as it
+is now (`store` lists it for the later observation to compare against).
+
+## `fn observe_after_drop(`
+
+The observation once the run has been dropped: the fold replayed from
+the bytes, the store compared with `store_before`.
+
+## `fn a_closed_settlement_scrubs_the_generations_worktree_and_…` › `let seen = timeline.lock().unwrap_or_else(PoisonError::into…`
+
+The order, observed: the settlement's append is durable
+(`Event.Append` after) before the scrub's first effect
+(`Worktree.Remove` before) is consulted.
+
+## `struct ArmedAppendError {`
+
+Hooks that return `Err` from the `Written` point of the nth transaction
+append counted from the moment the countdown is set — the append-error
+protocol, aimed at one line of the test's choosing, which is how the
+NoRunFinished ledger is driven rather than planted.
+
+## `fn the_ledger_is_resumably_open_when_no_run_finished_and_ba…` › `let released = referenced_objects(&fixture);`
+
+The pre-exit observation: the process still holds the run, its
+lock and its fold; the after-drop observation below is taken
+from the bytes and the OS once it has let go.
+
+## `fn observation_export_env() -> Vec<(String, String)> {`
+
+The ST-07 observation export directory, handed on to a spawned kill child:
+the host runner composes the child's environment from scratch, so a
+variable the parent test was started with does not reach the child unless
+the request carries it.
+

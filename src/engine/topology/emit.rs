@@ -248,6 +248,7 @@ pub fn emit(
         Ok(()) => {
             state.fold.apply_delta(delta);
             state.events.push(checked.clone());
+            hooks.folded(state.fold, state.events);
             Ok(checked)
         }
 

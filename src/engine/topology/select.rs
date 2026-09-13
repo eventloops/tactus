@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::UpstrokeError;
+use crate::events::RunOutcome;
 use crate::events::{AttemptRecord, BudgetKind};
 use crate::ir::QuestionId;
 use crate::topology::events::{
@@ -180,6 +181,8 @@ pub enum Step {
         questions: Vec<QuestionId>,
     },
     Closure(DerivedOutcome),
+    NotStarted,
+    Finished(RunOutcome),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -207,6 +210,7 @@ pub enum Admitted {
     HardBlock {
         questions: Vec<QuestionId>,
     },
+    Closure(DerivedOutcome),
 }
 
 #[must_use]
@@ -214,8 +218,11 @@ pub fn select(fold: &TopologyFold, ceiling: &Ceiling, spend: &Spend) -> Step {
     if fold.is_poisoned() {
         return Step::Poisoned;
     }
+    if let Some(outcome) = fold.finished() {
+        return Step::Finished(outcome.clone());
+    }
     let Some(epoch) = fold.epoch() else {
-        return Step::Closure(fold.derived_outcome());
+        return Step::NotStarted;
     };
 
     if fold.run_is_ending() {
@@ -295,11 +302,17 @@ pub fn checkpoint(step: Step) -> Result<Admitted, UpstrokeError> {
             generation,
             continuing,
         }),
-        Step::Closure(outcome) => Err(UpstrokeError::Refused {
+        Step::Closure(outcome) => Ok(Admitted::Closure(outcome)),
+        Step::NotStarted => Err(UpstrokeError::Refused {
+            message: "the run has not started: nothing is admitted from a fold with no \
+                      `run_started`, and nothing was appended"
+                .to_owned(),
+        }),
+        Step::Finished(outcome) => Err(UpstrokeError::Refused {
             message: format!(
-                "this build does not end a run: closure derives {outcome:?}, and the terminal \
-                 finalization `run_end_policy` attaches to `run_finished` is not implemented \
-                 here, so it refuses before appending it"
+                "this run already finished as `{}`, and continuation of a finished run is \
+                 refused after finalization; nothing was appended",
+                super::report::outcome_label(&outcome)
             ),
         }),
         Step::Poisoned => Err(UpstrokeError::Refused {

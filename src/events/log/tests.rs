@@ -2660,12 +2660,18 @@ fn the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold() {
 
     const FOLD_MENTIONS: &[&str] = &[
         "src/engine/topology/candidate.rs",
+        "src/engine/topology/closure.rs",
         "src/engine/topology/create.rs",
         "src/engine/topology/emit.rs",
+        "src/engine/topology/finalize.rs",
         "src/engine/topology/integrate.rs",
+        "src/engine/topology/ledger.rs",
+        "src/engine/topology/reachability.rs",
         "src/engine/topology/recover.rs",
         "src/engine/topology/repair.rs",
+        "src/engine/topology/report.rs",
         "src/engine/topology/run.rs",
+        "src/engine/topology/seams.rs",
         "src/engine/topology/select.rs",
         "src/engine/topology/settle.rs",
         "src/events/log.rs",

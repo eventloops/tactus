@@ -9,6 +9,8 @@ use crate::rundir::RunDirHooks;
 use crate::runner::container::ContainerHooks;
 use crate::topology::effects::HookHarness;
 use crate::topology::events::IncarnationId;
+use crate::topology::events::TopologyEvent;
+use crate::topology::fold::TopologyFold;
 use crate::workspace_manager::EffectHooks;
 
 pub trait TopologyHooks {
@@ -21,6 +23,8 @@ pub trait TopologyHooks {
     fn container(&mut self) -> &mut dyn ContainerHooks;
 
     fn spawn(&mut self) -> &mut dyn SpawnHooks;
+
+    fn folded(&mut self, _fold: &TopologyFold, _events: &[TopologyEvent]) {}
 }
 
 #[derive(Debug, Default)]
@@ -70,6 +74,13 @@ pub struct HarnessTopologyHooks {
     spawn: crate::runner::HarnessHooks,
     #[allow(dead_code)]
     harness: Arc<Mutex<HookHarness>>,
+    projections: Arc<Mutex<Vec<LiveProjection>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveProjection {
+    pub prefix: usize,
+    pub digest: Option<String>,
 }
 
 impl HarnessTopologyHooks {
@@ -82,6 +93,7 @@ impl HarnessTopologyHooks {
             container: crate::runner::container::HarnessHooks::new(Arc::clone(&harness)),
             spawn: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
             harness,
+            projections: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -109,6 +121,14 @@ impl HarnessTopologyHooks {
     pub fn event_observer(&self) -> &crate::events::log::HarnessEventHooks {
         &self.events
     }
+
+    #[must_use]
+    pub fn live_projections(&self) -> Vec<LiveProjection> {
+        self.projections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl TopologyHooks for HarnessTopologyHooks {
@@ -130,6 +150,21 @@ impl TopologyHooks for HarnessTopologyHooks {
 
     fn spawn(&mut self) -> &mut dyn SpawnHooks {
         &mut self.spawn
+    }
+
+    fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+        let digest = fold.started().and_then(|started| {
+            super::report::TopologyReport::derive(&started.run_id, fold, events)
+                .ok()
+                .map(|report| report.digest)
+        });
+        self.projections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(LiveProjection {
+                prefix: events.len(),
+                digest,
+            });
     }
 }
 

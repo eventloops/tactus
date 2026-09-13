@@ -24,6 +24,11 @@ impl TopologyFold {
         self.run.as_ref()?.tasks.get(key.index())
     }
 
+    #[must_use]
+    pub fn task_count(&self) -> usize {
+        self.run.as_ref().map_or(0, |run| run.tasks.len())
+    }
+
     pub fn task_state(&self, key: TaskKey) -> Option<TaskState> {
         self.task(key).map(|task| task.state)
     }

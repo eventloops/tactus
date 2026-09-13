@@ -565,7 +565,7 @@ fn a_run_with_no_admissible_work_never_asks_the_ceiling() {
 }
 
 #[test]
-fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {
+fn a_breach_appends_budget_exceeded_and_integration_and_run_end_cross_the_checkpoint() {
     let fold = started();
     assert!(
         fold.structurally_admissible() && fold.ready(ALEPH),
@@ -653,8 +653,12 @@ fn a_breach_appends_budget_exceeded_and_integration_and_run_end_are_refused() {
         step,
         Step::Closure(DerivedOutcome::Ending(RunOutcome::Complete))
     );
-    let error = checkpoint(step).expect_err("this build does not end a run");
-    assert!(format!("{error}").contains("does not end a run"), "{error}");
+    assert_eq!(
+        checkpoint(step).expect("run-end closure crosses the checkpoint since PR10"),
+        Admitted::Closure(DerivedOutcome::Ending(RunOutcome::Complete)),
+        "the closure carries the outcome the fold derived across to the acting half, which \
+         re-derives it after closing whatever is open (`closure::confirm_derived`)"
+    );
 }
 
 #[test]
@@ -709,7 +713,7 @@ fn the_checkpoint_admits_every_branch_this_build_implements() {
 }
 
 #[test]
-fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {
+fn every_step_variant_is_admitted_or_refused_and_the_split_is_eight_three() {
     let every: Vec<Step> = vec![
         Step::Poisoned,
         budget_exceeded(
@@ -744,6 +748,8 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {
             questions: vec![question_for(ALEPH).id],
         },
         Step::Closure(DerivedOutcome::Ending(RunOutcome::Complete)),
+        Step::NotStarted,
+        Step::Finished(RunOutcome::Complete),
     ];
 
     let mut names = Vec::new();
@@ -758,6 +764,8 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {
             Step::Backoff => "Backoff",
             Step::HardBlock { .. } => "HardBlock",
             Step::Closure(_) => "Closure",
+            Step::NotStarted => "NotStarted",
+            Step::Finished(_) => "Finished",
         });
     }
     let mut distinct = names.clone();
@@ -777,16 +785,17 @@ fn every_step_variant_is_admitted_or_refused_and_the_split_is_seven_two() {
 
     assert_eq!(
         crossed.len(),
-        7,
+        8,
         "the admitted count moved: {:?}",
         crossed.iter().map(|(_, n)| *n).collect::<Vec<_>>()
     );
     assert_eq!(
         refused,
-        vec!["Poisoned", "Closure"],
-        "the set that does not cross the checkpoint changed: `checkpoint_refusals` has this \
-         build refuse run-end closure until PR10, `Poisoned` is the absence of a branch, and a \
-         repair dispatch — PR8's refusal — is performed"
+        vec!["Poisoned", "NotStarted", "Finished"],
+        "the set that does not cross the checkpoint changed: run-end closure crosses since \
+         PR10 (`checkpoint_refusals` names no terminal this build does not implement), \
+         `Poisoned` is the absence of a branch, an unstarted fold admits nothing, and a \
+         finished run is refused continuation after its finalization"
     );
 }
 
@@ -994,6 +1003,8 @@ fn arm_label(step: &Step) -> &'static str {
         Step::Backoff => "Backoff",
         Step::HardBlock { .. } => "HardBlock",
         Step::Closure(_) => "Closure",
+        Step::NotStarted => "NotStarted",
+        Step::Finished(_) => "Finished",
     }
 }
 
@@ -1007,7 +1018,13 @@ const OFFERS_WORK: &[&str] = &[
     "HardBlock",
 ];
 
-const OFFERS_NO_WORK: &[&str] = &["Poisoned", "BudgetExceeded", "Closure"];
+const OFFERS_NO_WORK: &[&str] = &[
+    "Poisoned",
+    "BudgetExceeded",
+    "Closure",
+    "NotStarted",
+    "Finished",
+];
 
 #[test]
 fn every_label_the_arm_classifier_returns_is_classified() {
@@ -1064,7 +1081,13 @@ fn every_label_the_arm_classifier_returns_is_classified() {
     );
     assert_eq!(
         OFFERS_NO_WORK,
-        ["Poisoned", "BudgetExceeded", "Closure"],
+        [
+            "Poisoned",
+            "BudgetExceeded",
+            "Closure",
+            "NotStarted",
+            "Finished"
+        ],
         "the not-work list is pinned by name: without that, moving a work label into it \
          satisfies the equality below and drops that arm from the ending witness's coverage \
          requirement, which is the one way a seventh arm can still be added and left undriven"
@@ -1300,10 +1323,17 @@ fn an_unstarted_run_selects_nothing() {
     let fold = TopologyFold::new(inputs());
     assert_eq!(
         select(&fold, &Ceiling::unlimited(), &no_spend()),
-        Step::Closure(DerivedOutcome::NotEnding)
+        Step::NotStarted,
+        "a fold with no `run_started` has nothing to close and no outcome to derive, so it is \
+         not a closure; before PR10 it selected `Closure(NotEnding)` and the checkpoint's \
+         refusal of every closure hid the difference"
     );
-    checkpoint(select(&fold, &Ceiling::unlimited(), &no_spend()))
+    let error = checkpoint(select(&fold, &Ceiling::unlimited(), &no_spend()))
         .expect_err("nothing is admitted from a run that has not started");
+    assert!(
+        format!("{error}").contains("has not started"),
+        "the refusal says why: {error}"
+    );
 }
 
 #[test]

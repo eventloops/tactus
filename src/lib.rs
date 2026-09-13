@@ -15,6 +15,7 @@ pub mod gates;
 pub mod interaction;
 pub mod ir;
 pub mod ladder;
+pub mod observations;
 pub mod plan;
 pub mod review;
 pub mod route;

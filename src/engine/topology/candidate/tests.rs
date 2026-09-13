@@ -690,6 +690,10 @@ fn spawn_kill_child(fixture: &Fixture, which: &str) -> ProcessOutput {
         .env(ENV_BASE, fixture.base.to_string_lossy().into_owned())
         .env(ENV_PRIVATE, fixture.private.to_string_lossy().into_owned())
         .env(ENV_SITE, which);
+    let spec = match std::env::var(crate::observations::OBSERVATIONS_ENV) {
+        Ok(dir) => spec.env(crate::observations::OBSERVATIONS_ENV, dir),
+        Err(_) => spec,
+    };
     HostRunner::new()
         .run(&gate_request(
             spec,

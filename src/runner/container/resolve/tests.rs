@@ -1326,6 +1326,7 @@ fn no_module_outside_the_container_runner_writes_a_container_intent() {
     ];
     const EXCLUDED: &[&str] = &[
         "src/effects/tests.rs",
+        "src/engine/topology/coverage/tests.rs",
         "src/engine/topology/create/tests.rs",
         "src/engine/topology/recover/tests.rs",
         "src/runner/container/census/tests.rs",

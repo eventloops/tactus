@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::error::{ProcessFate, UpstrokeError};
+use crate::events::RunOutcome;
 use crate::ir::{Answer, Question, QuestionId};
 use crate::review;
 use crate::topology::events::Answer4;
@@ -12,8 +13,9 @@ use crate::topology::fold::QuestionOrigin;
 use crate::events::AttemptRecord;
 use crate::interaction::Sleeper;
 use crate::topology::events::{
-    AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion, GenerationId,
-    InfrastructureKind, Materialization, SequenceId, SessionId, TopologyEvent,
+    AttemptNumber, CandidateLeaseEffect, CandidateRef, CommitSha, FrozenQuestion,
+    GenerationCloseReason, GenerationId, InfrastructureKind, Materialization, SequenceId,
+    SessionId, TopologyEvent,
 };
 use crate::topology::fold::{FrozenInputs, TopologyFold};
 use crate::topology::registry::TaskKey;
@@ -28,11 +30,13 @@ use super::candidate::{
     CandidateJournal, JudgedTree, append_candidate_created, append_candidate_prepared,
     create_candidates_ref, pin_candidate, reclaim_after_creation, write_candidate_commit,
 };
+use super::closure;
 use super::dispatch::{
     DispatchKind, DispatchRequest, Dispatched, EventEmitter, OpenGeneration, dispatch,
     resume_open_no_attempt, task_slot,
 };
 use super::emit::{EmitFailure, EmitState, RunIdentity, emit};
+use super::finalize;
 use super::identity::{
     InvocationLedger, ReservationKind, Reservations, SequenceIdentities, SlotAssertion,
 };
@@ -43,7 +47,8 @@ use super::recover::RunHandle;
 use super::seams::{IdSource, TimeSource, TopologyHooks};
 use super::select::{Admitted, Ceiling, Spend, Step, checkpoint, select};
 use super::settle::{
-    Deferral, FinishedAttempt, ManagedWorktrees, RetryOutcome, RetryRequest, retry, settle_failed,
+    Deferral, FinishedAttempt, ManagedWorktrees, RetryOutcome, RetryRequest, close_generation,
+    retry, settle_failed,
 };
 
 pub struct RunEmitter<'a> {
@@ -394,7 +399,7 @@ impl LoopBranch {
     #[must_use]
     pub const fn disposition(self) -> Disposition {
         match self {
-            Self::Closure => Disposition::RefusedByCheckpoint,
+            Self::Closure => Disposition::Performed,
             Self::Integration => Disposition::Performed,
             Self::DeferBackoff => Disposition::Performed,
             Self::ReadyDispatch => Disposition::Performed,
@@ -415,6 +420,7 @@ impl LoopBranch {
             Step::Backoff => Some(Self::DeferBackoff),
             Step::HardBlock { .. } => Some(Self::HardBlock),
             Step::Closure(_) => Some(Self::Closure),
+            Step::NotStarted | Step::Finished(_) => None,
         }
     }
 
@@ -581,8 +587,11 @@ pub enum Progress {
         question: QuestionId,
         declined: bool,
     },
-    Blocked {
-        questions: usize,
+    Finished {
+        outcome: RunOutcome,
+        closed: usize,
+        report_written: bool,
+        execution_root_removed: bool,
     },
     Waited {
         waited_ms: u64,
@@ -650,6 +659,11 @@ impl TopologyRun {
     #[must_use]
     pub fn fold(&self) -> &TopologyFold {
         &self.handle.fold
+    }
+
+    #[must_use]
+    pub fn events(&self) -> &[TopologyEvent] {
+        &self.handle.events
     }
 
     #[must_use]
@@ -727,6 +741,7 @@ impl TopologyRun {
                 self.run_first_attempt(&dispatched, seams, hooks)
             }
             Admitted::HardBlock { questions } => self.hard_block(&questions, seams, hooks),
+            Admitted::Closure(_) => self.close_run(seams, hooks),
         }
     }
 
@@ -915,9 +930,7 @@ impl TopologyRun {
             let answer4 = self.answer_for(id, &asked, answer, seams)?;
             return self.ingest_answer(id, asked.key, answer4, seams, hooks);
         }
-        Ok(Progress::Blocked {
-            questions: questions.len(),
-        })
+        self.close_run(seams, hooks)
     }
 
     fn answer_for(
@@ -1216,9 +1229,68 @@ impl TopologyRun {
                     hooks,
                 )?;
                 self.retained.remove(&key);
+                super::dispatch::scrub(seams.manager, hooks, &slot_for_run)?;
             }
         }
         Ok(Progress::GenerationClosed { key })
+    }
+
+    fn close_run(
+        &mut self,
+        seams: &RunSeams<'_>,
+        hooks: &mut dyn TopologyHooks,
+    ) -> Result<Progress, UpstrokeError> {
+        let outcome = closure::ending_outcome(&self.handle.fold)?;
+        closure::refuse_unclosable(&self.handle.fold)?;
+
+        let reason = GenerationCloseReason::RunEnding {
+            outcome: outcome.clone(),
+        };
+        let mut closed = 0;
+        for key in closure::closable(&self.handle.fold) {
+            let event = close_generation(&self.handle.fold, key, reason.clone())?;
+            let slot = task_slot(key, event.generation);
+            self.emit(
+                TopologyEventBody::GenerationClosed { data: event },
+                seams,
+                hooks,
+            )?;
+            self.retained.remove(&key);
+            super::dispatch::scrub(seams.manager, hooks, &slot)?;
+            closed += 1;
+        }
+
+        if self.reservations.cancel_any() {
+            self.warnings.push(
+                "run-end closure found a provisional reservation still held and cancelled it"
+                    .to_owned(),
+            );
+        }
+
+        closure::confirm_derived(&self.handle.fold, &outcome)?;
+        let finished = closure::run_finished(&self.handle.fold, outcome.clone());
+        self.emit(
+            TopologyEventBody::RunFinished { data: finished },
+            seams,
+            hooks,
+        )?;
+
+        let finalized = finalize::finalize(
+            &finalize::Finalize {
+                manager: seams.manager,
+                public: &seams.paths.public,
+                run_id: &self.identity.run_id,
+                fold: &self.handle.fold,
+                events: &self.handle.events,
+            },
+            hooks,
+        )?;
+        Ok(Progress::Finished {
+            outcome,
+            closed,
+            report_written: finalized.report_written,
+            execution_root_removed: finalized.execution_root_removed,
+        })
     }
 
     fn retry_materialization(&self, key: TaskKey) -> Option<Materialization> {
@@ -1427,6 +1499,10 @@ impl TopologyRun {
         }
         self.spend.record(site.key, &settled.event.record);
         self.brief.record(site.key, &settled.event.record);
+        let closed = matches!(
+            settled.event.settlement,
+            crate::topology::events::AttemptSettlement::Closed { .. }
+        );
         self.emit(
             TopologyEventBody::AttemptFinished {
                 data: Box::new(settled.event),
@@ -1434,6 +1510,9 @@ impl TopologyRun {
             seams,
             hooks,
         )?;
+        if closed {
+            super::dispatch::scrub(seams.manager, hooks, site.slot)?;
+        }
         Ok(settled.spent_attempt)
     }
 

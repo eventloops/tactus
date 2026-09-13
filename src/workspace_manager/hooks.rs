@@ -137,7 +137,7 @@ impl EffectHooks for NoHooks {
 /// harness is poisoned; it never reads as an injected fault.
 #[derive(Debug, Clone, Default)]
 pub struct HarnessEffects {
-    harness: Arc<Mutex<HookHarness>>,
+    harness: crate::observations::Exported,
     ledger: DurabilityLedger,
     /// Set the first time [`EffectHooks::phase`] finds the harness poisoned;
     /// [`Self::poisoned`] and [`EffectHooks::refusal_cause`] read it.
@@ -153,7 +153,7 @@ impl HarnessEffects {
     #[must_use]
     pub fn new(harness: Arc<Mutex<HookHarness>>) -> Self {
         Self {
-            harness,
+            harness: crate::observations::Exported::new(harness),
             ledger: DurabilityLedger::off(),
             poisoned: false,
         }
@@ -167,7 +167,7 @@ impl HarnessEffects {
     /// records nothing more, whatever the lock says afterwards.
     #[must_use]
     pub fn harness(&self) -> &Arc<Mutex<HookHarness>> {
-        &self.harness
+        self.harness.harness()
     }
 
     /// Also record every durability primitive the funnels perform.
@@ -246,8 +246,12 @@ impl EffectHooks for HarnessEffects {
     /// same cause.
     fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
         if !self.poisoned {
-            match self.harness.lock() {
-                Ok(mut harness) => return harness.hook(site, phase),
+            match self.harness.harness().lock() {
+                Ok(mut harness) => {
+                    let injection = harness.hook(site, phase);
+                    drop(harness);
+                    return self.harness.carried(injection);
+                }
                 Err(_poisoned) => self.poisoned = true,
             }
         }

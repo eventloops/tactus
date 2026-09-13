@@ -86,6 +86,12 @@ Container intent, creation, start, view, stop, removal.
 
 The platform containment sub-effects of a spawn.
 
+## `pub trait TopologyHooks` › `fn folded(&mut self, _fold: &TopologyFold, _events: &[TopologyEvent]) {}`
+
+Called by `emit::emit` after every applied delta, with the fold and the
+events as the emitter holds them. A no-op by default: production hooks
+project nothing, and the harness bundle records the live projection.
+
 ## `pub struct NoTopologyHooks {`
 
 What production passes: nothing armed, nothing recorded.
@@ -112,6 +118,21 @@ only a [`crate::topology::effects::SubEffectPoint`], and `hook()` answers
 `Proceed` to both phases unconditionally. But the *recording* has to come
 here, or the 30-plus sites of this slice that expose no sub-effect point
 contribute nothing to coverage.
+
+Since PR10 the bundle also keeps the live projection: `folded` — the hook
+the emitter calls after every applied delta — derives the report of the
+live fold at that prefix and records its digest, so a test can compare
+what the process projected at every append with a replay of the bytes
+(`projections_are_equal_between_live_and_replay_at_every_prefix`). The
+ST-07 observation export is not here: each family's adapter carries it
+(`crate::observations::Exported`), so the record is written by every suite
+that uses an adapter, not only the ones that build this bundle.
+
+## `pub struct LiveProjection {`
+
+One live snapshot: the number of events the log held right after an
+append, and the digest of the report derived from the live fold then —
+`None` when no report derives, which is before `run_started`.
 
 ## `pub struct HarnessTopologyHooks` › `#[allow(dead_code)]` (trailing)
 
@@ -158,6 +179,18 @@ durability ledger and the sync records it collected.
 
 The sites themselves are on the shared [`HookHarness`] and are read
 there; these are the answers a `(site, phase)` key cannot carry.
+
+## `impl HarnessTopologyHooks` › `pub fn live_projections(&self) -> Vec<LiveProjection> {`
+
+Every snapshot `folded` recorded, in append order.
+
+## `impl TopologyHooks for HarnessTopologyHooks` › `fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {`
+
+Derive the report from the live fold and the events as the emitter holds
+them right after the append, and keep its digest against the prefix
+length. Derived here rather than in the test because the point is what
+the *process* projected at that moment: a test that derives from the fold
+after the step has already lost every intermediate prefix.
 
 ## `pub trait TimeSource {`
 

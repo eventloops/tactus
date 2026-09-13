@@ -1,0 +1,3910 @@
+{
+  "note": "decisions.fault_injection_registry, ST-07 for the sequential topology over the full claimed inventory (every Topology- and Shared-scoped site effect_sites.json generates): one entry per site x hook phase x parent-side point x injection mode, built through FaultRegistry::insert, each naming the committed test the suite's observation export shows executing it; one recovery-proven entry per residue class, its synthetic records from effects/residue-synthetic.json and its sampling record from effects/residue-histogram.json or effects/residue-histogram-sequential.json (the histogram counts are the machine-varying half: they are what the files held when this document was regenerated, the pin compares everything but them, and the merge check reads the files); and one no-execution record per site the exact-base fast path skips, naming every fast sequence the export records. The Windows-only points of Process.Spawn name the tests that execute them on that host; `hosts` lists both, and the merge check on each host holds the document to the points that host requires. `unobservable` declares, per coordinate and with the reason, the six coordinates no test can observe executed. The frozen sampling N a recovery-proven entry cites is effects/residue-classes.json's (SWEEP-BIJECTION-005).",
+  "range": [
+    "Worktree.CreateExecutionRoot",
+    "Worktree.RemoveExecutionRoot",
+    "Worktree.WriteIntent",
+    "Worktree.Add",
+    "Worktree.Verify",
+    "Worktree.Remove",
+    "Worktree.RemoveIntent",
+    "Worktree.WriteStagingIntent",
+    "Worktree.AddStaging",
+    "Worktree.RemoveStaging",
+    "Worktree.RemoveStagingIntent",
+    "Snapshot.WriteIntent",
+    "Snapshot.Add",
+    "Snapshot.Remove",
+    "Snapshot.RemoveIntent",
+    "Ref.CreateIntegration",
+    "Ref.CompareAndSwapIntegration",
+    "Ref.CreateCandidates",
+    "Ref.DeleteCandidatesRef",
+    "Ref.PinCandidatePrepared",
+    "Ref.DeleteCandidatePin",
+    "Ref.PinPrepared",
+    "Ref.DeletePreparedPin",
+    "Object.CandidateStage",
+    "Object.CandidateWriteTree",
+    "Object.SnapshotCommitTree",
+    "Object.CandidateCommitTree",
+    "Object.ProposalCherryPick",
+    "Object.RepairMaterialize",
+    "RunDir.CreatePublicDir",
+    "RunDir.StageMarker",
+    "RunDir.PublishMarker",
+    "RunDir.RemoveMarker",
+    "RunDir.CreatePrivateDir",
+    "RunDir.StageOwnerRecord",
+    "RunDir.PublishOwnerRecord",
+    "RunDir.StageCommitRecord",
+    "RunDir.PublishCommitRecord",
+    "RunDir.WritePlan",
+    "RunDir.WriteReport",
+    "RunDir.WriteQuestionPayload",
+    "RunDir.RemovePrivateHusk",
+    "RunDir.RemovePublicHusk",
+    "Event.OpenLog",
+    "Event.ProvePrefixStable",
+    "Event.AppendFirst",
+    "Event.Append",
+    "Event.AppendInformational",
+    "Answer.StageWrite",
+    "Answer.PublishRename",
+    "Answer.Ingest",
+    "Lock.AcquireRun",
+    "Lock.AcquireWorktree",
+    "Lock.ProbeCleanupExclusive",
+    "Lock.Release",
+    "Lock.CreateWorktreeLockFile",
+    "Lock.ObserveCleanupHold",
+    "Report.Write",
+    "Process.Spawn",
+    "Process.Terminate",
+    "Container.WriteIntent",
+    "Container.Create",
+    "Container.Start",
+    "Container.MountGitView",
+    "Container.Stop",
+    "Container.Remove",
+    "Container.UnmountGitView",
+    "Container.RemoveIntent"
+  ],
+  "hosts": [
+    "windows",
+    "unix"
+  ],
+  "unobservable": [
+    {
+      "site": "Report.Write",
+      "phases": [],
+      "reason": "no funnel names this site: `report.json` is written through `RunDir.WriteReport` (src/rundir.rs), and `Report.Write` is the one entry of `SITES_WITHOUT_A_FUNNEL` in src/effects/tests/artifacts.rs (PR3-REPORT-DOUBLE-NAME), so no hook of it can be called"
+    },
+    {
+      "site": "Process.Spawn",
+      "phases": [
+        "before",
+        "after"
+      ],
+      "reason": "the process funnel (src/agent/proc.rs) consults `SpawnHooks::point` at its parent-side points only; `SpawnHooks` (src/agent/proc/hooks.rs) has no before/after phase hook, so the two phases have no call to observe"
+    },
+    {
+      "site": "Process.Terminate",
+      "phases": [],
+      "reason": "termination (`kill_tree` in src/agent/proc.rs) consults no hook: the site is inventoried and row-mapped and `SpawnHooks` exposes nothing for it"
+    }
+  ],
+  "fast_sequences": [
+    "s0",
+    "exact-base-fast"
+  ],
+  "entries": [
+    {
+      "site": "Worktree.CreateExecutionRoot",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.CreateExecutionRoot",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r18"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveExecutionRoot",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r18"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveExecutionRoot",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.WriteIntent",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_dispatch",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.WriteIntent",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_dispatch",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Add",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_dispatch",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "nothing has been performed: the artifact this site creates does not exist, and the durable first half of its own two-step protocol — the intent behind an add, the staged temporary behind an atomic publication — is held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Add",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_dispatch",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Verify",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_retry",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Verify",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_retry",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no effect was performed: the site is a read-only observation"
+      },
+      "resume_action": "nothing to resume: the observation performs no effect and is repeated",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_dispatch_recorded_before_this_rule_resumes_at_the_base_it_recorded",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Remove",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Remove",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveIntent",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveIntent",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.WriteStagingIntent",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.WriteStagingIntent",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r10"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.AddStaging",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r10"
+        ],
+        "detail": "nothing has been performed: the artifact this site creates does not exist, and the durable first half of its own two-step protocol — the intent behind an add, the staged temporary behind an atomic publication — is held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.AddStaging",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r10"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveStaging",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r10"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveStaging",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveStagingIntent",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r10"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.RemoveStagingIntent",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.WriteIntent",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.WriteIntent",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r24"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.Add",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r24"
+        ],
+        "detail": "nothing has been performed: the artifact this site creates does not exist, and the durable first half of its own two-step protocol — the intent behind an add, the staged temporary behind an atomic publication — is held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.Add",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r24"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.Remove",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r24"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.Remove",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.RemoveIntent",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [
+          "r24"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Snapshot.RemoveIntent",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_scrub",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.CreateIntegration",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.CreateIntegration",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.CompareAndSwapIntegration",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_fast",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_dependent_task_is_dispatched_into_its_dependencys_merged_work",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.CompareAndSwapIntegration",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_fast",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_dependent_task_is_dispatched_into_its_dependencys_merged_work",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.CreateCandidates",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_cand_ref",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.CreateCandidates",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_cand_ref",
+      "expected_residue": {
+        "rows": [
+          "r11"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeleteCandidatesRef",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r11"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeleteCandidatesRef",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.PinCandidatePrepared",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_cand_obj",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.PinCandidatePrepared",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_cand_obj",
+      "expected_residue": {
+        "rows": [
+          "r23"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeleteCandidatePin",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_cand_ref",
+      "expected_residue": {
+        "rows": [
+          "r23"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeleteCandidatePin",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_cand_ref",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.PinPrepared",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.PinPrepared",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r12"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeletePreparedPin",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r12"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Ref.DeletePreparedPin",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the removal is durable; the objects it referenced are released to R27 and its administrative residue went with it"
+      },
+      "resume_action": "resume adopting the completed removal; the released objects are unreferenced and Git prunes them",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateStage",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateStage",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateWriteTree",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateWriteTree",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_budget_stopped_run_with_a_retained_generation_is_closed_run_ending_and_ends",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.SnapshotCommitTree",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.SnapshotCommitTree",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the object is present and unreferenced, R27"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.SnapshotCommitTree",
+      "phase": {
+        "point": {
+          "point": "id_unread",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "an R27 object without a recorded id: the child has exited with the object written and the coordinator has not read the printed id"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::attempt::tests::attempt_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateCommitTree",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_cand_obj",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateCommitTree",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_cand_obj",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "the object is present and unreferenced, R27"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateCommitTree",
+      "phase": {
+        "point": {
+          "point": "id_unread",
+          "mode": "kill"
+        }
+      },
+      "order": "effect_before_event",
+      "fault_row": "t_cand_obj",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "an R27 object without a recorded id: the child has exited with the object written and the coordinator has not read the printed id"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::candidate::tests::candidate_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.ProposalCherryPick",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.ProposalCherryPick",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r10"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_gate_spawn_failure_during_integration_verification_defers_inside_max_defers",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.RepairMaterialize",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_repair_dispatch",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Object.RepairMaterialize",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_repair_dispatch",
+      "expected_residue": {
+        "rows": [
+          "r9"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_next_materializes_again",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.CreatePublicDir",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.CreatePublicDir",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.StageMarker",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.StageMarker",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.PublishMarker",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "nothing has been performed: the artifact this site creates does not exist, and the durable first half of its own two-step protocol — the intent behind an add, the staged temporary behind an atomic publication — is held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.PublishMarker",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.RemoveMarker",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.RemoveMarker",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.CreatePrivateDir",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.CreatePrivateDir",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.StageOwnerRecord",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.StageOwnerRecord",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.PublishOwnerRecord",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "nothing has been performed: the artifact this site creates does not exist, and the durable first half of its own two-step protocol — the intent behind an add, the staged temporary behind an atomic publication — is held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.PublishOwnerRecord",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.StageCommitRecord",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.StageCommitRecord",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.PublishCommitRecord",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "nothing has been performed: the artifact this site creates does not exist, and the durable first half of its own two-step protocol — the intent behind an add, the staged temporary behind an atomic publication — is held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.PublishCommitRecord",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.WritePlan",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.WritePlan",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_created_run_hands_itself_to_the_loop",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.WriteReport",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.WriteReport",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_report_before_each_cleanup_step",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.WriteQuestionPayload",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_failed",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.WriteQuestionPayload",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_failed",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.RemovePrivateHusk",
+      "phase": "before",
+      "order": null,
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_during_recovery_repeats_recovery",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.RemovePrivateHusk",
+      "phase": "after",
+      "order": null,
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_during_recovery_repeats_recovery",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.RemovePublicHusk",
+      "phase": "before",
+      "order": null,
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_during_recovery_repeats_recovery",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "RunDir.RemovePublicHusk",
+      "phase": "after",
+      "order": null,
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_during_recovery_repeats_recovery",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.OpenLog",
+      "phase": "before",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.OpenLog",
+      "phase": "after",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.OpenLog",
+      "phase": {
+        "point": {
+          "point": "create",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the log file exists and its directory is fsynced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::event_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.OpenLog",
+      "phase": {
+        "point": {
+          "point": "create",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the log file exists and its directory is fsynced"
+      },
+      "resume_action": "the write command refuses resumably with no fold-derived effect, and the next open repeats the barrier",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.OpenLog",
+      "phase": {
+        "point": {
+          "point": "truncate_torn_tail",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the unterminated final line is truncated"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::event_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.OpenLog",
+      "phase": {
+        "point": {
+          "point": "truncate_torn_tail",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the unterminated final line is truncated"
+      },
+      "resume_action": "the write command refuses resumably with no fold-derived effect, and the next open repeats the barrier",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.OpenLog",
+      "phase": {
+        "point": {
+          "point": "sync_prefix",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the surviving prefix is possibly non-durable"
+      },
+      "resume_action": "the write command refuses resumably with no fold-derived effect, and the next open repeats the barrier",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::event_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.OpenLog",
+      "phase": {
+        "point": {
+          "point": "sync_prefix",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the surviving prefix is possibly non-durable"
+      },
+      "resume_action": "the write command refuses resumably with no fold-derived effect, and the next open repeats the barrier",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::barrier_sync_failure_before_cas_issues_no_cas_and_converges_after_loss",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.ProvePrefixStable",
+      "phase": "before",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.ProvePrefixStable",
+      "phase": "after",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no effect was performed: the site is a read-only observation"
+      },
+      "resume_action": "nothing to resume: the observation performs no effect and is repeated",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendFirst",
+      "phase": "before",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::attempt::tests::a_case_alias_is_read_per_character_so_a_final_sigma_hides_no_contradiction",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendFirst",
+      "phase": "after",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::attempt::tests::a_case_alias_is_read_per_character_so_a_final_sigma_hides_no_contradiction",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendFirst",
+      "phase": {
+        "point": {
+          "point": "written",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "bytes written, possibly partially, and not synced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::event_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendFirst",
+      "phase": {
+        "point": {
+          "point": "written",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "bytes written, possibly partially, and not synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendFirst",
+      "phase": {
+        "point": {
+          "point": "written_full",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "a complete newline-terminated line written and not synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendFirst",
+      "phase": {
+        "point": {
+          "point": "synced",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the appended line is synced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::event_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendFirst",
+      "phase": {
+        "point": {
+          "point": "synced",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the appended line is synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": "before",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_run_finished_before_report",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": "after",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::kill_after_run_finished_before_report",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "written",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "bytes written, possibly partially, and not synced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::closure_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "written",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "bytes written, possibly partially, and not synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::append_error_inside_closure_ends_command_and_resume_completes_closure",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "written_full",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "a complete newline-terminated line written and not synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::emit::tests::append_error_with_failed_prefix_sync_reports_undetermined_without_effects",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "synced",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the appended line is synced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::settle::tests::settlement_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.Append",
+      "phase": {
+        "point": {
+          "point": "synced",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the appended line is synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::emit::tests::a_refusal_before_the_append_was_entered_does_not_run_the_protocol",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendInformational",
+      "phase": "before",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::event_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendInformational",
+      "phase": "after",
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::emit::tests::poisoned_fold_refuses_every_later_transition",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendInformational",
+      "phase": {
+        "point": {
+          "point": "written",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "bytes written, possibly partially, and not synced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::event_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendInformational",
+      "phase": {
+        "point": {
+          "point": "written",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "bytes written, possibly partially, and not synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendInformational",
+      "phase": {
+        "point": {
+          "point": "written_full",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "a complete newline-terminated line written and not synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendInformational",
+      "phase": {
+        "point": {
+          "point": "synced",
+          "mode": "kill"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the appended line is synced"
+      },
+      "resume_action": "no live action: the next open converges the surviving prefix through its stable-prefix barrier before any fold-derived effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::event_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Event.AppendInformational",
+      "phase": {
+        "point": {
+          "point": "synced",
+          "mode": "error_return"
+        }
+      },
+      "order": null,
+      "fault_row": "t_append",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the appended line is synced"
+      },
+      "resume_action": "the append-error protocol, with the stable-prefix barrier at its reopen",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::every_error_return_point_of_the_event_funnels_fires_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Answer.StageWrite",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_answer",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Answer.StageWrite",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_answer",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Answer.PublishRename",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_answer",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "nothing has been performed: the artifact this site creates does not exist, and the durable first half of its own two-step protocol — the intent behind an add, the staged temporary behind an atomic publication — is held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Answer.PublishRename",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_answer",
+      "expected_residue": {
+        "rows": [
+          "r21"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Answer.Ingest",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_answer",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Answer.Ingest",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_answer",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no effect was performed: the site is a read-only observation"
+      },
+      "resume_action": "nothing to resume: the observation performs no effect and is repeated",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_question_and_answer_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.AcquireRun",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.AcquireRun",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r17"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.AcquireWorktree",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.AcquireWorktree",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r17"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.ProbeCleanupExclusive",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.ProbeCleanupExclusive",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the momentary hold was taken and given back before the command returned, so no row is left holding it"
+      },
+      "resume_action": "nothing to resume: the momentary hold was given back before the command returned, and the probe is repeated",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.Release",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [
+          "r17"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_commit_record_stat_that_cannot_answer_retains_both_halves_and_releases_the_lock",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.Release",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_finalize",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::create::tests::a_commit_record_stat_that_cannot_answer_retains_both_halves_and_releases_the_lock",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.CreateWorktreeLockFile",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.CreateWorktreeLockFile",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [
+          "r25"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.ObserveCleanupHold",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Lock.ObserveCleanupHold",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_runstart",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no effect was performed: the site is a read-only observation"
+      },
+      "resume_action": "nothing to resume: the observation performs no effect and is repeated",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_binding_answer_naming_no_frozen_option_is_refused_before_any_append",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "ambient_job_joined",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no host process: the ambient handle closes and the kernel terminates the stub or tree"
+      },
+      "resume_action": "nothing to resume: the ambient handle closes and the kernel terminates the stub or tree",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "ambient_job_joined",
+          "mode": "error_return"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no host process: the refusal precedes the ambient join, so nothing was spawned and nothing was terminated"
+      },
+      "resume_action": "nothing to resume: the write command refuses before the ambient join, and no process was spawned",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_ambient_job_join_error_return_point_fires_under_the_process_funnel",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "created_suspended",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no host process: the ambient handle closes and the kernel terminates the stub or tree"
+      },
+      "resume_action": "nothing to resume: the ambient handle closes and the kernel terminates the stub or tree",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "private_job_assigned",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no host process: the ambient handle closes and the kernel terminates the stub or tree"
+      },
+      "resume_action": "nothing to resume: the ambient handle closes and the kernel terminates the stub or tree",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "resumed",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [],
+        "detail": "no host process: the ambient handle closes and the kernel terminates the stub or tree"
+      },
+      "resume_action": "nothing to resume: the ambient handle closes and the kernel terminates the stub or tree",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "reaper_started",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r28"
+        ],
+        "detail": "a process group the reaper settles while holding its shared cleanup hold, R28"
+      },
+      "resume_action": "nothing to resume: the reaper settles the group while holding its cleanup hold",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "pre_exec_pgid_and_register",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r28"
+        ],
+        "detail": "a process group the reaper settles while holding its shared cleanup hold, R28"
+      },
+      "resume_action": "nothing to resume: the reaper settles the group while holding its cleanup hold",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "exec",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r28"
+        ],
+        "detail": "a process group the reaper settles while holding its shared cleanup hold, R28"
+      },
+      "resume_action": "nothing to resume: the reaper settles the group while holding its cleanup hold",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Process.Spawn",
+      "phase": {
+        "point": {
+          "point": "registered",
+          "mode": "kill"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r28"
+        ],
+        "detail": "a process group the reaper settles while holding its shared cleanup hold, R28"
+      },
+      "resume_action": "nothing to resume: the reaper settles the group while holding its cleanup hold",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::spawn_kill_child",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.WriteIntent",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.WriteIntent",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.Create",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "nothing has been performed: the artifact this site creates does not exist, and the durable first half of its own two-step protocol — the intent behind an add, the staged temporary behind an atomic publication — is held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.Create",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.Start",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.Start",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.MountGitView",
+      "phase": "before",
+      "order": "event_before_effect",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [],
+        "detail": "nothing has been performed, so no row holds anything"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.MountGitView",
+      "phase": "after",
+      "order": "event_before_effect",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r19"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::coverage::tests::the_container_launch_funnels_execute_both_phases_under_the_production_adapter",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.Stop",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.Stop",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "the artifact is present and referenced by the row row() names"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.Remove",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.Remove",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.UnmountGitView",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r19"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.UnmountGitView",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.RemoveIntent",
+      "phase": "before",
+      "order": "effect_before_event",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [
+          "r26"
+        ],
+        "detail": "nothing has been performed: the artifact this site acts on is present and unchanged, held by the row row() names"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Container.RemoveIntent",
+      "phase": "after",
+      "order": "effect_before_event",
+      "fault_row": "t_container",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the removal is durable and released no object; the row that accounted for what it removed holds nothing"
+      },
+      "resume_action": "resume adopting the completed effect",
+      "label": "execution_observed",
+      "evidence": {
+        "executed": {
+          "test": "engine::topology::recover::tests::a_lost_gate_container_is_reclaimed_by_the_next_resume_before_the_verification_is_settled",
+          "passed": true
+        }
+      }
+    },
+    {
+      "site": "Worktree.Add",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_dispatch",
+      "expected_residue": {
+        "rows": [
+          "r27",
+          "r9"
+        ],
+        "detail": "objects present and unreferenced, R27, with administrative residue in the owning worktree or a registered-but-unpopulated worktree"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "registered_unpopulated_worktree",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 1,
+              "internal": 6,
+              "after": 1
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Worktree.AddStaging",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r27",
+          "r10"
+        ],
+        "detail": "objects present and unreferenced, R27, with administrative residue in the owning worktree or a registered-but-unpopulated worktree"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "registered_unpopulated_worktree",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 2,
+              "internal": 6,
+              "after": 0
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Snapshot.Add",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r27",
+          "r24"
+        ],
+        "detail": "objects present and unreferenced, R27, with administrative residue in the owning worktree or a registered-but-unpopulated worktree"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "registered_unpopulated_worktree",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 2,
+              "internal": 6,
+              "after": 0
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateStage",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r27",
+          "r9"
+        ],
+        "detail": "objects present and unreferenced, R27, with administrative residue in the owning worktree or a registered-but-unpopulated worktree"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "unreferenced_object",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "temporary_object_file",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "index_lock",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 0,
+              "internal": 2,
+              "after": 6
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateWriteTree",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r27",
+          "r9"
+        ],
+        "detail": "objects present and unreferenced, R27, with administrative residue in the owning worktree or a registered-but-unpopulated worktree"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "unreferenced_object",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "temporary_object_file",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "index_lock",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 3,
+              "internal": 5,
+              "after": 0
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Object.SnapshotCommitTree",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_attempt",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "objects present and unreferenced, R27"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "unreferenced_object",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "temporary_object_file",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 0,
+              "internal": 8,
+              "after": 0
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Object.CandidateCommitTree",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "effect_before_event",
+      "fault_row": "t_cand_obj",
+      "expected_residue": {
+        "rows": [
+          "r27"
+        ],
+        "detail": "objects present and unreferenced, R27"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "unreferenced_object",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "temporary_object_file",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 0,
+              "internal": 8,
+              "after": 0
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Object.ProposalCherryPick",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "effect_before_event",
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [
+          "r27",
+          "r10"
+        ],
+        "detail": "objects present and unreferenced, R27, with administrative residue in the owning worktree or a registered-but-unpopulated worktree"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "unreferenced_object",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "temporary_object_file",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "index_lock",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "cherry_pick_head",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "merge_head",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "merge_msg",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "sequencer_state",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 0,
+              "internal": 5,
+              "after": 3
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Object.RepairMaterialize",
+      "phase": {
+        "residue": {
+          "class": "object_internal"
+        }
+      },
+      "order": "event_before_effect",
+      "fault_row": "t_repair_dispatch",
+      "expected_residue": {
+        "rows": [
+          "r27",
+          "r9"
+        ],
+        "detail": "objects present and unreferenced, R27, with administrative residue in the owning worktree or a registered-but-unpopulated worktree"
+      },
+      "resume_action": "resume from the prefix in which nothing was performed: the site's before-phase action",
+      "label": "recovery_proven",
+      "evidence": {
+        "recovery_proven": {
+          "synthetic": [
+            {
+              "element": "unreferenced_object",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "temporary_object_file",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "index_lock",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            },
+            {
+              "element": "cherry_pick_head",
+              "constructed": true,
+              "classified": "internal",
+              "recovered": true
+            }
+          ],
+          "sampling": {
+            "n": 8,
+            "histogram": {
+              "none": 0,
+              "internal": 8,
+              "after": 0
+            },
+            "unclassified": 0,
+            "recovered": true
+          }
+        }
+      }
+    },
+    {
+      "site": "Worktree.AddStaging",
+      "phase": "no_execution",
+      "order": null,
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the site was not reached: an exact-base fast publication creates no staging worktree, cherry-picks nothing, and takes no prepared pin"
+      },
+      "resume_action": "nothing to resume: the site performed no effect",
+      "label": "execution_observed",
+      "evidence": {
+        "not_executed": {
+          "test": "engine::topology::integrate::tests::fast_path_publishes_exact_candidate_without_staging_or_proposal_object",
+          "passed": true,
+          "sequences": [
+            "s0",
+            "exact-base-fast"
+          ]
+        }
+      }
+    },
+    {
+      "site": "Ref.PinPrepared",
+      "phase": "no_execution",
+      "order": null,
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the site was not reached: an exact-base fast publication creates no staging worktree, cherry-picks nothing, and takes no prepared pin"
+      },
+      "resume_action": "nothing to resume: the site performed no effect",
+      "label": "execution_observed",
+      "evidence": {
+        "not_executed": {
+          "test": "engine::topology::integrate::tests::fast_path_publishes_exact_candidate_without_staging_or_proposal_object",
+          "passed": true,
+          "sequences": [
+            "s0",
+            "exact-base-fast"
+          ]
+        }
+      }
+    },
+    {
+      "site": "Object.ProposalCherryPick",
+      "phase": "no_execution",
+      "order": null,
+      "fault_row": "t_proposal",
+      "expected_residue": {
+        "rows": [],
+        "detail": "the site was not reached: an exact-base fast publication creates no staging worktree, cherry-picks nothing, and takes no prepared pin"
+      },
+      "resume_action": "nothing to resume: the site performed no effect",
+      "label": "execution_observed",
+      "evidence": {
+        "not_executed": {
+          "test": "engine::topology::integrate::tests::fast_path_publishes_exact_candidate_without_staging_or_proposal_object",
+          "passed": true,
+          "sequences": [
+            "s0",
+            "exact-base-fast"
+          ]
+        }
+      }
+    }
+  ]
+}

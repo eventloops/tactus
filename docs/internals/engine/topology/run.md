@@ -261,17 +261,20 @@ A short name for the branch, for a refusal message and a test.
 What this build does with it, and — for anything but `Performed` — the
 reason belongs in the arm, not in prose somewhere else.
 
-## `pub const fn disposition(self) -> Disposition` › `Self::Closure => Disposition::RefusedByCheckpoint,`
+## `pub const fn disposition(self) -> Disposition` › `Self::Closure => Disposition::Performed,`
 
-`checkpoint_refusals`: "an intermediate build refuses, before any
-append, any operation whose terminals it does not implement". Run end
-beyond refusal is PR10's, and it is made unrepresentable rather than
-remembered — `Admitted` carries seven of `Step`'s nine variants, so no
-value reaching the acting half can name a closure. The other one that
-does not cross is `Poisoned`, which is not a branch this build declines
-but the absence of one. `RepairDispatch` crossed when PR9 implemented
-repair execution; it belongs to the ready-dispatch branch rather than
-to a branch of its own.
+Performed since PR10. `checkpoint_refusals` — "an intermediate build refuses,
+before any append, any operation whose terminals it does not implement" —
+named run end beyond refusal as PR9's one refusal, and `Admitted` carried no
+value that could name a closure. It carries one now: `Admitted::Closure`
+crosses the checkpoint and [`TopologyRun::close_run`] performs the closure
+procedure at `max_parallel = 1` (`closure.md`), appends `run_finished`, and
+finalizes (`finalize.md`). What does not cross is `Poisoned` (the absence of
+a branch), `NotStarted` (an unstarted fold admits nothing) and `Finished` (a
+finished run is refused continuation after its finalization). The
+concurrent half of closure — in-flight cancellation, the budget drain,
+promotion and publication completion inside closure — is refused by
+`closure::refuse_unclosable` naming PR11.
 
 ## `pub const fn disposition(self) -> Disposition` › `Self::Integration => Disposition::Performed,`
 
@@ -814,16 +817,33 @@ One verification-park question ingested: `question_answered` is
 durable, and the candidate is back in the queue (`declined` false) or
 its lineage has failed (`declined` true).
 
-## `pub enum Progress` › `Blocked {`
+## `pub enum Progress` › `Finished {`
 
-Nothing could run and the run is blocked on open questions.
+The run ended: closure appended `run_finished` and terminal finalization
+ran. Replaces `Blocked`, which PR9 returned when nobody answered the hard
+block: since PR10 the hard block falls through to closure (record §3 R2), so
+an unanswered question ends the run Parked rather than leaving it neither
+running nor ended.
 
-The hard-block rule applied and nobody answered. Not a terminal: an
-answer arriving later un-blocks the run, and that is PR9's to ingest.
+A further `step` is refused — `Step::Finished` does not cross the
+checkpoint — with the outcome in the message.
 
-## `pub enum Progress` › `questions: usize,`
+## `pub enum Progress` › `outcome: RunOutcome,`
 
-How many questions are open.
+The outcome `run_finished` recorded.
+
+## `pub enum Progress` › `closed: usize,`
+
+How many open generations closure closed `RunEnding` on the way.
+
+## `pub enum Progress` › `report_written: bool,`
+
+Whether finalization wrote `report.json`, or found the file current by
+digest.
+
+## `pub enum Progress` › `execution_root_removed: bool,`
+
+Whether the emptied execution root was pruned (R18).
 
 ## `pub enum Progress` › `Waited {`
 
@@ -842,10 +862,10 @@ Which wait it was.
 A ceiling refused the next spawn and `budget_exceeded` is durable.
 
 `loop`: a breach "appends `budget_exceeded` before any effect and
-**proceeds to closure**" — and closure is one of the two terminals this
-build refuses, so the next iteration ends the command. The append and
-the refusal are deliberately two iterations: the record of the breach is
-durable either way, which is what makes the refusal diagnosable.
+**proceeds to closure**" — the next iteration selects `Closure` and
+[`TopologyRun::close_run`] ends the run `BudgetExceeded`. The append and
+the closure are deliberately two iterations: the record of the breach is
+durable either way, which is what makes a closure that fails diagnosable.
 
 ## `pub struct TopologyRun {`
 
@@ -1114,7 +1134,12 @@ the one an operator needs.
 
 ## `impl TopologyRun` › `fn hard_block(`
 
-The hard-block branch: **apply the hard-block rules.**
+The hard-block branch: **apply the hard-block rules.** When no question
+resolves to an answer — an unattended source, or a person who left the
+prompt unanswered — the branch falls through to [`TopologyRun::close_run`]
+(record §3 R2): with nothing runnable, no backoff pending and only open
+questions in the way, the run's derived outcome is Parked, and Parked is a
+terminal a resume reopens with `run_resumed`. PR9 returned `Blocked` here.
 
 `loop`: "else apply the hard-block rules (attached-terminal prompt or
 `wait_on_block` for open questions)". Which of the two applies is
@@ -1304,6 +1329,25 @@ The ladder's cheap rungs, before the expensive ones. `judge` starts
 from this rather than from `None`, so a worker that died or produced
 no diff never reaches a gate or a frontier reviewer.
 
+## `impl TopologyRun` › `fn close_run(`
+
+Run-end closure, the acting half of `closure.md`: the ending outcome is
+read first (`closure::ending_outcome`), the shapes this build cannot close
+are refused (`closure::refuse_unclosable`, naming PR11), every closable
+generation is closed `RunEnding { outcome }` with its close appended and
+its slot scrubbed after the append, a provisional reservation still held
+is cancelled with a warning, the derivation is confirmed against the
+closed fold, `run_finished` is appended, and terminal finalization runs
+(`finalize::finalize`). The `Progress::Finished` it returns carries what
+finalization did.
+
+A kill or an append error inside the sequence leaves a prefix the next
+process's recovery completes: a `generation_closed` without its
+`run_finished` is a closed generation the sweep reclaims and a closure the
+next loop repeats; a torn `run_finished` is truncated by the next open and
+appended again (ST-17, `kill_inside_closure_recovers`,
+`append_error_inside_closure_ends_command_and_resume_completes_closure`).
+
 ## `impl TopologyRun` › `fn settle(`
 
 The branch's last clause: **settle the attempt.**
@@ -1325,6 +1369,20 @@ and a terminal failure settle directly; an outage defers from
 its question through [`Self::park_question`] before the settlement that
 records it. Two of those were refusals until the readers they needed
 existed, and both refusals are gone with their causes.
+
+### A closed settlement scrubs its slot
+
+Every `Closed` transition — retry, escalation, deferral, park, terminal
+failure — closes the generation in the fold, and R9's lifecycle says of a
+closed generation "pruned (forced); intent removed". Since PR10 the slot is
+scrubbed right after the `attempt_finished` append, as the retry path's
+`Close` arm and run-end closure already did for the closes they make.
+Before that every closed settlement other than a promotion left its
+worktree and intent for the next resume's sweep, and the ledger at Parked
+found the execution root not removed (record §6). The order is the durable
+close first, then the scrub: a kill between the two leaves a closed
+generation whose residue recovery reclaims, never a scrubbed generation
+the fold still holds open.
 
 ## `impl TopologyRun` › `feedback: crate::engine::classify::FeedbackCarrier::AttemptRecord,`
 

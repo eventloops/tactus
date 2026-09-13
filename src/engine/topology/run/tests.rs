@@ -31,12 +31,12 @@ fn every_branch_states_what_this_build_does_with_it() {
         .filter(|branch| branch.disposition() == Disposition::RefusedByCheckpoint)
         .map(|branch| branch.label())
         .collect();
-    assert_eq!(
-        refused,
-        vec!["run-end closure"],
-        "run end stays refused until PR10; repair execution and repair-admission answers, \
-         which PR8 refused, are performed by this build. A second branch here is a build \
-         refusing something the packet did not let it refuse"
+    assert!(
+        refused.is_empty(),
+        "no branch of the loop is refused by this build: run-end closure, which PR7 through \
+         PR9 refused at the checkpoint, is performed since PR10, so `checkpoint_refusals` \
+         names no terminal this build does not implement. A branch here is a build refusing \
+         something the packet did not let it refuse: {refused:?}"
     );
 
     let owed: Vec<&str> = LoopBranch::ALL

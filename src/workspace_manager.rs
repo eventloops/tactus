@@ -2216,6 +2216,20 @@ impl WorkspaceManager {
     /// See [`Self::CANDIDATE_STAGE_ARGV`]. Takes the path and the commit.
     pub(crate) const WORKTREE_ADD_ARGV: [&str; 4] = ["worktree", "add", "--detach", "--quiet"];
 
+    /// The fixed words of the two commit-tree sites' one Git child, shared
+    /// with the kill sampler that runs the same command (PR10's ST-07 residue
+    /// evidence for `Object.SnapshotCommitTree` and
+    /// `Object.CandidateCommitTree`), so the sampler runs the command the
+    /// funnel runs rather than a transcription of it: the command, the parent
+    /// flag and the message flag, each followed by its dynamic argument.
+    pub(crate) const COMMIT_TREE_ARGV: [&str; 1] = ["commit-tree"];
+    pub(crate) const COMMIT_TREE_PARENT_FLAG: &str = "-p";
+    pub(crate) const COMMIT_TREE_MESSAGE_FLAG: &str = "-m";
+
+    /// The fixed words of `Object.RepairMaterialize`'s sampled Git child, the
+    /// cherry-pick, shared with the kill sampler for the same reason.
+    pub(crate) const REPAIR_CHERRY_PICK_ARGV: [&str; 2] = ["cherry-pick", "--no-commit"];
+
     /// `Worktree.Add` / `Worktree.AddStaging` / `Snapshot.Add`: a **detached**
     /// linked worktree at `commit`.
     ///
@@ -3408,11 +3422,11 @@ impl WorkspaceManager {
         let output = self.git_with_identity(
             &self.base,
             &[
-                OsString::from("commit-tree"),
+                OsString::from(Self::COMMIT_TREE_ARGV[0]),
                 OsString::from(tree),
-                OsString::from("-p"),
+                OsString::from(Self::COMMIT_TREE_PARENT_FLAG),
                 OsString::from(parent),
-                OsString::from("-m"),
+                OsString::from(Self::COMMIT_TREE_MESSAGE_FLAG),
                 OsString::from(message),
             ],
         )?;
@@ -3688,8 +3702,8 @@ impl WorkspaceManager {
                 let output = self.git(
                     &path,
                     &[
-                        OsString::from("cherry-pick"),
-                        OsString::from("--no-commit"),
+                        OsString::from(Self::REPAIR_CHERRY_PICK_ARGV[0]),
+                        OsString::from(Self::REPAIR_CHERRY_PICK_ARGV[1]),
                         OsString::from(commit),
                     ],
                 )?;

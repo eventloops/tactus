@@ -2070,11 +2070,11 @@ fn the_p8_report_promises_exactly_the_resume_action_the_resume_performs() {
         .find("pub fn run_recovery_order")
         .expect("the recovery driver is in the production region");
     let to = resume
-        .find("pub fn refuse_if_finished")
-        .expect("step (b)'s refusal follows the driver, and bounds its body");
+        .find("pub fn finalize_if_finished")
+        .expect("step (b)'s finalize-then-refuse follows the driver, and bounds its body");
     assert!(
         from < to,
-        "the driver no longer precedes step (b)'s refusal"
+        "the driver no longer precedes step (b)'s finalize-then-refuse"
     );
     let driver = &resume[from..to];
     let performs_it = driver.contains("ensure_recorded_integration_ref");
@@ -2402,6 +2402,11 @@ fn spawn_and_wait(child: &str, root: &Path, site: &str, ordinal: u32) -> Option<
         ),
         ("UPSTROKE_TEST_KILL_SITE".to_owned(), site.to_owned()),
     ];
+    if let Ok(dir) = std::env::var(crate::observations::OBSERVATIONS_ENV) {
+        command
+            .env
+            .push((crate::observations::OBSERVATIONS_ENV.to_owned(), dir));
+    }
     let request = crate::runner::gate_request(
         command,
         root.to_path_buf(),
