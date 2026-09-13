@@ -3907,3 +3907,13 @@ The ST-07 observation export directory, handed on to a spawned kill child:
 the host runner composes the child's environment from scratch, so a
 variable the parent test was started with does not reach the child unless
 the request carries it.
+
+## `fn wait_for_cleanup_hold_release(public: &Path) -> bool {`
+
+Wait, bounded, for the run's cleanup lease to be free. A `git` child of
+the ref funnel holds the lease while it lives, through a descriptor made
+inheritable for it, and under a parallel suite a child another test
+thread forks in that window can inherit the descriptor and hold the
+lease until it exits. The wait is bounded so a hold that never clears
+still fails the assertion that follows it; the ledger's post-drop
+observation and the finalization matrix's resumes wait through it.
