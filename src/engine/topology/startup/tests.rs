@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 
 use super::{
     CensusInputs, FailedStep, Planned, RunDirCensusReport, RunDirEntry, RunDirOutcome,
-    WorktreeLocked, apply, census_run_dirs, startup_census,
+    WorktreeLocked, apply, census_run_dirs, scan_classified, startup_census,
 };
 use crate::error::UpstrokeError;
 use crate::events::log::EventLog;
@@ -1096,7 +1096,126 @@ fn every_retain_reason() -> Vec<RetainReason> {
         },
         RetainReason::MarkerlessWithContent,
         RetainReason::PossiblyCommitted,
+        RetainReason::ClassificationIncomplete,
     ]
+}
+
+/// A directory `classify_run_dir` could not finish observing is **retained**,
+/// and the reclaim path that would otherwise have deleted both its halves
+/// deletes nothing (`SWEEP-CLASSIFY-001`).
+///
+/// **One directory, two classifications, and the control is the second half of
+/// the same test.** The fixture is a husk at P3b — marker published, private
+/// half created, owner record published, no commit record — which is exactly
+/// the shape the ownership proof answers `Proven` for, so the census reclaims
+/// *both halves* of it. Classified `Indeterminate` it is retained byte for
+/// byte; classified `Husk` the same directory is destroyed. Without the second
+/// half, "nothing was deleted" is also what a fixture nothing could delete
+/// answers, and that is the shape of assertion the finding says PR #137's own
+/// test had.
+///
+/// **Why the class is supplied rather than produced.** No directory a test here
+/// can build classifies `Indeterminate`: the class exists for a read a signal
+/// interrupted, and nothing in this suite arranges a signal — a fixture's
+/// `events.jsonl` is an ordinary regular file whose reads deliver bytes or end.
+/// The interrupting source itself is measured over a `Read` fixture in
+/// `rundir::tests`. `scan` is one call to `scan_classified` with the class it
+/// read, so this drives every part of the census's decision except that single
+/// line.
+#[test]
+fn a_directory_the_probe_could_not_classify_is_retained_and_both_halves_survive() {
+    let fixture = Fixture::new("unclassified");
+    let run_id = "01UNCLASSIFIED000000000000";
+    let husk = Husk::at_p0(&fixture, run_id)
+        .stage_marker()
+        .publish_marker()
+        .create_private()
+        .publish_owner();
+    let public = husk.public();
+    let private = husk.private();
+    let private_before = tree_bytes(&private);
+    let public_before = tree_bytes(&public);
+    assert!(
+        !private_before.is_empty(),
+        "the private half must really be on disk, or the retention below measures nothing"
+    );
+
+    let harness = Arc::new(Mutex::new(HookHarness::new()));
+    let mut hooks = rundir::HarnessHooks::new(Arc::clone(&harness));
+    let scanned = scan_classified(
+        run_id,
+        public.clone(),
+        RunDirClass::Indeterminate,
+        &fixture.inputs(),
+        None,
+    );
+    assert_eq!(scanned.class, RunDirClass::Indeterminate);
+    assert!(
+        matches!(
+            scanned.plan,
+            Planned::Retain(RetainReason::ClassificationIncomplete)
+        ),
+        "the plan must be a retention, and it must name why: {:?}",
+        scanned.plan
+    );
+    assert!(
+        scanned.locator.is_none(),
+        "the marker is not read: a locator is a claim about a private half, and this \
+         directory's own log is what could not be read"
+    );
+
+    let outcome = apply(&mut hooks, &public, scanned.plan);
+    assert_eq!(
+        outcome,
+        RunDirOutcome::Retained(RetainReason::ClassificationIncomplete)
+    );
+    assert!(!outcome.reclaimed_anything());
+    assert!(!outcome.deleted_a_private_half());
+    assert!(
+        !outcome.may_have_deleted_a_private_half(),
+        "not even the weak form: nothing on this path can have touched a private half"
+    );
+    assert_eq!(
+        harness.lock().expect("harness").executions(),
+        0,
+        "the retain arm reaches no funnel at all, so nothing can be deleted by it"
+    );
+    assert_eq!(
+        tree_bytes(&private),
+        private_before,
+        "the private half must be byte-identical afterwards"
+    );
+    assert_eq!(
+        tree_bytes(&public),
+        public_before,
+        "the public half must be byte-identical afterwards"
+    );
+
+    // The control. The same directory, the same census, the same funnel — only
+    // the classification differs, and this one is destroyed.
+    let scanned = scan_classified(
+        run_id,
+        public.clone(),
+        RunDirClass::Husk,
+        &fixture.inputs(),
+        None,
+    );
+    assert!(
+        matches!(scanned.plan, Planned::ReclaimBothHalves(_)),
+        "the fixture is reclaimable as a husk, or the retention above is not the reason \
+         it survived: {:?}",
+        scanned.plan
+    );
+    let outcome = apply(&mut rundir::NoHooks, &public, scanned.plan);
+    assert_eq!(outcome, RunDirOutcome::ReclaimedBothHalves);
+    assert!(
+        !exists(&private),
+        "the control must really delete the private half"
+    );
+    assert!(
+        !exists(&public),
+        "the control must really delete the public half"
+    );
 }
 
 /// `owner_record_disagreement_retained`.

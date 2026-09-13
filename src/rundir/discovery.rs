@@ -33,8 +33,8 @@ use std::path::{Path, PathBuf};
 use crate::error::UpstrokeError;
 
 use super::{
-    CreatingMarker, MARKER, PrivateHalfOwnership, RepoKey, RetainReason, RunDirClass, UnboundShape,
-    classify_run_dir, fs, prove_private_half_ownership, public_dir, runs_root,
+    CreatingMarker, EVENT_LOG, MARKER, PrivateHalfOwnership, RepoKey, RetainReason, RunDirClass,
+    UnboundShape, classify_run_dir, fs, prove_private_half_ownership, public_dir, runs_root,
 };
 
 /// Every run in this repo, oldest first.
@@ -54,13 +54,44 @@ use super::{
 /// This is the slice's only change in behaviour: a legacy husk that today
 /// shadows [`latest_run`] is no longer listed. A run whose log committed is
 /// listed exactly as before, marker or no marker.
+///
+/// **A directory the probe could not classify is not listed either**
+/// ([`RunDirClass::Indeterminate`], `SWEEP-CLASSIFY-001`): this returns
+/// `Committed` directories and that is not one. It is not returned by
+/// [`list_husks`] either, so nothing offers it for reclaim — which is the point
+/// of the class. [`resolve_run_id`] says which of the two it met.
 pub fn list_runs(repo_root: &Path) -> Vec<String> {
     let mut runs: Vec<String> = run_dir_names(repo_root)
         .into_iter()
-        .filter(|run_id| classify_run_dir(&public_dir(repo_root, run_id)) == RunDirClass::Committed)
+        .filter(|run_id| listed_as_run(classify_run_dir(&public_dir(repo_root, run_id))))
         .collect();
     runs.sort();
     runs
+}
+
+/// Which classifications [`list_runs`] returns.
+///
+/// A named predicate rather than an inline `==`, and the reason is that the
+/// fact it states cannot be measured over a directory: no fixture in this
+/// suite classifies [`RunDirClass::Indeterminate`], because nothing here
+/// arranges the signal that interrupts a read of an ordinary file, so the only
+/// way to assert that this reader does not return one is to ask the predicate.
+/// See
+/// `a_directory_that_did_not_classify_is_neither_a_run_nor_a_husk`, which
+/// crosses all three of these against all three classifications.
+const fn listed_as_run(class: RunDirClass) -> bool {
+    matches!(class, RunDirClass::Committed)
+}
+
+/// Which classifications [`list_husks`] returns. See [`listed_as_run`].
+const fn listed_as_husk(class: RunDirClass) -> bool {
+    matches!(class, RunDirClass::Husk)
+}
+
+/// Which classifications [`unclassified_matching`] reports. See
+/// [`listed_as_run`].
+const fn unclassified(class: RunDirClass) -> bool {
+    matches!(class, RunDirClass::Indeterminate)
 }
 
 /// Every directory under `<repo>/.upstroke/runs`, committed or not, oldest first.
@@ -85,11 +116,18 @@ pub fn run_dir_names(repo_root: &Path) -> Vec<String> {
 }
 
 /// Every husk under `<repo>/.upstroke/runs`, oldest first.
+///
+/// `Husk` and nothing else: a directory whose classification did not finish is
+/// [`RunDirClass::Indeterminate`] and is absent from this list, so the two
+/// readers of it — `status`'s husk answer and [`resolve_run_id`]'s refusal
+/// message — cannot call it a husk, and neither can a caller added later that
+/// reclaims from it. Those are the two readers in this repository at this SHA,
+/// by `grep -rn 'list_husks' src/`.
 #[must_use]
 pub fn list_husks(repo_root: &Path) -> Vec<String> {
     run_dir_names(repo_root)
         .into_iter()
-        .filter(|run_id| classify_run_dir(&public_dir(repo_root, run_id)) == RunDirClass::Husk)
+        .filter(|run_id| listed_as_husk(classify_run_dir(&public_dir(repo_root, run_id))))
         .collect()
 }
 
@@ -225,10 +263,24 @@ pub fn resolve_run_id(repo_root: &Path, wanted: &str) -> Result<String, Upstroke
                     "`{husk}` never recorded a committed run_started, so there is no run to open \
                      there — ask `upstroke status {husk}` for what it is and what happens to it"
                 ),
-                None if runs.is_empty() => {
-                    format!("no runs found under {}", runs_root(repo_root).display())
-                }
-                None => format!("no run matches that id; known runs: {}", runs.join(", ")),
+                // A directory is there and the probe could not read it. The
+                // husk sentence above would be a *claim about its contents*
+                // that nothing established, and it is the sentence `status`
+                // prints too, so an operator would be told a run never started
+                // when what happened is that the log could not be read.
+                // `upstroke status` is not offered here because it resolves
+                // through this same function and would print this same line.
+                None => match unclassified_matching(repo_root, wanted) {
+                    Some(unread) => format!(
+                        "`{unread}` could not be classified: its {EVENT_LOG} could not be read to \
+                         a first line, so whether a run committed there is unknown — nothing has \
+                         been deleted and the next census retains it"
+                    ),
+                    None if runs.is_empty() => {
+                        format!("no runs found under {}", runs_root(repo_root).display())
+                    }
+                    None => format!("no run matches that id; known runs: {}", runs.join(", ")),
+                },
             },
         }),
         several => Err(UpstrokeError::Refused {
@@ -251,12 +303,33 @@ pub fn resolve_run_id(repo_root: &Path, wanted: &str) -> Result<String, Upstroke
 /// operator is told to use more characters by the branch above, not sent to a
 /// husk that merely happens to be one of the matches.
 fn husk_matching(repo_root: &Path, wanted: &str) -> Option<String> {
-    let husks = list_husks(repo_root);
+    matching(&list_husks(repo_root), wanted)
+}
+
+/// The directory a wanted id names whose classification did not finish, exactly
+/// or by unambiguous prefix.
+///
+/// Consulted only after [`husk_matching`] has answered `None`, so the husk
+/// sentence and the set it is drawn from are exactly what they were: this adds
+/// a branch below the existing one rather than widening it.
+fn unclassified_matching(repo_root: &Path, wanted: &str) -> Option<String> {
+    let unread: Vec<String> = run_dir_names(repo_root)
+        .into_iter()
+        .filter(|run_id| unclassified(classify_run_dir(&public_dir(repo_root, run_id))))
+        .collect();
+    matching(&unread, wanted)
+}
+
+/// The one id in `names` a wanted id names, exactly or by unambiguous prefix.
+///
+/// Extracted from [`husk_matching`] unchanged so the second caller cannot drift
+/// from the first on what "unambiguous" means.
+fn matching(names: &[String], wanted: &str) -> Option<String> {
     let wanted_upper = wanted.to_ascii_uppercase();
-    if let Some(exact) = husks.iter().find(|id| id.eq_ignore_ascii_case(wanted)) {
+    if let Some(exact) = names.iter().find(|id| id.eq_ignore_ascii_case(wanted)) {
         return Some(exact.clone());
     }
-    let mut prefixed = husks
+    let mut prefixed = names
         .iter()
         .filter(|id| id.to_ascii_uppercase().starts_with(&wanted_upper));
     let first = prefixed.next()?;
@@ -327,5 +400,66 @@ pub fn find_question(repo_root: &Path, wanted: &str) -> Result<FoundQuestion, Up
                     .join(", ")
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RunDirClass, listed_as_husk, listed_as_run, unclassified};
+
+    /// The three classifications, crossed with the three readers that filter on
+    /// them.
+    ///
+    /// **This table is the only driver these readers have for the third
+    /// class.** No directory a test here can build classifies
+    /// `Indeterminate`: that class comes from a read a signal interrupted, and
+    /// nothing in this suite arranges a signal — a fixture's `events.jsonl` is
+    /// an ordinary regular file whose reads deliver bytes or end. So
+    /// `list_runs` and `list_husks` are measured over the classification rather
+    /// than over a fixture, through the predicates they filter by — which is
+    /// why those predicates are named functions.
+    ///
+    /// The property is the finding's: an observation that could not be
+    /// completed is returned by **neither** reader. Not as a run, which would
+    /// resume from a log nothing managed to read; and not as a husk, which is
+    /// what `husk_report` and the census's reclaim arm are fed from, and
+    /// therefore the answer that can end in a deletion.
+    #[test]
+    fn a_directory_that_did_not_classify_is_neither_a_run_nor_a_husk() {
+        let mut seen = Vec::new();
+        for class in [
+            RunDirClass::Committed,
+            RunDirClass::Husk,
+            RunDirClass::Indeterminate,
+        ] {
+            // Exhaustive on purpose: a fourth classification stops compiling
+            // here rather than passing this test without a row.
+            let name = match class {
+                RunDirClass::Committed => "committed",
+                RunDirClass::Husk => "husk",
+                RunDirClass::Indeterminate => "indeterminate",
+            };
+            let answers = [
+                listed_as_run(class),
+                listed_as_husk(class),
+                unclassified(class),
+            ];
+            assert_eq!(
+                answers.iter().filter(|answered| **answered).count(),
+                1,
+                "{name}: exactly one of the three readers claims a classification"
+            );
+            seen.push((name, answers));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                ("committed", [true, false, false]),
+                ("husk", [false, true, false]),
+                ("indeterminate", [false, false, true]),
+            ],
+            "SWEEP-CLASSIFY-001: an unfinished observation is neither listed as a run nor \
+             offered as a husk"
+        );
     }
 }

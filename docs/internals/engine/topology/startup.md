@@ -255,6 +255,13 @@ then the public directory is removed with the marker last".
 Arm (iii): "retained and reported with its locator and reason by every
 census and by status". **Nothing private was deleted.**
 
+Every reason but one is a condition `prove_private_half_ownership` refused on.
+The exception is `RetainReason::ClassificationIncomplete`, which comes from the
+classifier rather than the proof (`SWEEP-CLASSIFY-001`): the outcome is the same
+arm because what the census does with it is the same thing — retain, report,
+delete nothing. `RetainReason::PROOF_KINDS` is the proof's subset and
+`RetainReason::KINDS` is the whole of this arm's vocabulary.
+
 ## `pub enum RunDirOutcome` › `RepairedStaleMarker,`
 
 "A Committed directory still carrying `.creating` or `.creating.tmp` …
@@ -384,7 +391,9 @@ The private locator, exactly as [`rundir::husk_report`] reports it to
 
 ## `pub struct RunDirEntry` › `pub class: RunDirClass,`
 
-What [`rundir::classify_run_dir`] answered.
+What [`rundir::classify_run_dir`] answered — which is three things and not two.
+`RunDirClass::Indeterminate` is an observation the probe could not complete, and
+its entry is always a retention: see `fn scan_classified(`.
 
 ## `pub struct RunDirEntry` › `pub outcome: RunDirOutcome,`
 
@@ -607,16 +616,47 @@ and "the proof this census computed" the same object.
 
 ## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {`
 
-Classify one directory and decide, read-only.
+Classify one directory, read-only, and hand the classification to the decision.
 
-## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {` › `let lock_held = rundir::is_running(&public);`
+## `fn scan_classified(`
+
+Decide one directory from its classification, read-only.
+
+**Split from `scan` so the decision can be driven over a classification the
+filesystem cannot produce** (`SWEEP-CLASSIFY-001`). `RunDirClass::Indeterminate`
+is what the first-line probe answers when a source interrupts it past its
+allowance, and nothing a test here can write to an `events.jsonl` produces it:
+that class comes from a read a signal interrupted, and no fixture in this suite
+arranges a signal — a fixture's log is an ordinary regular file whose reads
+deliver bytes or end. `scan` is one call to this function with the class it
+read, so what is left undriven is that single line, and
+`a_directory_the_probe_could_not_classify_is_retained_and_both_halves_survive`
+drives everything below it — including the funnel, on a directory the census
+really does delete when the class is `Husk`.
+
+## `fn scan_classified(` › `if class == RunDirClass::Indeterminate {`
+
+**The retaining answer, taken before any second observation.** The probe could
+not read this directory's `events.jsonl`; the lock probe, the marker read and
+the ownership proof are three more questions about the same directory, and each
+of them folds its own failures towards reclaiming — `read_dir_names` answers
+`[]` when `read_dir` fails, which is the shape `unbound_shape` reclaims
+(`SWEEP-CLASSIFY-009`). So the census stops here and retains, rather than
+asking them and hoping. Nothing is deleted and nothing is repaired, and the
+entry names why: `RetainReason::ClassificationIncomplete`.
+
+`locator: None` for the same reason. The marker would parse and would name a
+private half, but a locator is a claim about a private half this census has
+deliberately not reasoned about.
+
+## `fn scan_classified(` › `let lock_held = rundir::is_running(&public);`
 
 `is_running` is the read-only probe: on Unix `F_GETLK` asks who holds the
 lock without taking it, and an absent lock file means the run never
 started. "A Husk whose `run.lock` is **free or absent** is handled by
 shape and proof."
 
-## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {` › `let own = own_run == Some(run_id);`
+## `fn scan_classified(` › `let own = own_run == Some(run_id);`
 
 The own-run exception, stated twice by the packet: recovery step (a1)'s
 census covers "this run's own stale marker, **which the owner removes
@@ -624,13 +664,13 @@ here**", and the stale-marker sentence's "otherwise its live owner
 removes it in recovery step (a)" is the same removal from the other
 side. It licenses the marker repair and nothing else.
 
-## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {` › `locator: None,`
+## `fn scan_classified(` › `locator: None,`
 
 A committed run's private half is bound by
 `run_started.private_dir`, which recovery step (a) verifies. A
 marker on it is stale residue, not a binding to report.
 
-## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {` › `if lock_held {`
+## `fn scan_classified(` › `if lock_held {`
 
 Every husk arm is gated on the lock alone. A husk whose lock is held is
 skipped whoever holds it, this process included: under the worktree lock
@@ -638,12 +678,12 @@ no live creator can exist in this worktree, so a held lock on a husk is
 either another repository's process or this resume's own run with a
 damaged log — and neither is a directory a census may delete.
 
-## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {` › `let report = rundir::husk_report(`
+## `fn scan_classified(` › `let report = rundir::husk_report(`
 
 The one classifier. `status` drives the same call on the same directory
 and gets the same locator and the same reason.
 
-## `fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {` › `HuskDisposition::Unstarted(Reclaimable::BothHalves) => {`
+## `fn scan_classified(` › `HuskDisposition::Unstarted(Reclaimable::BothHalves) => {`
 
 `husk_report` is read-only and drops its token unspent, so the proof
 is recomputed here to mint one. A second answer that is not `Proven`

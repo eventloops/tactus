@@ -938,6 +938,7 @@ fn every_publication_prefix_classifies_as_the_packet_names_it() {
     let root = scratch("shapes");
     let mut committed = 0usize;
     let mut husks = 0usize;
+    let mut indeterminate = 0usize;
     for shape in shapes() {
         let public = root.join(shape.name);
         fs::create_dir_all(&public).expect("shape dir");
@@ -948,15 +949,27 @@ fn every_publication_prefix_classifies_as_the_packet_names_it() {
             "shape `{}` classified {actual:?}",
             shape.name
         );
-        match shape.expected {
+        match actual {
             RunDirClass::Committed => committed += 1,
             RunDirClass::Husk => husks += 1,
+            RunDirClass::Indeterminate => indeterminate += 1,
         }
     }
     // Distinct-value counts rather than prose: a grid that had drifted to
     // one class would still pass every assertion above.
     assert_eq!(committed, 5, "committed shapes");
     assert_eq!(husks, 18, "husk shapes");
+    // Every shape here is an ordinary regular file read with no signal
+    // arranged, so every read delivers bytes or ends. This is the count that
+    // says `RunDirClass::Indeterminate` did not leak into ordinary
+    // classification when it was added (`SWEEP-CLASSIFY-001`), and it counts
+    // what the probe *answered* rather than what the shape declared -- the
+    // arms above moved from `shape.expected` to `actual` for exactly that
+    // reason, since counting the table would report the table.
+    assert_eq!(
+        indeterminate, 0,
+        "no ordinary publication prefix is unclassifiable"
+    );
     // The two marker-bound shapes are the ones a locator-following
     // classifier gets wrong, so their presence is asserted rather than
     // left to the count above.
@@ -1166,7 +1179,9 @@ fn the_probe_returns_the_lines_exact_bytes_on_both_paths() {
         write(&path, &bytes);
 
         let mut file = File::open(&path).expect("open");
-        let read = first_line(&mut file).expect("a newline-terminated first line");
+        let Observed::Found(read) = first_line(&mut file) else {
+            panic!("{label}: a newline-terminated first line");
+        };
         assert_eq!(
             read,
             line[..line.len() - 1].to_vec(),
@@ -1265,8 +1280,9 @@ fn a_source_rewritten_between_the_scan_and_the_reread_has_no_first_line() {
         };
         assert_eq!(
             first_line_within(&mut source, bound),
-            None,
-            "{label}: a first line the re-read cannot vouch for is a husk"
+            Observed::Absent,
+            "{label}: a first line the re-read cannot vouch for is a husk — and an \
+             *absence*, which is a completed observation, not the unfinished one"
         );
         assert!(
             source.rewound,
@@ -1282,7 +1298,7 @@ fn a_source_rewritten_between_the_scan_and_the_reread_has_no_first_line() {
     };
     assert_eq!(
         first_line_within(&mut steady, bound),
-        Some(before[..length].to_vec()),
+        Observed::Found(before[..length].to_vec()),
         "a source that did not change still has its first line"
     );
 }
@@ -1344,8 +1360,9 @@ fn the_first_line_probe_spends_its_budget_and_stops() {
     };
     assert_eq!(
         first_line_within(&mut endless, budget),
-        None,
-        "a source with no newline in it has no first line"
+        Observed::Absent,
+        "a source with no newline in it has no first line, and spending the budget is a \
+         completed observation rather than an unfinished one"
     );
     assert_eq!(
         endless.handed, budget,
@@ -1359,8 +1376,425 @@ fn the_first_line_probe_spends_its_budget_and_stops() {
         handed: 0,
         ceiling: 1,
     };
-    assert_eq!(first_line_within(&mut device, 0), None);
+    assert_eq!(first_line_within(&mut device, 0), Observed::Absent);
     assert_eq!(device.handed, 0, "a source with no length is not read");
+}
+
+// =======================================================================
+// SWEEP-CLASSIFY-001: a source that answers `Interrupted`
+// =======================================================================
+
+/// When an otherwise ordinary source starts answering `Interrupted`, which is
+/// the same thing as which of the probe's three reads it stops.
+///
+/// [`first_line_within`] reads three times and the finding's warning is about
+/// exactly that: `SWEEP-CLASSIFY-001` had "two independent unbounded doors" and
+/// "a successor who closes only (i) will believe the probe terminates". One
+/// variant per read, one test per variant, and each test asserts *which* read
+/// it stopped in rather than trusting the construction.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum InterruptAfter {
+    /// Nothing: the first window read never completes. Door (i) — on master
+    /// this is `Take` + `read_to_end`, and the retry is `std::io`'s.
+    Nothing,
+    /// This many bytes: the window read completes and the scan does not. Door
+    /// (ii) — on master the retry is `newline_offset_from`'s own `continue`.
+    Delivered(u64),
+    /// The seek back to the start: the window read and the scan both complete
+    /// and the re-read does not. The third read, which the finding does not
+    /// number because on master it is door (i)'s `read_to_end` again.
+    TheSeek,
+}
+
+/// A source that serves `bytes` until [`InterruptAfter`] says to stop, and
+/// answers `Interrupted` for ever afterwards.
+///
+/// **Past `ceiling` it answers a *different* error instead**, which is what
+/// lets an unbounded probe fail these tests in milliseconds rather than hang
+/// the suite — the trade [`Endless`] makes, for the reason its comment gives: a
+/// guard against non-termination that does not itself terminate is no guard.
+///
+/// The ceiling is [`INTERRUPT_CEILING`], a literal, and is deliberately **not**
+/// derived from the allowance it measures. A threshold computed from the
+/// constant under test grows with every mutation of that constant and so
+/// catches none of them.
+struct Interrupting {
+    bytes: Vec<u8>,
+    at: usize,
+    when: InterruptAfter,
+    ceiling: u64,
+    /// Observed, not configured: which stage the probe actually reached.
+    delivered: u64,
+    rewound: bool,
+    interruptions: u64,
+}
+
+impl Interrupting {
+    fn new(bytes: Vec<u8>, when: InterruptAfter, ceiling: u64) -> Self {
+        Self {
+            bytes,
+            at: 0,
+            when,
+            ceiling,
+            delivered: 0,
+            rewound: false,
+            interruptions: 0,
+        }
+    }
+
+    fn interrupting(&self) -> bool {
+        match self.when {
+            InterruptAfter::Nothing => true,
+            InterruptAfter::Delivered(bytes) => self.delivered >= bytes,
+            InterruptAfter::TheSeek => self.rewound,
+        }
+    }
+}
+
+impl Read for Interrupting {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.interrupting() {
+            self.interruptions += 1;
+            if self.interruptions > self.ceiling {
+                return Err(io::Error::other(format!(
+                    "the probe made {} interrupted reads and had not stopped, so it is \
+                     unbounded on a source that answers Interrupted (SWEEP-CLASSIFY-001)",
+                    self.interruptions
+                )));
+            }
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
+        let Some(rest) = self.bytes.get(self.at..) else {
+            return Ok(0);
+        };
+        let take = rest.len().min(buf.len());
+        let (Some(from), Some(into)) = (rest.get(..take), buf.get_mut(..take)) else {
+            return Ok(0);
+        };
+        into.copy_from_slice(from);
+        self.at += take;
+        self.delivered += take as u64;
+        Ok(take)
+    }
+}
+
+impl Seek for Interrupting {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        self.rewound = true;
+        if let SeekFrom::Start(at) = to {
+            self.at = usize::try_from(at).unwrap_or(usize::MAX);
+        }
+        Ok(self.at as u64)
+    }
+}
+
+/// Every interrupted-source test's bound, as literals.
+///
+/// `CEILING` is what the fixture refuses past, and `DEADLINE` is what the
+/// caller refuses past; both are here rather than at the call sites so that
+/// "the same bound, for all three reads" is a fact about one pair of numbers.
+/// Neither is computed from `INTERRUPTED_ALLOWANCE`, which is private to
+/// `classify` for that reason.
+const INTERRUPT_CEILING: u64 = 4_000_000;
+const INTERRUPT_DEADLINE: Duration = Duration::from_secs(20);
+
+/// Drive `source` through the probe and return what it answered, refusing to
+/// take longer than [`INTERRUPT_DEADLINE`].
+///
+/// The elapsed check is an assertion rather than a watchdog: nothing here can
+/// stop a probe that does not return, and that is what `INTERRUPT_CEILING`
+/// inside the fixture is for. This is the second signal, and it is the one the
+/// finding asks for in seconds.
+fn probe_under_interruption(source: &mut Interrupting, bound: u64) -> Observed<Vec<u8>> {
+    let started = Instant::now();
+    let answer = first_line_within(source, bound);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < INTERRUPT_DEADLINE,
+        "the probe took {elapsed:?} against an interrupting source; the census holds the \
+         physical worktree lock across it (SWEEP-CLASSIFY-001)"
+    );
+    answer
+}
+
+/// Door (i): the **window read**, which on master is `Take` + `read_to_end`.
+///
+/// `std::io` retries `Interrupted` inside `read_to_end` without limit and an
+/// interrupted read spends none of a `Take`'s byte budget, so master's probe
+/// never returns here. Measured on master's own copy of these two functions,
+/// lifted verbatim into a standalone binary: no return within 25 seconds at
+/// rustc 1.85.0 and at 1.97.1.
+///
+/// **The answer is the assertion, not merely the return.** A probe that
+/// terminated by calling an interrupted source a husk would pass a test that
+/// only checked it came back — and that is precisely the repair PR #137 wrote
+/// and withdrew, because `Husk` is the reclaiming classification. So this
+/// asserts `Incomplete` and asserts it is not `Absent`.
+#[test]
+fn the_window_read_stops_on_an_interrupting_source_and_does_not_call_it_absent() {
+    let mut source = Interrupting::new(Vec::new(), InterruptAfter::Nothing, INTERRUPT_CEILING);
+    let answer = probe_under_interruption(&mut source, FIRST_LINE_WINDOW * 4);
+
+    assert_eq!(
+        source.delivered, 0,
+        "this door is the window read: the source handed out no bytes at all"
+    );
+    assert!(
+        !source.rewound,
+        "the scan and the re-read were never reached"
+    );
+    assert!(
+        source.interruptions > 0,
+        "the fixture never interrupted, so nothing here is measured"
+    );
+    assert!(
+        source.interruptions <= INTERRUPT_CEILING,
+        "{} interrupted reads and the probe had not stopped: it is unbounded on a source \
+         that answers Interrupted, which is SWEEP-CLASSIFY-001",
+        source.interruptions
+    );
+    assert_eq!(
+        answer,
+        Observed::Incomplete,
+        "an observation that could not be completed is not an absence"
+    );
+    assert_ne!(
+        answer,
+        Observed::Absent,
+        "SWEEP-CLASSIFY-001: `Absent` is `Husk`, which is the reclaiming answer"
+    );
+}
+
+/// Door (ii): the **scan**, which is this crate's own `Interrupted` arm.
+///
+/// The finding's warning is this test's reason for existing: "a successor who
+/// closes only (i) will believe the probe terminates". The source satisfies the
+/// whole first window with newline-free bytes, so `read_to_end` returns and the
+/// probe is inside `newline_offset_from` when the interruptions start — which
+/// the `delivered` assertion below states rather than assumes.
+#[test]
+fn the_scan_stops_on_an_interrupting_source_and_does_not_call_it_absent() {
+    let window = FIRST_LINE_WINDOW;
+    let bytes = vec![b'x'; usize::try_from(window).expect("the window fits a usize")];
+    let mut source = Interrupting::new(bytes, InterruptAfter::Delivered(window), INTERRUPT_CEILING);
+    let answer = probe_under_interruption(&mut source, window * 4);
+
+    assert_eq!(
+        source.delivered, window,
+        "this door is the scan: the window read must have completed first, or this test \
+         is measuring door (i) again"
+    );
+    assert!(
+        !source.rewound,
+        "the probe stopped in the scan, before the re-read's seek"
+    );
+    assert!(
+        source.interruptions > 0,
+        "the fixture never interrupted, so nothing here is measured"
+    );
+    assert!(
+        source.interruptions <= INTERRUPT_CEILING,
+        "{} interrupted reads and the probe had not stopped: it is unbounded on a source \
+         that answers Interrupted, which is SWEEP-CLASSIFY-001",
+        source.interruptions
+    );
+    assert_eq!(answer, Observed::Incomplete);
+    assert_ne!(
+        answer,
+        Observed::Absent,
+        "SWEEP-CLASSIFY-001: `Absent` is `Husk`, which is the reclaiming answer"
+    );
+}
+
+/// The **re-read**, the third read, reached only after the seek.
+///
+/// The finding numbers two doors because on master this read is door (i)'s
+/// `read_to_end` again. It is a third *site* all the same, and a repair that
+/// bounded the first two would leave it: the fixture serves a newline-free
+/// window, then a newline the scan finds, and only starts interrupting once the
+/// probe has sought back to the start — which `rewound` states.
+#[test]
+fn the_reread_stops_on_an_interrupting_source_and_does_not_call_it_absent() {
+    let window = usize::try_from(FIRST_LINE_WINDOW).expect("the window fits a usize");
+    // Newline-free for the whole window, so the scan is reached; terminated
+    // just past it, so the scan finds an offset and the re-read is reached.
+    let mut bytes = vec![b'x'; window + 32];
+    bytes.push(b'\n');
+    let bound = bytes.len() as u64;
+    let mut source = Interrupting::new(bytes, InterruptAfter::TheSeek, INTERRUPT_CEILING);
+    let answer = probe_under_interruption(&mut source, bound);
+
+    assert!(
+        source.rewound,
+        "the re-read was never reached, so this test is measuring one of the other two"
+    );
+    assert!(
+        source.delivered > FIRST_LINE_WINDOW,
+        "the window read and the scan both completed first: {} bytes",
+        source.delivered
+    );
+    assert!(
+        source.interruptions > 0,
+        "the fixture never interrupted, so nothing here is measured"
+    );
+    assert!(
+        source.interruptions <= INTERRUPT_CEILING,
+        "{} interrupted reads and the probe had not stopped: it is unbounded on a source \
+         that answers Interrupted, which is SWEEP-CLASSIFY-001",
+        source.interruptions
+    );
+    assert_eq!(answer, Observed::Incomplete);
+    assert_ne!(
+        answer,
+        Observed::Absent,
+        "SWEEP-CLASSIFY-001: `Absent` is `Husk`, which is the reclaiming answer"
+    );
+}
+
+/// A source that interrupts and then **recovers** still has its first line.
+///
+/// The control the three tests above cannot be: each of them shows the probe
+/// stops, and a probe that answered `Incomplete` the moment it saw one
+/// `Interrupted` would satisfy all three while classifying every interrupted
+/// read as unreadable. A burst well inside the allowance must be absorbed and
+/// the line returned, which is also the property a retry exists for at all.
+#[test]
+fn a_burst_of_interruptions_inside_the_allowance_is_absorbed() {
+    let line = committed_line_of_exactly("01BURST", 4096);
+    let bound = line.len() as u64;
+    let mut source = Bursty {
+        bytes: line.clone(),
+        at: 0,
+        left: 512,
+        interruptions: 0,
+    };
+    assert_eq!(
+        first_line_within(&mut source, bound),
+        Observed::Found(line[..line.len() - 1].to_vec()),
+        "a source that interrupts and then delivers has its first line"
+    );
+    assert_eq!(
+        source.interruptions, 512,
+        "the fixture must actually have interrupted, or this measures nothing"
+    );
+}
+
+/// Answers `Interrupted` `left` times and then behaves like an ordinary file.
+struct Bursty {
+    bytes: Vec<u8>,
+    at: usize,
+    left: u64,
+    interruptions: u64,
+}
+
+impl Read for Bursty {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.left > 0 {
+            self.left -= 1;
+            self.interruptions += 1;
+            return Err(io::Error::from(io::ErrorKind::Interrupted));
+        }
+        let Some(rest) = self.bytes.get(self.at..) else {
+            return Ok(0);
+        };
+        let take = rest.len().min(buf.len());
+        let (Some(from), Some(into)) = (rest.get(..take), buf.get_mut(..take)) else {
+            return Ok(0);
+        };
+        into.copy_from_slice(from);
+        self.at += take;
+        Ok(take)
+    }
+}
+
+impl Seek for Bursty {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        if let SeekFrom::Start(at) = to {
+            self.at = usize::try_from(at).unwrap_or(usize::MAX);
+        }
+        Ok(self.at as u64)
+    }
+}
+
+/// The probe retries `Interrupted` in **one** place, and reaches no retry it
+/// does not own.
+///
+/// Three drivers above measure the three reads. This measures the shape that
+/// makes three drivers enough: `SWEEP-CLASSIFY-001`'s two doors were two
+/// independent retry sites — one in this crate's code and one inside
+/// `std::io`'s `read_to_end` — and the finding's warning is that closing either
+/// alone looks finished. So the count is the assertion, not the reads.
+///
+/// Comments and string literals are blanked first, because the prose in that
+/// file says "Interrupted" many times; the test region is cut off first,
+/// because this is a statement about the probe and not about its tests. Both
+/// derivations are `crate::effects`'s own, which is what the classification
+/// census uses.
+///
+/// **What this does not prove**: that the one site is bounded — the three tests
+/// above are that — or that a read added later goes through it. It does catch
+/// the two shapes that would reintroduce the defect, which are a second
+/// `ErrorKind::Interrupted` arm and any return of `read_to_end`.
+#[test]
+fn the_probe_has_exactly_one_interrupted_retry_site() {
+    let source = include_str!("classify.rs");
+    let code =
+        crate::effects::blank_comments_and_strings(&crate::effects::production_region(source));
+
+    // The positive control: a zero below is only evidence if this search can
+    // see the file's code at all. `read_step` is the retry site's own name and
+    // appears at its declaration and at both of its callers.
+    assert!(
+        code.matches("read_step").count() >= 3,
+        "the blanked production region does not contain the probe's own code, so the \
+         counts below measure nothing: {} bytes",
+        code.len()
+    );
+    assert_eq!(
+        code.matches("ErrorKind::Interrupted").count(),
+        1,
+        "SWEEP-CLASSIFY-001: every read in this module retries Interrupted through one \
+         bounded site, and a second arm is the second door the finding warns about"
+    );
+    assert_eq!(
+        code.matches("read_to_end").count(),
+        0,
+        "SWEEP-CLASSIFY-001 door (i): `read_to_end` retries Interrupted inside `std::io` \
+         without limit, and an interrupted read spends none of a `Take`'s byte budget"
+    );
+}
+
+/// `RetainReason::PROOF_KINDS` is `KINDS` without the classifier's one, and
+/// nothing else.
+///
+/// Two censuses measure `RetainReason` and this is what stops them drifting:
+/// the proof grid asserts it exercises every `PROOF_KINDS` entry, and
+/// `every_retain_reason_kind_deletes_nothing` asserts the census's retain arm
+/// covers every `KINDS` entry. Without this, a variant added to `KINDS` alone
+/// would be exercised by the second and invisible to the first, and a variant
+/// added to `PROOF_KINDS` alone would name a refusal that is not a reason.
+#[test]
+fn the_proof_kinds_are_the_retain_kinds_the_classifier_does_not_add() {
+    let classifier_only = ["classification-incomplete"];
+    let expected: Vec<&str> = RetainReason::PROOF_KINDS
+        .iter()
+        .copied()
+        .chain(classifier_only)
+        .collect();
+    assert_eq!(
+        RetainReason::KINDS.to_vec(),
+        expected,
+        "KINDS is PROOF_KINDS followed by the kinds the classifier produces"
+    );
+    assert_eq!(
+        RetainReason::ClassificationIncomplete.kind(),
+        classifier_only[0],
+        "the classifier's reason is the one named above"
+    );
+    assert!(
+        !RetainReason::PROOF_KINDS.contains(&RetainReason::ClassificationIncomplete.kind()),
+        "the ownership proof never answers the classifier's reason"
+    );
 }
 
 /// The budget really is *the file's own length*, and a line that runs past
@@ -1385,8 +1819,9 @@ fn the_budget_is_the_files_length_and_a_line_past_the_window_is_still_read() {
         "the bound the probe takes is this number"
     );
     assert_eq!(
-        first_line(&mut file).expect("a line past the window is still a line"),
-        line[..line.len() - 1].to_vec()
+        first_line(&mut file),
+        Observed::Found(line[..line.len() - 1].to_vec()),
+        "a line past the window is still a line"
     );
     assert_eq!(
         classify_run_dir(root.join("long").as_path()),
@@ -1437,7 +1872,7 @@ fn a_log_with_no_newline_at_all_is_a_husk_however_long_it_is() {
     let mut file = File::open(public.join(EVENT_LOG)).expect("open");
     assert_eq!(
         first_line(&mut file),
-        None,
+        Observed::Absent,
         "no newline is no first line, not an empty one"
     );
 }
@@ -1482,7 +1917,7 @@ fn endless_log_classification_helper() {
         let mut device = File::open(Path::new(&dir).join(EVENT_LOG)).expect("the log opens");
         assert_eq!(
             first_line(&mut device),
-            None,
+            Observed::Absent,
             "the bounded read must terminate on the device too, not only the guard"
         );
     }
@@ -1610,11 +2045,14 @@ fn a_run_directory_whose_log_blocks_on_open_is_still_classified() {
 /// classified, and classified *quickly* (`PR5-RD-001`).
 ///
 /// `startup_census` requires **every** run-directory entry to be classified
-/// `Committed` or `Husk` before a write command proceeds, and the write
-/// command holds the physical worktree lock while it does that. An entry
-/// that never classifies is therefore not a slow census: it is a lock held
-/// for ever by a process that will never make progress, and no later
-/// command in that worktree can run.
+/// before a write command proceeds, and the write command holds the physical
+/// worktree lock while it does that. An entry that never classifies is
+/// therefore not a slow census: it is a lock held for ever by a process that
+/// will never make progress, and no later command in that worktree can run.
+/// (The packet's two answers are `Committed` and `Husk`; the probe also has
+/// `RunDirClass::Indeterminate` for a read it could not finish, and this
+/// device is not that shape -- it delivers bytes and never ends, so the
+/// bound that stops it here is the file's own declared length.)
 ///
 /// Unix only because `/dev/zero` is where a source with no end can be got
 /// hold of without privilege. The platform-free half of the same claim —
@@ -2288,11 +2726,18 @@ fn every_conjunct_of_the_ownership_proof_refuses_on_its_own() {
     let mut covered: Vec<&str> = kinds.iter().map(|(kind, _)| *kind).collect();
     covered.sort_unstable();
     covered.dedup();
-    let mut expected: Vec<&str> = RetainReason::KINDS.to_vec();
+    // `PROOF_KINDS`, not `KINDS`: this grid measures the *proof*, and one
+    // `RetainReason` is produced by the classifier before the proof is
+    // consulted at all (`SWEEP-CLASSIFY-001`). Pointing it at `KINDS` would
+    // require a case for a refusal `prove_private_half_ownership` cannot make.
+    // `the_proof_kinds_are_the_retain_kinds_the_classifier_does_not_add` is
+    // what stops the two lists drifting apart, and the census's retain arm
+    // still covers `KINDS` in full.
+    let mut expected: Vec<&str> = RetainReason::PROOF_KINDS.to_vec();
     expected.sort_unstable();
     assert_eq!(
         covered, expected,
-        "every RetainReason variant is a conjunct this grid must exercise"
+        "every RetainReason variant the proof answers is a conjunct this grid must exercise"
     );
 
     let mut fields: Vec<OwnerField> = kinds.iter().filter_map(|(_, field)| *field).collect();

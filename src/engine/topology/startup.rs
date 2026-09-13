@@ -398,6 +398,26 @@ enum Planned {
 fn scan(run_id: &str, inputs: &CensusInputs<'_>, own_run: Option<&str>) -> Scanned {
     let public = rundir::public_dir(inputs.repo_root, run_id);
     let class = rundir::classify_run_dir(&public);
+    scan_classified(run_id, public, class, inputs, own_run)
+}
+
+fn scan_classified(
+    run_id: &str,
+    public: PathBuf,
+    class: RunDirClass,
+    inputs: &CensusInputs<'_>,
+    own_run: Option<&str>,
+) -> Scanned {
+    if class == RunDirClass::Indeterminate {
+        return Scanned {
+            run_id: run_id.to_owned(),
+            public,
+            locator: None,
+            class,
+            plan: Planned::Retain(RetainReason::ClassificationIncomplete),
+        };
+    }
+
     let lock_held = rundir::is_running(&public);
 
     if class == RunDirClass::Committed {

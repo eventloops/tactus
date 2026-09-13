@@ -96,22 +96,37 @@ property the code does not have — with three tests and their mutations. It als
 could not repair**: the probe does not terminate on a source answering `Interrupted`, the census
 holds the physical worktree lock across it, and both repairs attempted were wrong — the second
 because an exhausted retry bound has to answer `Husk`, which is the reclaiming classification, so
-it traded a hang for a deletion. The interrupted-read behaviour is master's and the defect is
-`SWEEP-CLASSIFY-001`, an open P1 whose row carries both unbounded doors, the reproduction and why a
-cap cannot be the fix. A repair needs a classification that is neither `Committed` nor `Husk`, so
-it needs the same signature change as the folds below. It did **not** discharge §7 for the file.
+it traded a hang for a deletion.
+
+**`SWEEP-CLASSIFY-001` is closed** by the pull request that made
+`classify_run_dir` three-valued: `RunDirClass::Indeterminate` is what a bound answers when it runs
+out, every reader treats it as retaining, and the census retains the directory with
+`RetainReason::ClassificationIncomplete` rather than offering it to the reclaim path. Both unbounded
+doors are gone, and there is one `Interrupted` retry site in the file rather than two. That change
+did **not** discharge §7 for the file and this row stays open.
 **Seven** inspections still fold an I/O failure the filesystem declined to explain into the same
 `Husk` as an honest absence: the `symlink_metadata` guard, the `open`, the `fstat` that takes the
-bound, the window read, the scan read's own `Err(_)` arm, the seek and the re-read. Seven is
-derived rather than counted -- PR #137's body carries the command that enumerates the sites, after
-two frontier passes corrected the number twice. Making those errors changes `classify_run_dir`'s
-public signature, the `pub` `RunDirClass` re-export, `RunDirEntry`'s `pub` class field in the
-engine's census, and both `list_runs` and `list_husks` in `src/rundir/discovery.rs` (queue row 13)
-— three production call sites in three files and thirty-six call sites in all, which is past any
-reading of a sweep's own-file bound. Listing the file here would activate §6 and §7 over it in
-full, and recording a violation does not satisfy a standard, so the row stays open and a successor
-takes the folds with the call sites they force. The findings are `reviews/FINDINGS.md` §56, and
-the ones still open are files in `findings/`.
+bound, the window read's `Err`, the scan read's own `Err(_)` arm, the seek and the re-read's `Err`.
+Seven is derived rather than counted -- PR #137's body carries the command that enumerates the
+sites, after two frontier passes corrected the number twice. **The `SWEEP-CLASSIFY-001` repair
+folds every one of those seven exactly as master did**; what it moved out of the set is a read that
+did not *finish*, which was never one of them. What it did change is the number of *arms* those
+seven reach, from seven to six: the window read and the re-read share one `Step::Failed` arm in
+`read_up_to` now, where they were two `read_to_end(..).ok()?` calls before. Six arms, seven
+inspections, by
+
+```
+grep -n 'Step::Failed\|is_ok_and\|let Ok(.*) = \(File::open\|file.metadata\)\|seek(SeekFrom::Start(0)).is_err()' src/rundir/classify.rs
+```
+
+which prints seven lines, of which `Err(_) => return Step::Failed` is where the failure is
+classified rather than where it is folded, and `read_up_to`'s arm is reached from two call sites.
+Making those errors is what `RunDirClass::Indeterminate` is now available for, and it no longer
+needs the signature change: `classify_run_dir` already answers three ways, and `list_runs`,
+`list_husks` and `RunDirEntry`'s class field already handle all three (queue row 13).
+Listing the file here would activate §6 and §7 over it in full, and recording a violation does not
+satisfy a standard, so the row stays open and a successor takes the folds. The findings are
+`reviews/FINDINGS.md` §56, and the ones still open are files in `findings/`.
 
 
 **Row 29 (`src/topology/fold/apply.rs`) is swept, in the table below.** It was left open when

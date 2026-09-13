@@ -1,8 +1,11 @@
-//! The retention taxonomy: why a husk is kept rather than reclaimed.
+//! The retention taxonomy: why a directory is kept rather than reclaimed.
 //!
 //! `startup_census` (iii) enumerates the shapes the ownership proof refuses on
-//! and `expected_failures_refusals` enumerates them again as refusals, so the
-//! set is closed and every variant here is one of them. Nothing in this module
+//! and `expected_failures_refusals` enumerates them again as refusals, so that
+//! set is closed and every variant here but one is one of them
+//! ([`RetainReason::PROOF_KINDS`]). The exception is
+//! [`RetainReason::ClassificationIncomplete`], which the classifier produces
+//! and the proof never reaches (`SWEEP-CLASSIFY-001`). Nothing in this module
 //! decides anything — it is the vocabulary [`super::ownership`]'s proof answers
 //! in, and the report surface renders. The proof itself is next door, and the
 //! deletion it authorises is in the parent, behind a site.
@@ -32,12 +35,20 @@ use std::path::PathBuf;
 
 use super::PrivateHalfProof;
 
-/// Why a husk is retained rather than reclaimed.
+/// Why a directory the census considered reclaiming is kept instead.
 ///
-/// Every variant is a condition `prove_private_half_ownership` refuses on, and
-/// the set is closed: `startup_census` (iii) enumerates the shapes, and
-/// `expected_failures_refusals` enumerates them again as refusals. Nothing
-/// private is ever deleted for any of these.
+/// **Every variant but one is a condition `prove_private_half_ownership`
+/// refuses on**, and that set is closed: `startup_census` (iii) enumerates the
+/// shapes, `expected_failures_refusals` enumerates them again as refusals, and
+/// [`Self::PROOF_KINDS`] is the list. Nothing private is ever deleted for any
+/// of them.
+///
+/// The exception is [`Self::ClassificationIncomplete`], which the *classifier*
+/// produces and the proof never does — `SWEEP-CLASSIFY-001`. It is here rather
+/// than beside it because what the census does with it is identical: retain,
+/// report, delete nothing. [`Self::KINDS`] is still the whole closed set, and
+/// `rundir::tests::the_proof_kinds_are_the_retain_kinds_the_classifier_does_not_add`
+/// is what stops the two lists drifting apart.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetainReason {
     /// A marker that is not JSON, or not this marker's shape.
@@ -69,6 +80,14 @@ pub enum RetainReason {
     /// `committed.json` is present: the private half may have crossed P5b, so
     /// no census and no creating process ever deletes it.
     PossiblyCommitted,
+    /// `classify_run_dir` could not finish reading `events.jsonl`, so whether
+    /// this directory holds a committed run is unknown.
+    ///
+    /// The one reason the ownership proof never answers: it comes from
+    /// [`super::RunDirClass::Indeterminate`], before the proof is consulted at
+    /// all, and consulting it would be asking a second question about a
+    /// directory the first one could not read.
+    ClassificationIncomplete,
 }
 
 impl RetainReason {
@@ -79,6 +98,31 @@ impl RetainReason {
     /// reflection over variants, so [`Self::kind`]'s exhaustive match is what
     /// makes adding one to the enum and not to this list impossible.
     pub const KINDS: &'static [&'static str] = &[
+        "marker-unparseable",
+        "marker-run-id-mismatch",
+        "marker-repo-key-mismatch",
+        "locator-outside-authorized-root",
+        "locator-through-reparse-point",
+        "owner-record-missing",
+        "owner-record-unparseable",
+        "owner-record-disagrees",
+        "markerless-with-content",
+        "possibly-committed",
+        "classification-incomplete",
+    ];
+
+    /// The kinds the **ownership proof** itself answers: [`Self::KINDS`]
+    /// without the one the classifier produces.
+    ///
+    /// Two censuses measure this enum and they measure different things. The
+    /// proof grid in `rundir::tests` asserts that every conjunct of
+    /// `prove_private_half_ownership` has a case, and a conjunct is what this
+    /// list holds; the census's retain arm asserts that it deletes nothing for
+    /// any reason at all, and that is `KINDS`. Before
+    /// [`Self::ClassificationIncomplete`] the two lists were the same one, and
+    /// pointing the grid at `KINDS` would now require it to fixture a refusal
+    /// the proof cannot make.
+    pub const PROOF_KINDS: &'static [&'static str] = &[
         "marker-unparseable",
         "marker-run-id-mismatch",
         "marker-repo-key-mismatch",
@@ -105,6 +149,7 @@ impl RetainReason {
             Self::OwnerRecordDisagrees { .. } => "owner-record-disagrees",
             Self::MarkerlessWithContent => "markerless-with-content",
             Self::PossiblyCommitted => "possibly-committed",
+            Self::ClassificationIncomplete => "classification-incomplete",
         }
     }
 
@@ -197,6 +242,10 @@ impl std::fmt::Display for RetainReason {
             Self::PossiblyCommitted => {
                 f.write_str("its private half carries a commit record, so the run may have started")
             }
+            Self::ClassificationIncomplete => f.write_str(
+                "its events.jsonl could not be read to a first line, so whether a run committed \
+                 here is unknown",
+            ),
         }
     }
 }
