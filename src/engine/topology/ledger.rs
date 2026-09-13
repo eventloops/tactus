@@ -835,8 +835,6 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
         holds,
         parts: Vec::new(),
     };
-    // The rows whose `resource_accounting` cell names several facts carry
-    // one requirement per named fact, and the verdict consumes each.
     let consumed = Expectation {
         row: Row::R14,
         class: Consumed,
@@ -853,10 +851,6 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
             ("override_slots", Monotone),
         ],
     };
-    // The report is derived at every run end and regenerated on resume, so
-    // it is present at every outcome but the mid-run one; the marker is
-    // removed after `run_started`; the lock files persist; answer, question
-    // and `.partial` files are never pruned; the private artifacts persist.
     let outputs = Expectation {
         row: Row::R21,
         class: PersistentOutput,
@@ -884,9 +878,6 @@ pub fn equation(outcome: Outcome) -> Vec<Expectation> {
             ("private_artifacts", Retained),
         ],
     };
-    // Released to Git: nothing a pruned ref, pin or worktree referenced is
-    // gone, nothing the store held before the run end is gone, and what
-    // fsck reports unreachable can only grow.
     let released = Expectation {
         row: Row::R27,
         class: Released,

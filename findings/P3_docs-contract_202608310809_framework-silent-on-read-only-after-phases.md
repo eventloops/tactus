@@ -5,7 +5,7 @@ disposition: deferred
 category: docs-contract
 pr: 3
 reviewed_sha: 7dfbf8b0cb1203671300a097ca9be1c8107732a3
-location: src/topology/effects/residue_authority.rs:249
+location: src/topology/effects/residue_authority.rs:288
 provenance: undetermined
 first_bad:
 guard: the owner — a design section stating the residue authority's derived rules (`DESIGN.md` §26 is the owner's; re-checked at PR10)

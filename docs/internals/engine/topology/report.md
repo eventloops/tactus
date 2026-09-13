@@ -39,8 +39,10 @@ for what the fold does not retain (the integration ledger, the runner record's s
 
 ## `impl TopologyReport` › `pub fn is_fresh_against(&self, existing: &[u8]) -> bool {`
 
-Fresh when the bytes on disk parse as a report whose digest equals this one's. A file that does
-not parse is stale, never an error: finalization then rewrites it.
+Fresh when the bytes on disk parse as a report whose stored digest is this one's and is the
+digest of the stored content itself, and whose outcome and runner are this one's. A file that
+does not parse, one carrying this digest over other bytes, and one recording another outcome or
+runner under a matching digest are stale, never an error: finalization then rewrites it.
 
 ## `impl TopologyReport` › `pub fn render(&self) -> String {`
 

@@ -87,9 +87,27 @@ The inventory minus the sites declared unobservable as a whole. `Process.Spawn` 
 points are required and observed — and its two declared phases are the only findings
 [`excused`] removes.
 
+## `pub fn excused(failure: &BijectionFailure, declared: &[Unob…`
+
+Whether a bijection failure is about a declared-unobservable coordinate.
+
+## `pub const FAST_PATH_TEST: &str = "engine::topology::integra…`
+
+The test whose fast-path assertion the no-execution record cites, and
+the fast sequences the suite's export records: the record has to name
+every one of them (`check_bijection`), and the merge check holds this
+list to the export.
+
 ## `pub const FAST_PATH_TEST: &str =`
 
 The integrate suite's exact-base fast path, whose assertion the no-execution record cites.
+
+## `pub const FAST_SEQUENCES: &[&str] = &["s0", "exact-base-fas…`
+
+Every fast sequence the suite's funnel executions record: `s0` is the
+integrate suite's exact-base fast path; `exact-base-fast` is the
+workspace manager lane's exact-base tour
+(`workspace_manager::tests::every_site_this_lane_owns_executes_both_hook_phases`).
 
 ## `pub const FAST_SEQUENCES: &[&str] = &["s0", "exact-base-fast"];`
 
@@ -108,6 +126,21 @@ what it constructed, classified and recovered; the sampling records from
 module's tests, which kill-samples the five residue-classified sites PR5's sampler does not run,
 each through the argv its funnel shares with it).
 
+## `impl ResidueEvidence` › `pub fn parse(synthetic_json: &str, histograms: &[&str]) -> …`
+
+# Errors
+
+A file that does not parse, or names a site the enums do not.
+
+## `pub fn residue_entries(evidence: &ResidueEvidence) -> Resul…`
+
+One recovery-proven entry per residue class of every site of the
+inventory that registers one.
+
+# Errors
+
+A site whose class has no synthetic or no sampling evidence in `evidence`.
+
 ## `pub fn residue_entries(evidence: &ResidueEvidence) -> Result<Vec<RegistryEntry>, String> {`
 
 One recovery-proven entry per residue class of every site of the inventory that registers one —
@@ -125,15 +158,38 @@ the production adapters are claimed by this module's own witnesses (the question
 funnels, every event error-return and kill point, the process funnel's kill points on each host,
 the container launch funnels).
 
+## `pub fn registry(evidence: &ResidueEvidence) -> Result<Fault…`
+
+# Errors
+
+An entry the format refuses, or residue evidence a site lacks.
+
 ## `pub fn registry(evidence: &ResidueEvidence) -> Result<FaultRegistry, String> {`
 
 The claims' entries, the residue entries and the no-execution records, every one through
 `FaultRegistry::insert`.
 
+## `pub fn registry_document(evidence: &ResidueEvidence) -> Res…`
+
+# Errors
+
+See [`registry`].
+
 ## `pub fn registry_document(evidence: &ResidueEvidence) -> Result<RegistryDocument, String> {`
 
 The pinned document: a note, the inventory, both hosts, the declared-unobservable coordinates
 with their reasons, the fast sequences and the entries.
+
+## `pub fn registry_json(evidence: &ResidueEvidence) -> Result<…`
+
+# Errors
+
+See [`registry`].
+
+## `pub fn without_histograms(mut document: RegistryDocument) -…`
+
+The document with every recovery-proven sampling histogram zeroed: what
+the pin compares, the machine-varying half set aside.
 
 ## `pub fn without_histograms(mut document: RegistryDocument) -> RegistryDocument {`
 

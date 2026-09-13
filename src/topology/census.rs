@@ -133,9 +133,6 @@ impl Census {
         while let Some(id) = frontier.pop_front() {
             let first = transitions.len();
             if states[id].trace.len() >= bounds.max_trace {
-                // The trace ceiling stops expansion here; if anything legal
-                // was left to explore, the census says so, the way it says
-                // so at the state ceiling.
                 if classes(&states[id].fold)
                     .iter()
                     .any(|candidate| states[id].fold.plan_transition(&candidate.event).is_ok())
@@ -359,9 +356,6 @@ mod tests {
     const BET: TaskKey = TaskKey(1);
     const GIMEL: TaskKey = TaskKey(2);
 
-    /// The plan shapes the packet's bounds name. Three originals admit a
-    /// chain, a fan-out and, as the diamond's join, a task after two
-    /// independent ones; a four-node diamond needs a fourth original.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum PlanShape {
         Chain,
@@ -387,8 +381,6 @@ mod tests {
         }
     }
 
-    /// The shape the shared census explores: aleph first, then bet and
-    /// gimel interleaving under it.
     const MAIN_SHAPE: PlanShape = PlanShape::FanOut;
 
     fn sha(label: &str) -> CommitSha {
@@ -620,9 +612,6 @@ mod tests {
         fold
     }
 
-    /// An original's region; a repair's is its lineage root's, and a key
-    /// beyond the three originals is a repair of aleph unless the fold says
-    /// otherwise (`region_of`).
     fn region(key: TaskKey) -> PathSet {
         PathSet::Prefixes {
             paths: vec![GitPath::from(match key {
@@ -664,9 +653,6 @@ mod tests {
         binding_of(fold, key, rung).expect("the task's ladder has this rung")
     }
 
-    /// The rung's binding, or `None` for a ladder without rungs — a merge
-    /// repair whose root's rungs all lie below the repair floor, which the
-    /// registry admits only through a human binding.
     fn binding_of(fold: &TopologyFold, key: TaskKey, rung: usize) -> Option<RungBinding> {
         let registry = fold.registry().expect("started");
         let entry = registry.get(key).expect("a registered task");
@@ -729,9 +715,6 @@ mod tests {
         })
     }
 
-    /// A fresh attempt of `key`'s open generation. A repair's attempt records
-    /// what its worktree was materialized from (the fold refuses one that
-    /// does not) and an original's records nothing.
     fn attempt_started(
         fold: &TopologyFold,
         key: TaskKey,
@@ -753,8 +736,6 @@ mod tests {
         })
     }
 
-    /// Whether the registry holds `key` as a merge repair (an entry with a
-    /// lineage); a key it does not hold is no repair.
     fn is_repair(fold: &TopologyFold, key: TaskKey) -> bool {
         fold.registry()
             .and_then(|registry| registry.get(key))
@@ -817,9 +798,6 @@ mod tests {
         )
     }
 
-    /// The candidate `key`'s in-flight attempt prepares over its region: an
-    /// original's replaces the predicted region and a repair's widens its
-    /// lineage, which is what the fold requires of each.
     fn candidate_prepared_for(
         fold: &TopologyFold,
         key: TaskKey,
@@ -941,8 +919,6 @@ mod tests {
                 verification_source: source.clone(),
                 verification: match &source {
                     VerificationSource::CandidatePrepared { .. } => None,
-                    // A verified publication records its one review pass:
-                    // the bounds' `review_passes`.
                     VerificationSource::Verification { .. } => Some(VerificationRecord {
                         verdict: VerificationVerdict::Passed,
                         gates_passed: true,
@@ -1003,10 +979,6 @@ mod tests {
         })
     }
 
-    /// A rejection of `key`'s candidate at `sequence`, registering the repair
-    /// the production repair module derives — or nothing when the fold is
-    /// not in a state the derivation accepts (a failed ancestor, a full
-    /// registry), which is the generator's own bound on repairs.
     fn rejection_of(
         fold: &TopologyFold,
         key: TaskKey,
@@ -1043,7 +1015,6 @@ mod tests {
         }))
     }
 
-    /// A question a task raises on its own (`question_raised`), one per key.
     fn raised_question(key: TaskKey) -> TopologyEvent {
         ev(TopologyEventBody::QuestionRaised {
             data: crate::topology::events::QuestionRaised4 {
@@ -1084,13 +1055,6 @@ mod tests {
         })
     }
 
-    /// Every event class the packet's `event_payload_classes` names, offered
-    /// at every state for every task the fold registers — originals and the
-    /// repairs rejections registered — within the bounds: two generations,
-    /// two attempts, a parked settlement or a verification park only while
-    /// fewer than the bound's questions are open, a resume only while the
-    /// epoch is below the bound's resumes. Refusals are offers too: every
-    /// arm of `plan_transition` executes on something.
     fn classes(fold: &TopologyFold) -> Vec<Candidate> {
         let bounds = CensusBounds::default();
         let mut out = Vec::new();
@@ -1100,16 +1064,12 @@ mod tests {
         );
         let open_questions = fold.open_questions().map_or(0, BTreeMap::len);
         let may_ask = open_questions < usize::try_from(bounds.questions).unwrap_or(usize::MAX);
-        // The sequences bound: an integration opened at the next sequence
-        // beyond it is not offered; an open one is driven to its end.
         let may_integrate = fold.transaction().is_some() || sequence < bounds.sequences;
         let epoch = fold.epoch().map_or(0, |epoch| epoch.0);
         let entries: Vec<crate::topology::registry::TaskEntry> = fold
             .registry()
             .map(|registry| registry.entries().to_vec())
             .unwrap_or_default();
-        // The repairs bound: a rejection or a spawn registers a repair, and
-        // the fold registers as many as a run asks for.
         let repairs = entries
             .iter()
             .filter(|entry| entry.origin == crate::topology::registry::Origin::MergeRepair)
@@ -1133,13 +1093,6 @@ mod tests {
                 LeaseDisposition::PredictedRetained
             };
             for generation in 0..bounds.generations_per_task {
-                // A dispatch is offered where the sequential run admits one:
-                // the task ready (its dependencies merged) and the pipeline
-                // reservable, which at `max_parallel = 1` is one open
-                // generation at a time. The fold trusts its emitter here — it
-                // refuses a dispatch of a task that is not Pending and
-                // nothing else — so without the run's own rule the census
-                // would explore interleavings no sequential run performs.
                 let dispatchable = fold.ready(key) && fold.pipeline_reservable();
                 let dispatch_event = match entry.lineage {
                     Some(lineage) => ev(TopologyEventBody::TaskDispatched {
@@ -1194,8 +1147,6 @@ mod tests {
                         (
                             "deferred",
                             SettlementTransition::Deferred {
-                                // The record carries the count the fold
-                                // expects next, so a second deferral is one.
                                 defers: fold.task(key).map_or(1, |task| task.defers + 1),
                                 reason: "census outage".to_owned(),
                             },
@@ -1248,23 +1199,12 @@ mod tests {
                     format!("task_candidate_created/{name}/g{generation}"),
                     candidate_created(key, generation),
                 ));
-                // The close reasons, each offered for the class it is about:
-                // run-ending for any open generation, a missing worktree for
-                // one no attempt has started in, a discarded session for a
-                // retained one. Every reason at every generation multiplies
-                // the closed states by three for no new arm.
                 let class = fold.task(key).and_then(|task| {
                     task.generations
                         .iter()
                         .find(|held| held.id.0 == generation)
                         .map(|held| held.class.clone())
                 });
-                // The run-ending close is the closure's, offered where the
-                // closure performs it — a halt, a budget stop, or a derived
-                // ending — with the outcome the closure's own precedence
-                // selects; offered elsewhere it closes every open generation
-                // at every state for no arm the closure does not already
-                // execute.
                 let mut reasons = Vec::new();
                 if let Ok(outcome) = crate::engine::topology::closure::ending_outcome(fold) {
                     reasons.push(("run-ending", GenerationCloseReason::RunEnding { outcome }));
@@ -1471,11 +1411,6 @@ mod tests {
                     format!("task_merged/{name}/g{generation}"),
                     task_merged(fold, sequence, key, generation),
                 ));
-                // A rejection is of a queued candidate with no transaction
-                // open, or of the candidate an open verification is about,
-                // and the fold refuses any other; the derivation is the
-                // costly part of an offer, so it is made where the fold can
-                // accept it.
                 let rejectable = match fold.transaction() {
                     None => fold.task_state(key) == Some(TaskState::AwaitingMerge),
                     Some(transaction) => {
@@ -1496,11 +1431,6 @@ mod tests {
                         ));
                     }
                 }
-                // The same spawn a person could make by hand, offered where
-                // a person would: over merged work, once, before anything
-                // else is dispatched. The fold registers a spawn at almost
-                // any state, and a spawn at every state copies the space per
-                // repair.
                 let spawnable = may_repair
                     && generation == 0
                     && repairs == 0
@@ -1529,13 +1459,6 @@ mod tests {
                     }
                 }
             }
-            // One task raises questions of its own; a raised question for
-            // every task would multiply every other state by the eight
-            // combinations of three, and the questions bound is reached
-            // through the parks the settlements and verifications record.
-            // The fold parks a lineage's task only with nothing of the
-            // lineage in flight or under integration; a candidate awaiting
-            // its merge is where a task raises one on its own.
             let awaiting = fold.task_state(key) == Some(TaskState::AwaitingMerge)
                 && fold.transaction().is_none();
             if may_ask && key == ALEPH && awaiting {
@@ -1605,10 +1528,6 @@ mod tests {
                 },
             }),
         ));
-        // The ceiling is consulted where the loop selects — with no
-        // generation open and the run not over — and that is where the
-        // sequential loop appends `budget_exceeded`; offered in flight it
-        // doubles every attempt state for the same arm.
         if fold.pipeline_reservable() && fold.finished().is_none() {
             out.push(Candidate::new(
                 "budget_exceeded",
@@ -1634,12 +1553,6 @@ mod tests {
                 run_finished(fold, outcome),
             ));
         }
-        // A resume is offered where a run resumes: after a Parked or
-        // budget-stopped end (the reopening resume) and over a retained
-        // session (the resume that retries or discards it). Accepted
-        // mid-run at every state it would copy the whole space once per
-        // epoch; the classification of every mid-run state as a resume
-        // action is the classifier tests' claim, over the same states.
         let resumes_here = matches!(
             fold.finished(),
             Some(RunOutcome::Parked | RunOutcome::BudgetExceeded)
@@ -1705,9 +1618,6 @@ mod tests {
         })
     }
 
-    /// The classes of the integration path alone: what the deep census
-    /// explores from a seed where two originals are merged, so that four
-    /// sequences and two repairs are a few steps away rather than forty.
     fn integration_path_classes(fold: &TopologyFold) -> Vec<Candidate> {
         classes(fold)
             .into_iter()
@@ -1729,8 +1639,6 @@ mod tests {
             .collect()
     }
 
-    /// A prefix with aleph and bet merged (sequences 0 and 1) and gimel's
-    /// candidate created, applied event by event.
     fn two_merged_prefix() -> (TopologyFold, Vec<TopologyEvent>) {
         let mut fold = started();
         let mut trace = vec![run_started_event()];
@@ -1780,10 +1688,6 @@ mod tests {
         (fold, trace)
     }
 
-    /// The deep census: from [`two_merged_prefix`], the integration path
-    /// alone — gimel's candidate rejected and repaired, the repair rejected
-    /// and repaired again — explored to closure, where the fourth sequence
-    /// and the second repair are.
     fn deep_census() -> &'static Census {
         static DEEP: OnceLock<Census> = OnceLock::new();
         DEEP.get_or_init(|| {
@@ -1800,8 +1704,6 @@ mod tests {
         })
     }
 
-    /// What each census reached in every declared dimension, from its states
-    /// and traces: the largest value any state holds.
     fn reached_dimensions(censuses: &[&Census]) -> BTreeMap<&'static str, u32> {
         let mut reached: BTreeMap<&'static str, u32> = CensusBounds::default()
             .dimensions()
@@ -1867,13 +1769,6 @@ mod tests {
         reached
     }
 
-    /// The shared census: the fan-out plan under the packet's bounds, explored
-    /// breadth-first to `CensusBounds::default().max_states` states. The
-    /// bounded space is larger than that ceiling by orders of magnitude, so
-    /// the census stops there and says so (`truncated`); every assertion over
-    /// it is over the explored set, and the bounds the breadth-first prefix
-    /// cannot reach — four integration sequences, two repairs — are reached by
-    /// [`deep_census`].
     fn census() -> &'static Census {
         static CENSUS: OnceLock<Census> = OnceLock::new();
         CENSUS.get_or_init(|| {
@@ -1886,7 +1781,6 @@ mod tests {
         })
     }
 
-    /// Every key the fold registers: the originals and the repairs.
     fn every_key(fold: &TopologyFold) -> Vec<TaskKey> {
         fold.registry()
             .map(|registry| registry.entries().iter().map(|entry| entry.key).collect())
@@ -1922,8 +1816,6 @@ mod tests {
             .is_some_and(|questions| !questions.is_empty())
     }
 
-    /// Whether `key` can never run: one of its dependencies, transitively,
-    /// has failed, so the task stays Pending and the run completes around it.
     fn blocked(fold: &TopologyFold, key: TaskKey) -> bool {
         fold.registry()
             .and_then(|registry| registry.get(key))
@@ -3412,8 +3304,6 @@ mod tests {
 
     #[test]
     fn an_overlapping_region_is_explored_and_changes_a_transition_answer() {
-        // The join shape: aleph and bet independent, so region A leaves bet
-        // dispatchable while aleph is parked and region AB does not.
         let census = Census::explore(
             started_for(PlanShape::Join),
             vec![run_started_event_for(PlanShape::Join)],
@@ -3480,10 +3370,6 @@ mod tests {
         assert_ne!(region(BET), overlap_region());
     }
 
-    /// The arms of the production dispatch, read from the source of
-    /// `check_started_run` (`src/topology/fold/start.rs`): every
-    /// `TopologyEventBody::Variant` the match names, mapped to its wire kind
-    /// through the `kind()` table in `src/topology/events.rs`.
     fn production_arms() -> BTreeSet<&'static str> {
         let start = include_str!("fold/start.rs");
         let body = start
@@ -3528,11 +3414,6 @@ mod tests {
             .collect()
     }
 
-    /// `coverage_assertions[0]`: every `plan_transition` arm executed at
-    /// least once — the arms enumerated from the production source, the
-    /// executions from the census's transitions, whose kinds the explorer
-    /// records as it offers. Both ways: an arm no offer reached fails, and
-    /// an offered kind the dispatch has no arm for fails.
     #[test]
     fn every_plan_transition_arm_is_executed_by_the_census() {
         let arms = production_arms();
@@ -3567,10 +3448,6 @@ mod tests {
         );
     }
 
-    /// The packet's plan shapes: the chain and the join, explored under the
-    /// same generator to a smaller ceiling, reach every outcome, never the
-    /// fold's error arm, and say where they stopped; the fan-out is the
-    /// shared census.
     #[test]
     fn every_plan_shape_is_explored() {
         for shape in [PlanShape::Chain, PlanShape::Join] {
@@ -4094,8 +3971,6 @@ mod tests {
                 out
             },
         );
-        // One step deep by construction, so the trace ceiling stops legal
-        // continuations and the census says so; the state ceiling is not hit.
         assert!(seeded.truncated() && seeded.states().len() < 500);
         let mut reject = 0;
         let mut repair_dispatch = 0;
@@ -4232,8 +4107,6 @@ mod tests {
                 out
             },
         );
-        // One step deep by construction, so the trace ceiling stops legal
-        // continuations and the census says so; the state ceiling is not hit.
         assert!(seeded.truncated() && seeded.states().len() < 500);
         let (mut retained_states, mut retry_states) = (0, 0);
         for state in seeded.states() {

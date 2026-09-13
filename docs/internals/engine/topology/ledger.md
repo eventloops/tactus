@@ -13,7 +13,9 @@ excerpt within the preceding item when a heading names both an item and a line i
 `decisions.resource_accounting`, transcribed: the twenty-eight rows with their enforcement
 domains, the five outcome equations row by row from each row's `at_run_end`, an observation of
 every row from a fold plus a physical inventory plus the process-local rows, and a check that
-reads each requirement against a before/after pair. ST-09 for the durable rows; the process-local
+reads each requirement against a before/after pair — and, for the rows whose
+`resource_accounting` cell names several facts (R14, R21, R27), one requirement per named fact
+(`Expectation::parts`), each consumed by the verdict. ST-09 for the durable rows; the process-local
 rows (R3, R4, R13, R17, R22, R28) are observed here as the loop reports them and certified at G6.
 
 Nothing here measures the disk: [`PhysicalInventory`] is filled by the test that owns the
@@ -54,14 +56,21 @@ entitlements held, the run lock held, a surviving cleanup hold observed.
 The disk, Git and container facts the external rows read: slots by namespace (intents and
 directories as one set), refs and pins under the run's namespace, the integration ref, the
 execution root, the run directory's files, the private records, the two lock files, container
-intents, the credential-volume check, and R27's objects — the ones the last pre-finalization
-observation saw referenced, checked present in Git's store afterwards.
+intents, the credential-volume check, R21's outputs one by one (the report, the normalized plan,
+the question, answer and `.partial` files, the marker, the lock files, the owner and commit
+records, the private artifacts), and R27's objects — the ones the last pre-finalization
+observation saw referenced, the whole store as it listed it, and what `fsck` reports
+unreachable, so that nothing present before the run end is gone after it, an
+already-unreachable object included.
 
 ## `pub fn observe(`
 
 One observation per row, with the evidence a disagreement quotes. R1 is the fold's own
-pipeline count; R14 is the next sequence number; R20 is balanced when no effect site names a
-volume and the recorded volume map is unchanged (operator-owned by classification).
+pipeline count; R14 is one fact per consumed counter — the merge sequence, task keys, display
+ids, generations, attempts, lineage indexes, repair budget units, verification defers and
+override slots — each held monotone; R21 one fact per persistent output and R27 one per object
+accounting (`Expectation::parts`); R20 is balanced when no effect site names a volume and the
+recorded volume map is unchanged (operator-owned by classification).
 
 ## `pub fn equation(outcome: Outcome) -> Vec<Expectation> {`
 
@@ -70,6 +79,24 @@ BudgetExceeded: the queue, the leases, the candidates refs and the questions ret
 (resumably open), the pins and worktrees pruned, the root pruned. Halted: the void rows `Any`,
 the candidates refs retained (forensic). NoRunFinished: every row retained, the execution root
 present — "a command ended by the append-error protocol leaves exactly this shape".
+
+## `pub fn equation(outcome: Outcome) -> Vec<Expectation>` › `let consumed = Expectation {`
+
+The rows whose `resource_accounting` cell names several facts carry
+one requirement per named fact, and the verdict consumes each.
+
+## `pub fn equation(outcome: Outcome) -> Vec<Expectation>` › `let outputs = Expectation {`
+
+The report is derived at every run end and regenerated on resume, so
+it is present at every outcome but the mid-run one; the marker is
+removed after `run_started`; the lock files persist; answer, question
+and `.partial` files are never pruned; the private artifacts persist.
+
+## `pub fn equation(outcome: Outcome) -> Vec<Expectation>` › `let released = Expectation {`
+
+Released to Git: nothing a pruned ref, pin or worktree referenced is
+gone, nothing the store held before the run end is gone, and what
+fsck reports unreachable can only grow.
 
 ## `pub fn check(before: &Ledger, after: &Ledger, outcome: Outcome) -> Vec<Disagreement> {`
 

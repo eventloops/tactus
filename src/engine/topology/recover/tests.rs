@@ -198,8 +198,6 @@ impl Fixture {
         };
         rundir::stage_marker(&public, &marker, &mut NoHooks).expect("P1a stages the marker");
         rundir::publish_marker(&public, &mut NoHooks).expect("P1b publishes it");
-        // The normalized plan the creator writes at P2, through its funnel: R21
-        // names it among the persistent outputs, so the ledger looks for it.
         rundir::write_plan(&public, b"{\"plan\":\"planted\"}\n", &mut NoHooks)
             .expect("the plan is written");
 
@@ -8239,10 +8237,6 @@ fn driven_runner(seams: &DriveSeams) -> DrivenRunner {
     }
 }
 
-/// Append `bodies` through the production emitter on a handle the caller
-/// already resumed — the live epoch — so the state a closure test plants is
-/// what the loop closes against, with no `run_resumed` between the planting
-/// and the loop to clear a budget stop or wake a deferred task.
 fn plant_live(
     fixture: &Fixture,
     handle: &mut RunHandle,
@@ -11925,7 +11919,6 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
     assert!(driven.invocations_balance);
     assert_eq!(driven.entitlements_held, 0);
     {
-        // INV-13: the projection names the repair's origin and its whole lineage.
         let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
         let report =
             crate::engine::topology::report::TopologyReport::derive(RUN_ID, &fold, &events)
@@ -11936,11 +11929,6 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
             .find(|task| task.key == repair.0)
             .expect("the repair is projected");
         assert_eq!(projected.origin, "merge_repair");
-        // The registry's own lineage, member for member: alpha's first repair
-        // is member 0 of alpha's lineage (`lineage_members` counts the repairs
-        // registered before it, and the root is not a member), and the
-        // projection carries the index the rejection registered rather than
-        // a count of its own.
         let registered = rejection
             .repair
             .entry
@@ -13669,9 +13657,6 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
     use crate::engine::topology::select::Ceiling;
     use crate::topology::events::DerivedOutcome;
 
-    // Halted: alpha deferred, beta's halting failure — both planted in the
-    // live epoch, after the resume, so the closure meets alpha Deferred with
-    // its backoff pending rather than the Pending task `run_resumed` wakes.
     let fixture = Fixture::two_tasks("closure-halted-deferred");
     let mut hooks = HarnessTopologyHooks::new(harness());
     let (_, mut handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
@@ -13827,13 +13812,6 @@ fn run_finished_halted_and_budget_exceeded_accepted_with_deferred_items() {
     assert!(handle.fold.budget_stop().is_none());
 }
 
-/// T-FINISH's closure prefix with a fault inside it: the retained
-/// generation's `generation_closed` is durable and the scrub that follows
-/// it is refused at `Worktree.Remove`'s before phase, so the command ends
-/// between the close and the `run_finished`. The next resume finds one
-/// close for that generation, reclaims its worktree and intent, keeps every
-/// candidates ref, clears the epoch's budget stop, and the loop meets the
-/// ceiling again in the new epoch.
 #[test]
 fn a_fault_between_the_closure_close_and_its_scrub_is_reclaimed_by_the_next_resume() {
     use crate::engine::topology::select::Ceiling;
@@ -13944,10 +13922,6 @@ fn a_fault_between_the_closure_close_and_its_scrub_is_reclaimed_by_the_next_resu
         "the ceiling is met again in the new epoch: {:?}",
         driven.progress
     );
-    // A budget stop per epoch, each in the epoch the resumes before it
-    // opened: the live run above is itself a resume of the planted log, so
-    // the first stop is epoch 1's, and the resume that reclaimed the closure
-    // opened epoch 2 for the second.
     let log = TopologyFold::parse_log(&fixture.log_bytes()).expect("the log parses");
     let mut resumes = 0u32;
     let mut stops: Vec<(u32, u32)> = Vec::new();
@@ -13980,9 +13954,6 @@ fn run_finished_budget_exceeded_refused_after_halting_drain_settlement() {
     let (_, mut handle) = resume_as(&fixture, RESUMER, &runtime_holding_the_record(), &mut hooks)
         .expect("the started run resumes");
     let epoch = handle.fold.epoch().expect("the resume opened an epoch").0;
-    // Planted in the live epoch: the budget stop and the halting settlement
-    // after it are what the closure meets, not a budget stop a resume between
-    // the planting and the loop would have cleared.
     plant_live(
         &fixture,
         &mut handle,
@@ -14567,9 +14538,6 @@ struct ArmedFinalization {
     rundir: ArmedSite,
 }
 
-/// The harness bundle with one timeline across the Event and effect
-/// families, so a test can read which of an append and an effect came
-/// first.
 struct OrderedHooks {
     inner: HarnessTopologyHooks,
     effects: OrderedEffects,
@@ -14690,8 +14658,6 @@ impl ArmedFinalization {
         Self::answering(harness, at, Injection::Error)
     }
 
-    /// Armed to answer `injection` — an error return, or the kill the
-    /// finalization kill child dies by — the first time `at` is consulted.
     fn answering(
         harness: &Arc<Mutex<HookHarness>>,
         at: (EffectSiteId, HookPhase),
@@ -14849,11 +14815,6 @@ struct FinalizationEffect {
     done: fn(&FinishedPlanting) -> bool,
 }
 
-/// What finalization does to a run planted with every kind of residue, in
-/// order: the report, then every cleanup step's effects site by site, then
-/// the run lock's release. `Lock.Release` is last and its "done" is the lock
-/// being free, which the guard's drop also achieves: the fault at it is
-/// survivable, so a resume faulted there still reaches the refusal.
 fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
     use crate::topology::effects::{LockSite, SnapshotSite};
     fn has_slot(
@@ -14955,8 +14916,6 @@ fn finalization_effects(outcome: &RunOutcome) -> Vec<FinalizationEffect> {
     effects
 }
 
-/// Every cell of the finalization matrix: both hook phases of every effect's
-/// site, in effect order.
 fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectSiteId, HookPhase)> {
     finalization_effects(outcome)
         .iter()
@@ -14969,14 +14928,6 @@ fn finalization_sites(outcome: &RunOutcome) -> Vec<(EffectSiteId, HookPhase)> {
         .collect()
 }
 
-/// What a fault at `cell` leaves: every effect before the faulted site is
-/// done, the faulted site's own effect is done only when the fault came
-/// after it, and nothing later is. The lock's release is read from the
-/// harness rather than the file — the faulted resume's guard drops and
-/// frees the file whatever happened, so the file cannot tell a release
-/// through the funnel from a drop; the funnel's after phase can. A fault
-/// at the release itself is absorbed (`RunLock::release` discards the
-/// funnel's error), so it leaves every earlier effect done.
 #[track_caller]
 fn assert_finalization_order(
     planted: &FinishedPlanting,
@@ -15147,10 +15098,6 @@ fn kill_after_report_before_each_cleanup_step() {
 
 const FINALIZATION_KILL_CHILD: &str = "engine::topology::recover::tests::finalization_kill_child";
 
-/// The child of `a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`:
-/// resumes the run its parent planted at its end and dies by abort at
-/// `Worktree.RemoveExecutionRoot`'s after phase — inside finalization, after
-/// the last cleanup step's effect and before the guards drop.
 #[test]
 #[ignore = "spawned as a subprocess by the finalization kill test"]
 fn finalization_kill_child() {
@@ -15220,13 +15167,6 @@ fn finalization_kill_child() {
     );
 }
 
-/// T-FINALIZE with a real process death inside finalization: the child
-/// resumes a Complete run planted at its end, performs the report and every
-/// cleanup step, and is killed right after the execution root is removed —
-/// before the run lock is released and the guards drop. The log is untouched
-/// by the death, the lock is free once the child is gone, and the next
-/// resume finds the report current, nothing left to prune, releases the lock
-/// through the funnel and refuses.
 #[test]
 fn a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume() {
     use crate::topology::effects::LockSite;
@@ -15752,7 +15692,6 @@ fn finalized_report_names_runner_identity() {
     assert_eq!(status.outcome, Some(RunOutcome::Halted));
     assert!(warnings.is_empty(), "{warnings:?}");
 
-    // INV-13's projections name each task's origin and lineage: two originals here.
     assert_eq!(report.tasks.len(), 2);
     for task in &report.tasks {
         assert_eq!(task.origin, "original", "task {}", task.key);
@@ -15760,11 +15699,6 @@ fn finalized_report_names_runner_identity() {
         assert!(task.lineage_root.is_none(), "task {}", task.key);
     }
 
-    // A stored report is fresh only when its digest is the digest of its own
-    // content and its outcome and runner are this report's. A file carrying
-    // the current digest over another image reference, or another outcome,
-    // is stale: the next resume regenerates it and says so; an untouched file
-    // is left alone.
     let report_path = fixture.public().join("report.json");
     let tampered = |mutate: &dyn Fn(&mut crate::engine::topology::report::TopologyReport)| {
         let mut stored = report_of(fixture);
@@ -16138,14 +16072,6 @@ fn with_live_run_hooked_runner<R>(
     body(&mut run, &seams, &mut hooks)
 }
 
-/// `projection equivalence` over a run that defers, stops for budget, closes
-/// and refuses: the report derived from the live fold **at every successful
-/// append** — recorded by the hooks bundle's `folded` hook, which the emitter
-/// calls after each applied delta — equals the report derived from a replay
-/// of that prefix of the bytes on disk, and every durable prefix this
-/// process appended had such a live comparison. The whole-step comparison
-/// (`assert_live_equals_replay`) runs beside it, and the last loop checks the
-/// weaker property it always checked: a prefix replays to one report.
 #[test]
 fn projections_are_equal_between_live_and_replay_at_every_prefix() {
     use crate::engine::topology::report::TopologyReport;
@@ -16291,7 +16217,6 @@ fn files_ending_with(dir: &Path, suffix: &str) -> u32 {
     u32::try_from(count).expect("a small count")
 }
 
-/// Every regular file under `dir`, recursively.
 fn files_under(dir: &Path) -> u32 {
     fn walk(dir: &Path, count: &mut u32) {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -16311,8 +16236,6 @@ fn files_under(dir: &Path) -> u32 {
     count
 }
 
-/// Every object in the repository's store, reachable or not: what R27
-/// holds the run end to — nothing present before it is gone after it.
 fn store_objects(repo_root: &Path) -> Vec<String> {
     use crate::workspace_manager::fixture::git;
     let mut objects: Vec<String> = git(
@@ -16331,10 +16254,6 @@ fn store_objects(repo_root: &Path) -> Vec<String> {
     objects
 }
 
-/// Write one object nothing references into the store, so the run end has
-/// an already-unreachable object to leave alone: R27 says the run never
-/// deletes one, and a verdict that only checked the objects pruned refs
-/// released could not see a finalization that pruned Git's own residue.
 fn plant_unreachable_object(fixture: &Fixture, tag: &str) -> String {
     use crate::workspace_manager::fixture::{git, write_file};
     let path = fixture.private_root.join(format!("orphan-{tag}.txt"));
@@ -16433,7 +16352,6 @@ fn ledger_inventory(
             .map(|dir| files_under(&private_dir.join(dir)))
             .sum(),
         run_lock_file_present: rundir::lock_file(&public).exists(),
-        // `cleanup.lock` is the reaper's Unix hold file beside the run lock.
         cleanup_lock_file_present: public.join("cleanup.lock").exists(),
         worktree_lock_file_present: fixture.worktree_lock_file().exists(),
         container_intents: files_ending_with(
@@ -16504,8 +16422,6 @@ fn last_process_facts(run: &crate::engine::topology::run::TopologyRun) -> (bool,
     (run.invocations_balance(), run.entitlements_held())
 }
 
-/// The live observation: the fold as the process holds it, the store as it
-/// is now (`store` lists it for the later observation to compare against).
 fn observe_live(
     fixture: &Fixture,
     run: &crate::engine::topology::run::TopologyRun,
@@ -16519,8 +16435,6 @@ fn observe_live(
     )
 }
 
-/// The observation once the run has been dropped: the fold replayed from
-/// the bytes, the store compared with `store_before`.
 fn observe_after_drop(
     fixture: &Fixture,
     released: &[String],
@@ -16902,9 +16816,6 @@ fn a_closed_settlement_scrubs_the_generations_worktree_and_intent() {
                 .unwrap_or_else(PoisonError::into_inner)
                 .len();
             let first = run.step(seams, hooks).expect("the outage defers alpha");
-            // The order, observed: the settlement's append is durable
-            // (`Event.Append` after) before the scrub's first effect
-            // (`Worktree.Remove` before) is consulted.
             let seen = timeline.lock().unwrap_or_else(PoisonError::into_inner);
             let step = &seen[from..];
             let appended = step
@@ -17174,9 +17085,6 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
                 .step(seams, hooks)
                 .expect_err("the append-error protocol ends the command");
             assert!(run.fold().is_poisoned(), "the fold is poisoned");
-            // The pre-exit observation: the process still holds the run, its
-            // lock and its fold; the after-drop observation below is taken
-            // from the bytes and the OS once it has let go.
             let released = referenced_objects(&fixture);
             let store = store_objects(&fixture.repo_root);
             let before = observe_live(&fixture, run, &released, &store);

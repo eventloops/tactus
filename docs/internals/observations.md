@@ -35,7 +35,17 @@ written.
 The harness and its export in one handle, so an adapter can derive `Default` — the derived
 `default` builds a fresh harness with its own export — and every clone shares one export. The
 export is written by the drop of the last clone, through the `ExportOnDrop` the handle holds
-for its drop alone.
+for its drop alone, and before a `Kill` is handed back, since a process that dies at a hook never
+reaches its drop. Outside `cfg(test)` the export is a no-op.
+
+## `pub struct Exported` › `_on_drop: Arc<ExportOnDrop>,`
+
+Held for its drop: the last clone's release writes the export.
+
+## `impl Exported` › `pub fn hook(&self, site: EffectSiteId, phase: HookPhase) ->…`
+
+One `hook` call under the harness's lock (a poisoned lock is
+entered), the answer carried through [`Self::carried`].
 
 ## `impl Exported` › `pub fn hook(&self, site: EffectSiteId, phase: HookPhase) -> Injection {`
 
@@ -47,7 +57,7 @@ export takes the lock itself, and `std::sync::Mutex` is not reentrant.
 Every adapter's answer passes through here: a `Kill` is exported before it is returned, because
 the funnel aborts the process right after and a kill-mode observation that reached only the
 in-memory harness would be lost with it — which is exactly the observation the merge check needs
-for a kill-mode point.
+for a kill-mode point. Call it with the harness's lock released: the export takes the lock itself.
 
 ## `mod export {`
 
@@ -57,3 +67,9 @@ current thread — which `cargo test` names after the test — merges with the r
 drop or a spawned kill child of the same test wrote, and writes through the fixture's
 `write_file`, the one write a module outside the funnels may make in a test build. Outside tests
 it does nothing.
+## `mod export` › `pub(super) fn export(harness: &Arc<Mutex<HookHarness>>) {`
+
+Merge what `harness` observed into the record named after the current
+thread (the test) under the directory `UPSTROKE_HOOK_OBSERVATIONS`
+names; nothing when the variable is unset or nothing was observed.
+

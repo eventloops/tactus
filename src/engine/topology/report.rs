@@ -383,10 +383,6 @@ impl TopologyReport {
         let Ok(existing) = serde_json::from_slice::<Self>(existing) else {
             return false;
         };
-        // The stored digest has to be the digest of the stored content, and
-        // the content the recorded outcome and runner: a file carrying this
-        // report's digest over other bytes, or another outcome or runner
-        // under a matching digest, is stale and is regenerated.
         existing.digest == self.digest
             && existing.compute_digest().ok().as_deref() == Some(self.digest.as_str())
             && existing.outcome == self.outcome

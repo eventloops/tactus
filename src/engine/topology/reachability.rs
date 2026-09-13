@@ -170,11 +170,6 @@ pub fn classify(fold: &TopologyFold) -> ResumeAction {
     ResumeAction::Recover(plan)
 }
 
-/// What the fold holds for each fault row, read by the audit on its own —
-/// the same generation classes, transaction and questions the classifier
-/// reads, walked again here rather than through the classifier's plan, so
-/// that a classifier which drops an item cannot also drop the assertion
-/// about it.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct FoldView {
     fresh_start: bool,

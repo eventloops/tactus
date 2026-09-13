@@ -48,10 +48,16 @@ report lists as retained.
 
 Refuses without a durable `run_finished` — nothing is written and nothing deleted for a run
 that has not ended. Otherwise the report is derived from the fold and written when the file on
-disk is missing or stale by digest (`TopologyReport::is_fresh_against`), then the steps run.
+disk is missing or stale — a file whose stored digest is not the digest of its own bytes, or
+whose outcome or runner is not the derived report's (`TopologyReport::is_fresh_against`) — then
+the steps run.
 A fault at any site ends the command with the steps before it done and the steps after it not
 started; the next resume's step (b) runs the whole order again and converges (ST-18,
-`kill_after_report_before_each_cleanup_step`).
+`kill_after_report_before_each_cleanup_step`, which at every cell of the matrix — both phases of
+every effect's site, the run lock's release included — asserts what has and has not been
+removed at the fault, and
+`a_kill_inside_finalization_after_the_execution_root_is_removed_converges_on_the_next_resume`,
+which kills a real child inside finalization).
 
 ## `pub fn refuse_continuation(run_id: &str, finalized: &Finalized) -> UpstrokeError {`
 

@@ -82,14 +82,9 @@ fn merge_observations(into: &mut Vec<Observation>, from: Vec<Observation>) {
     }
 }
 
-/// A shared [`HookHarness`] with its ST-07 observation export attached: the
-/// export is written when the last clone of this handle drops, and before a
-/// `Kill` is handed back, since a process that dies at a hook never reaches
-/// its drop. Outside `cfg(test)` the export is a no-op.
 #[derive(Debug, Clone)]
 pub struct Exported {
     harness: Arc<Mutex<HookHarness>>,
-    /// Held for its drop: the last clone's release writes the export.
     _on_drop: Arc<ExportOnDrop>,
 }
 
@@ -108,8 +103,6 @@ impl Exported {
         &self.harness
     }
 
-    /// One `hook` call under the harness's lock (a poisoned lock is
-    /// entered), the answer carried through [`Self::carried`].
     pub fn hook(&self, site: EffectSiteId, phase: HookPhase) -> Injection {
         let injection = self
             .harness
@@ -119,8 +112,6 @@ impl Exported {
         self.carried(injection)
     }
 
-    /// `injection` as given, after the export when it is a `Kill`. Call it
-    /// with the harness's lock released: the export takes the lock itself.
     #[must_use]
     pub fn carried(&self, injection: Injection) -> Injection {
         if injection == Injection::Kill {
@@ -152,9 +143,6 @@ mod export {
     use super::{OBSERVATIONS_ENV, ObservationRecord};
     use crate::topology::effects::HookHarness;
 
-    /// Merge what `harness` observed into the record named after the current
-    /// thread (the test) under the directory `UPSTROKE_HOOK_OBSERVATIONS`
-    /// names; nothing when the variable is unset or nothing was observed.
     pub(super) fn export(harness: &Arc<Mutex<HookHarness>>) {
         let Ok(dir) = std::env::var(OBSERVATIONS_ENV) else {
             return;

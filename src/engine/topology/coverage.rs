@@ -161,10 +161,6 @@ pub fn frozen_sampling_n(declarations: &str, site: EffectSiteId) -> Result<Optio
     Ok(None)
 }
 
-/// Tests whose observations are calls on an adapter rather than executions
-/// of a funnel: the adapter unit tests, which hook the harness through the
-/// adapter's own `phase`/`point` methods to test the adapter. Their records
-/// are excluded from the merge check's harness, and no claim names them.
 pub const ADAPTER_UNIT_TEST_MODULES: &[&str] = &[
     "workspace_manager::hooks::tests::",
     "engine::topology::seams::tests::",
@@ -178,17 +174,11 @@ pub fn is_funnel_execution(test: &str) -> bool {
         .any(|module| test.starts_with(module))
 }
 
-/// The inventory ST-07 is claimed over: every Topology- and Shared-scoped
-/// site the enums generate.
 #[must_use]
 pub fn inventory() -> Vec<EffectSiteId> {
     EffectSiteId::claimed()
 }
 
-/// A coordinate of the inventory no test can observe executed, with the
-/// reason, stated in the document and held to the code by
-/// `every_declared_unobservable_coordinate_has_its_reason_in_the_code`. An
-/// empty `phases` declares the whole site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unobservable {
     pub site: EffectSiteId,
@@ -232,9 +222,6 @@ pub fn declared_unobservable() -> Vec<Unobservable> {
     ]
 }
 
-/// The inventory minus the sites declared unobservable as a whole; a site
-/// declared at some phases stays in, and its declared phases are excused
-/// from the check's findings by [`excused`].
 #[must_use]
 pub fn checked_inventory() -> Vec<EffectSiteId> {
     let declared = declared_unobservable();
@@ -248,7 +235,6 @@ pub fn checked_inventory() -> Vec<EffectSiteId> {
         .collect()
 }
 
-/// Whether a bijection failure is about a declared-unobservable coordinate.
 #[must_use]
 pub fn excused(failure: &BijectionFailure, declared: &[Unobservable]) -> bool {
     let (site, phase) = match failure {
@@ -266,16 +252,8 @@ pub fn excused(failure: &BijectionFailure, declared: &[Unobservable]) -> bool {
     declared.iter().any(|entry| entry.covers(site, phase))
 }
 
-/// The test whose fast-path assertion the no-execution record cites, and
-/// the fast sequences the suite's export records: the record has to name
-/// every one of them (`check_bijection`), and the merge check holds this
-/// list to the export.
 pub const FAST_PATH_TEST: &str = "engine::topology::integrate::tests::fast_path_publishes_exact_candidate_without_staging_or_proposal_object";
 
-/// Every fast sequence the suite's funnel executions record: `s0` is the
-/// integrate suite's exact-base fast path; `exact-base-fast` is the
-/// workspace manager lane's exact-base tour
-/// (`workspace_manager::tests::every_site_this_lane_owns_executes_both_hook_phases`).
 pub const FAST_SEQUENCES: &[&str] = &["s0", "exact-base-fast"];
 
 #[must_use]
@@ -309,12 +287,6 @@ pub fn no_execution_entries() -> Vec<RegistryEntry> {
         .collect()
 }
 
-/// The residue-class evidence, read from the files two tests write:
-/// the synthetic half from `effects/residue-synthetic.json`
-/// (`workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers`)
-/// and the sampling half from `effects/residue-histogram.json` (PR5's
-/// four-command sampler) and `effects/residue-histogram-sequential.json`
-/// (`engine::topology::coverage::tests::sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_recovered`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResidueEvidence {
     pub synthetic: Vec<(EffectSiteId, Vec<SyntheticRecord>)>,
@@ -349,9 +321,6 @@ struct HistogramSite {
 }
 
 impl ResidueEvidence {
-    /// # Errors
-    ///
-    /// A file that does not parse, or names a site the enums do not.
     pub fn parse(synthetic_json: &str, histograms: &[&str]) -> Result<Self, String> {
         let synthetic: SyntheticFile = serde_json::from_str(synthetic_json)
             .map_err(|error| format!("the synthetic evidence does not parse: {error}"))?;
@@ -401,12 +370,6 @@ impl ResidueEvidence {
     }
 }
 
-/// One recovery-proven entry per residue class of every site of the
-/// inventory that registers one.
-///
-/// # Errors
-///
-/// A site whose class has no synthetic or no sampling evidence in `evidence`.
 pub fn residue_entries(evidence: &ResidueEvidence) -> Result<Vec<RegistryEntry>, String> {
     let mut entries = Vec::new();
     for site in inventory() {
@@ -1350,9 +1313,6 @@ pub const CLAIMS: &[Claim] = &[
     },
 ];
 
-/// # Errors
-///
-/// An entry the format refuses, or residue evidence a site lacks.
 pub fn registry(evidence: &ResidueEvidence) -> Result<FaultRegistry, String> {
     let mut registry = registry_of(CLAIMS).map_err(|error| error.to_string())?;
     for entry in residue_entries(evidence)? {
@@ -1383,9 +1343,6 @@ pub struct RegistryDocument {
     pub entries: Vec<RegistryEntry>,
 }
 
-/// # Errors
-///
-/// See [`registry`].
 pub fn registry_document(evidence: &ResidueEvidence) -> Result<RegistryDocument, String> {
     Ok(RegistryDocument {
         note: "decisions.fault_injection_registry, ST-07 for the sequential topology over the \
@@ -1428,9 +1385,6 @@ pub fn registry_document(evidence: &ResidueEvidence) -> Result<RegistryDocument,
     })
 }
 
-/// # Errors
-///
-/// See [`registry`].
 pub fn registry_json(evidence: &ResidueEvidence) -> Result<String, String> {
     let document = registry_document(evidence)?;
     serde_json::to_string_pretty(&document)
@@ -1438,8 +1392,6 @@ pub fn registry_json(evidence: &ResidueEvidence) -> Result<String, String> {
         .map_err(|error| error.to_string())
 }
 
-/// The document with every recovery-proven sampling histogram zeroed: what
-/// the pin compares, the machine-varying half set aside.
 #[must_use]
 pub fn without_histograms(mut document: RegistryDocument) -> RegistryDocument {
     for entry in &mut document.entries {
