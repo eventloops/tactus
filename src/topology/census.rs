@@ -3043,9 +3043,9 @@ mod tests {
         let mut reached: BTreeMap<FaultRow, usize> = BTreeMap::new();
         for state in census.states() {
             let action = classify(&state.fold);
-            for row in rows_reached(&state.fold, &action) {
+            for row in rows_reached(&state.fold) {
                 assert!(
-                    matches_row(row, &action),
+                    matches_row(row, &state.fold, &action),
                     "state {}: a {} prefix classified as {}",
                     state.id,
                     reachability::row_name(row),
@@ -3137,11 +3137,11 @@ mod tests {
         );
         let action = classify(&rejected);
         assert!(
-            rows_reached(&rejected, &action).contains(&FaultRow::TReject),
+            rows_reached(&rejected).contains(&FaultRow::TReject),
             "{}",
             reachability::action_label(&action)
         );
-        assert!(matches_row(FaultRow::TReject, &action));
+        assert!(matches_row(FaultRow::TReject, &rejected, &action));
         assert_eq!(action, classify(&replayed(&trace)), "live equals replay");
 
         let TopologyEventBody::MergeRejected { data } = &rejection.body else {
@@ -3160,10 +3160,10 @@ mod tests {
         trace.push(dispatch);
         let dispatched = replayed(&trace);
         let action = classify(&dispatched);
-        assert!(rows_reached(&dispatched, &action).contains(&FaultRow::TRepairDispatch));
-        assert!(matches_row(FaultRow::TRepairDispatch, &action));
+        assert!(rows_reached(&dispatched).contains(&FaultRow::TRepairDispatch));
+        assert!(matches_row(FaultRow::TRepairDispatch, &dispatched, &action));
         assert!(
-            !matches_row(FaultRow::TDispatch, &action),
+            !matches_row(FaultRow::TDispatch, &dispatched, &action),
             "a repair's open generation is not an ordinary dispatch's"
         );
         let ResumeAction::Recover(plan) = &action else {
@@ -3216,9 +3216,13 @@ mod tests {
                 "state {}",
                 state.id
             );
-            let rows = rows_reached(&state.fold, &action);
+            let rows = rows_reached(&state.fold);
             for row in &rows {
-                assert!(matches_row(*row, &action), "state {}: {row:?}", state.id);
+                assert!(
+                    matches_row(*row, &state.fold, &action),
+                    "state {}: {row:?}",
+                    state.id
+                );
             }
             reject += usize::from(rows.contains(&FaultRow::TReject));
             repair_dispatch += usize::from(rows.contains(&FaultRow::TRepairDispatch));
@@ -3296,8 +3300,8 @@ mod tests {
             "the retaining incarnation may retry"
         );
         let action = classify(&retained);
-        assert!(rows_reached(&retained, &action).contains(&FaultRow::TRetained));
-        assert!(matches_row(FaultRow::TRetained, &action));
+        assert!(rows_reached(&retained).contains(&FaultRow::TRetained));
+        assert!(matches_row(FaultRow::TRetained, &retained, &action));
         let ResumeAction::Recover(plan) = &action else {
             panic!("{action:?}");
         };
@@ -3312,8 +3316,8 @@ mod tests {
         trace.push(resumed_attempt(&retained, ALEPH, 0, 2));
         let retrying = replayed(&trace);
         let action = classify(&retrying);
-        assert!(rows_reached(&retrying, &action).contains(&FaultRow::TRetry));
-        assert!(matches_row(FaultRow::TRetry, &action));
+        assert!(rows_reached(&retrying).contains(&FaultRow::TRetry));
+        assert!(matches_row(FaultRow::TRetry, &retrying, &action));
         assert_eq!(action, classify(&replayed(&trace)), "live equals replay");
 
         let seeded = Census::explore(
@@ -3343,9 +3347,13 @@ mod tests {
                 "state {}",
                 state.id
             );
-            let rows = rows_reached(&state.fold, &action);
+            let rows = rows_reached(&state.fold);
             for row in &rows {
-                assert!(matches_row(*row, &action), "state {}: {row:?}", state.id);
+                assert!(
+                    matches_row(*row, &state.fold, &action),
+                    "state {}: {row:?}",
+                    state.id
+                );
             }
             retained_states += usize::from(rows.contains(&FaultRow::TRetained));
             retry_states += usize::from(rows.contains(&FaultRow::TRetry));

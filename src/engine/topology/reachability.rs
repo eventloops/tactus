@@ -39,7 +39,7 @@ pub struct RecoveryPlan {
     pub derived: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct InFlightIdentity {
     pub key: u32,
     pub generation: u32,
@@ -47,7 +47,7 @@ pub struct InFlightIdentity {
     pub lineage: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct GenerationIdentity {
     pub key: u32,
     pub generation: u32,
@@ -170,53 +170,133 @@ pub fn classify(fold: &TopologyFold) -> ResumeAction {
     ResumeAction::Recover(plan)
 }
 
-#[must_use]
-pub fn rows_reached(fold: &TopologyFold, action: &ResumeAction) -> Vec<FaultRow> {
-    let mut rows = Vec::new();
-    let plan = match action {
-        ResumeAction::NotStarted => return rows,
-        ResumeAction::FinalizeThenRefuse { .. } => {
-            rows.push(FaultRow::TFinalize);
-            return rows;
-        }
-        ResumeAction::Recover(plan) => plan,
-    };
+/// What the fold holds for each fault row, read by the audit on its own —
+/// the same generation classes, transaction and questions the classifier
+/// reads, walked again here rather than through the classifier's plan, so
+/// that a classifier which drops an item cannot also drop the assertion
+/// about it.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FoldView {
+    fresh_start: bool,
+    open: Vec<GenerationIdentity>,
+    in_flight: Vec<InFlightIdentity>,
+    retained: Vec<GenerationIdentity>,
+    promoting: Vec<GenerationIdentity>,
+    publication: Option<PendingPublication>,
+    verification: Option<PendingVerification>,
+    open_questions: u32,
+    reopens: Option<RunOutcome>,
+    finalizes: Option<RunOutcome>,
+}
 
-    if fold.epoch().is_some()
+fn view(fold: &TopologyFold) -> FoldView {
+    let mut seen = FoldView {
+        open_questions: fold.open_questions().map_or(0, |questions| {
+            u32::try_from(questions.len()).unwrap_or(u32::MAX)
+        }),
+        ..FoldView::default()
+    };
+    match fold.finished() {
+        Some(outcome @ (RunOutcome::Complete | RunOutcome::Halted)) => {
+            seen.finalizes = Some(outcome.clone());
+        }
+        Some(outcome @ (RunOutcome::Parked | RunOutcome::BudgetExceeded)) => {
+            seen.reopens = Some(outcome.clone());
+        }
+        None => {}
+    }
+    let mut any_generation = false;
+    for key in keys(fold) {
+        let Some(task) = fold.task(key) else { continue };
+        for generation in &task.generations {
+            any_generation = true;
+            let lineage = matches!(generation.lease, GenerationLease::InheritedLineage { .. });
+            let identity = GenerationIdentity {
+                key: key.0,
+                generation: generation.id.0,
+                lineage,
+            };
+            match &generation.class {
+                GenerationClass::OpenNoAttempt => seen.open.push(identity),
+                GenerationClass::InFlight { attempt } => seen.in_flight.push(InFlightIdentity {
+                    key: key.0,
+                    generation: generation.id.0,
+                    attempt: attempt.0,
+                    lineage,
+                }),
+                GenerationClass::RetainedIdle { .. } => seen.retained.push(identity),
+                GenerationClass::Promoting => seen.promoting.push(identity),
+                GenerationClass::Closed => {}
+            }
+        }
+    }
+    seen.fresh_start = fold.epoch().is_some()
         && fold.task_count() > 0
-        && keys(fold).all(|key| {
-            fold.task(key)
-                .is_some_and(|task| task.generations.is_empty())
-        })
-        && fold.finished().is_none()
-    {
+        && !any_generation
+        && fold.finished().is_none();
+    if let Some(transaction) = fold.transaction() {
+        match &transaction.class {
+            TransactionClass::Prepared { disposition, .. } => {
+                seen.publication = Some(PendingPublication {
+                    sequence: transaction.sequence.0,
+                    key: transaction.candidate.key.0,
+                    disposition: match disposition {
+                        PreparedDisposition::Fast => "fast",
+                        PreparedDisposition::StaleClean => "stale_clean",
+                        PreparedDisposition::AlreadyPresent => "already_present",
+                    }
+                    .to_owned(),
+                });
+            }
+            TransactionClass::VerificationStarted { basis, .. } => {
+                seen.verification = Some(PendingVerification {
+                    sequence: transaction.sequence.0,
+                    key: transaction.candidate.key.0,
+                    pinned: matches!(basis, VerificationBasis::StaleClean { .. }),
+                });
+            }
+        }
+    }
+    seen
+}
+
+fn sorted<T: Clone + Ord>(items: &[T]) -> Vec<T> {
+    let mut out = items.to_vec();
+    out.sort();
+    out
+}
+
+#[must_use]
+pub fn rows_reached(fold: &TopologyFold) -> Vec<FaultRow> {
+    let seen = view(fold);
+    let mut rows = Vec::new();
+    if fold.epoch().is_none() {
+        return rows;
+    }
+    if seen.finalizes.is_some() {
+        rows.push(FaultRow::TFinalize);
+        return rows;
+    }
+    if seen.fresh_start {
         rows.push(FaultRow::TRunstart);
     }
-    if plan.recreate_open.iter().any(|open| !open.lineage) {
+    if seen.open.iter().any(|open| !open.lineage) {
         rows.push(FaultRow::TDispatch);
     }
-    if plan.recreate_open.iter().any(|open| open.lineage) {
+    if seen.open.iter().any(|open| open.lineage) {
         rows.push(FaultRow::TRepairDispatch);
     }
-    if plan
-        .settle_interrupted
-        .iter()
-        .any(|attempt| attempt.attempt == 1)
-    {
+    if seen.in_flight.iter().any(|attempt| attempt.attempt == 1) {
         rows.push(FaultRow::TAttempt);
         rows.push(FaultRow::TCandObj);
     }
-    if plan
-        .settle_interrupted
-        .iter()
-        .any(|attempt| attempt.attempt > 1)
-    {
+    if seen.in_flight.iter().any(|attempt| attempt.attempt > 1) {
         rows.push(FaultRow::TRetry);
     }
-    if !plan.complete_promotions.is_empty() {
+    if !seen.promoting.is_empty() {
         rows.push(FaultRow::TCandRef);
     }
-    if !plan.close_retained.is_empty() {
+    if !seen.retained.is_empty() {
         rows.push(FaultRow::TRetained);
     }
     if keys(fold).any(|key| {
@@ -242,12 +322,12 @@ pub fn rows_reached(fold: &TopologyFold, action: &ResumeAction) -> Vec<FaultRow>
     }) {
         rows.push(FaultRow::TFailed);
     }
-    match &plan.publication {
+    match &seen.publication {
         Some(publication) if publication.disposition == "fast" => rows.push(FaultRow::TFast),
         Some(_) => rows.push(FaultRow::TPrepared),
         None => {}
     }
-    if let Some(verification) = &plan.interrupted_verification {
+    if let Some(verification) = &seen.verification {
         rows.push(FaultRow::TVerify);
         if verification.pinned {
             rows.push(FaultRow::TProposal);
@@ -261,7 +341,7 @@ pub fn rows_reached(fold: &TopologyFold, action: &ResumeAction) -> Vec<FaultRow>
     }) {
         rows.push(FaultRow::TReject);
     }
-    if plan.open_questions > 0 {
+    if seen.open_questions > 0 {
         rows.push(FaultRow::TAnswer);
     }
     if fold.finished().is_none()
@@ -269,7 +349,7 @@ pub fn rows_reached(fold: &TopologyFold, action: &ResumeAction) -> Vec<FaultRow>
     {
         rows.push(FaultRow::TFinish);
     }
-    if plan.reopens.is_some() {
+    if seen.reopens.is_some() {
         rows.push(FaultRow::TResume);
     }
     rows
@@ -281,48 +361,76 @@ pub const fn outside_the_fold(row: FaultRow) -> bool {
 }
 
 #[must_use]
-pub fn matches_row(row: FaultRow, action: &ResumeAction) -> bool {
+pub fn matches_row(row: FaultRow, fold: &TopologyFold, action: &ResumeAction) -> bool {
+    let seen = view(fold);
     let plan = match (row, action) {
-        (FaultRow::TFinalize, ResumeAction::FinalizeThenRefuse { .. }) => return true,
+        (FaultRow::TFinalize, ResumeAction::FinalizeThenRefuse { outcome }) => {
+            return seen.finalizes.as_ref() == Some(outcome);
+        }
         (FaultRow::TFinalize, _) | (_, ResumeAction::FinalizeThenRefuse { .. }) => return false,
         (_, ResumeAction::NotStarted) => return false,
         (_, ResumeAction::Recover(plan)) => plan,
     };
+    let open = |lineage: bool| -> Vec<GenerationIdentity> {
+        sorted(
+            &seen
+                .open
+                .iter()
+                .filter(|open| open.lineage == lineage)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
+    let planned_open = |lineage: bool| -> Vec<GenerationIdentity> {
+        sorted(
+            &plan
+                .recreate_open
+                .iter()
+                .filter(|open| open.lineage == lineage)
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    };
     match row {
         FaultRow::TRunstart => {
-            plan.recreate_open.is_empty()
+            seen.fresh_start
+                && plan.recreate_open.is_empty()
                 && plan.settle_interrupted.is_empty()
                 && plan.close_retained.is_empty()
                 && plan.complete_promotions.is_empty()
                 && plan.publication.is_none()
                 && plan.interrupted_verification.is_none()
         }
-        FaultRow::TDispatch => plan.recreate_open.iter().any(|open| !open.lineage),
-        FaultRow::TRepairDispatch => plan.recreate_open.iter().any(|open| open.lineage),
-        FaultRow::TAttempt | FaultRow::TCandObj => !plan.settle_interrupted.is_empty(),
-        FaultRow::TRetry => plan
-            .settle_interrupted
-            .iter()
-            .any(|attempt| attempt.attempt > 1),
-        FaultRow::TCandRef => !plan.complete_promotions.is_empty(),
-        FaultRow::TRetained => !plan.close_retained.is_empty(),
-        // The item these rows are about needs no recovery event of its own: a
-        // scrubbed candidate is re-scrubbed idempotently, a settled task, a
-        // registered repair and an open question are read from the prefix.
-        // Whatever another task in the same state needs is that task's row.
-        FaultRow::TScrub | FaultRow::TFailed | FaultRow::TReject | FaultRow::TAnswer => true,
-        FaultRow::TFast | FaultRow::TPrepared => plan.publication.is_some(),
-        FaultRow::TProposal | FaultRow::TVerify => plan.interrupted_verification.is_some(),
-        // A closure in progress: the run is ending (a halting settlement, a
-        // budget stop, or nothing left to select) and no run_finished is
-        // durable yet. The next process repeats the closure steps for the
-        // classes still open — which is what the plan's other fields carry —
-        // then evaluates derived_outcome and appends run_finished.
+        FaultRow::TDispatch => !open(false).is_empty() && planned_open(false) == open(false),
+        FaultRow::TRepairDispatch => !open(true).is_empty() && planned_open(true) == open(true),
+        FaultRow::TAttempt | FaultRow::TCandObj => {
+            !seen.in_flight.is_empty()
+                && sorted(&plan.settle_interrupted) == sorted(&seen.in_flight)
+        }
+        FaultRow::TRetry => {
+            seen.in_flight.iter().any(|attempt| attempt.attempt > 1)
+                && sorted(&plan.settle_interrupted) == sorted(&seen.in_flight)
+        }
+        FaultRow::TCandRef => {
+            !seen.promoting.is_empty()
+                && sorted(&plan.complete_promotions) == sorted(&seen.promoting)
+        }
+        FaultRow::TRetained => {
+            !seen.retained.is_empty() && sorted(&plan.close_retained) == sorted(&seen.retained)
+        }
+        FaultRow::TScrub | FaultRow::TFailed | FaultRow::TReject => true,
+        FaultRow::TAnswer => seen.open_questions > 0 && plan.open_questions == seen.open_questions,
+        FaultRow::TFast | FaultRow::TPrepared => {
+            seen.publication.is_some() && plan.publication == seen.publication
+        }
+        FaultRow::TProposal | FaultRow::TVerify => {
+            seen.verification.is_some() && plan.interrupted_verification == seen.verification
+        }
         FaultRow::TFinish => {
             plan.reopens.is_none()
                 && (plan.derived != "not ending" || plan.halted || plan.clears_budget_stop)
         }
-        FaultRow::TResume => plan.reopens.is_some(),
+        FaultRow::TResume => plan.reopens.is_some() && plan.reopens == seen.reopens,
         FaultRow::TContainer | FaultRow::TAppend | FaultRow::TFinalize => false,
     }
 }
@@ -401,10 +509,10 @@ pub fn summarize(census: &Census, classification_equal_live_and_on_replay: bool)
         *outcomes.entry(derived_label(&state.outcome)).or_insert(0) += 1;
         let action = classify(&state.fold);
         *actions.entry(action_label(&action)).or_insert(0) += 1;
-        for row in rows_reached(&state.fold, &action) {
+        for row in rows_reached(&state.fold) {
             if let Some(summary) = rows.get_mut(&row_name(row)) {
                 summary.reachable_states += 1;
-                if !matches_row(row, &action) {
+                if !matches_row(row, &state.fold, &action) {
                     summary.every_reachable_state_classifies_as_tabled = false;
                 }
             }
