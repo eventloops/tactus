@@ -14636,6 +14636,10 @@ fn kill_after_report_before_each_cleanup_step() {
             );
             assert_eq!(fixture.log_bytes(), before, "{tag}: nothing appended");
 
+            assert!(
+                wait_for_cleanup_hold_release(&fixture.public()),
+                "{tag}: the run's cleanup lease is still held"
+            );
             let second = harness();
             let (result, _) = resume(fixture, &second, &given);
             let text = message(&result.expect_err("the next resume finalizes then refuses"));
@@ -14646,6 +14650,10 @@ fn kill_after_report_before_each_cleanup_step() {
             assert_finalized(&planted, &outcome, &tag);
             assert_eq!(fixture.log_bytes(), before, "{tag}: still nothing appended");
 
+            assert!(
+                wait_for_cleanup_hold_release(&fixture.public()),
+                "{tag}: the run's cleanup lease is still held"
+            );
             let third = harness();
             let (result, _) = resume(fixture, &third, &given);
             let text = message(&result.expect_err("a finalized run refuses again"));
@@ -15658,6 +15666,25 @@ fn ledger_inventory(
     }
 }
 
+/// Wait, bounded, for the run's cleanup lease to be free. A `git` child of
+/// the ref funnel holds the lease while it lives, through a descriptor made
+/// inheritable for it, and under a parallel suite a child another test
+/// thread forks in that window can inherit the descriptor and hold the
+/// lease until it exits. The wait is bounded so a hold that never clears
+/// still fails the assertion that follows it.
+fn wait_for_cleanup_hold_release(public: &Path) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        if !rundir::observe_cleanup_hold(public, &mut crate::rundir::NoHooks) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 /// R3, R4, R13, R17, R22 and R28 as the live process sees them.
 fn process_local_of(
     run: &crate::engine::topology::run::TopologyRun,
@@ -15672,8 +15699,10 @@ fn process_local_of(
 }
 
 /// The same rows once the run has been dropped: the process-local ledgers
-/// as the run last reported them, the locks as the OS reports them.
+/// as the run last reported them, the locks as the OS reports them — after
+/// a bounded wait for a lease a concurrently forked child may still hold.
 fn process_local_after(public: &Path, last: (bool, u32)) -> ProcessLocal {
+    let _ = wait_for_cleanup_hold_release(public);
     ProcessLocal {
         invocations_balanced: last.0,
         entitlements_held: last.1,
