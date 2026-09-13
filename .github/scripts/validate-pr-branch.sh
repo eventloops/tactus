@@ -163,6 +163,15 @@
 # two ways in are now one code path from the index down, so the equivalence
 # this gate claims holds by construction rather than by fixture.
 #
+# AND WHICH REPOSITORY'S RECORDS, WHICH IS A SEVENTH SHAPE AND NOT A SEVENTH
+# DEFECT. Locating the repository lands in the DEEPEST work tree the path enters,
+# and for an INITIALISED SUBMODULE that is the submodule's own: its index was
+# read as this repository's ledger, while the superproject records the path at
+# mode 160000 -- a GITLINK, and not a directory to descend into. The walk now
+# continues out of a submodule into its superproject before anything is asked
+# about the path, so a recorded type decides here exactly as 120000 already does.
+# locate_listing states it and measures it.
+#
 # WHAT THAT COSTS, STATED PLAINLY. An UNTRACKED finding file inside a tracked
 # findings/ no longer counts for the directory input: the ledger is what
 # is committed, and a merge gate decides about commits and never about a work
@@ -1108,6 +1117,57 @@ locate_listing() {
     echo "  was not judged." >&2
     return 1
   fi
+  # OUT OF A SUBMODULE AND INTO THE SUPERPROJECT, BECAUSE A SUBMODULE'S OWN INDEX
+  # IS NOT A STATEMENT ABOUT WHAT THIS REPOSITORY TRACKS. Discovery lands in the
+  # DEEPEST work tree the path enters, and for an INITIALISED submodule that is
+  # the submodule's own: `rev-parse --show-toplevel` from inside
+  # `<super>/findings` answers `<super>/findings`, the listing is then named by
+  # the empty path in THAT index, and the submodule's entries were read as this
+  # repository's ledger. Measured on a clean checkout -- `git status --porcelain`
+  # exit 0 and empty -- of a superproject recording `findings` at mode 160000
+  # with a finding-shaped file at the submodule's root: the three tree listings
+  # refuse at exit 1 `names no finding` and the same checkout's `findings`
+  # DIRECTORY conformed at exit 0.
+  #
+  # A 160000 GITLINK IS A RECORDED TYPE AND NOT A DIRECTORY TO DESCEND INTO, and
+  # answering from the superproject is what puts it under the rule that already
+  # decides the other three: 100644 and 100755 are a file listing, 120000 is
+  # neither a listing nor a finding, and 160000 joins them at the same place --
+  # recorded_kind_of sees the gitlink AT the path and reports a blob at mode
+  # 160000, or sees it ABOVE the path and reports the path unnameable. Both are
+  # what a tree listing of the same commit says for the same path.
+  #
+  # AN ORDINARY NESTED REPOSITORY IS NOT REACHED BY THIS AND IS NOT MEANT TO BE.
+  # Git answers here only where the parent's index records a gitlink at this work
+  # tree's own path; a repository the surrounding one records NOTHING at is
+  # untracked there, so there is no recorded type to decide from and its own
+  # index stays the answer, exactly as before.
+  #
+  # The walk repeats, because a superproject may itself be a submodule, and each
+  # step must move strictly UPWARDS or this cannot bound it: git's answer is the
+  # work-tree root that CONTAINS the one asked about, so a reply that is not a
+  # proper ancestor is refused rather than followed. It costs one probe per level
+  # walked out of PLUS the one that answers empty and ends the walk. Measured on
+  # this tree: an ordinary repository's findings directory goes from 3 git
+  # invocations to 4, and a listing inside one submodule from 3 to 5 -- two of
+  # these probes, and the `ls-files` that now goes to the superproject. A listing
+  # with no repository over it returns above and pays nothing: for the five files
+  # .github/workflows/pr-policy.yml builds under RUNNER_TEMP and hands in, the
+  # sequence of git calls is byte-identical either side of this change.
+  while :; do
+    git_probe '0' -- -C "$top" rev-parse --show-superproject-working-tree
+    [[ -n "$probe_text" ]] || break
+    case "$top" in
+      "$probe_text"/?*) top="$probe_text" ;;
+      *)
+        echo "branch-name-policy: git says the work tree at '$top' is a submodule of" >&2
+        echo "  '$probe_text', which does not contain it, so which repository records" >&2
+        echo "  '$path' is not known. That is refused rather than answered from" >&2
+        echo "  whichever index is nearest. '$branch' was not judged." >&2
+        return 1
+        ;;
+    esac
+  done
   # The caller's own components, DEEPEST FIRST, until one of them IS the work
   # tree's root. What is left is the listing's name in the index, and no part of
   # it has been resolved on the filesystem.

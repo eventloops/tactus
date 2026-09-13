@@ -1416,6 +1416,85 @@ else
   echo 'note: skipping the symlinked-findings-directory cases (this filesystem will not create one)' >&2
 fi
 
+# ---- a 160000 GITLINK is a recorded type too, and the SUPERPROJECT records it -----------------
+#
+# The recorded type decided what the listing path IS for 100644, 100755 and
+# 120000, and 160000 was decided by WHERE DISCOVERY LANDED instead. An
+# INITIALISED submodule at findings is a work tree of its own, so
+# `rev-parse --show-toplevel` from inside it answers the SUBMODULE'S root, the
+# listing is named by the empty path in THAT index, and the submodule's entries
+# were read as this repository's ledger. Measured on a clean checkout -- `git
+# status --porcelain` exit 0 and empty -- with a finding-shaped file at the
+# submodule's root: the three tree listings refuse at exit 1, `names no finding`,
+# and the same checkout's findings DIRECTORY conformed at exit 0. The
+# superproject's gitlink is the authority, and a submodule's own index is not a
+# statement about what THIS repository tracks.
+#
+# THE GITLINK IS BUILT WITH `update-index --cacheinfo` AND NOT WITH `submodule
+# add`, which wants `protocol.file.allow` for a local path from git 2.38 and
+# writes a `.gitmodules` no rule here reads. What makes the shape is the 160000
+# entry in the superproject's index and a work tree git can discover beneath it;
+# both are asserted before anything is judged, so a fixture that failed to build
+# the shape cannot pass as one that did.
+repo_gitlink="$fixture_dir/repo-initialised-submodule"
+new_repo "$repo_gitlink"
+echo seed > "$repo_gitlink/seed.txt"
+git -C "$repo_gitlink" add -A && git -C "$repo_gitlink" commit -q -m base
+gitlink_base="$(git -C "$repo_gitlink" rev-parse HEAD)"
+new_repo "$repo_gitlink/findings"
+echo fixture > "$repo_gitlink/findings/P2_correctness_202609100001_inside-a-submodule.md"
+git -C "$repo_gitlink/findings" add -A
+git -C "$repo_gitlink/findings" commit -q -m 'the submodule ledger'
+git -C "$repo_gitlink" update-index --add --cacheinfo \
+  "160000,$(git -C "$repo_gitlink/findings" rev-parse HEAD),findings"
+git -C "$repo_gitlink" commit -q -m 'an initialised submodule at findings'
+gitlink_head="$(git -C "$repo_gitlink" rev-parse HEAD)"
+if ! git -C "$repo_gitlink" ls-tree "$gitlink_head" | grep -q $'^160000 commit [0-9a-f]*\tfindings$' \
+  || [[ -n "$(git -C "$repo_gitlink" status --porcelain)" ]] \
+  || [[ ! -f "$repo_gitlink/findings/P2_correctness_202609100001_inside-a-submodule.md" ]]; then
+  echo 'the fixture was meant to record findings as a clean 160000 gitlink holding a finding' >&2
+  exit 1
+fi
+both_apis 'an initialised submodule at findings holds no finding of this repository' \
+  "$repo_gitlink" "$gitlink_base" "$gitlink_head" 'fix-P2/correctness_inside-a-submodule' 1
+# Every spelling, because appending `/.` moves the last component and has moved a
+# verdict with it before now.
+spelling_case 'an initialised submodule at findings, every spelling' \
+  'fix-P2/correctness_inside-a-submodule' 1 "$repo_gitlink/findings"
+# AND FROM INSIDE THE SUBMODULE, where the listing is spelled `.`: the caller's
+# components still name the superproject's root, so the same gitlink answers.
+gitlink_inside_rc=0
+( cd "$repo_gitlink/findings" \
+  && "$BASH" "$branch_validator" 'fix-P2/correctness_inside-a-submodule' . ) >/dev/null 2>&1 \
+  || gitlink_inside_rc=$?
+if [[ "$gitlink_inside_rc" != 1 ]]; then
+  echo "a listing spelled '.' inside an initialised submodule was meant to refuse; got $gitlink_inside_rc" >&2
+  exit 1
+fi
+# A PATH BELOW THE GITLINK IS UNNAMEABLE AND NOT RESOLVED, which is the ancestor
+# half of the same rule: no index entry and no tree entry of this repository is
+# named by a path through a gitlink.
+mkdir -p "$repo_gitlink/findings/deeper"
+echo fixture > "$repo_gitlink/findings/deeper/P2_correctness_202609100002_under-a-submodule.md"
+gitlink_under_rc=0
+"$BASH" "$branch_validator" 'fix-P2/correctness_under-a-submodule' \
+  "$repo_gitlink/findings/deeper" >/dev/null 2>&1 || gitlink_under_rc=$?
+if [[ "$gitlink_under_rc" != 1 ]]; then
+  echo "a listing under an initialised submodule was meant to refuse; got $gitlink_under_rc" >&2
+  exit 1
+fi
+# AND AN ORDINARY findings DIRECTORY STILL RESOLVES THE SAME NAME, so the rule
+# above is a filter on the RECORDED TYPE and not on the shape of the checkout.
+repo_plain_dir="$fixture_dir/repo-ordinary-findings-directory"
+new_repo "$repo_plain_dir"
+echo seed > "$repo_plain_dir/seed.txt"
+git -C "$repo_plain_dir" add -A && git -C "$repo_plain_dir" commit -q -m base
+plain_dir_base="$(git -C "$repo_plain_dir" rev-parse HEAD)"
+commit_finding "$repo_plain_dir" 'P2_correctness_202609100001_inside-a-submodule.md' 'an ordinary finding'
+plain_dir_head="$(git -C "$repo_plain_dir" rev-parse HEAD)"
+both_apis 'and an ordinary findings directory still resolves that name' \
+  "$repo_plain_dir" "$plain_dir_base" "$plain_dir_head" 'fix-P2/correctness_inside-a-submodule' 0
+
 # ---- what git RECORDS, not what the checkout happens to hold -----------------------------------
 #
 # A TRACKED finding need not be in the working tree, and the candidate names
