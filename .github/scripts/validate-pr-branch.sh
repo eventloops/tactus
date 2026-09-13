@@ -1045,9 +1045,136 @@ recorded_tree() {
   return 0
 }
 
+# enclosing_work_tree <work-tree root> <listing, for the message>: the root of
+# the work tree that CONTAINS that one, left in `enclosing_root`, or the empty
+# string where there is none. The answer is 0 or a REFUSAL: 1 says whether there
+# is one is NOT KNOWN, and that is never read as an absence.
+#
+# WHY THE QUESTION IS PUT TO THE PARENT DIRECTORY AND NOT TO GIT'S SUBMODULE
+# QUERY. `rev-parse --show-superproject-working-tree` answers "which repository
+# records this one" in a single call, and answers it EMPTY for three different
+# worlds: there is no repository above; there is one and it records nothing
+# here; and there is one whose index could not be read. Measured on a
+# superproject recording `findings` at mode 160000, with `chmod 000` on its
+# `.git/index`: `git -C <super> ls-files -s` exits 128 `Permission denied`, that
+# query exits 0 with EMPTY STDOUT AND EMPTY STDERR, and the listing was then
+# answered out of the submodule's own index -- exit 0 `conforms`, on the
+# checkout the same validator refuses at exit 1 the moment the index is readable
+# again. THAT QUERY'S SUCCESSFUL EMPTY ANSWER IS INSUFFICIENT: an empty success
+# is not evidence of absence, which is the shape a producer's exit status not
+# being evidence its output was consumed already has.
+#
+# So the question is put to two things that FAIL when the look fails. Git's own
+# discovery from the parent directory says where the containing work tree is and
+# exits non-zero when it cannot say; `repository_above` then decides whether
+# that non-zero is an absence, and decides it from the FILESYSTEM rather than
+# from git's status -- it is the helper that already separates "no repository"
+# from "a repository this cannot examine" in four measured shapes. `chmod 000`
+# on the superproject's `.git` DIRECTORY rather than on its index is the second
+# of those: discovery exits 128, `repository_above` answers 2, and this refuses
+# where the submodule query answered empty and conformed.
+enclosing_root=''
+enclosing_work_tree() {
+  local root="$1" listing="$2" parent above=0
+  enclosing_root=''
+  [[ "$root" != / ]] || return 0
+  parent="${root%/*}"
+  [[ -n "$parent" ]] || parent='/'
+  git_probe '0,128' -- -C "$parent" rev-parse --is-inside-work-tree
+  if (( probe_status != 0 )); then
+    repository_above "$parent" || above=$?
+    if (( above == 1 )); then
+      return 0
+    fi
+    echo "branch-name-policy: git could not say whether '$parent' is inside a work" >&2
+    if (( above == 2 )); then
+      echo "  tree, and '$unexaminable_git' is there and cannot be examined, so" >&2
+    else
+      echo "  tree, and there is a repository at it or above it, so" >&2
+    fi
+    echo "  whether a repository above '$root' records '$listing' is not known." >&2
+    echo "  That is refused rather than read as nothing being recorded above it," >&2
+    echo "  which is the reading that let an unreadable index conform. '$branch'" >&2
+    echo "  was not judged." >&2
+    return 1
+  fi
+  # `false` is a repository with NO WORK TREE over the parent -- a bare one, or
+  # the inside of a `.git` -- and no index entry of it is named by a path through
+  # this work tree's root. That is an absence of a containing work tree and not a
+  # failure to look, so it ends the walk rather than refusing.
+  [[ "$probe_text" == true ]] || return 0
+  git_probe '0' -- -C "$parent" rev-parse --show-toplevel
+  if [[ -z "$probe_text" ]]; then
+    echo "branch-name-policy: git says '$parent' is inside a work tree and did not say" >&2
+    echo "  where its root is, so whether that repository records '$listing' cannot" >&2
+    echo "  be worked out. '$branch' was not judged." >&2
+    return 1
+  fi
+  # EVERY STEP MOVES STRICTLY UPWARDS or the walk that calls this is not bounded:
+  # the answer is the work-tree root that CONTAINS the one asked about, so a
+  # reply that is not a proper ancestor is refused rather than followed. `/` is
+  # spelled its own way and is tested first: it contains every other root, and
+  # `/` followed by a component is `//...`, which matches nothing -- a work tree
+  # at the filesystem root would otherwise be refused as not containing what it
+  # plainly contains. `$root` is never `/` here; that returned above.
+  if [[ "$probe_text" == / ]]; then
+    enclosing_root="$probe_text"
+  else
+    case "$root" in
+      "$probe_text"/?*) enclosing_root="$probe_text" ;;
+      *)
+        echo "branch-name-policy: git says the work tree at '$root' is inside the one at" >&2
+        echo "  '$probe_text', which does not contain it, so which repository records" >&2
+        echo "  '$listing' is not known. That is refused rather than answered from" >&2
+        echo "  whichever index is nearest. '$branch' was not judged." >&2
+        return 1
+        ;;
+    esac
+  fi
+  return 0
+}
+
+# records_path <work-tree root> <path within it>: do that repository's records
+# NAME that path? 0 they do -- there is an entry AT it, an entry UNDER it, or a
+# blob ABOVE it. 1 they say nothing about it at all. 2 the index could not be
+# read, which is the caller's refusal and is never read as a 1: `ls-files` is
+# enumerated as 0 AND 128 here for exactly the reason recorded_kind_of enumerates
+# it as 0 alone -- a status that is not an answer must not become an absence.
+#
+# IT IS recorded_kind_of'S QUESTION ASKED OF ANOTHER REPOSITORY, and the ancestor
+# half is counted the way that function counts it: an ancestor the records hold
+# ENTRIES UNDER is a directory of that ledger's and says nothing about a
+# repository somebody nested inside it, while an ancestor recorded AT ITS OWN
+# NAME is a blob, and no entry of that ledger is named by a path through it.
+records_path() {
+  local where="$1" rel="$2" record name anc
+  git_probe '0,128' -- -C "$where" ls-files -sz -- ":(literal)$rel"
+  if (( probe_status != 0 )); then
+    return 2
+  fi
+  (( ${#probe_records[@]} == 0 )) || return 0
+  anc="$rel"
+  while [[ "$anc" == */* ]]; do
+    anc="${anc%/*}"
+    git_probe '0,128' -- -C "$where" ls-files -sz -- ":(literal)$anc"
+    if (( probe_status != 0 )); then
+      return 2
+    fi
+    (( ${#probe_records[@]} > 0 )) || continue
+    for record in "${probe_records[@]}"; do
+      name="${record#*$'\t'}"
+      if [[ "$name" == "$anc" ]]; then
+        return 0
+      fi
+    done
+    return 1
+  done
+  return 1
+}
+
 locate_listing() {
   local path="$1" anchor entered=0 said top spelled prefix rest component index above=0
-  local prefixes rests shallow deep named_root segment nameable
+  local prefixes rests shallow deep named_root segment nameable answering walker named subrel
   listing_world=''
   listing_toplevel=''
   listing_relpath=''
@@ -1117,57 +1244,6 @@ locate_listing() {
     echo "  was not judged." >&2
     return 1
   fi
-  # OUT OF A SUBMODULE AND INTO THE SUPERPROJECT, BECAUSE A SUBMODULE'S OWN INDEX
-  # IS NOT A STATEMENT ABOUT WHAT THIS REPOSITORY TRACKS. Discovery lands in the
-  # DEEPEST work tree the path enters, and for an INITIALISED submodule that is
-  # the submodule's own: `rev-parse --show-toplevel` from inside
-  # `<super>/findings` answers `<super>/findings`, the listing is then named by
-  # the empty path in THAT index, and the submodule's entries were read as this
-  # repository's ledger. Measured on a clean checkout -- `git status --porcelain`
-  # exit 0 and empty -- of a superproject recording `findings` at mode 160000
-  # with a finding-shaped file at the submodule's root: the three tree listings
-  # refuse at exit 1 `names no finding` and the same checkout's `findings`
-  # DIRECTORY conformed at exit 0.
-  #
-  # A 160000 GITLINK IS A RECORDED TYPE AND NOT A DIRECTORY TO DESCEND INTO, and
-  # answering from the superproject is what puts it under the rule that already
-  # decides the other three: 100644 and 100755 are a file listing, 120000 is
-  # neither a listing nor a finding, and 160000 joins them at the same place --
-  # recorded_kind_of sees the gitlink AT the path and reports a blob at mode
-  # 160000, or sees it ABOVE the path and reports the path unnameable. Both are
-  # what a tree listing of the same commit says for the same path.
-  #
-  # AN ORDINARY NESTED REPOSITORY IS NOT REACHED BY THIS AND IS NOT MEANT TO BE.
-  # Git answers here only where the parent's index records a gitlink at this work
-  # tree's own path; a repository the surrounding one records NOTHING at is
-  # untracked there, so there is no recorded type to decide from and its own
-  # index stays the answer, exactly as before.
-  #
-  # The walk repeats, because a superproject may itself be a submodule, and each
-  # step must move strictly UPWARDS or this cannot bound it: git's answer is the
-  # work-tree root that CONTAINS the one asked about, so a reply that is not a
-  # proper ancestor is refused rather than followed. It costs one probe per level
-  # walked out of PLUS the one that answers empty and ends the walk. Measured on
-  # this tree: an ordinary repository's findings directory goes from 3 git
-  # invocations to 4, and a listing inside one submodule from 3 to 5 -- two of
-  # these probes, and the `ls-files` that now goes to the superproject. A listing
-  # with no repository over it returns above and pays nothing: for the five files
-  # .github/workflows/pr-policy.yml builds under RUNNER_TEMP and hands in, the
-  # sequence of git calls is byte-identical either side of this change.
-  while :; do
-    git_probe '0' -- -C "$top" rev-parse --show-superproject-working-tree
-    [[ -n "$probe_text" ]] || break
-    case "$top" in
-      "$probe_text"/?*) top="$probe_text" ;;
-      *)
-        echo "branch-name-policy: git says the work tree at '$top' is a submodule of" >&2
-        echo "  '$probe_text', which does not contain it, so which repository records" >&2
-        echo "  '$path' is not known. That is refused rather than answered from" >&2
-        echo "  whichever index is nearest. '$branch' was not judged." >&2
-        return 1
-        ;;
-    esac
-  done
   # The caller's own components, DEEPEST FIRST, until one of them IS the work
   # tree's root. What is left is the listing's name in the index, and no part of
   # it has been resolved on the filesystem.
@@ -1243,48 +1319,150 @@ locate_listing() {
   # at all -- `a/..` is `a`'s parent only when `a` is a directory. They reach
   # here only from the leading `..` of a spelling like `../../repo/src`,
   # which is an ordinary one.
-  shallow=-1
-  deep=-1
-  index=0
-  while (( index < ${#prefixes[@]} )); do
-    if [[ "${prefixes[index]}" -ef "$top" ]]; then
-      if (( shallow < 0 )); then
-        shallow=$index
+  #
+  # AND AN EMPTY NAME IS NOT A LISTING'S NAME, WHICH IS WHERE THE QUESTION MOVES
+  # TO ANOTHER REPOSITORY. The name below comes out empty exactly where the
+  # listing IS a work tree's own root, and the empty path names THE WHOLE OF
+  # THAT REPOSITORY'S INDEX -- every entry it holds, read as this repository's
+  # ledger. For an INITIALISED SUBMODULE at `findings` that is what happened:
+  # discovery lands in the DEEPEST work tree the path enters, `rev-parse
+  # --show-toplevel` from inside `<super>/findings` answers `<super>/findings`,
+  # and the submodule's entries were counted as findings while the superproject
+  # records the path at mode 160000 -- a GITLINK, which is a recorded type and
+  # not a directory to descend into. Measured on a clean checkout -- `git status
+  # --porcelain` exit 0 and empty -- of a superproject recording `findings` at
+  # 160000 with a finding-shaped file at the submodule's root: the three tree
+  # listings refuse at exit 1 `names no finding` and the same checkout's
+  # `findings` DIRECTORY conformed at exit 0.
+  #
+  # Answering from the repository that RECORDS that root is what puts 160000
+  # under the rule that already decides the other three: 100644 and 100755 are a
+  # file listing, 120000 is neither a listing nor a finding, and 160000 joins
+  # them at the same place -- recorded_kind_of sees the gitlink AT the path and
+  # reports a blob at mode 160000, or sees it ABOVE the path and reports the path
+  # unnameable. Both are what a tree listing of the same commit says for the same
+  # path.
+  #
+  # THE EMPTY NAME IS THE WHOLE OF THE CONDITION, AND THAT IS THE HALF THE FIRST
+  # CUT OF THIS GOT WRONG. It ascended out of EVERY submodule, whatever the
+  # listing was called inside it, and so threw away the ledger of a project that
+  # simply lives in one. Measured with the project itself an initialised
+  # submodule at `host/project`, its base holding one finding and its head
+  # holding another of the same description -- both checkouts clean -- and the
+  # validator run from `project` with its ordinary `findings/`: the merge-base
+  # listing plus that directory answered exit 0 `conforms` where the same state
+  # through the three generated tree listings answered exit 1 `names 2
+  # findings`, and the directory alone answered exit 1 `names no finding` where
+  # the project's own ledger holds one. A false green, a false red, and two
+  # EQUIVALENT INPUTS disagreeing about one commit. A listing INSIDE a work tree
+  # is named by that work tree's index and nothing above it is asked, which is
+  # the case an ordinary project is, and it is the case this walk never enters.
+  #
+  # THE ASCENT REPEATS AND DOES NOT STOP AT THE FIRST REPOSITORY THAT DISCLAIMS A
+  # PARENT. An ordinary nested repository inside a submodule is recorded by
+  # nothing -- the submodule's index holds no entry for it -- and the gitlink
+  # that blocks it is one level further out: with `<super>/findings` a clean
+  # 160000 and an ignored repository at `<super>/findings/nested` holding a
+  # finding-shaped file at its own root, the listing conformed at exit 0 while
+  # the same commit's three tree listings refused at exit 1 `names no finding`.
+  # So `walker` is how far out the ascent has got and `answering` is the
+  # OUTERMOST work tree whose records NAME the one below it; a repository nothing
+  # above records keeps its own index, exactly as before, and the ascent above it
+  # only looks.
+  #
+  # WHAT IT COSTS, counted with GIT_TRACE on this tree rather than read off the
+  # code: nothing at all unless the listing is a work tree's own root, because
+  # the name is worked out FIRST and a non-empty one ends this before a single
+  # call is made. An ordinary repository's `findings/` directory with no
+  # repository above it goes from 4 git invocations to 3 -- the submodule query
+  # the previous head made unconditionally is gone -- and the five files
+  # .github/workflows/pr-policy.yml builds under RUNNER_TEMP and hands in make
+  # the same 27 in a byte-identical sequence, because nothing records them and
+  # they return above without reaching here. A listing that IS a submodule's root
+  # pays for the ascent: 6 invocations become 14, seven of them `repository_above`
+  # walking to `/` to decide that git's silence about a repository above is an
+  # absence and not a failure to look. An ordinary repository nested under a
+  # gitlink goes from 5 to 18, which is that walk at two levels.
+  while :; do
+    shallow=-1
+    deep=-1
+    index=0
+    while (( index < ${#prefixes[@]} )); do
+      if [[ "${prefixes[index]}" -ef "$top" ]]; then
+        if (( shallow < 0 )); then
+          shallow=$index
+        fi
+        deep=$index
       fi
-      deep=$index
+      index=$(( index + 1 ))
+    done
+    if (( shallow < 0 )); then
+      echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
+      echo "  of the path as it was written names that root, so what the index records" >&2
+      echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
+      echo "  the repository's own directory. '$branch' was not judged." >&2
+      return 1
     fi
-    index=$(( index + 1 ))
-  done
-  if (( shallow < 0 )); then
-    echo "branch-name-policy: '$path' is inside the work tree at '$top' and no part" >&2
-    echo "  of the path as it was written names that root, so what the index records" >&2
-    echo "  for it cannot be worked out. Give the listing as a path that goes through" >&2
-    echo "  the repository's own directory. '$branch' was not judged." >&2
-    return 1
-  fi
-  named_root=$shallow
-  segment=''
-  nameable=1
-  index=$(( shallow + 1 ))
-  while (( index <= deep )); do
-    component="${rests[index - 1]%%/*}"
-    if [[ -n "$segment" ]]; then
-      segment="$segment/$component"
-    else
-      segment="$component"
-    fi
-    case "$component" in
-      .|..) nameable=0 ;;
-    esac
-    if (( nameable )); then
-      recorded_tree "$top" "$segment" || break
-    fi
-    if [[ "${prefixes[index]}" -ef "$top" ]]; then
-      named_root=$index
-      segment=''
-      nameable=1
-    fi
-    index=$(( index + 1 ))
+    named_root=$shallow
+    segment=''
+    nameable=1
+    index=$(( shallow + 1 ))
+    while (( index <= deep )); do
+      component="${rests[index - 1]%%/*}"
+      if [[ -n "$segment" ]]; then
+        segment="$segment/$component"
+      else
+        segment="$component"
+      fi
+      case "$component" in
+        .|..) nameable=0 ;;
+      esac
+      if (( nameable )); then
+        recorded_tree "$top" "$segment" || break
+      fi
+      if [[ "${prefixes[index]}" -ef "$top" ]]; then
+        named_root=$index
+        segment=''
+        nameable=1
+      fi
+      index=$(( index + 1 ))
+    done
+    # A name the work tree's own index can hold. Only an EMPTY one asks another
+    # repository, and only then is anything above this one looked at.
+    [[ -z "${rests[named_root]}" ]] || break
+    answering="$top"
+    walker="$top"
+    while :; do
+      enclosing_work_tree "$walker" "$path" || return 1
+      [[ -n "$enclosing_root" ]] || break
+      named=0
+      # The path of this work tree WITHIN the one above it, and the separator is
+      # dropped on its own rather than as part of the prefix: with `/` the root
+      # above, `${walker#"/"/}` strips nothing and an ABSOLUTE path would go to
+      # `ls-files` as a pathspec leaving the work tree.
+      subrel="${walker#"$enclosing_root"}"
+      records_path "$enclosing_root" "${subrel#/}" || named=$?
+      if (( named == 2 )); then
+        echo "branch-name-policy: the repository at '$enclosing_root' contains the work" >&2
+        echo "  tree at '$walker' and its index could not be read, so whether it records" >&2
+        echo "  '$path' is not known. That is refused rather than answered out of the" >&2
+        echo "  nearest index below it, which is what a successful empty answer to the" >&2
+        echo "  same question was read as. '$branch' was not judged." >&2
+        if [[ -n "$probe_stderr" ]]; then
+          indent "$probe_stderr"
+        fi
+        return 1
+      fi
+      if (( named == 0 )); then
+        answering="$enclosing_root"
+      fi
+      walker="$enclosing_root"
+    done
+    # Nothing above records this root, so its own index is the answer and the
+    # name stays the empty one. Every ascent that does move goes strictly
+    # UPWARDS, which is what bounds this.
+    [[ "$answering" != "$top" ]] || break
+    top="$answering"
   done
   listing_world=records
   listing_toplevel="$top"
