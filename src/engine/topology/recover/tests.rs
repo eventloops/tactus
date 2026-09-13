@@ -198,6 +198,10 @@ impl Fixture {
         };
         rundir::stage_marker(&public, &marker, &mut NoHooks).expect("P1a stages the marker");
         rundir::publish_marker(&public, &mut NoHooks).expect("P1b publishes it");
+        // The normalized plan the creator writes at P2, through its funnel: R21
+        // names it among the persistent outputs, so the ledger looks for it.
+        rundir::write_plan(&public, b"{\"plan\":\"planted\"}\n", &mut NoHooks)
+            .expect("the plan is written");
 
         let mut warnings = Vec::new();
         let mut log = EventLog::open(
@@ -15627,14 +15631,87 @@ fn files_ending_with(dir: &Path, suffix: &str) -> u32 {
     u32::try_from(count).expect("a small count")
 }
 
+/// Every regular file under `dir`, recursively.
+fn files_under(dir: &Path) -> u32 {
+    fn walk(dir: &Path, count: &mut u32) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, count);
+            } else {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0;
+    walk(dir, &mut count);
+    count
+}
+
+/// Every object in the repository's store, reachable or not: what R27
+/// holds the run end to — nothing present before it is gone after it.
+fn store_objects(repo_root: &Path) -> Vec<String> {
+    use crate::workspace_manager::fixture::git;
+    let mut objects: Vec<String> = git(
+        repo_root,
+        &[
+            "cat-file",
+            "--batch-all-objects",
+            "--batch-check=%(objectname)",
+        ],
+    )
+    .lines()
+    .map(|line| line.trim().to_owned())
+    .filter(|line| !line.is_empty())
+    .collect();
+    objects.sort();
+    objects
+}
+
+/// Write one object nothing references into the store, so the run end has
+/// an already-unreachable object to leave alone: R27 says the run never
+/// deletes one, and a verdict that only checked the objects pruned refs
+/// released could not see a finalization that pruned Git's own residue.
+fn plant_unreachable_object(fixture: &Fixture, tag: &str) -> String {
+    use crate::workspace_manager::fixture::{git, write_file};
+    let path = fixture.private_root.join(format!("orphan-{tag}.txt"));
+    write_file(
+        &path,
+        format!(
+            "an object nothing references: {tag} {}\n",
+            std::process::id()
+        )
+        .as_bytes(),
+    );
+    let object = git(
+        &fixture.repo_root,
+        &["hash-object", "-w", &path.to_string_lossy()],
+    )
+    .trim()
+    .to_owned();
+    assert!(
+        crate::workspace_manager::unreachable_objects(&fixture.repo_root)
+            .expect("fsck")
+            .contains(&object),
+        "the planted object is unreachable"
+    );
+    object
+}
+
 /// The physical half of the ledger, measured from the repository, the
 /// execution root, the run directory and the private half. `released` names
 /// the objects the last pre-finalization observation saw referenced, so R27
-/// can ask whether each is still in Git's store.
+/// can ask whether each is still in Git's store; `store_before` is the whole
+/// store as the earlier observation listed it, so R27 can ask whether any
+/// object at all went missing.
 fn ledger_inventory(
     fixture: &Fixture,
     fold: &TopologyFold,
     released: &[String],
+    store_before: &[String],
 ) -> PhysicalInventory {
     let manager = fixture.manager();
     let namespace = crate::engine::topology::candidate::run_namespace(RUN_ID);
@@ -15652,6 +15729,11 @@ fn ledger_inventory(
     let missing = released
         .iter()
         .filter(|object| !manager.object_exists(object).unwrap_or(false))
+        .count();
+    let store = store_objects(&fixture.repo_root);
+    let store_missing = store_before
+        .iter()
+        .filter(|object| store.binary_search(object).is_err())
         .count();
     // R20 is operator-owned by classification: no site in the inventory creates or removes a
     // volume, and the volume map the run recorded at `run_started` is the one it ends with.
@@ -15678,12 +15760,21 @@ fn ledger_inventory(
             .is_some(),
         execution_root_present: manager.execution_root().exists(),
         event_log_present: fixture.log().exists(),
+        plan_present: public.join(rundir::PLAN).exists(),
         report_present: public.join("report.json").exists(),
+        question_payloads: files_ending_with(&public.join("questions"), ".json"),
         answer_files: files_ending_with(&public.join("answers"), ".json"),
         partial_files: files_ending_with(&public.join("answers"), ".partial"),
+        marker_present: public.join(rundir::MARKER).exists(),
         owner_record_present: private_dir.join(rundir::OWNER_RECORD).exists(),
         commit_record_present: private_dir.join(rundir::COMMIT_RECORD).exists(),
+        private_artifacts: ["transcripts", "reviews", "settings", "gates"]
+            .iter()
+            .map(|dir| files_under(&private_dir.join(dir)))
+            .sum(),
         run_lock_file_present: rundir::lock_file(&public).exists(),
+        // `cleanup.lock` is the reaper's Unix hold file beside the run lock.
+        cleanup_lock_file_present: public.join("cleanup.lock").exists(),
         worktree_lock_file_present: fixture.worktree_lock_file().exists(),
         container_intents: files_ending_with(
             &crate::runner::container::intent::containers_dir(&fixture.private_root),
@@ -15697,6 +15788,8 @@ fn ledger_inventory(
                 .len(),
         )
         .expect("a small count"),
+        store_objects: u32::try_from(store.len()).expect("a small count"),
+        store_objects_missing: u32::try_from(store_missing).expect("a small count"),
         released_objects_checked: u32::try_from(released.len()).expect("a small count"),
         released_objects_missing: u32::try_from(missing).expect("a small count"),
     }
@@ -15751,23 +15844,33 @@ fn last_process_facts(run: &crate::engine::topology::run::TopologyRun) -> (bool,
     (run.invocations_balance(), run.entitlements_held())
 }
 
+/// The live observation: the fold as the process holds it, the store as it
+/// is now (`store` lists it for the later observation to compare against).
 fn observe_live(
     fixture: &Fixture,
     run: &crate::engine::topology::run::TopologyRun,
     released: &[String],
+    store: &[String],
 ) -> Ledger {
     ledger::observe(
         run.fold(),
-        &ledger_inventory(fixture, run.fold(), released),
+        &ledger_inventory(fixture, run.fold(), released, store),
         &process_local_of(run, &fixture.public()),
     )
 }
 
-fn observe_after_drop(fixture: &Fixture, released: &[String], last: (bool, u32)) -> Ledger {
+/// The observation once the run has been dropped: the fold replayed from
+/// the bytes, the store compared with `store_before`.
+fn observe_after_drop(
+    fixture: &Fixture,
+    released: &[String],
+    store_before: &[String],
+    last: (bool, u32),
+) -> Ledger {
     let fold = replayed(fixture);
     ledger::observe(
         &fold,
-        &ledger_inventory(fixture, &fold, released),
+        &ledger_inventory(fixture, &fold, released, store_before),
         &process_local_after(&fixture.public(), last),
     )
 }
@@ -15876,7 +15979,7 @@ fn the_ledger_balances_at_complete() {
     );
     let harness = harness();
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
-    let (shapes, before, released, last) = with_live_run_hooked_runner(
+    let (shapes, before, released, store, orphan, last) = with_live_run_hooked_runner(
         &fixture,
         &harness,
         Ceiling::unlimited(),
@@ -15887,10 +15990,19 @@ fn the_ledger_balances_at_complete() {
             for _ in 0..4 {
                 shapes.push(progress_shape(&run.step(seams, hooks)));
             }
+            let orphan = plant_unreachable_object(&fixture, "complete");
             let released = referenced_objects(&fixture);
-            let before = observe_live(&fixture, run, &released);
+            let store = store_objects(&fixture.repo_root);
+            let before = observe_live(&fixture, run, &released, &store);
             shapes.push(progress_shape(&run.step(seams, hooks)));
-            (shapes, before, released, last_process_facts(run))
+            (
+                shapes,
+                before,
+                released,
+                store,
+                orphan,
+                last_process_facts(run),
+            )
         },
     );
     assert_eq!(
@@ -15903,8 +16015,17 @@ fn the_ledger_balances_at_complete() {
             "finished(Complete, 0, true, true)",
         ]
     );
-    let after = observe_after_drop(&fixture, &released, last);
+    let after = observe_after_drop(&fixture, &released, &store, last);
     assert_ledger(&before, &after, LedgerOutcome::Complete, "ledger-complete");
+    assert!(
+        fixture.manager().object_exists(&orphan).expect("cat-file"),
+        "the already-unreachable object survived finalization untouched"
+    );
+    assert!(
+        store.contains(&orphan) && store.len() >= 3,
+        "the store listing the ledger compared against held the orphan: {}",
+        store.len()
+    );
     assert_eq!(
         fact_of(&before, Row::R11),
         Fact::Present(2),
@@ -15940,7 +16061,7 @@ fn the_ledger_balances_at_parked() {
     let alpha = plant_queued_candidate(&fixture);
     let harness = harness();
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::asking();
-    let (shapes, before, released, last) = with_live_run(
+    let (shapes, before, released, store, last) = with_live_run(
         &fixture,
         &harness,
         Ceiling::unlimited(),
@@ -15950,10 +16071,12 @@ fn the_ledger_balances_at_parked() {
                 progress_shape(&run.step(seams, hooks)),
                 progress_shape(&run.step(seams, hooks)),
             ];
+            plant_unreachable_object(&fixture, "parked");
             let released = referenced_objects(&fixture);
-            let before = observe_live(&fixture, run, &released);
+            let store = store_objects(&fixture.repo_root);
+            let before = observe_live(&fixture, run, &released, &store);
             shapes.push(progress_shape(&run.step(seams, hooks)));
-            (shapes, before, released, last_process_facts(run))
+            (shapes, before, released, store, last_process_facts(run))
         },
     );
     assert_eq!(
@@ -15966,7 +16089,7 @@ fn the_ledger_balances_at_parked() {
         "execution root: {:?}",
         tree_of(fixture.manager().execution_root())
     );
-    let after = observe_after_drop(&fixture, &released, last);
+    let after = observe_after_drop(&fixture, &released, &store, last);
     assert_ledger(&before, &after, LedgerOutcome::Parked, "ledger-parked");
     assert_eq!(
         fact_of(&after, Row::R15),
@@ -16025,6 +16148,7 @@ fn the_ledger_balances_at_halted() {
     );
     let mut before = None;
     let mut released = Vec::new();
+    let mut store = Vec::new();
     let mut last = (false, 0);
     let driven = drive_observing(
         &fixture,
@@ -16038,8 +16162,10 @@ fn the_ledger_balances_at_halted() {
         &RecordingRunner::editing(),
         &mut |step, run| {
             if step == 1 {
+                plant_unreachable_object(&fixture, "halted");
                 released = referenced_objects(&fixture);
-                before = Some(observe_live(&fixture, run, &released));
+                store = store_objects(&fixture.repo_root);
+                before = Some(observe_live(&fixture, run, &released, &store));
             }
             last = last_process_facts(run);
         },
@@ -16053,7 +16179,7 @@ fn the_ledger_balances_at_halted() {
         ]
     );
     let before = before.expect("observed after the decline");
-    let after = observe_after_drop(&fixture, &released, last);
+    let after = observe_after_drop(&fixture, &released, &store, last);
     assert_ledger(&before, &after, LedgerOutcome::Halted, "ledger-halted");
     assert_eq!(
         fact_of(&after, Row::R11),
@@ -16178,7 +16304,7 @@ fn the_ledger_balances_at_budget_exceeded() {
     );
     let harness = harness();
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
-    let (shapes, before, released, last) = with_live_run(
+    let (shapes, before, released, store, last) = with_live_run(
         &fixture,
         &harness,
         Ceiling {
@@ -16188,10 +16314,12 @@ fn the_ledger_balances_at_budget_exceeded() {
         &adapters,
         |run, seams, hooks| {
             let mut shapes = vec![progress_shape(&run.step(seams, hooks))];
+            plant_unreachable_object(&fixture, "budget");
             let released = referenced_objects(&fixture);
-            let before = observe_live(&fixture, run, &released);
+            let store = store_objects(&fixture.repo_root);
+            let before = observe_live(&fixture, run, &released, &store);
             shapes.push(progress_shape(&run.step(seams, hooks)));
-            (shapes, before, released, last_process_facts(run))
+            (shapes, before, released, store, last_process_facts(run))
         },
     );
     assert_eq!(shapes[0], "BudgetExceeded", "{shapes:?}");
@@ -16199,7 +16327,7 @@ fn the_ledger_balances_at_budget_exceeded() {
         shapes[1].starts_with("finished(BudgetExceeded, "),
         "{shapes:?}"
     );
-    let after = observe_after_drop(&fixture, &released, last);
+    let after = observe_after_drop(&fixture, &released, &store, last);
     assert_ledger(
         &before,
         &after,
@@ -16341,13 +16469,14 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
     let fired = Arc::new(AtomicU32::new(0));
     let mut hooks = ArmedAppendError::new(&harness, &countdown, &fired);
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::new();
-    let (first, error, last) = with_live_run_hooked(
+    let (first, error, before, released, store, last) = with_live_run_hooked(
         &fixture,
         &mut hooks,
         Ceiling::unlimited(),
         &adapters,
         |run, seams, hooks| {
             let first = progress_shape(&run.step(seams, hooks));
+            plant_unreachable_object(&fixture, "no-run-finished");
             // Beta's dispatch appends `task_dispatched` and `attempt_started`; the third
             // append is the first line after the worker ran, and it errors.
             countdown.store(3, Ordering::SeqCst);
@@ -16355,7 +16484,20 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
                 .step(seams, hooks)
                 .expect_err("the append-error protocol ends the command");
             assert!(run.fold().is_poisoned(), "the fold is poisoned");
-            (first, error.to_string(), last_process_facts(run))
+            // The pre-exit observation: the process still holds the run, its
+            // lock and its fold; the after-drop observation below is taken
+            // from the bytes and the OS once it has let go.
+            let released = referenced_objects(&fixture);
+            let store = store_objects(&fixture.repo_root);
+            let before = observe_live(&fixture, run, &released, &store);
+            (
+                first,
+                error.to_string(),
+                before,
+                released,
+                store,
+                last_process_facts(run),
+            )
         },
     );
     assert_eq!(first, "integrated(k0, s0)");
@@ -16371,10 +16513,18 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
         Some("attempt_started"),
         "the surviving prefix ends inside beta's attempt: {kinds:?}"
     );
-    let released = referenced_objects(&fixture);
-    let observed = observe_after_drop(&fixture, &released, last);
+    let observed = observe_after_drop(&fixture, &released, &store, last);
+    assert_eq!(
+        fact_of(&before, Row::R17),
+        Fact::Present(1),
+        "the live observation saw the lock held"
+    );
+    assert_ne!(
+        before, observed,
+        "the two observations are independent: the lock and the process-local rows differ"
+    );
     assert_ledger(
-        &observed,
+        &before,
         &observed,
         LedgerOutcome::NoRunFinished,
         "ledger-no-run-finished",
@@ -16404,6 +16554,7 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
 
     let mut before = observed.clone();
     let mut released = released;
+    let mut store = store;
     let mut last = last;
     let driven = drive_observing(
         &fixture,
@@ -16413,7 +16564,8 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
         &mut |_, run| {
             if run.fold().finished().is_none() {
                 released = referenced_objects(&fixture);
-                before = observe_live(&fixture, run, &released);
+                store = store_objects(&fixture.repo_root);
+                before = observe_live(&fixture, run, &released, &store);
             }
             last = last_process_facts(run);
         },
@@ -16429,7 +16581,7 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
         ],
         "the resume settles the interrupted attempt and the run completes"
     );
-    let after = observe_after_drop(&fixture, &released, last);
+    let after = observe_after_drop(&fixture, &released, &store, last);
     assert_ledger(
         &before,
         &after,
