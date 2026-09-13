@@ -11936,12 +11936,26 @@ fn a_fresh_incarnation_closes_a_retained_repair_generation_lineage_held_and_the_
             .find(|task| task.key == repair.0)
             .expect("the repair is projected");
         assert_eq!(projected.origin, "merge_repair");
+        // The registry's own lineage, member for member: alpha's first repair
+        // is member 0 of alpha's lineage (`lineage_members` counts the repairs
+        // registered before it, and the root is not a member), and the
+        // projection carries the index the rejection registered rather than
+        // a count of its own.
+        let registered = rejection
+            .repair
+            .entry
+            .lineage
+            .expect("a repair descends from its root");
+        assert_eq!(
+            (registered.root, registered.parent, registered.index),
+            (ALPHA, ALPHA, 0)
+        );
         assert_eq!(
             projected.lineage,
             Some(crate::engine::topology::report::TaskLineage {
-                root: ALPHA.0,
-                parent: ALPHA.0,
-                index: 1,
+                root: registered.root.0,
+                parent: registered.parent.0,
+                index: registered.index,
             })
         );
         assert_eq!(projected.lineage_root, Some(ALPHA.0));
@@ -13930,15 +13944,25 @@ fn a_fault_between_the_closure_close_and_its_scrub_is_reclaimed_by_the_next_resu
         "the ceiling is met again in the new epoch: {:?}",
         driven.progress
     );
+    // A budget stop per epoch, each in the epoch the resumes before it
+    // opened: the live run above is itself a resume of the planted log, so
+    // the first stop is epoch 1's, and the resume that reclaimed the closure
+    // opened epoch 2 for the second.
     let log = TopologyFold::parse_log(&fixture.log_bytes()).expect("the log parses");
-    let epochs: Vec<u32> = log
-        .iter()
-        .filter_map(|event| match &event.body {
-            TopologyEventBody::BudgetExceeded { data } => Some(data.epoch.0),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(epochs, vec![0, 1], "a budget stop per epoch");
+    let mut resumes = 0u32;
+    let mut stops: Vec<(u32, u32)> = Vec::new();
+    for event in &log {
+        match &event.body {
+            TopologyEventBody::RunResumed { .. } => resumes += 1,
+            TopologyEventBody::BudgetExceeded { data } => stops.push((data.epoch.0, resumes)),
+            _ => {}
+        }
+    }
+    assert_eq!(
+        stops,
+        vec![(1, 1), (2, 2)],
+        "a budget stop per epoch as (epoch, resumes before it)"
+    );
 }
 
 /// `run_finished_budget_exceeded_refused_after_halting_drain_settlement`

@@ -1,6 +1,7 @@
 //! Extended notes: `docs/internals/topology/census.md`
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use crate::topology::events::{DerivedOutcome, TopologyEvent};
 use crate::topology::fold::TopologyFold;
@@ -72,14 +73,14 @@ impl Candidate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionOutcome {
     Accepted { to: usize },
-    Refused { reason: String },
+    Refused { reason: Arc<str> },
     Truncated,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CensusTransition {
     pub from: usize,
-    pub label: String,
+    pub label: Arc<str>,
     pub kind: &'static str,
     pub outcome: TransitionOutcome,
 }
@@ -97,6 +98,7 @@ pub struct Census {
     bounds: CensusBounds,
     states: Vec<CensusState>,
     transitions: Vec<CensusTransition>,
+    outgoing: Vec<std::ops::Range<usize>>,
     truncated: bool,
 }
 
@@ -112,9 +114,11 @@ impl Census {
     {
         let mut states: Vec<CensusState> = Vec::new();
         let mut transitions: Vec<CensusTransition> = Vec::new();
+        let mut outgoing: Vec<std::ops::Range<usize>> = Vec::new();
         let mut seen: BTreeMap<String, usize> = BTreeMap::new();
         let mut frontier: VecDeque<usize> = VecDeque::new();
         let mut truncated = false;
+        let mut interned: BTreeMap<String, Arc<str>> = BTreeMap::new();
 
         seen.insert(fingerprint(&start), 0);
         states.push(CensusState {
@@ -123,9 +127,11 @@ impl Census {
             trace: seed,
             fold: start,
         });
+        outgoing.push(0..0);
         frontier.push_back(0);
 
         while let Some(id) = frontier.pop_front() {
+            let first = transitions.len();
             if states[id].trace.len() >= bounds.max_trace {
                 // The trace ceiling stops expansion here; if anything legal
                 // was left to explore, the census says so, the way it says
@@ -140,9 +146,10 @@ impl Census {
             }
             for candidate in classes(&states[id].fold) {
                 let kind = candidate.event.body.kind();
+                let label = intern(&mut interned, candidate.label);
                 let outcome = match states[id].fold.plan_transition(&candidate.event) {
                     Err(error) => TransitionOutcome::Refused {
-                        reason: error.to_string(),
+                        reason: intern(&mut interned, error.to_string()),
                     },
                     Ok(delta) => {
                         let mut next = states[id].fold.clone();
@@ -155,7 +162,7 @@ impl Census {
                                     truncated = true;
                                     transitions.push(CensusTransition {
                                         from: id,
-                                        label: candidate.label,
+                                        label,
                                         kind,
                                         outcome: TransitionOutcome::Truncated,
                                     });
@@ -171,6 +178,7 @@ impl Census {
                                     outcome: next.derived_outcome(),
                                     fold: next,
                                 });
+                                outgoing.push(0..0);
                                 frontier.push_back(to);
                                 TransitionOutcome::Accepted { to }
                             }
@@ -179,10 +187,13 @@ impl Census {
                 };
                 transitions.push(CensusTransition {
                     from: id,
-                    label: candidate.label,
+                    label,
                     kind,
                     outcome,
                 });
+            }
+            if let Some(range) = outgoing.get_mut(id) {
+                *range = first..transitions.len();
             }
         }
 
@@ -190,6 +201,7 @@ impl Census {
             bounds,
             states,
             transitions,
+            outgoing,
             truncated,
         }
     }
@@ -211,9 +223,11 @@ impl Census {
     }
 
     pub fn outgoing(&self, id: usize) -> impl Iterator<Item = &CensusTransition> {
-        self.transitions
+        self.outgoing
+            .get(id)
+            .and_then(|range| self.transitions.get(range.clone()))
+            .unwrap_or(&[])
             .iter()
-            .filter(move |transition| transition.from == id)
     }
 
     pub fn has_legal_transition(&self, id: usize) -> bool {
@@ -239,7 +253,7 @@ impl Census {
             .filter(|transition| {
                 matches!(transition.outcome, TransitionOutcome::Accepted { .. }) == accepted
             })
-            .map(|transition| transition.label.as_str())
+            .map(|transition| &*transition.label)
             .collect()
     }
 
@@ -294,6 +308,15 @@ impl TotalityAudit {
 
 fn fingerprint(fold: &TopologyFold) -> String {
     format!("{:?}|{:?}", fold.state(), fold.is_poisoned())
+}
+
+fn intern(table: &mut BTreeMap<String, Arc<str>>, text: String) -> Arc<str> {
+    if let Some(held) = table.get(&text) {
+        return Arc::clone(held);
+    }
+    let shared: Arc<str> = Arc::from(text.as_str());
+    table.insert(text, Arc::clone(&shared));
+    shared
 }
 
 #[cfg(test)]
@@ -706,6 +729,9 @@ mod tests {
         })
     }
 
+    /// A fresh attempt of `key`'s open generation. A repair's attempt records
+    /// what its worktree was materialized from (the fold refuses one that
+    /// does not) and an original's records nothing.
     fn attempt_started(
         fold: &TopologyFold,
         key: TaskKey,
@@ -721,9 +747,18 @@ mod tests {
                 binding: binding(fold, key, 0),
                 pool: None,
                 resume_session: None,
-                materialization_observed: None,
+                materialization_observed: is_repair(fold, key)
+                    .then_some(crate::topology::events::Materialization::Clean),
             },
         })
+    }
+
+    /// Whether the registry holds `key` as a merge repair (an entry with a
+    /// lineage); a key it does not hold is no repair.
+    fn is_repair(fold: &TopologyFold, key: TaskKey) -> bool {
+        fold.registry()
+            .and_then(|registry| registry.get(key))
+            .is_some_and(|entry| entry.lineage.is_some())
     }
 
     fn settle(
@@ -780,6 +815,36 @@ mod tests {
             sha("base"),
             candidate_of(key, generation).commit_sha,
         )
+    }
+
+    /// The candidate `key`'s in-flight attempt prepares over its region: an
+    /// original's replaces the predicted region and a repair's widens its
+    /// lineage, which is what the fold requires of each.
+    fn candidate_prepared_for(
+        fold: &TopologyFold,
+        key: TaskKey,
+        generation: u32,
+        attempt: u32,
+    ) -> TopologyEvent {
+        let paths = region_of(fold, key);
+        let root = fold
+            .registry()
+            .and_then(|registry| registry.get(key))
+            .and_then(|entry| entry.lineage)
+            .map(|lineage| lineage.root);
+        let mut event = candidate_prepared_at(
+            key,
+            generation,
+            attempt,
+            paths.clone(),
+            sha("base"),
+            candidate_of(key, generation).commit_sha,
+        );
+        if let (Some(root), TopologyEventBody::CandidatePrepared { data }) = (root, &mut event.body)
+        {
+            data.lease_effect = CandidateLeaseEffect::WidensLineage { root, paths };
+        }
+        event
     }
 
     fn candidate_prepared_at(
@@ -1057,6 +1122,16 @@ mod tests {
             let key = entry.key;
             let name = label(key);
             let has_rungs = binding_of(fold, key, 0).is_some();
+            let released = if entry.lineage.is_some() {
+                LeaseDisposition::LineageHeld
+            } else {
+                LeaseDisposition::PredictedReleased
+            };
+            let retained = if entry.lineage.is_some() {
+                LeaseDisposition::LineageHeld
+            } else {
+                LeaseDisposition::PredictedRetained
+            };
             for generation in 0..bounds.generations_per_task {
                 // A dispatch is offered where the sequential run admits one:
                 // the task ready (its dependencies merged) and the pipeline
@@ -1098,23 +1173,15 @@ mod tests {
                         resumed_attempt(fold, key, generation, attempt),
                     ));
                     let mut settlements = vec![
-                        (
-                            "succeeded",
-                            SettlementTransition::Succeeded,
-                            LeaseDisposition::PredictedRetained,
-                        ),
-                        (
-                            "retry",
-                            SettlementTransition::Retry,
-                            LeaseDisposition::PredictedReleased,
-                        ),
+                        ("succeeded", SettlementTransition::Succeeded, retained),
+                        ("retry", SettlementTransition::Retry, released),
                         (
                             "failed",
                             SettlementTransition::Failed {
                                 halts_run: false,
                                 reason: "census failure".to_owned(),
                             },
-                            LeaseDisposition::PredictedReleased,
+                            released,
                         ),
                         (
                             "halting",
@@ -1122,7 +1189,7 @@ mod tests {
                                 halts_run: true,
                                 reason: "census halting failure".to_owned(),
                             },
-                            LeaseDisposition::PredictedReleased,
+                            released,
                         ),
                         (
                             "deferred",
@@ -1132,7 +1199,7 @@ mod tests {
                                 defers: fold.task(key).map_or(1, |task| task.defers + 1),
                                 reason: "census outage".to_owned(),
                             },
-                            LeaseDisposition::PredictedReleased,
+                            released,
                         ),
                     ];
                     if may_ask {
@@ -1147,7 +1214,7 @@ mod tests {
                                     options: vec!["yes".to_owned(), "no".to_owned()],
                                 },
                             },
-                            LeaseDisposition::PredictedReleased,
+                            released,
                         ));
                     }
                     for (tag, transition, lease) in settlements {
@@ -1167,14 +1234,14 @@ mod tests {
                                 key,
                                 generation: GenerationId(generation),
                                 attempt: AttemptNumber(attempt),
-                                lease: LeaseDisposition::PredictedReleased,
+                                lease: released,
                                 detail: "the census killed the worker".to_owned(),
                             },
                         }),
                     ));
                     out.push(Candidate::new(
                         format!("candidate_prepared/{name}/g{generation}/a{attempt}"),
-                        candidate_prepared_over(key, generation, attempt, region_of(fold, key)),
+                        candidate_prepared_for(fold, key, generation, attempt),
                     ));
                 }
                 out.push(Candidate::new(
@@ -1192,20 +1259,15 @@ mod tests {
                         .find(|held| held.id.0 == generation)
                         .map(|held| held.class.clone())
                 });
-                // The run-ending close is the closure's, appended where the
-                // run is ending; offered elsewhere it closes every open
-                // generation at every state for no arm the closure does not
-                // already execute.
-                let ending = fold.run_is_ending()
-                    || matches!(fold.derived_outcome(), DerivedOutcome::Ending(_));
+                // The run-ending close is the closure's, offered where the
+                // closure performs it — a halt, a budget stop, or a derived
+                // ending — with the outcome the closure's own precedence
+                // selects; offered elsewhere it closes every open generation
+                // at every state for no arm the closure does not already
+                // execute.
                 let mut reasons = Vec::new();
-                if ending {
-                    reasons.push((
-                        "run-ending",
-                        GenerationCloseReason::RunEnding {
-                            outcome: RunOutcome::Complete,
-                        },
-                    ));
+                if let Ok(outcome) = crate::engine::topology::closure::ending_outcome(fold) {
+                    reasons.push(("run-ending", GenerationCloseReason::RunEnding { outcome }));
                 }
                 if matches!(class, Some(GenerationClass::OpenNoAttempt)) {
                     reasons.push(("worktree-missing", GenerationCloseReason::WorktreeMissing));
@@ -1224,7 +1286,7 @@ mod tests {
                                 key,
                                 generation: GenerationId(generation),
                                 reason,
-                                lease: LeaseDisposition::PredictedReleased,
+                                lease: released,
                             },
                         }),
                     ));
@@ -2093,7 +2155,7 @@ mod tests {
                             TransitionOutcome::Accepted { .. } | TransitionOutcome::Truncated
                         )
                     })
-                    .map(|transition| transition.label.clone())
+                    .map(|transition| transition.label.to_string())
                     .collect();
                 assert_eq!(
                     recorded, accepted,
@@ -2249,7 +2311,7 @@ mod tests {
                 .filter(|transition| {
                     matches!(transition.outcome, TransitionOutcome::Accepted { .. })
                 })
-                .map(|transition| transition.label.as_str())
+                .map(|transition| &*transition.label)
                 .collect();
             assert!(
                 accepted.contains("defer_wait_elapsed"),
@@ -2308,7 +2370,7 @@ mod tests {
             );
         }
         assert!(census.transitions().iter().any(|transition| {
-            transition.label == "merge_prepared/fast/with-pin/aleph/g0"
+            &*transition.label == "merge_prepared/fast/with-pin/aleph/g0"
                 && matches!(transition.outcome, TransitionOutcome::Refused { .. })
         }));
     }
@@ -2705,10 +2767,10 @@ mod tests {
             let mut any_accepted = false;
             for (offer, row) in offers.iter().zip(&recorded) {
                 assert_eq!(row.from, state.id);
-                assert_eq!(row.label, offer.label, "state {}", state.id);
+                assert_eq!(&*row.label, offer.label, "state {}", state.id);
                 match (state.fold.plan_transition(&offer.event), &row.outcome) {
                     (Err(error), TransitionOutcome::Refused { reason }) => {
-                        assert_eq!(*reason, error.to_string(), "state {}", state.id);
+                        assert_eq!(&**reason, error.to_string(), "state {}", state.id);
                     }
                     (Ok(_), TransitionOutcome::Truncated) => {
                         any_accepted = true;
@@ -3408,7 +3470,7 @@ mod tests {
         let answer = |state: &CensusState| {
             census
                 .outgoing(state.id)
-                .find(|transition| transition.label == "run_finished/Parked")
+                .find(|transition| &*transition.label == "run_finished/Parked")
                 .map(|transition| matches!(transition.outcome, TransitionOutcome::Accepted { .. }))
                 .unwrap_or_else(|| panic!("state {} never offered run_finished", state.id))
         };
@@ -4111,6 +4173,10 @@ mod tests {
         data.resume_session = Some(crate::topology::events::SessionId(
             RETAINED_SESSION.to_owned(),
         ));
+        if data.materialization_observed.is_some() {
+            data.materialization_observed =
+                Some(crate::topology::events::Materialization::Retained);
+        }
         ev(TopologyEventBody::AttemptStarted { data })
     }
 
