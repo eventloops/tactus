@@ -155,21 +155,93 @@ fn a_refusal_names_the_branch_and_says_whether_anything_happened() {
     }
 }
 
-#[test]
-fn every_driver_append_propagates_its_error() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/topology/run.rs"),
-    )
-    .expect("the driver's own source");
-    let code = crate::effects::production_code(&source);
-
-    assert!(
-        code.len() * 10 > source.len(),
-        "the production region is {} of {} bytes — a census over a fraction of a \
-         file reports zero for the part it never read",
+fn blanked_bytes(source: &str, code: &str) -> usize {
+    assert_eq!(
+        code.len(),
+        source.len(),
+        "a production region of {} bytes against {} of source did not blank in place, so \
+         every line number derived from an offset into it names a different line",
         code.len(),
         source.len()
     );
+    source
+        .as_bytes()
+        .iter()
+        .zip(code.as_bytes())
+        .filter(|(from, to)| from != to)
+        .count()
+}
+
+fn assert_blanked_region(file: &str, source: &str, code: &str, retained_floor: usize) {
+    let blanked = blanked_bytes(source, code);
+    assert!(
+        blanked > 0,
+        "nothing was blanked out of {file}'s {} bytes. Either the file carries no comment \
+         and no literal, or the blanker has stopped removing them — and the second reads \
+         exactly like a clean file to every needle below",
+        source.len()
+    );
+    let retained = source.len() - blanked;
+    assert!(
+        retained * retained_floor > source.len(),
+        "{retained} of {file}'s {} bytes survived blanking, under one {retained_floor}th of \
+         it — a census over a fraction of a file reports zero for the part it never read",
+        source.len()
+    );
+}
+
+#[test]
+fn the_blanked_region_count_falls_to_zero_when_nothing_was_removable() {
+    const REMOVABLE: &str = "// a line comment\n\
+                             /* a block comment */\n\
+                             fn go() -> usize {\n\
+                             let quoted = \"a string literal\";\n\
+                             quoted.len()\n\
+                             }\n\
+                             #[cfg(test)]\n\
+                             mod fixture {\n\
+                             fn one() -> usize { 1 }\n\
+                             }\n";
+    const NOTHING_REMOVABLE: &str = "fn go() -> usize {\n\
+                                     1 + 1\n\
+                                     }\n";
+
+    let removable = crate::effects::production_code(REMOVABLE);
+    assert_eq!(
+        removable.len(),
+        REMOVABLE.len(),
+        "the region function is length-preserving by contract, which is the whole reason a \
+         length ratio cannot report what it removed"
+    );
+    assert!(
+        blanked_bytes(REMOVABLE, &removable) > 0,
+        "a comment, a literal and a `#[cfg(test)]` item were left standing: {removable:?}"
+    );
+
+    let nothing = crate::effects::production_code(NOTHING_REMOVABLE);
+    assert_eq!(
+        blanked_bytes(NOTHING_REMOVABLE, &nothing),
+        0,
+        "a source with nothing removable in it must count zero, or the guard the censuses \
+         open with is true of every input and proves nothing: {nothing:?}"
+    );
+    assert!(
+        nothing.len() * 10 > NOTHING_REMOVABLE.len(),
+        "the ratio these censuses used to carry is satisfied by a region that blanked \
+         nothing, which is why it could not stand in for a blanked-region count"
+    );
+}
+
+#[test]
+fn every_driver_append_propagates_its_error() {
+    const FILE: &str = "src/engine/topology/run.rs";
+
+    let source =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(FILE))
+            .expect("the driver's own source");
+    let code = crate::effects::production_code(&source);
+
+    assert_blanked_region(FILE, &source, &code, 10);
 
     let needle = "self.emit(";
     let mut sites = 0;
@@ -214,18 +286,14 @@ fn every_driver_append_propagates_its_error() {
 
 #[test]
 fn the_loop_selects_through_one_function() {
-    let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/engine/topology/run.rs"),
-    )
-    .expect("the driver's own source");
+    const FILE: &str = "src/engine/topology/run.rs";
+
+    let source =
+        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(FILE))
+            .expect("the driver's own source");
     let code = crate::effects::production_code(&source);
 
-    assert!(
-        code.len() * 10 > source.len(),
-        "the production region is {} of {} bytes",
-        code.len(),
-        source.len()
-    );
+    assert_blanked_region(FILE, &source, &code, 10);
 
     let calls = |needle: &str| {
         code.match_indices(needle)
@@ -259,13 +327,7 @@ fn the_frozen_pool_table_is_read_through_one_seam() {
         std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(FILE))
             .expect("a source file");
     let code = crate::effects::production_code(&source);
-    assert!(
-        code.len() * 2 > source.len(),
-        "the production region of {FILE} is {} of {} bytes, so a count over it says little about \
-         the file",
-        code.len(),
-        source.len()
-    );
+    assert_blanked_region(FILE, &source, &code, 2);
 
     use crate::effects::census_domain::{Call, production_calls};
 
@@ -300,46 +362,365 @@ fn the_frozen_pool_table_is_read_through_one_seam() {
     );
 }
 
+#[derive(Debug)]
+struct AttemptStartedSite {
+    line: usize,
+    pool: String,
+}
+
+fn is_name_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn opens_a_struct_expression(before: &str) -> bool {
+    const NOT_EXPRESSIONS: &[&str] = &["struct", "enum", "union", "trait", "impl", "for"];
+
+    let mut head = before.trim_end();
+    while let Some(rest) = head.strip_suffix("::") {
+        head = rest.trim_end().trim_end_matches(is_name_char).trim_end();
+    }
+
+    if head.ends_with("->") {
+        return false;
+    }
+    !NOT_EXPRESSIONS.iter().any(|keyword| {
+        head.strip_suffix(keyword)
+            .is_some_and(|rest| !rest.ends_with(is_name_char))
+    })
+}
+
+fn matching_delimiter(code: &str, open: usize) -> Option<usize> {
+    let mut stack = Vec::new();
+    for (offset, ch) in code[open..].char_indices() {
+        match ch {
+            '{' | '(' | '[' => stack.push(ch),
+            '}' | ')' | ']' => {
+                let opened = stack.pop()?;
+                if !matches!((opened, ch), ('{', '}') | ('(', ')') | ('[', ']')) {
+                    return None;
+                }
+                if stack.is_empty() {
+                    return Some(open + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn top_level_field(body: &str, name: &str) -> Option<String> {
+    let mut depth = 0_usize;
+    let mut start = 0_usize;
+    let mut fields = Vec::new();
+    for (offset, ch) in body.char_indices() {
+        match ch {
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                fields.push(&body[start..offset]);
+                start = offset + 1;
+            }
+            _ => {}
+        }
+    }
+    fields.push(&body[start..]);
+
+    fields.iter().find_map(|field| {
+        let field = field.trim();
+        let label: String = field.chars().take_while(|ch| is_name_char(*ch)).collect();
+        if label != name {
+            return None;
+        }
+        let rest = field[label.len()..].trim_start();
+        match rest.strip_prefix(':') {
+            Some(value) if !value.starts_with(':') => Some(value.trim().to_owned()),
+            _ if rest.is_empty() => Some(label),
+            _ => None,
+        }
+    })
+}
+
+fn expression_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut word = String::new();
+    for ch in text.chars() {
+        if is_name_char(ch) {
+            word.push(ch);
+            continue;
+        }
+        if !word.is_empty() {
+            tokens.push(std::mem::take(&mut word));
+        }
+        if !ch.is_whitespace() {
+            tokens.push(ch.to_string());
+        }
+    }
+    if !word.is_empty() {
+        tokens.push(word);
+    }
+    tokens
+}
+
+fn is_the_declared_authority(found: &str, expected: &str) -> bool {
+    expression_tokens(found) == expression_tokens(expected)
+}
+
+fn attempt_started_sites(code: &str) -> Vec<AttemptStartedSite> {
+    const TYPE: &str = "AttemptStarted4";
+
+    let mut found = Vec::new();
+    for (at, _) in code.match_indices(TYPE) {
+        let before = &code[..at];
+        let after = &code[at + TYPE.len()..];
+        if before.ends_with(is_name_char) || after.starts_with(is_name_char) {
+            continue;
+        }
+        let gap = after.len() - after.trim_start().len();
+        if !after[gap..].starts_with('{') {
+            continue;
+        }
+        if !opens_a_struct_expression(before) {
+            continue;
+        }
+
+        let line = before.matches('\n').count() + 1;
+        let open = at + TYPE.len() + gap;
+        let Some(close) = matching_delimiter(code, open) else {
+            panic!("the `AttemptStarted4` at line {line} does not close on balanced delimiters");
+        };
+        let pool = top_level_field(&code[open + 1..close], "pool").unwrap_or_else(|| {
+            panic!("the `AttemptStarted4` at line {line} has no top-level `pool` field")
+        });
+        found.push(AttemptStartedSite { line, pool });
+    }
+    found
+}
+
+#[test]
+fn the_attempt_started_scanner_reads_expressions_and_not_return_types() {
+    const COMMENT_SEPARATED: &str = "fn dispatch() {\n\
+                                     let started = AttemptStarted4 /* the arm */ {\n\
+                                     pool: plan.pool.clone(),\n\
+                                     };\n\
+                                     let retried = AttemptStarted4 // the other arm\n\
+                                     {\n\
+                                     pool: request.pool.clone(),\n\
+                                     };\n\
+                                     }\n";
+    let separated = attempt_started_sites(&crate::effects::production_code(COMMENT_SEPARATED));
+    assert_eq!(
+        separated.len(),
+        2,
+        "a comment between the name and its brace hid a construction site from the scan, \
+         which is a whole arm outside the domain the census reports on: {separated:?}"
+    );
+    assert!(
+        is_the_declared_authority(&separated[0].pool, "plan.pool.clone()")
+            && is_the_declared_authority(&separated[1].pool, "request.pool.clone()"),
+        "the sites were found but read the wrong field: {separated:?}"
+    );
+
+    const NOT_CONSTRUCTIONS: &str = "struct AttemptStarted4 {\n\
+                                     pool: Option<String>,\n\
+                                     }\n\
+                                     impl AttemptStarted4 {\n\
+                                     fn build(plan: &Plan) -> AttemptStarted4 {\n\
+                                     AttemptStarted4 {\n\
+                                     pool: plan.pool.clone(),\n\
+                                     }\n\
+                                     }\n\
+                                     }\n\
+                                     impl Debug for AttemptStarted4 {\n\
+                                     fn fmt(&self) {}\n\
+                                     }\n\
+                                     enum Wrapped {\n\
+                                     Started(AttemptStarted4),\n\
+                                     }\n";
+    let constructions = attempt_started_sites(&crate::effects::production_code(NOT_CONSTRUCTIONS));
+    assert_eq!(
+        constructions.len(),
+        1,
+        "a declaration, an `impl` header or a return type was counted as a construction. The \
+         needle this replaces counted `-> AttemptStarted4 {{` and then failed looking for a \
+         `pool` field in a function body: {constructions:?}"
+    );
+    assert!(
+        is_the_declared_authority(&constructions[0].pool, "plan.pool.clone()"),
+        "the one real expression in that fixture was not the one read: {constructions:?}"
+    );
+
+    const LONGER_NAMES: &str = "fn go() {\n\
+                                let a = AttemptStarted4Extended {\n\
+                                pool: None,\n\
+                                };\n\
+                                let b = OuterAttemptStarted4 {\n\
+                                pool: None,\n\
+                                };\n\
+                                }\n";
+    assert!(
+        attempt_started_sites(&crate::effects::production_code(LONGER_NAMES)).is_empty(),
+        "a longer identifier ending or beginning with this type's name was read as the type"
+    );
+
+    const NESTED_FIRST: &str = "fn go() {\n\
+                                let started = AttemptStarted4 {\n\
+                                binding: Binding {\n\
+                                pool: None,\n\
+                                },\n\
+                                pool: plan.pool.clone(),\n\
+                                };\n\
+                                }\n";
+    const NESTED_LAST: &str = "fn go() {\n\
+                               let started = AttemptStarted4 {\n\
+                               pool: plan.pool.clone(),\n\
+                               binding: Binding {\n\
+                               pool: None,\n\
+                               },\n\
+                               };\n\
+                               }\n";
+    for (label, fixture) in [("nested first", NESTED_FIRST), ("nested last", NESTED_LAST)] {
+        let sites = attempt_started_sites(&crate::effects::production_code(fixture));
+        assert_eq!(sites.len(), 1, "{label}: {sites:?}");
+        assert!(
+            is_the_declared_authority(&sites[0].pool, "plan.pool.clone()"),
+            "{label}: a `pool` inside a nested literal was read as this literal's own, so the \
+             census reports a value the event never carried: {sites:?}"
+        );
+    }
+}
+
+#[test]
+fn the_pool_authority_oracle_names_the_expression_rather_than_absence() {
+    const AUTHORITY: &str = "plan.pool.clone()";
+
+    for invention in [
+        "None",
+        "Option::None",
+        "None::<String>",
+        "Default::default()",
+        "<_>::default()",
+        "core::option::Option::None",
+        "Option::default()",
+    ] {
+        assert!(
+            !is_the_declared_authority(invention, AUTHORITY),
+            "`{invention}` was accepted as this site's authority. The oracle this replaces \
+             admitted every one of these that does not begin with `None`, which is a ledger \
+             recording no pool while the plan resolves one"
+        );
+    }
+
+    assert!(
+        is_the_declared_authority("NonePool::resolve(agent)", "NonePool::resolve(agent)"),
+        "an authority whose name begins with `None` was read as an invention, which is the \
+         false positive a prefix test buys with the false negatives above"
+    );
+
+    assert!(
+        is_the_declared_authority("plan\n            .pool\n            .clone()", AUTHORITY),
+        "the same expression, wrapped, was read as a different one"
+    );
+
+    assert!(
+        !is_the_declared_authority("mut pool", "mutpool"),
+        "two tokens were run together into one, so expressions that differ compare equal"
+    );
+
+    assert!(
+        is_the_declared_authority("plan.pool.clone()", AUTHORITY),
+        "the authority a site actually carries was not accepted, so every site is an offender"
+    );
+}
+
 #[test]
 fn both_attempt_started_arms_take_their_pool_from_an_authority() {
-    const SITES: &[(&str, &str)] = &[
+    const SITES: &[(&str, &str, &str)] = &[
         (
             "src/engine/topology/attempt.rs",
+            "plan.pool.clone()",
             "the dispatch arm: `plan.pool`, resolved by the assembler that owns the pool table",
         ),
         (
             "src/engine/topology/settle.rs",
+            "request.pool.clone()",
             "the retry arm: `request.pool`, which the driver fills from `AttemptPlans::pool_for` \
              — the same authority, asked one step earlier",
         ),
     ];
 
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut invented: Vec<String> = Vec::new();
+    let mut off_authority: Vec<String> = Vec::new();
     let mut checked = 0_usize;
-    for (file, why) in SITES {
+    for (file, authority, why) in SITES {
         let source = std::fs::read_to_string(root.join(file)).expect("a source file");
         let code = crate::effects::production_code(&source);
-        let at = code
-            .find("AttemptStarted4 {")
-            .unwrap_or_else(|| panic!("{file} no longer constructs an `AttemptStarted4`"));
-        let rest = &code[at..];
-        let body = &rest[..rest.find("})").unwrap_or(rest.len())];
-        let pool = body
-            .lines()
-            .find_map(|line| line.trim().strip_prefix("pool:"))
-            .unwrap_or_else(|| panic!("{file}'s `AttemptStarted4` has no `pool` field"));
-        checked += 1;
-        if pool.trim().starts_with("None") {
-            invented.push(format!("{file} — {why}"));
+        assert_blanked_region(file, &source, &code, 10);
+
+        let sites = attempt_started_sites(&code);
+        assert_eq!(
+            sites.len(),
+            1,
+            "{file} builds {} production `AttemptStarted4` expressions and this census claims \
+             one arm per site. Zero means it no longer constructs one and the site has \
+             moved; a second is a third arm, and it needs its own `SITES` entry naming the \
+             authority it reads rather than a scan that stops at the first",
+            sites.len()
+        );
+        for site in sites {
+            checked += 1;
+            if !is_the_declared_authority(&site.pool, authority) {
+                off_authority.push(format!(
+                    "{file}:{} initialises `pool` with `{}`, and this site's authority is \
+                     `{authority}` — {why}",
+                    site.line, site.pool
+                ));
+            }
         }
     }
 
-    assert_eq!(checked, SITES.len(), "a site stopped being found");
+    assert_eq!(
+        checked,
+        SITES.len(),
+        "the per-site count above pins each file's boundary; this is the domain's size. Two \
+         arms are the whole of what this census claims, and it inspected {checked} \
+         expressions"
+    );
     assert!(
-        invented.is_empty(),
-        "these append `attempt_started` with a hard-coded `pool: None`, so the ledger and the \
-         plan disagree about which pool the attempt drained: {invented:?}"
+        off_authority.is_empty(),
+        "these append `attempt_started` with a `pool` that is not the expression the site is \
+         supposed to carry, so the ledger and the plan can disagree about which pool the \
+         attempt drained: {off_authority:?}"
+    );
+
+    const SECOND_ARM_INVENTS_ITS_POOL: &str = "fn dispatch() {\n\
+                                               let started = AttemptStarted4 {\n\
+                                               pool: plan.pool.clone(),\n\
+                                               };\n\
+                                               }\n\
+                                               fn retry() {\n\
+                                               let started = AttemptStarted4 /* past it */ {\n\
+                                               pool: Option::default(),\n\
+                                               };\n\
+                                               }\n";
+    let control = attempt_started_sites(&crate::effects::production_code(
+        SECOND_ARM_INVENTS_ITS_POOL,
+    ));
+    assert_eq!(
+        control.len(),
+        2,
+        "a construction site after the first, spelled with a comment before its brace, is \
+         outside the domain this census reports on: {control:?}"
+    );
+    assert!(
+        is_the_declared_authority(&control[0].pool, "plan.pool.clone()"),
+        "the control's first site carries its authority, so reporting it would make every \
+         correct arm an offender and the census's greens meaningless: {control:?}"
+    );
+    assert!(
+        !is_the_declared_authority(&control[1].pool, "plan.pool.clone()"),
+        "an invented pool in the second site is what this census exists to catch, and the \
+         scan did not see it: {control:?}"
     );
 }
 
