@@ -1,0 +1,56 @@
+{
+  "note": "decisions.effect_site_inventory.outputs, the observed-class histogram half for the five residue-classified sites PR5's four-command sampler does not run: written by engine::topology::coverage::tests::sampled_git_child_kills_of_the_remaining_residue_sites_are_classified_and_recovered on every run. Machine-varying by construction -- which class a sample lands in is a race between the kill and Git -- so it is emitted here rather than pinned; effects/sequential-registry.json embeds the histogram this file held when it was regenerated, and the registry's pin compares everything but these counts.",
+  "sampling_n": 8,
+  "sites": [
+    {
+      "after": 0,
+      "internal": 6,
+      "killed": 8,
+      "n": 8,
+      "none": 2,
+      "recovered": true,
+      "site": "Worktree.AddStaging",
+      "unclassified": 0
+    },
+    {
+      "after": 0,
+      "internal": 6,
+      "killed": 8,
+      "n": 8,
+      "none": 2,
+      "recovered": true,
+      "site": "Snapshot.Add",
+      "unclassified": 0
+    },
+    {
+      "after": 0,
+      "internal": 8,
+      "killed": 6,
+      "n": 8,
+      "none": 0,
+      "recovered": true,
+      "site": "Object.SnapshotCommitTree",
+      "unclassified": 0
+    },
+    {
+      "after": 0,
+      "internal": 8,
+      "killed": 6,
+      "n": 8,
+      "none": 0,
+      "recovered": true,
+      "site": "Object.CandidateCommitTree",
+      "unclassified": 0
+    },
+    {
+      "after": 6,
+      "internal": 2,
+      "killed": 3,
+      "n": 8,
+      "none": 0,
+      "recovered": true,
+      "site": "Object.RepairMaterialize",
+      "unclassified": 0
+    }
+  ]
+}

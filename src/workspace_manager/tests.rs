@@ -9750,6 +9750,40 @@ fn every_registered_residue_element_is_constructed_and_recovers() {
         );
         assert!(!evidence.claims_execution());
     }
+
+    // The synthetic half of the residue-class evidence, written as a file
+    // the sequential registry (`engine::topology::coverage`) embeds: one
+    // record per (site, element), exactly what this test asserted above.
+    // Deterministic by construction -- every field is what the assertions
+    // required -- so unlike the histogram it is pinned rather than
+    // machine-varying.
+    let sites: Vec<serde_json::Value> = residue_classified_sites()
+        .iter()
+        .map(|site| {
+            serde_json::json!({
+                "site": site.name(),
+                "synthetic": records
+                    .iter()
+                    .filter(|(seen, _)| seen == site)
+                    .map(|(_, record)| *record)
+                    .collect::<Vec<SyntheticRecord>>(),
+            })
+        })
+        .collect();
+    let emitted = serde_json::to_string_pretty(&serde_json::json!({
+        "note": "decisions.effect_site_inventory.outputs, the synthetic-construction half of \
+                 the residue-class evidence: one record per (site, element) the frozen enums \
+                 register, written by \
+                 workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers \
+                 on every run from what it constructed, classified and recovered. Deterministic, \
+                 so it is pinned; effects/sequential-registry.json embeds it.",
+        "sites": sites,
+    }))
+    .expect("the synthetic evidence serializes");
+    write_file(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::effects::RESIDUE_SYNTHETIC_JSON),
+        format!("{emitted}\n").as_bytes(),
+    );
 }
 
 /// Construct one element at one site, classify it, check quiescence, and

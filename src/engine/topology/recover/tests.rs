@@ -15474,21 +15474,25 @@ fn with_live_run_hooked_runner<R>(
     body(&mut run, &seams, &mut hooks)
 }
 
-/// `projection equivalence` over a run that parks, defers, stops for budget
-/// and ends: the report derived from the live fold equals the report derived
-/// from a replay of the bytes on disk after every step, and every prefix of
-/// the final log derives a report twice alike.
+/// `projection equivalence` over a run that defers, stops for budget, closes
+/// and refuses: the report derived from the live fold **at every successful
+/// append** — recorded by the hooks bundle's `folded` hook, which the emitter
+/// calls after each applied delta — equals the report derived from a replay
+/// of that prefix of the bytes on disk, and every durable prefix this
+/// process appended had such a live comparison. The whole-step comparison
+/// (`assert_live_equals_replay`) runs beside it, and the last loop checks the
+/// weaker property it always checked: a prefix replays to one report.
 #[test]
 fn projections_are_equal_between_live_and_replay_at_every_prefix() {
     use crate::engine::topology::report::TopologyReport;
     use crate::engine::topology::select::Ceiling;
 
     let fixture = Fixture::two_tasks("projection-equivalence");
-    let harness = harness();
     let adapters = crate::engine::topology::scaffold::ScaffoldAdapters::rate_limiting();
-    let steps = with_live_run(
+    let mut hooks = HarnessTopologyHooks::new(harness());
+    let steps = with_live_run_hooked(
         &fixture,
-        &harness,
+        &mut hooks,
         Ceiling {
             run_usd: Some(0.2),
             task_usd: None,
@@ -15515,6 +15519,38 @@ fn projections_are_equal_between_live_and_replay_at_every_prefix() {
 
     let events = TopologyFold::parse_log(&fixture.log_bytes()).expect("parses");
     assert_eq!(finished_events(&events).len(), 1);
+    let live = hooks.live_projections();
+    let first = live
+        .first()
+        .map(|projection| projection.prefix)
+        .expect("the resume's `run_resumed` was the first live append");
+    assert_eq!(
+        live.iter()
+            .map(|projection| projection.prefix)
+            .collect::<Vec<_>>(),
+        (first..=events.len()).collect::<Vec<_>>(),
+        "every durable prefix this process appended, from `run_resumed` to `run_finished`, had \
+         exactly one live snapshot, in order"
+    );
+    assert!(
+        live.len() >= 5,
+        "{} live snapshots: the resume, a deferral, a wait, a budget stop and an end",
+        live.len()
+    );
+    for projection in &live {
+        let prefix = projection.prefix;
+        let replayed =
+            TopologyFold::replay(fixture.inputs(), &events[..prefix]).expect("the prefix replays");
+        let from_replay =
+            TopologyReport::derive(RUN_ID, &replayed, &events[..prefix]).expect("derives");
+        assert_eq!(
+            projection.digest.as_deref(),
+            Some(from_replay.digest.as_str()),
+            "prefix {prefix}: the report derived from the live fold right after this append is \
+             not the report derived from a replay of these bytes"
+        );
+    }
+
     for prefix in 1..=events.len() {
         let once = TopologyFold::replay(fixture.inputs(), &events[..prefix]).expect("replays");
         let twice = TopologyFold::replay(fixture.inputs(), &events[..prefix]).expect("replays");
@@ -16410,13 +16446,8 @@ fn the_ledger_is_resumably_open_when_no_run_finished_and_balances_after_the_resu
 /// a variable the parent test was started with does not reach the child
 /// unless the request carries it.
 fn observation_export_env() -> Vec<(String, String)> {
-    std::env::var(crate::engine::topology::coverage::OBSERVATIONS_ENV)
+    std::env::var(crate::observations::OBSERVATIONS_ENV)
         .ok()
-        .map(|dir| {
-            vec![(
-                crate::engine::topology::coverage::OBSERVATIONS_ENV.to_owned(),
-                dir,
-            )]
-        })
+        .map(|dir| vec![(crate::observations::OBSERVATIONS_ENV.to_owned(), dir)])
         .unwrap_or_default()
 }

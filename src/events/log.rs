@@ -72,7 +72,7 @@ impl EventHooks for NoEventHooks {}
 
 #[derive(Debug, Clone)]
 pub struct HarnessEventHooks {
-    harness: Arc<Mutex<HookHarness>>,
+    harness: crate::observations::Exported,
     ledger: DurabilityLedger,
     syncs: Arc<Mutex<Vec<SyncRecord>>>,
     written: WrittenShape,
@@ -82,7 +82,7 @@ impl HarnessEventHooks {
     #[must_use]
     pub fn new(harness: Arc<Mutex<HookHarness>>) -> Self {
         Self {
-            harness,
+            harness: crate::observations::Exported::new(harness),
             ledger: DurabilityLedger::off(),
             syncs: Arc::new(Mutex::new(Vec::new())),
             written: WrittenShape::Complete,
@@ -91,7 +91,7 @@ impl HarnessEventHooks {
 
     #[must_use]
     pub fn harness(&self) -> &Arc<Mutex<HookHarness>> {
-        &self.harness
+        self.harness.harness()
     }
 
     #[must_use]
@@ -122,19 +122,12 @@ impl HarnessEventHooks {
 
 impl EventHooks for HarnessEventHooks {
     fn phase(&mut self, site: EventSite, phase: HookPhase) {
-        let mut harness = self
-            .harness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        harness.hook(EffectSiteId::Event(site), phase);
+        self.harness.hook(EffectSiteId::Event(site), phase);
     }
 
     fn point(&mut self, site: EventSite, point: SubEffectPoint, mode: InjectionMode) -> Injection {
-        let mut harness = self
-            .harness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        harness.hook(EffectSiteId::Event(site), HookPhase::Point { point, mode })
+        self.harness
+            .hook(EffectSiteId::Event(site), HookPhase::Point { point, mode })
     }
 
     fn durability_ledger(&self) -> DurabilityLedger {

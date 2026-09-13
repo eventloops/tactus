@@ -247,18 +247,20 @@ pub const SPAWN_SITE: EffectSiteId = EffectSiteId::Process(ProcessSite::Spawn);
 
 #[derive(Debug, Clone, Default)]
 pub struct HarnessHooks {
-    harness: Arc<Mutex<HookHarness>>,
+    harness: crate::observations::Exported,
 }
 
 impl HarnessHooks {
     #[must_use]
     pub fn new(harness: Arc<Mutex<HookHarness>>) -> Self {
-        Self { harness }
+        Self {
+            harness: crate::observations::Exported::new(harness),
+        }
     }
 
     #[must_use]
     pub fn harness(&self) -> &Arc<Mutex<HookHarness>> {
-        &self.harness
+        self.harness.harness()
     }
 }
 
@@ -275,11 +277,8 @@ impl SpawnHooks for HarnessHooks {
     }
 
     fn point_mode(&mut self, point: SubEffectPoint, mode: InjectionMode) -> Injection {
-        let mut harness = self
-            .harness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        harness.hook(SPAWN_SITE, HookPhase::Point { point, mode })
+        self.harness
+            .hook(SPAWN_SITE, HookPhase::Point { point, mode })
     }
 }
 

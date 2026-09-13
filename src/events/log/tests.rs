@@ -2671,6 +2671,7 @@ fn the_stable_prefix_barrier_is_the_only_way_a_log_becomes_a_topology_fold() {
         "src/engine/topology/repair.rs",
         "src/engine/topology/report.rs",
         "src/engine/topology/run.rs",
+        "src/engine/topology/seams.rs",
         "src/engine/topology/select.rs",
         "src/engine/topology/settle.rs",
         "src/events/log.rs",

@@ -1,0 +1,194 @@
+{
+  "note": "decisions.effect_site_inventory.outputs, the synthetic-construction half of the residue-class evidence: one record per (site, element) the frozen enums register, written by workspace_manager::tests::every_registered_residue_element_is_constructed_and_recovers on every run from what it constructed, classified and recovered. Deterministic, so it is pinned; effects/sequential-registry.json embeds it.",
+  "sites": [
+    {
+      "site": "Worktree.Add",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "registered_unpopulated_worktree",
+          "recovered": true
+        }
+      ]
+    },
+    {
+      "site": "Worktree.AddStaging",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "registered_unpopulated_worktree",
+          "recovered": true
+        }
+      ]
+    },
+    {
+      "site": "Snapshot.Add",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "registered_unpopulated_worktree",
+          "recovered": true
+        }
+      ]
+    },
+    {
+      "site": "Object.CandidateStage",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "unreferenced_object",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "temporary_object_file",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "index_lock",
+          "recovered": true
+        }
+      ]
+    },
+    {
+      "site": "Object.CandidateWriteTree",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "unreferenced_object",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "temporary_object_file",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "index_lock",
+          "recovered": true
+        }
+      ]
+    },
+    {
+      "site": "Object.SnapshotCommitTree",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "unreferenced_object",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "temporary_object_file",
+          "recovered": true
+        }
+      ]
+    },
+    {
+      "site": "Object.CandidateCommitTree",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "unreferenced_object",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "temporary_object_file",
+          "recovered": true
+        }
+      ]
+    },
+    {
+      "site": "Object.ProposalCherryPick",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "unreferenced_object",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "temporary_object_file",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "index_lock",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "cherry_pick_head",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "merge_head",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "merge_msg",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "sequencer_state",
+          "recovered": true
+        }
+      ]
+    },
+    {
+      "site": "Object.RepairMaterialize",
+      "synthetic": [
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "unreferenced_object",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "temporary_object_file",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "index_lock",
+          "recovered": true
+        },
+        {
+          "classified": "internal",
+          "constructed": true,
+          "element": "cherry_pick_head",
+          "recovered": true
+        }
+      ]
+    }
+  ]
+}

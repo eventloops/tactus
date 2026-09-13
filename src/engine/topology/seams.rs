@@ -7,10 +7,10 @@ use crate::events::log::EventHooks;
 use crate::ir::QuestionId;
 use crate::rundir::RunDirHooks;
 use crate::runner::container::ContainerHooks;
-use crate::topology::effects::{
-    EffectSiteId, EventSite, HookHarness, HookPhase, Injection, InjectionMode, SubEffectPoint,
-};
+use crate::topology::effects::HookHarness;
 use crate::topology::events::IncarnationId;
+use crate::topology::events::TopologyEvent;
+use crate::topology::fold::TopologyFold;
 use crate::workspace_manager::EffectHooks;
 
 pub trait TopologyHooks {
@@ -23,6 +23,8 @@ pub trait TopologyHooks {
     fn container(&mut self) -> &mut dyn ContainerHooks;
 
     fn spawn(&mut self) -> &mut dyn SpawnHooks;
+
+    fn folded(&mut self, _fold: &TopologyFold, _events: &[TopologyEvent]) {}
 }
 
 #[derive(Debug, Default)]
@@ -65,43 +67,33 @@ impl TopologyHooks for NoTopologyHooks {
 
 #[derive(Debug, Clone)]
 pub struct HarnessTopologyHooks {
-    effects: Exporting<crate::workspace_manager::HarnessEffects>,
-    rundir: Exporting<crate::rundir::HarnessHooks>,
-    events: Exporting<crate::events::log::HarnessEventHooks>,
-    container: Exporting<crate::runner::container::HarnessHooks>,
-    spawn: Exporting<crate::runner::HarnessHooks>,
+    effects: crate::workspace_manager::HarnessEffects,
+    rundir: crate::rundir::HarnessHooks,
+    events: crate::events::log::HarnessEventHooks,
+    container: crate::runner::container::HarnessHooks,
+    spawn: crate::runner::HarnessHooks,
     #[allow(dead_code)]
     harness: Arc<Mutex<HookHarness>>,
-    #[allow(dead_code)]
-    export: Arc<ExportOnDrop>,
+    projections: Arc<Mutex<Vec<LiveProjection>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveProjection {
+    pub prefix: usize,
+    pub digest: Option<String>,
 }
 
 impl HarnessTopologyHooks {
     #[must_use]
     pub fn new(harness: Arc<Mutex<HookHarness>>) -> Self {
         Self {
-            effects: Exporting::new(
-                crate::workspace_manager::HarnessEffects::new(Arc::clone(&harness)),
-                &harness,
-            ),
-            rundir: Exporting::new(
-                crate::rundir::HarnessHooks::new(Arc::clone(&harness)),
-                &harness,
-            ),
-            events: Exporting::new(
-                crate::events::log::HarnessEventHooks::new(Arc::clone(&harness)),
-                &harness,
-            ),
-            container: Exporting::new(
-                crate::runner::container::HarnessHooks::new(Arc::clone(&harness)),
-                &harness,
-            ),
-            spawn: Exporting::new(
-                crate::runner::HarnessHooks::new(Arc::clone(&harness)),
-                &harness,
-            ),
-            export: Arc::new(ExportOnDrop(Arc::clone(&harness))),
+            effects: crate::workspace_manager::HarnessEffects::new(Arc::clone(&harness)),
+            rundir: crate::rundir::HarnessHooks::new(Arc::clone(&harness)),
+            events: crate::events::log::HarnessEventHooks::new(Arc::clone(&harness)),
+            container: crate::runner::container::HarnessHooks::new(Arc::clone(&harness)),
+            spawn: crate::runner::HarnessHooks::new(Arc::clone(&harness)),
             harness,
+            projections: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -113,21 +105,29 @@ impl HarnessTopologyHooks {
 
     #[must_use]
     pub fn recording_durability(mut self) -> Self {
-        self.effects.inner = self.effects.inner.clone().recording_durability();
-        self.rundir.inner = self.rundir.inner.clone().recording_durability();
-        self.events.inner = self.events.inner.clone().recording_durability();
+        self.effects = self.effects.recording_durability();
+        self.rundir = self.rundir.clone().recording_durability();
+        self.events = self.events.clone().recording_durability();
         self
     }
 
     #[must_use]
     pub fn with_written_kill_shape(mut self, shape: crate::events::log::WrittenShape) -> Self {
-        self.events.inner = self.events.inner.clone().with_written_kill_shape(shape);
+        self.events = self.events.clone().with_written_kill_shape(shape);
         self
     }
 
     #[must_use]
     pub fn event_observer(&self) -> &crate::events::log::HarnessEventHooks {
-        &self.events.inner
+        &self.events
+    }
+
+    #[must_use]
+    pub fn live_projections(&self) -> Vec<LiveProjection> {
+        self.projections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -151,153 +151,21 @@ impl TopologyHooks for HarnessTopologyHooks {
     fn spawn(&mut self) -> &mut dyn SpawnHooks {
         &mut self.spawn
     }
-}
 
-#[derive(Debug, Clone)]
-struct Exporting<H> {
-    inner: H,
-    harness: Arc<Mutex<HookHarness>>,
-}
-
-impl<H> Exporting<H> {
-    fn new(inner: H, harness: &Arc<Mutex<HookHarness>>) -> Self {
-        Self {
-            inner,
-            harness: Arc::clone(harness),
-        }
+    fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {
+        let digest = fold.started().and_then(|started| {
+            super::report::TopologyReport::derive(&started.run_id, fold, events)
+                .ok()
+                .map(|report| report.digest)
+        });
+        self.projections
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(LiveProjection {
+                prefix: events.len(),
+                digest,
+            });
     }
-
-    fn carried(&self, injection: Injection) -> Injection {
-        if injection == Injection::Kill {
-            export::observations(&self.harness);
-        }
-        injection
-    }
-}
-
-#[derive(Debug)]
-struct ExportOnDrop(Arc<Mutex<HookHarness>>);
-
-impl Drop for ExportOnDrop {
-    fn drop(&mut self) {
-        export::observations(&self.0);
-    }
-}
-
-impl EffectHooks for Exporting<crate::workspace_manager::HarnessEffects> {
-    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
-        let injection = self.inner.phase(site, phase);
-        self.carried(injection)
-    }
-
-    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
-        self.inner.durability_ledger()
-    }
-
-    fn refusal_cause(&self) -> Option<String> {
-        self.inner.refusal_cause()
-    }
-}
-
-impl RunDirHooks for Exporting<crate::rundir::HarnessHooks> {
-    fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
-        let injection = self.inner.hook(site, phase);
-        self.carried(injection)
-    }
-
-    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
-        self.inner.durability_ledger()
-    }
-}
-
-impl EventHooks for Exporting<crate::events::log::HarnessEventHooks> {
-    fn phase(&mut self, site: EventSite, phase: HookPhase) {
-        self.inner.phase(site, phase);
-    }
-
-    fn point(&mut self, site: EventSite, point: SubEffectPoint, mode: InjectionMode) -> Injection {
-        let injection = self.inner.point(site, point, mode);
-        self.carried(injection)
-    }
-
-    fn written_kill_shape(&mut self, site: EventSite) -> crate::events::log::WrittenShape {
-        self.inner.written_kill_shape(site)
-    }
-
-    fn durability_ledger(&self) -> crate::util::DurabilityLedger {
-        self.inner.durability_ledger()
-    }
-
-    fn synced(&mut self, record: &crate::events::log::SyncRecord) {
-        self.inner.synced(record);
-    }
-}
-
-impl ContainerHooks for Exporting<crate::runner::container::HarnessHooks> {
-    fn phase(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
-        let injection = self.inner.phase(site, phase);
-        self.carried(injection)
-    }
-
-    fn trace(&self) -> crate::runner::container::runtime::ContainerTrace {
-        self.inner.trace()
-    }
-}
-
-impl SpawnHooks for Exporting<crate::runner::HarnessHooks> {
-    fn point(&mut self, point: SubEffectPoint) -> Injection {
-        let injection = self.inner.point(point);
-        self.carried(injection)
-    }
-
-    fn point_mode(&mut self, point: SubEffectPoint, mode: InjectionMode) -> Injection {
-        let injection = self.inner.point_mode(point, mode);
-        self.carried(injection)
-    }
-
-    fn child_created(&mut self, pid: u32) {
-        self.inner.child_created(pid);
-    }
-}
-
-#[cfg(test)]
-mod export {
-    use std::path::PathBuf;
-    use std::sync::{Arc, Mutex, PoisonError};
-
-    use super::super::coverage::{OBSERVATIONS_ENV, ObservationRecord};
-    use crate::topology::effects::HookHarness;
-
-    pub(super) fn observations(harness: &Arc<Mutex<HookHarness>>) {
-        let Ok(dir) = std::env::var(OBSERVATIONS_ENV) else {
-            return;
-        };
-        let thread = std::thread::current();
-        let test = thread.name().unwrap_or("unnamed");
-        let mut record = {
-            let harness = harness.lock().unwrap_or_else(PoisonError::into_inner);
-            ObservationRecord::of(test, &harness)
-        };
-        let path = PathBuf::from(dir).join(ObservationRecord::file_name(test));
-        if let Ok(bytes) = std::fs::read(&path) {
-            if let Ok(earlier) = serde_json::from_slice::<ObservationRecord>(&bytes) {
-                record.merge(earlier);
-            }
-        }
-        let Ok(json) = serde_json::to_vec_pretty(&record) else {
-            return;
-        };
-        crate::workspace_manager::fixture::write_file(&path, &json);
-    }
-}
-
-#[cfg(not(test))]
-mod export {
-    use std::sync::{Arc, Mutex};
-
-    use crate::topology::effects::HookHarness;
-
-    pub(super) fn observations(_harness: &Arc<Mutex<HookHarness>>) {}
 }
 
 pub trait TimeSource {

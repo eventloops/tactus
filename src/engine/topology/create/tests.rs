@@ -2402,6 +2402,11 @@ fn spawn_and_wait(child: &str, root: &Path, site: &str, ordinal: u32) -> Option<
         ),
         ("UPSTROKE_TEST_KILL_SITE".to_owned(), site.to_owned()),
     ];
+    if let Ok(dir) = std::env::var(crate::observations::OBSERVATIONS_ENV) {
+        command
+            .env
+            .push((crate::observations::OBSERVATIONS_ENV.to_owned(), dir));
+    }
     let request = crate::runner::gate_request(
         command,
         root.to_path_buf(),

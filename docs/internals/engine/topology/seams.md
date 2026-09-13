@@ -86,6 +86,12 @@ Container intent, creation, start, view, stop, removal.
 
 The platform containment sub-effects of a spawn.
 
+## `pub trait TopologyHooks` › `fn folded(&mut self, _fold: &TopologyFold, _events: &[TopologyEvent]) {}`
+
+Called by `emit::emit` after every applied delta, with the fold and the
+events as the emitter holds them. A no-op by default: production hooks
+project nothing, and the harness bundle records the live projection.
+
 ## `pub struct NoTopologyHooks {`
 
 What production passes: nothing armed, nothing recorded.
@@ -113,13 +119,20 @@ only a [`crate::topology::effects::SubEffectPoint`], and `hook()` answers
 here, or the 30-plus sites of this slice that expose no sub-effect point
 contribute nothing to coverage.
 
-Since PR10 the five families are wrapped by [`Exporting`], which carries
-the ST-07 observation export: when `UPSTROKE_HOOK_OBSERVATIONS` names a
-directory, what the shared harness observed is written there under the
-current thread's name — the test's — when the last clone of a bundle is
-dropped (`ExportOnDrop`), and again just before a `Kill` injection is
-carried out, since the process that carries it out writes nothing
-afterwards. `engine::topology::coverage` reads the records back.
+Since PR10 the bundle also keeps the live projection: `folded` — the hook
+the emitter calls after every applied delta — derives the report of the
+live fold at that prefix and records its digest, so a test can compare
+what the process projected at every append with a replay of the bytes
+(`projections_are_equal_between_live_and_replay_at_every_prefix`). The
+ST-07 observation export is not here: each family's adapter carries it
+(`crate::observations::Exported`), so the record is written by every suite
+that uses an adapter, not only the ones that build this bundle.
+
+## `pub struct LiveProjection {`
+
+One live snapshot: the number of events the log held right after an
+append, and the digest of the report derived from the live fold then —
+`None` when no report derives, which is before `run_started`.
 
 ## `pub struct HarnessTopologyHooks` › `#[allow(dead_code)]` (trailing)
 
@@ -167,30 +180,17 @@ durability ledger and the sync records it collected.
 The sites themselves are on the shared [`HookHarness`] and are read
 there; these are the answers a `(site, phase)` key cannot carry.
 
-## `struct Exporting<H> {`
+## `impl HarnessTopologyHooks` › `pub fn live_projections(&self) -> Vec<LiveProjection> {`
 
-One family's harness adapter, with the harness beside it so the export
-can read it. Every answer the adapter gives passes through `carried`,
-which exports before returning `Injection::Kill`: the funnel aborts the
-process right after, and a kill-mode observation that reached only the
-in-memory harness would be lost with it — which is exactly the
-observation the merge check needs for a `Written`/kill claim.
+Every snapshot `folded` recorded, in append order.
 
-## `struct ExportOnDrop(Arc<Mutex<HookHarness>>);`
+## `impl TopologyHooks for HarnessTopologyHooks` › `fn folded(&mut self, fold: &TopologyFold, events: &[TopologyEvent]) {`
 
-Held in an `Arc` by the bundle and every clone of it, so the export runs
-once, when the last clone drops. A `Drop` on the bundle itself would have
-forbidden the builders that move its fields.
-
-## `mod export {`
-
-The export, compiled two ways. Under `cfg(test)` it reads the variable,
-names the record after the current thread, merges with the record an
-earlier drop or a spawned kill child of the same test wrote, and writes
-through the fixture's `write_file` — the one write this file may make,
-because the test fixture is the allowlisted module and a topology module
-carries no raw `fs` write. Outside tests it is a no-op: the bundle exists
-in production code only so that tests and kill children can name it.
+Derive the report from the live fold and the events as the emitter holds
+them right after the append, and keep its digest against the prefix
+length. Derived here rather than in the test because the point is what
+the *process* projected at that moment: a test that derives from the fold
+after the step has already lost every intermediate prefix.
 
 ## `pub trait TimeSource {`
 

@@ -310,7 +310,7 @@ impl RunDirHooks for NoHooks {
 /// [`crate::runner::HarnessHooks`] wires the process funnel onto it.
 #[derive(Debug, Clone, Default)]
 pub struct HarnessHooks {
-    harness: Arc<Mutex<HookHarness>>,
+    harness: crate::observations::Exported,
     ledger: DurabilityLedger,
 }
 
@@ -319,7 +319,7 @@ impl HarnessHooks {
     #[must_use]
     pub fn new(harness: Arc<Mutex<HookHarness>>) -> Self {
         Self {
-            harness,
+            harness: crate::observations::Exported::new(harness),
             ledger: DurabilityLedger::off(),
         }
     }
@@ -327,7 +327,7 @@ impl HarnessHooks {
     /// The harness this observer records into.
     #[must_use]
     pub fn harness(&self) -> &Arc<Mutex<HookHarness>> {
-        &self.harness
+        self.harness.harness()
     }
 
     /// Also record every durability primitive the funnels perform.
@@ -350,10 +350,7 @@ impl RunDirHooks for HarnessHooks {
     }
 
     fn hook(&mut self, site: EffectSiteId, phase: HookPhase) -> Injection {
-        self.harness
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .hook(site, phase)
+        self.harness.hook(site, phase)
     }
 }
 
